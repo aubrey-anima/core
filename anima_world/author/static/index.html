@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>世界创作台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #1a1c18;
+      --panel: #22251f;
+      --ink: #d8dbd4;
+      --muted: #888f82;
+      --line: #2e3129;
+      --soft: #282b23;
+      --green: #5cad7a;
+      --amber: #c9923a;
+      --red: #d96a5e;
+      --blue: #5c91c4;
+      --accent: #3d6b52;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font: 14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI","Noto Sans SC",sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    button, input, select, textarea { font: inherit; }
+    button, input, select {
+      min-height: 36px;
+      border: 1px solid #3a3f33;
+      border-radius: 4px;
+      background: #282b23;
+      color: var(--ink);
+    }
+    textarea {
+      border: 1px solid #3a3f33;
+      border-radius: 4px;
+      background: #282b23;
+      color: var(--ink);
+      padding: 8px 10px;
+      resize: vertical;
+    }
+    button { padding: 0 14px; cursor: pointer; font-weight: 650; }
+    button:hover { background: #30352a; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #5c91c4; outline-offset: 2px; }
+    .primary { color: #fff; border-color: var(--accent); background: var(--accent); }
+    .primary:hover { background: #336046; }
+    .danger { color: var(--red); border-color: #7a3a34; }
+    .quiet { border-color: transparent; background: transparent; }
+    .hidden { display: none !important; }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      min-height: 56px;
+      padding: 10px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    h1 { margin: 0; font-size: 18px; color: var(--ink); }
+    h2 { margin: 0 0 14px; font-size: 15px; color: var(--ink); }
+    h3 { margin: 0 0 10px; font-size: 14px; color: var(--ink); }
+    .subtitle { margin-left: 10px; color: var(--muted); font-size: 12px; font-weight: 400; }
+    main {
+      width: min(1400px, calc(100% - 32px));
+      margin: 20px auto 60px;
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      grid-template-rows: auto auto 1fr;
+      gap: 14px;
+    }
+    .panel {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+    }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
+    input[type="text"], input[type="search"] { width: 100%; padding: 7px 9px; }
+    .status-chip {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 750;
+      border: 1px solid var(--line);
+    }
+    .status-chip.scanning { color: var(--amber); border-color: #6a5020; background: #2a2010; }
+    .status-chip.distilling { color: var(--blue); border-color: #2a4060; background: #12202c; }
+    .status-chip.scan_done { color: var(--green); border-color: #2a5038; background: #0e2018; }
+    .status-chip.done { color: var(--green); border-color: #2a5038; background: #0e2018; }
+    .status-chip.failed { color: var(--red); border-color: #5a2820; background: #200e0c; }
+    .mono { font: 12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; color: var(--muted); }
+    .empty { padding: 32px; color: var(--muted); text-align: center; }
+    .progress-bar-wrap {
+      height: 6px;
+      background: var(--soft);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-bar {
+      height: 100%;
+      background: var(--green);
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+
+    /* ---- Left column ---- */
+    #upload { grid-column: 1; grid-row: 1; }
+    #jobs { grid-column: 1; grid-row: 2 / 4; overflow: auto; }
+
+    /* ---- Right column ---- */
+    #progress { grid-column: 2; grid-row: 1; }
+    #cards { grid-column: 2; grid-row: 2 / 4; }
+
+    /* ---- Jobs list ---- */
+    .job-item {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .job-item:hover { border-color: var(--accent); }
+    .job-item.selected { border-color: var(--blue); background: #12202c; }
+    .job-title { font-weight: 700; margin-bottom: 4px; }
+    .job-meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+
+    /* ---- Progress section ---- */
+    .progress-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    #btn-seed:hover { background: #30352a; }
+    .failed-chunks { margin-top: 12px; }
+    .chunk-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .chunk-item .chunk-label { color: var(--muted); }
+
+    /* ---- Tabs ---- */
+    .tab-bar {
+      display: flex;
+      gap: 2px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 16px;
+    }
+    .tab-btn {
+      min-height: 36px;
+      padding: 0 16px;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 4px 4px 0 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn.active { color: var(--ink); border-bottom-color: var(--blue); }
+    .tab-btn:hover { color: var(--ink); background: var(--soft); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    /* ---- Entity cards ---- */
+    .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .entity-card {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--bg);
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    .entity-card:hover { border-color: var(--accent); }
+    .entity-card .card-name { font-weight: 750; margin-bottom: 6px; }
+    .entity-card .card-brief { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+    .alias-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+    .alias-chip {
+      padding: 1px 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .card-meta { font-size: 11px; color: var(--muted); }
+    .notes-panel {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--soft);
+      font-size: 12px;
+      display: none;
+    }
+    .notes-panel.open { display: block; }
+    .note-item { padding: 4px 0; border-bottom: 1px solid var(--line); }
+    .note-item:last-child { border-bottom: none; }
+
+    /* ---- Lore tab ---- */
+    .world-setting-box {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--bg);
+      font-size: 13px;
+      margin-bottom: 14px;
+      white-space: pre-wrap;
+    }
+    .lore-item {
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    /* ---- Relations tab ---- */
+    .relation-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .relation-table th {
+      text-align: left;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      background: var(--soft);
+    }
+    .relation-table td {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .relation-table tr:last-child td { border-bottom: none; }
+
+    /* ---- Notice ---- */
+    #notice {
+      min-height: 22px;
+      margin: 6px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    #notice.error { color: var(--red); }
+    #notice.success { color: var(--green); }
+
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      #upload, #jobs { grid-column: 1; }
+      #progress, #cards { grid-column: 1; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>世界创作台 <span class="subtitle">小说导入 · 扫描 · 蒸馏 · 生成世界</span></h1>
+  </header>
+
+  <main>
+    <!-- ============================================================ -->
+    <!-- LEFT: upload + job list                                       -->
+    <!-- ============================================================ -->
+
+    <section id="upload" class="panel">
+      <h2>导入小说</h2>
+      <div style="display:grid;gap:10px">
+        <label>
+          标题
+          <input id="novel-title" type="text" placeholder="《故事名称》" autocomplete="off">
+        </label>
+        <label>
+          正文（粘贴全文）
+          <textarea id="novel-text" rows="10" placeholder="在此粘贴小说全文…"></textarea>
+        </label>
+        <button id="btn-upload" class="primary" style="justify-self:start">上传并开始扫描</button>
+        <div id="notice" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section id="jobs" class="panel">
+      <h2>作业列表</h2>
+      <div id="jobs-list"><p class="empty">暂无作业</p></div>
+      <button id="btn-refresh-jobs" class="quiet" style="margin-top:10px;font-size:12px">刷新列表</button>
+    </section>
+
+    <!-- ============================================================ -->
+    <!-- RIGHT: progress + cards                                       -->
+    <!-- ============================================================ -->
+
+    <section id="progress" class="panel">
+      <h2 id="progress-title">作业进度</h2>
+      <div id="progress-empty" class="empty">请从左侧选择一个作业</div>
+
+      <div id="progress-detail" class="hidden">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <span id="progress-status" class="status-chip"></span>
+          <span id="progress-cursor" class="mono"></span>
+        </div>
+        <div class="progress-bar-wrap">
+          <div id="progress-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+
+        <!-- Failed chunks with retry buttons -->
+        <div id="failed-chunks" class="failed-chunks hidden">
+          <h3>失败片段</h3>
+          <div id="failed-chunks-list"></div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="progress-actions">
+          <button id="btn-resume" class="hidden">恢复扫描</button>
+          <button id="btn-distill" class="hidden primary">提炼蒸馏</button>
+          <a id="btn-seed" class="hidden" download style="min-height:36px;padding:0 14px;display:inline-flex;align-items:center;border:1px solid #3a3f33;border-radius:4px;background:#282b23;color:var(--ink);cursor:pointer;font-weight:650;text-decoration:none">下载种子</a>
+          <button id="btn-materialize" class="hidden primary">生成世界</button>
+        </div>
+
+        <div id="materialize-result" class="hidden" style="margin-top:10px;font-size:12px;color:var(--green)"></div>
+      </div>
+    </section>
+
+    <section id="cards" class="panel">
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="characters" id="tab-characters">人物</button>
+        <button class="tab-btn" data-tab="locations" id="tab-locations">地点</button>
+        <button class="tab-btn" data-tab="lore" id="tab-lore">世界观</button>
+        <button class="tab-btn" data-tab="relations" id="tab-relations">关系</button>
+      </div>
+
+      <div id="pane-characters" class="tab-pane active">
+        <div id="characters-grid" class="card-grid"><p class="empty">选择作业后加载</p></div>
+      </div>
+
+      <div id="pane-locations" class="tab-pane">
+        <div id="locations-grid" class="card-grid"><p class="empty">选择作业后加载</p></div>
+      </div>
+
+      <div id="pane-lore" class="tab-pane">
+        <div id="lore-world-setting" class="hidden">
+          <h3>世界观设定（定稿）</h3>
+          <div id="lore-setting-text" class="world-setting-box"></div>
+        </div>
+        <h3>世界观素材</h3>
+        <div id="lore-list"><p class="empty">选择作业后加载</p></div>
+      </div>
+
+      <div id="pane-relations" class="tab-pane">
+        <div id="relations-final-note" class="hidden" style="margin-bottom:10px;font-size:12px;color:var(--green)">
+          显示定稿关系
+        </div>
+        <div style="overflow:auto">
+          <table class="relation-table">
+            <thead><tr><th>A</th><th>B</th><th>关系性质</th><th>来源</th></tr></thead>
+            <tbody id="relations-body"><tr><td colspan="4" class="empty">选择作业后加载</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section id="db-editor" class="panel hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <h2 style="margin:0">数据库</h2>
+        <button id="db-editor-toggle" class="quiet">展开编辑器</button>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
+        sqlite-web:浏览与编辑运维根目录下的所有数据库(作业库、世界库),可执行任意 SQL。
+      </p>
+      <div id="db-editor-frame-box" class="hidden" style="margin-top:12px">
+        <iframe id="db-editor-frame" title="数据库编辑器"
+                style="width:100%;height:72vh;border:1px solid var(--line);border-radius:8px;background:#fff"></iframe>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  (()=>{
+    const API = '/author/v1';
+    const $ = id => document.getElementById(id);
+
+    // ---- State ----
+    let selectedJobId = null;
+    let pollTimer = null;
+
+    // ---- Helpers ----
+    function el(tag, text, cls) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (cls) node.className = cls;
+      return node;
+    }
+
+    function notice(text, kind = '') {
+      const node = $('notice');
+      node.textContent = text;
+      node.className = kind;
+    }
+
+    function statusChipClass(status) {
+      return `status-chip ${status}`;
+    }
+
+    async function apiFetch(path, options = {}) {
+      const res = await fetch(`${API}${path}`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+      });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      return res;
+    }
+
+    // ---- Polling ----
+    function startPolling() {
+      stopPolling();
+      pollTimer = setInterval(refreshSelectedJob, 3000);
+    }
+
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    function isActiveStatus(status) {
+      return status === 'scanning' || status === 'distilling';
+    }
+
+    // ---- Job list ----
+    async function loadJobs() {
+      try {
+        const data = await (await apiFetch('/jobs')).json();
+        renderJobs(data.jobs || []);
+      } catch (err) {
+        notice(`读取作业失败：${err.message}`, 'error');
+      }
+    }
+
+    function renderJobs(jobs) {
+      const list = $('jobs-list');
+      list.replaceChildren();
+      if (!jobs.length) {
+        list.append(el('p', '暂无作业', 'empty'));
+        return;
+      }
+      jobs.slice().reverse().forEach(job => {
+        const item = el('div', undefined, 'job-item' + (job.id === selectedJobId ? ' selected' : ''));
+        const title = el('div', job.title || '（无标题）', 'job-title');
+        const meta = el('div', undefined, 'job-meta');
+        const chip = el('span', job.status, statusChipClass(job.status));
+        const prog = el('span', `${job.cursor ?? 0}/${job.total_chunks ?? '?'}`, 'mono');
+        meta.append(chip, prog);
+        item.append(title, meta);
+        item.addEventListener('click', () => selectJob(job.id));
+        list.append(item);
+      });
+    }
+
+    // ---- Select job ----
+    async function selectJob(jobId) {
+      selectedJobId = jobId;
+      stopPolling();
+      // Re-render job list selection highlight
+      document.querySelectorAll('.job-item').forEach(el => el.classList.remove('selected'));
+      document.querySelectorAll('.job-item').forEach(item => {
+        // We can't easily identify which item is which after replaceChildren,
+        // so re-load the jobs list to get selection highlight correct.
+      });
+      await refreshSelectedJob();
+      // Also reload job list to update selection highlight
+      loadJobs();
+    }
+
+    async function refreshSelectedJob() {
+      if (!selectedJobId) return;
+      try {
+        const job = await (await apiFetch(`/jobs/${selectedJobId}`)).json();
+        renderProgress(job);
+        // Load card tabs
+        loadCharacters(selectedJobId);
+        loadLocations(selectedJobId);
+        loadLore(selectedJobId);
+        loadRelations(selectedJobId);
+        // Continue polling if active
+        if (isActiveStatus(job.status)) {
+          startPolling();
+        } else {
+          stopPolling();
+        }
+      } catch (err) {
+        notice(`读取作业详情失败：${err.message}`, 'error');
+      }
+    }
+
+    // ---- Progress panel ----
+    function renderProgress(job) {
+      $('progress-empty').classList.add('hidden');
+      $('progress-detail').classList.remove('hidden');
+      $('progress-title').textContent = job.title || '作业进度';
+
+      const statusEl = $('progress-status');
+      statusEl.textContent = job.status;
+      statusEl.className = statusChipClass(job.status);
+
+      const cursor = job.cursor ?? 0;
+      const total = job.total_chunks ?? 0;
+      $('progress-cursor').textContent = `${cursor} / ${total} 片段`;
+      const pct = total > 0 ? Math.round((cursor / total) * 100) : 0;
+      $('progress-bar').style.width = `${pct}%`;
+
+      // Failed chunks
+      const failedIdxs = job.failed_chunks || [];
+      const failedWrap = $('failed-chunks');
+      const failedList = $('failed-chunks-list');
+      failedList.replaceChildren();
+      if (failedIdxs.length) {
+        failedWrap.classList.remove('hidden');
+        failedIdxs.forEach(idx => {
+          const item = el('div', undefined, 'chunk-item');
+          item.append(el('span', `片段 #${idx}`, 'chunk-label'));
+          const btn = el('button', '重试', 'danger');
+          btn.style.minHeight = '28px';
+          btn.style.padding = '0 10px';
+          btn.style.fontSize = '12px';
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+              await apiFetch(`/jobs/${selectedJobId}/chunks/${idx}/retry`, { method: 'POST' });
+              notice('重试已提交', 'success');
+              await refreshSelectedJob();
+            } catch (err) {
+              notice(`重试失败：${err.message}`, 'error');
+              btn.disabled = false;
+            }
+          });
+          item.append(btn);
+          failedList.append(item);
+        });
+      } else {
+        failedWrap.classList.add('hidden');
+      }
+
+      // Action buttons
+      const status = job.status;
+
+      // btn-resume: show when status=scanning
+      toggleBtn('btn-resume', status === 'scanning');
+
+      // btn-distill: show when status in [scan_done, failed, done]
+      toggleBtn('btn-distill', ['scan_done', 'failed', 'done'].includes(status));
+
+      // btn-seed: show when status=done
+      const seedEl = $('btn-seed');
+      if (status === 'done') {
+        seedEl.classList.remove('hidden');
+        seedEl.href = `${API}/jobs/${selectedJobId}/seed`;
+        seedEl.download = `${selectedJobId}-seed.json`;
+      } else {
+        seedEl.classList.add('hidden');
+      }
+
+      // btn-materialize: show when status=done
+      toggleBtn('btn-materialize', status === 'done');
+    }
+
+    function toggleBtn(id, show) {
+      const el = $(id);
+      if (show) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    }
+
+    // ---- Upload ----
+    $('btn-upload').addEventListener('click', async () => {
+      const title = $('novel-title').value.trim();
+      const text = $('novel-text').value.trim();
+      if (!text) { notice('请先粘贴小说正文', 'error'); return; }
+      $('btn-upload').disabled = true;
+      notice('正在上传…');
+      try {
+        const res = await apiFetch('/jobs', {
+          method: 'POST',
+          body: JSON.stringify({ title, text }),
+        });
+        const job = await res.json();
+        notice('上传成功，扫描已启动', 'success');
+        $('novel-title').value = '';
+        $('novel-text').value = '';
+        await loadJobs();
+        await selectJob(job.id);
+      } catch (err) {
+        notice(`上传失败：${err.message}`, 'error');
+      } finally {
+        $('btn-upload').disabled = false;
+      }
+    });
+
+    // ---- Resume ----
+    $('btn-resume').addEventListener('click', async () => {
+      if (!selectedJobId) return;
+      $('btn-resume').disabled = true;
+      try {
+        await apiFetch(`/jobs/${selectedJobId}/resume`, { method: 'POST' });
+        notice('已恢复扫描', 'success');
+        await refreshSelectedJob();
+      } catch (err) {
+        notice(`恢复失败：${err.message}`, 'error');
+      } finally {
+        $('btn-resume').disabled = false;
+      }
+    });
+
+    // ---- Distill ----
+    $('btn-distill').addEventListener('click', async () => {
+      if (!selectedJobId) return;
+      $('btn-distill').disabled = true;
+      notice('蒸馏任务已提交…');
+      try {
+        await apiFetch(`/jobs/${selectedJobId}/distill`, { method: 'POST' });
+        notice('蒸馏已启动', 'success');
+        await refreshSelectedJob();
+        startPolling();
+      } catch (err) {
+        notice(`蒸馏失败：${err.message}`, 'error');
+      } finally {
+        $('btn-distill').disabled = false;
+      }
+    });
+
+    // ---- Materialize ----
+    $('btn-materialize').addEventListener('click', async () => {
+      if (!selectedJobId) return;
+      $('btn-materialize').disabled = true;
+      notice('正在生成世界（可能需要约 30 秒）…');
+      try {
+        const res = await apiFetch(`/jobs/${selectedJobId}/materialize`, { method: 'POST' });
+        const data = await res.json();
+        notice('世界生成成功', 'success');
+        const result = $('materialize-result');
+        result.classList.remove('hidden');
+        result.textContent = `世界数据库：${data.db_path}  种子文件：${data.seed_path}`;
+        alert(`世界已生成\nDB: ${data.db_path}\n种子: ${data.seed_path}`);
+      } catch (err) {
+        notice(`生成失败：${err.message}`, 'error');
+      } finally {
+        $('btn-materialize').disabled = false;
+      }
+    });
+
+    // ---- Refresh jobs ----
+    $('btn-refresh-jobs').addEventListener('click', loadJobs);
+
+    // ---- Tabs ----
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        $(`pane-${btn.dataset.tab}`).classList.add('active');
+      });
+    });
+
+    // ---- Characters ----
+    async function loadCharacters(jobId) {
+      try {
+        const data = await (await apiFetch(`/jobs/${jobId}/entities?kind=character`)).json();
+        renderEntityCards($('characters-grid'), data.entities || [], 'character');
+      } catch (err) {
+        $('characters-grid').replaceChildren(el('p', `加载失败：${err.message}`, 'empty'));
+      }
+    }
+
+    // ---- Locations ----
+    async function loadLocations(jobId) {
+      try {
+        const data = await (await apiFetch(`/jobs/${jobId}/entities?kind=location`)).json();
+        renderEntityCards($('locations-grid'), data.entities || [], 'location');
+      } catch (err) {
+        $('locations-grid').replaceChildren(el('p', `加载失败：${err.message}`, 'empty'));
+      }
+    }
+
+    function renderEntityCards(container, entities, kind) {
+      container.replaceChildren();
+      if (!entities.length) {
+        container.append(el('p', '暂无数据', 'empty'));
+        return;
+      }
+      entities.forEach(entity => {
+        const card = el('div', undefined, 'entity-card');
+        card.append(el('div', entity.name || entity.id, 'card-name'));
+        if (entity.brief) {
+          card.append(el('div', entity.brief, 'card-brief'));
+        }
+
+        // Alias chips (character only)
+        if (kind === 'character' && entity.aliases && entity.aliases.length) {
+          const chipsWrap = el('div', undefined, 'alias-chips');
+          entity.aliases.forEach(alias => {
+            chipsWrap.append(el('span', alias, 'alias-chip'));
+          });
+          card.append(chipsWrap);
+        }
+
+        // Appearances
+        if (entity.appearance_chunks && entity.appearance_chunks.length) {
+          const meta = el('div', undefined, 'card-meta');
+          meta.textContent = `出场章节：${entity.appearance_chunks.slice(0, 5).join('、')}${entity.appearance_chunks.length > 5 ? '…' : ''}`;
+          card.append(meta);
+        }
+
+        // Note count (character only)
+        if (kind === 'character' && entity.note_count !== undefined) {
+          card.append(el('div', `${entity.note_count} 条档案`, 'card-meta'));
+        }
+
+        // Notes expand (character only)
+        if (kind === 'character') {
+          const notesPanel = el('div', undefined, 'notes-panel');
+          let loaded = false;
+          card.addEventListener('click', async () => {
+            const isOpen = notesPanel.classList.contains('open');
+            if (isOpen) {
+              notesPanel.classList.remove('open');
+              return;
+            }
+            notesPanel.classList.add('open');
+            if (!loaded) {
+              notesPanel.textContent = '正在加载…';
+              try {
+                const data = await (await apiFetch(`/jobs/${selectedJobId}/entities/${entity.id}/notes`)).json();
+                notesPanel.replaceChildren();
+                const notes = data.notes || [];
+                if (!notes.length) {
+                  notesPanel.textContent = '无档案';
+                } else {
+                  notes.forEach(note => {
+                    const item = el('div', undefined, 'note-item');
+                    item.textContent = typeof note === 'string' ? note : (note.content || note.summary || JSON.stringify(note));
+                    notesPanel.append(item);
+                  });
+                }
+                loaded = true;
+              } catch (err) {
+                notesPanel.textContent = `加载失败：${err.message}`;
+              }
+            }
+          });
+          card.append(notesPanel);
+        }
+
+        container.append(card);
+      });
+    }
+
+    // ---- Lore ----
+    async function loadLore(jobId) {
+      try {
+        const data = await (await apiFetch(`/jobs/${jobId}/lore`)).json();
+        const settingWrap = $('lore-world-setting');
+        const settingText = $('lore-setting-text');
+        if (data.world_setting) {
+          settingWrap.classList.remove('hidden');
+          settingText.textContent = data.world_setting;
+        } else {
+          settingWrap.classList.add('hidden');
+        }
+        const list = $('lore-list');
+        list.replaceChildren();
+        const lore = data.lore || [];
+        if (!lore.length) {
+          list.append(el('p', '暂无世界观素材', 'empty'));
+          return;
+        }
+        lore.forEach(item => {
+          const div = el('div', undefined, 'lore-item');
+          div.textContent = typeof item === 'string' ? item : (item.content || item.text || JSON.stringify(item));
+          list.append(div);
+        });
+      } catch (err) {
+        $('lore-list').replaceChildren(el('p', `加载失败：${err.message}`, 'empty'));
+      }
+    }
+
+    // ---- Relations ----
+    async function loadRelations(jobId) {
+      try {
+        const data = await (await apiFetch(`/jobs/${jobId}/relations`)).json();
+        const finalNote = $('relations-final-note');
+        const body = $('relations-body');
+        body.replaceChildren();
+
+        // Prefer final if it exists
+        const rows = (data.final && data.final.length) ? data.final : (data.facts || []);
+        const isFinal = data.final && data.final.length > 0;
+
+        finalNote.classList.toggle('hidden', !isFinal);
+
+        if (!rows.length) {
+          const tr = el('tr');
+          const td = el('td', '暂无关系数据', 'empty');
+          td.colSpan = 4;
+          tr.append(td);
+          body.append(tr);
+          return;
+        }
+
+        rows.forEach(fact => {
+          const tr = el('tr');
+          tr.append(
+            el('td', fact.a || fact.subject || '—'),
+            el('td', fact.b || fact.object || '—'),
+            el('td', fact.nature || fact.predicate || fact.relation || '—'),
+            el('td', fact.origin || '—', 'mono'),
+          );
+          body.append(tr);
+        });
+      } catch (err) {
+        const body = $('relations-body');
+        body.replaceChildren();
+        const tr = el('tr');
+        const td = el('td', `加载失败：${err.message}`, 'empty');
+        td.colSpan = 4;
+        tr.append(td);
+        body.append(tr);
+      }
+    }
+
+    // ---- Embedded database editor (sqlite-web, reported by /config) ----
+    async function initDbEditor() {
+      try {
+        const config = await (await apiFetch('/config')).json();
+        const target = config.db_editor_url
+          || (config.db_editor_port
+              ? `${location.protocol}//${location.hostname}:${config.db_editor_port}/`
+              : null);
+        if (!target) return;
+        $('db-editor').classList.remove('hidden');
+        $('db-editor-toggle').addEventListener('click', () => {
+          const box = $('db-editor-frame-box');
+          const opening = box.classList.contains('hidden');
+          box.classList.toggle('hidden');
+          $('db-editor-toggle').textContent = opening ? '收起编辑器' : '展开编辑器';
+          const frame = $('db-editor-frame');
+          if (opening && !frame.src) frame.src = target;
+        });
+      } catch (_) { /* no editor wired — the section simply stays hidden */ }
+    }
+
+    // ---- Boot ----
+    loadJobs();
+    initDbEditor();
+  })();
+  </script>
+</body>
+</html>

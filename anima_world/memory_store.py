@@ -1,0 +1,179 @@
+"""MemoryStore: per-agent episodic memory persistence (M4).
+
+Memory is derived truth, not source truth (see design.md D1) — the `memories`
+table lives alongside `events`/`snapshots` in `world.db` but is purely a
+projection of "sufficiently important" events, decided by a trigger callable
+supplied by the caller (kept decoupled from `memory_triggers.TriggerEngine`
+so the two modules can be built/tested independently, per design.md D7:
+MemoryStore stays a neutral persistence layer with no cross-agent ACL —
+access-scoping is a call-site convention, not a store-level check).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable
+
+_DEFAULT_CAPACITY = 50
+
+
+@dataclass(frozen=True)
+class MemoryDescriptor:
+    """What a trigger decides should become a memory row."""
+
+    agent_id: str
+    tick: int
+    kind: str
+    summary: str
+    importance: float = 0.5
+    anchor: bool = False
+    event_seq: int | None = None
+
+
+class MemoryStore:
+    """SQLite-backed store for per-agent memories, with LRU + anchor eviction.
+
+    All access is serialized through `lock` (defaults to its own RLock; the
+    web server passes the scheduler's shared lock since the connection is
+    shared across threads, same pattern as `ChatStore`).
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        capacity: int | None = None,
+        lock: Any | None = None,
+        config_store: Any | None = None,
+    ) -> None:
+        self._conn = conn
+        self._explicit_capacity = capacity
+        self._config_store = config_store
+        self._lock = lock if lock is not None else threading.RLock()
+
+    @property
+    def _capacity(self) -> int:
+        """Explicit constructor arg wins (existing test/no-DB usage); else
+        live from `config_store` (`memory.capacity`, M5 §8); else default."""
+        if self._explicit_capacity is not None:
+            return self._explicit_capacity
+        if self._config_store is not None:
+            return self._config_store.get("memory.capacity", default=_DEFAULT_CAPACITY)
+        return _DEFAULT_CAPACITY
+
+    @staticmethod
+    def _dicts(cur: sqlite3.Cursor) -> list[dict[str, Any]]:
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def add(
+        self,
+        agent_id: str,
+        tick: int,
+        kind: str,
+        summary: str,
+        importance: float = 0.5,
+        anchor: bool = False,
+        event_seq: int | None = None,
+        created_at: int | None = None,
+    ) -> int:
+        if created_at is None:
+            created_at = tick
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO memories "
+                "(agent_id, tick, kind, summary, importance, anchor, event_seq, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent_id, tick, kind, summary, importance, int(anchor), event_seq, created_at),
+            )
+            memory_id = int(cur.lastrowid)
+            self._conn.commit()
+            self._evict_if_over_capacity(agent_id)
+            return memory_id
+
+    def _evict_if_over_capacity(self, agent_id: str) -> None:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE agent_id = ?",
+            (agent_id,),
+        )
+        (total,) = cur.fetchone()
+        overflow = total - self._capacity
+        if overflow <= 0:
+            return
+        self._conn.execute(
+            "DELETE FROM memories WHERE id IN ("
+            "  SELECT id FROM memories WHERE agent_id = ? AND anchor = 0 "
+            "  ORDER BY id ASC LIMIT ?"
+            ")",
+            (agent_id, overflow),
+        )
+        self._conn.commit()
+
+    def query(
+        self,
+        agent_id: str,
+        kind: str | None = None,
+        min_importance: float | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM memories WHERE agent_id = ?"
+        params: list[Any] = [agent_id]
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if min_importance is not None:
+            sql += " AND importance >= ?"
+            params.append(min_importance)
+        sql += " ORDER BY tick DESC"
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            return self._dicts(cur)
+
+    def set_anchor(self, memory_id: int, anchor: bool) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE memories SET anchor = ? WHERE id = ?",
+                (int(anchor), memory_id),
+            )
+            self._conn.commit()
+
+    def anchors(self, agent_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM memories WHERE agent_id = ? AND anchor = 1 ORDER BY tick DESC",
+                (agent_id,),
+            )
+            return self._dicts(cur)
+
+    def rebuild(
+        self,
+        events: Iterable[Any],
+        trigger: Callable[[Any], MemoryDescriptor | None],
+    ) -> int:
+        """Replay events through `trigger` only if `memories` is empty (idempotent).
+
+        Returns the total memory count afterward either way, so callers can
+        tell "already had data" from "just rebuilt" only via the row count
+        they observe before calling, matching the spec's idempotency scenario.
+        """
+        with self._lock:
+            cur = self._conn.execute("SELECT COUNT(*) FROM memories")
+            (total,) = cur.fetchone()
+            if total > 0:
+                return int(total)
+        for event in events:
+            descriptor = trigger(event)
+            if descriptor is not None:
+                self.add(
+                    agent_id=descriptor.agent_id,
+                    tick=descriptor.tick,
+                    kind=descriptor.kind,
+                    summary=descriptor.summary,
+                    importance=descriptor.importance,
+                    anchor=descriptor.anchor,
+                    event_seq=descriptor.event_seq,
+                )
+        with self._lock:
+            cur = self._conn.execute("SELECT COUNT(*) FROM memories")
+            (total,) = cur.fetchone()
+            return int(total)

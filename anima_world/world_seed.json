@@ -1,0 +1,188 @@
+{
+  "agents": [
+    {
+      "id": "夏",
+      "name": "苏晚夏",
+      "location": "cafe",
+      "personality": "开朗热情，说话直接，是咖啡店里手脚麻利的店员，喜欢主动搭话、把气氛聊热",
+      "duties": [
+        {
+          "name": "open_cafe",
+          "start": "07:30",
+          "end": "08:00",
+          "kind": "walk",
+          "params": {
+            "location": "cafe"
+          }
+        },
+        {
+          "name": "tend_cafe",
+          "start": "08:00",
+          "end": "18:30",
+          "kind": "work",
+          "params": {
+            "location": "cafe"
+          }
+        },
+        {
+          "name": "walk_home",
+          "start": "18:30",
+          "end": "19:00",
+          "kind": "walk",
+          "params": {
+            "location": "home"
+          }
+        },
+        {
+          "name": "night_sleep",
+          "start": "23:00",
+          "end": "07:30",
+          "kind": "sleep",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "id": "遥",
+      "name": "陆知遥",
+      "location": "workshop",
+      "personality": "冷静知性，惜字如金，是独立设计工作室的建筑师，习惯理性分析、不轻易表露情绪",
+      "duties": [
+        {
+          "name": "to_workshop",
+          "start": "09:00",
+          "end": "09:30",
+          "kind": "walk",
+          "params": {
+            "location": "workshop"
+          }
+        },
+        {
+          "name": "draft",
+          "start": "09:30",
+          "end": "20:00",
+          "kind": "work",
+          "params": {
+            "location": "workshop"
+          }
+        },
+        {
+          "name": "walk_home",
+          "start": "20:00",
+          "end": "20:30",
+          "kind": "walk",
+          "params": {
+            "location": "home"
+          }
+        },
+        {
+          "name": "night_sleep",
+          "start": "00:30",
+          "end": "09:00",
+          "kind": "sleep",
+          "params": {}
+        }
+      ]
+    },
+    {
+      "id": "柔",
+      "name": "沈亦柔",
+      "location": "home",
+      "personality": "温柔细腻，情感丰富，喜欢窝在家里画画，说话温和、容易共情别人的心事",
+      "duties": [
+        {
+          "name": "paint",
+          "start": "10:00",
+          "end": "15:00",
+          "kind": "work",
+          "params": {
+            "location": "home"
+          }
+        },
+        {
+          "name": "to_cafe",
+          "start": "15:00",
+          "end": "15:30",
+          "kind": "walk",
+          "params": {
+            "location": "cafe"
+          }
+        },
+        {
+          "name": "linger",
+          "start": "15:30",
+          "end": "17:30",
+          "kind": "idle_social",
+          "params": {}
+        },
+        {
+          "name": "walk_home",
+          "start": "17:30",
+          "end": "18:00",
+          "kind": "walk",
+          "params": {
+            "location": "home"
+          }
+        },
+        {
+          "name": "night_sleep",
+          "start": "22:30",
+          "end": "10:00",
+          "kind": "sleep",
+          "params": {}
+        }
+      ]
+    }
+  ],
+  "locations": [
+    {
+      "id": "oldport",
+      "name": "旧港区",
+      "description": "临海市的旧港区，慢，潮湿，总也下不完的雨。",
+      "kind": "region",
+      "parent": null,
+      "x": 0.08,
+      "y": 0.08,
+      "w": 0.84,
+      "h": 0.84
+    },
+    {
+      "id": "harbor_st",
+      "name": "港街",
+      "description": "沿着水岸的一条老街，白天有咖啡香，晚上只剩路灯。",
+      "kind": "region",
+      "parent": "oldport",
+      "x": 0.05,
+      "y": 0.08,
+      "w": 0.55,
+      "h": 0.5
+    },
+    {
+      "id": "cafe",
+      "name": "咖啡店",
+      "description": "港街拐角的咖啡店，手冲，木头桌子，靠窗的位置最好。",
+      "kind": "point",
+      "parent": "harbor_st",
+      "x": 0.3,
+      "y": 0.45
+    },
+    {
+      "id": "workshop",
+      "name": "建筑工作室",
+      "description": "港街尽头的独立工作室，满桌纸质草图和模型。",
+      "kind": "point",
+      "parent": "harbor_st",
+      "x": 0.78,
+      "y": 0.6
+    },
+    {
+      "id": "home",
+      "name": "家",
+      "description": "旧港区深处的一间屋子，画架朝着窗，颜料味散不掉。",
+      "kind": "point",
+      "parent": "oldport",
+      "x": 0.78,
+      "y": 0.8
+    }
+  ]
+}

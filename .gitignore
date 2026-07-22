@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 打包产物
+dist/
+build/
+*.egg-info/
+
+# 世界数据:一个 world.db = 一个世界,.key 是 Fernet 密钥,两者都绝不入库
+saves/
+*.db
+*.db.key
+*.db-shm
+*.db-wal
+
+.env
+.venv/
+
+# Claude Code 本地权限,不入库
+.claude/settings.local.json

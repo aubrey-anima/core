@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anima-world"
+dynamic = ["version"]
+description = "ANIMA 世界引擎 + 创作工作台:事件溯源内核、行为树调度、LLM 叙事/聊天/记忆,小说 → 世界种子 → .cyberworld 数据包"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+authors = [{ name = "ANIMA", email = "aubrey@animametaverse.com" }]
+keywords = ["simulation", "agents", "llm", "event-sourcing", "behavior-tree", "worldbuilding"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment :: Simulation",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# The engine is the runtime a world image is pinned to; the author studio ships
+# with it so one install can both create a world and package it. Keep this list
+# minimal — every dependency here lands inside every world image.
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "cryptography>=42.0",  # Fernet encryption for config secrets (<db>.key)
+    "openai>=1.30",        # LLM client: chat / narrative / planning / relationship judge
+    "httpx>=0.27",         # injected transport for the OpenAI-compatible client
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "build>=1.2", "twine>=5.0"]
+
+[project.urls]
+Homepage = "https://animametaverse.com"
+
+[project.scripts]
+anima-world = "anima_world.__main__:main"
+anima-author = "anima_world.author.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "anima_world.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["anima_world*"]
+
+[tool.setuptools.package-data]
+anima_world = ["world_seed.json", "world/static/*.html", "author/static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
