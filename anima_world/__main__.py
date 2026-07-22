@@ -852,6 +852,30 @@ def _coerce_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _seed_entry_dicts(world_seed: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """Malformed seed data must never block startup (the module-wide contract
+    _duties_for/_normalize_location_entry already honor) — and these seeders
+    run AFTER genesis events are committed, so a crash here would strand a
+    half-initialized world that the non-empty-db check then skips forever.
+    Degrade per entry, loudly."""
+    entries = world_seed.get(key, [])
+    if entries in (None, []):
+        return []
+    if not isinstance(entries, list):
+        logger.warning(
+            "world_seed %r must be a list, got %s; skipping all %s",
+            key, type(entries).__name__, key,
+        )
+        return []
+    good: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if isinstance(entry, dict):
+            good.append(entry)
+        else:
+            logger.warning("world_seed %s[%d] is not an object; skipping", key, index)
+    return good
+
+
 def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any]) -> None:
     """rich-injection: initial relation values, reusing the existing
     sentiment/r_type state_change genesis semantics — zero new projection
@@ -862,11 +886,19 @@ def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: d
     events (actions.py `to_event`) — a single one-directional event would
     leave the other agent's view of the relationship at the Relation()
     default, silently, for any seed declaring a mutual relationship."""
-    for rel in world_seed.get("relations", []):
+    for rel in _seed_entry_dicts(world_seed, "relations"):
         a, b = rel.get("a"), rel.get("b")
+        if not isinstance(a, str) or not isinstance(b, str):
+            logger.warning("world_seed relation has non-string agent ids (%r, %r); skipping", a, b)
+            continue
         if a not in registered_ids or b not in registered_ids:
             continue
-        if "sentiment" in rel:
+        if "sentiment" in rel and not isinstance(rel["sentiment"], (int, float)):
+            logger.warning(
+                "world_seed relation (%s, %s) sentiment %r is not numeric; skipping sentiment",
+                a, b, rel["sentiment"],
+            )
+        elif "sentiment" in rel:
             for as_id, target_id in ((a, b), (b, a)):
                 event_log.append({
                     "ts": 0,
@@ -893,10 +925,10 @@ def _seed_goals(event_log: EventLog, registered_ids: set[str], world_seed: dict[
     """rich-injection: per-agent `goals` (same place as `duties`), merged
     into agent.spec via the existing persona_update semantics. Data only —
     BT/planner do not read this field (D9)."""
-    for entry in world_seed.get("agents", []):
+    for entry in _seed_entry_dicts(world_seed, "agents"):
         aid = entry.get("id")
         goals = _coerce_goals(entry.get("goals"))  # a raw string would persist and char-split forever
-        if aid not in registered_ids or not goals:
+        if not isinstance(aid, str) or aid not in registered_ids or not goals:
             continue
         event_log.append({
             "ts": 0,
@@ -911,20 +943,29 @@ def _seed_memories(event_log: EventLog, registered_ids: set[str], world_seed: di
     event-sourced (D10) so a future memories-table rebuild can't lose them.
     Folded into MemoryStore by `_rebuild_memories`'s trigger closure, not
     here — first-boot seeding and rebuild share that one path."""
-    for mem in world_seed.get("memories", []):
+    for mem in _seed_entry_dicts(world_seed, "memories"):
         aid = mem.get("agent_id")
-        if aid not in registered_ids:
+        if not isinstance(aid, str) or aid not in registered_ids:
             logger.warning("world_seed memory references unknown agent %r; skipping", aid)
             continue
+        importance = mem.get("importance", 0.5)
+        try:
+            importance = float(importance)
+        except (TypeError, ValueError):
+            logger.warning(
+                "world_seed memory for %s has non-numeric importance %r; using 0.5",
+                aid, importance,
+            )
+            importance = 0.5
         event_log.append({
             "ts": 0,
             "who": aid,
             "type": "memory_seed",
             "payload": {
                 "agent_id": aid,
-                "kind": mem.get("kind", "seed"),
-                "summary": mem.get("summary", ""),
-                "importance": mem.get("importance", 0.5),
+                "kind": str(mem.get("kind", "seed")),
+                "summary": str(mem.get("summary", "")),
+                "importance": importance,
                 "anchor": _coerce_bool(mem.get("anchor", False)),
             },
         })
@@ -1031,6 +1072,14 @@ def run_serve(args: argparse.Namespace) -> int:
         if server is not None:
             server.should_exit = True
 
+    admin_token = os.getenv(args.world_admin_token_env)
+    public_bind = not _is_loopback_host(args.host)
+    if public_bind:
+        print(
+            "[serve] non-loopback bind: /api/* now requires the world admin token"
+            + ("" if admin_token else " — none is configured, so the group is closed"),
+            file=sys.stderr,
+        )
     app = create_app(
         scheduler,
         tick_rate=tick_rate,
@@ -1039,11 +1088,12 @@ def run_serve(args: argparse.Namespace) -> int:
         instance_id=args.instance_id,
         world_id=args.world_id,
         world_name=args.world_name,
-        admin_token=os.getenv(args.world_admin_token_env),
+        admin_token=admin_token,
         shutdown_callback=request_shutdown,
         cors_origins=args.cors_origin,
         platform_service_credentials=service_tokens,
         membership_claim_secret=claim_secret,
+        require_local_api_auth=public_bind,
     )
     config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
     server = uvicorn.Server(config)

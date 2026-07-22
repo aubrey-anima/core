@@ -461,6 +461,7 @@ def create_app(
     cors_origins: tuple[str, ...] | list[str] = (),
     platform_service_credentials: tuple[str, ...] | list[str] = (),
     membership_claim_secret: str | None = None,
+    require_local_api_auth: bool = False,
 ) -> FastAPI:
     """Build the FastAPI app bound to `scheduler`.
 
@@ -499,6 +500,7 @@ def create_app(
     serve = _ServeWorld(scheduler)
     _loop_running = {"value": False}
     _loop_thread: list[threading.Thread | None] = [None]
+    _reaper_thread: list[threading.Thread | None] = [None]
     _simulation_paused = {"value": False}
     _tick_lock = threading.Lock()
 
@@ -666,19 +668,11 @@ def create_app(
             _loop_running["value"] = True
 
             def _loop() -> None:
-                last_reap = time.monotonic()
                 while _loop_running["value"] and not scheduler._stopped:
                     if _simulation_paused["value"]:
                         time.sleep(0.1)
                         continue
                     _advance_once()
-                    now = time.monotonic()
-                    if now - last_reap >= _REAP_INTERVAL:
-                        try:
-                            asyncio.run(session_manager.reap_idle())
-                        except Exception:  # pragma: no cover - reaper is best-effort
-                            pass
-                        last_reap = now
                     # Sleep in short slices, re-reading the configured rate each
                     # slice: at 1 tick / 5 min a single sleep(300) would pin a
                     # tick_rate edit (M5 hot-reload) and graceful shutdown to the
@@ -692,14 +686,41 @@ def create_app(
                         time.sleep(step)
                         slept += step
 
+            def _reaper() -> None:
+                # Own thread: closing a conversation summarizes via a network
+                # LLM call, which must never pin the tick loop — the same rule
+                # that put narrative/planner/judge on their pools. Sliced sleep
+                # so shutdown isn't held for a full interval.
+                while _loop_running["value"] and not scheduler._stopped:
+                    slept = 0.0
+                    while (
+                        _loop_running["value"]
+                        and not scheduler._stopped
+                        and slept < _REAP_INTERVAL
+                    ):
+                        time.sleep(0.5)
+                        slept += 0.5
+                    if not _loop_running["value"] or scheduler._stopped:
+                        return
+                    try:
+                        asyncio.run(session_manager.reap_idle())
+                    except Exception:  # pragma: no cover - reaper is best-effort
+                        pass
+
             t = threading.Thread(target=_loop, daemon=True)
             _loop_thread[0] = t
             t.start()
+            reaper_thread = threading.Thread(target=_reaper, daemon=True)
+            _reaper_thread[0] = reaper_thread
+            reaper_thread.start()
         yield
         _loop_running["value"] = False
         loop_thread = _loop_thread[0]
         if loop_thread is not None:
             loop_thread.join(timeout=1.0)
+        reaper = _reaper_thread[0]
+        if reaper is not None:
+            reaper.join(timeout=1.0)
         # The event log is committed per event, so a snapshot is only a
         # rebuild cache. Never let one in-flight daemon tick prevent the HTTP
         # server from honoring SIGTERM or an authenticated admin stop.
@@ -721,6 +742,36 @@ def create_app(
             expose_headers=["X-Cyberworld-Protocol-Version", "X-Cyberworld-Instance-Id"],
         )
     app.state.world_provider = _world_context  # 供测试与 change ② 复用
+
+    if require_local_api_auth:
+        # The unauthenticated /api/* group exists for loopback operation only:
+        # it can write llm.api_key, rewrite every prompt, and pause the world.
+        # On a non-loopback bind those become admin-token-gated — /internal/v1
+        # and /api/admin/v1 are fail-closed, and this group must not be the one
+        # door left open. OPTIONS passes through so CORS preflights still work.
+        @app.middleware("http")
+        async def _guard_local_api(request: Request, call_next):
+            path = request.url.path
+            if (
+                request.method != "OPTIONS"
+                and path.startswith("/api/")
+                and not path.startswith("/api/admin/")
+            ):
+                authorization = request.headers.get("Authorization", "")
+                scheme, _, supplied = authorization.partition(" ")
+                if (
+                    admin_token is None
+                    or scheme.lower() != "bearer"
+                    or not supplied
+                    or not hmac.compare_digest(supplied, admin_token)
+                ):
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "detail": "local API requires admin authorization on a non-loopback bind"
+                        },
+                    )
+            return await call_next(request)
 
     def _trusted_claim(request: Request) -> MembershipClaim:
         """Authenticate one platform-to-runtime request and bind its audience."""
@@ -1068,41 +1119,64 @@ def create_app(
             if existing is not None:
                 if tuple(existing[:5]) != provenance:
                     raise HTTPException(status_code=409, detail="delivery_id provenance conflict")
-                return {
-                    "world_id": world_id,
-                    "instance_id": instance_id,
-                    "delivery_id": delivery_id,
-                    "status": existing[5],
-                    "conversation_id": existing[6],
-                    "duplicate": True,
-                }
-            chat_conn.execute(
-                """INSERT INTO world_chat_evolution_receipts
-                   (delivery_id, membership_id, world_id, instance_id, agent_id,
-                    payload_hash, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'processing', ?)""",
-                (delivery_id, *provenance, int(time.time())),
-            )
+                if existing[5] == "applied":
+                    return {
+                        "world_id": world_id,
+                        "instance_id": instance_id,
+                        "delivery_id": delivery_id,
+                        "status": existing[5],
+                        "conversation_id": existing[6],
+                        "duplicate": True,
+                    }
+                # A receipt still 'processing' means an earlier attempt died
+                # mid-flight (failures below delete their receipt; only a hard
+                # crash leaves one). Treating it as a duplicate would turn the
+                # idempotency table into a black hole where the first failure
+                # swallows every retry — take the delivery over instead.
+                chat_conn.execute(
+                    "UPDATE world_chat_evolution_receipts SET created_at = ? WHERE delivery_id = ?",
+                    (int(time.time()), delivery_id),
+                )
+            else:
+                chat_conn.execute(
+                    """INSERT INTO world_chat_evolution_receipts
+                       (delivery_id, membership_id, world_id, instance_id, agent_id,
+                        payload_hash, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'processing', ?)""",
+                    (delivery_id, *provenance, int(time.time())),
+                )
             chat_conn.commit()
 
-        player = players.get(claim.membership_id, {})
-        location = str(player.get("location") or "") or None
-        participants = [
-            {"id": claim.membership_id, "kind": "user"},
-            {"id": agent_id, "kind": "agent"},
-        ]
-        conversation_id = chat_store.start_conversation(
-            agent_id,
-            int(time.time()),
-            participants=participants,
-            location=location,
-            player_id=claim.membership_id,
-        )
-        for message in messages:
-            chat_store.add_message(
-                conversation_id, message["role"], message["content"], int(time.time())
+        try:
+            player = players.get(claim.membership_id, {})
+            location = str(player.get("location") or "") or None
+            participants = [
+                {"id": claim.membership_id, "kind": "user"},
+                {"id": agent_id, "kind": "agent"},
+            ]
+            conversation_id = chat_store.start_conversation(
+                agent_id,
+                int(time.time()),
+                participants=participants,
+                location=location,
+                player_id=claim.membership_id,
             )
-        await session_manager.close_conversation(conversation_id)
+            for message in messages:
+                chat_store.add_message(
+                    conversation_id, message["role"], message["content"], int(time.time())
+                )
+            await session_manager.close_conversation(conversation_id)
+        except BaseException:
+            # Withdraw the receipt so the platform's retry gets a real attempt
+            # rather than a 'processing' echo. A conversation started before
+            # the failure lingers open and is swept by the idle reaper.
+            with scheduler._lock:
+                chat_conn.execute(
+                    "DELETE FROM world_chat_evolution_receipts WHERE delivery_id = ?",
+                    (delivery_id,),
+                )
+                chat_conn.commit()
+            raise
         with scheduler._lock:
             chat_conn.execute(
                 """UPDATE world_chat_evolution_receipts

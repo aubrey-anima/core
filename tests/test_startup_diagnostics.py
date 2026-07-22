@@ -135,3 +135,39 @@ def test_state_names_the_reason_the_llm_is_mocked(tmp_path):
         assert llm["degraded_reason"] == "llm.api_key is not configured"
     finally:
         scheduler.stop()
+
+
+def test_malformed_rich_seed_sections_degrade_instead_of_stranding_the_world(tmp_path, caplog):
+    """relations/memories 不在最小 schema 校验里,而它们的播种跑在创世事件已落盘
+    之后——这里崩溃会留下一个半初始化且永不重播种的世界。必须逐条降级。"""
+    seed = tmp_path / "seed.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "agents": [
+                    {"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"},
+                    {"id": "b", "name": "小北", "location": "cafe", "personality": "外向"},
+                ],
+                "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+                "relations": {"a": "b"},  # 该是 list 却给了 dict
+                "memories": [
+                    "not-an-object",
+                    {"agent_id": ["a"], "summary": "unhashable id"},
+                    {"agent_id": "a", "summary": "好记忆", "importance": "很重要"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        scheduler = build_serve_scheduler(
+            db_path=tmp_path / "w.db", seed_path=seed, force_mock_llm=True
+        )
+    try:
+        assert sorted(scheduler.agents) == ["a", "b"], "坏 relations/memories 不得阻断世界初始化"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("relations" in m for m in messages)
+        assert any("importance" in m for m in messages)
+    finally:
+        scheduler.stop()

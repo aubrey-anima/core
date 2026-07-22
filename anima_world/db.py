@@ -259,6 +259,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _script_statements(script: str) -> list[str]:
+    """Split a schema script into single statements executable inside one
+    transaction — executescript() would implicitly COMMIT first, which is
+    exactly what table-rebuild migrations must never let happen."""
+    return [stmt.strip() for stmt in script.split(";") if stmt.strip()]
+
+
 def _migrate_locations(conn: sqlite3.Connection) -> None:
     """Rebuild a legacy flat-grid `locations` table into the nested schema.
 
@@ -266,6 +273,11 @@ def _migrate_locations(conn: sqlite3.Connection) -> None:
     point whose grid cell maps to its center in 0~1 space; `exits` is dropped
     (nested-map D3 — it was never read). A no-op on a table that is already
     nested, so a second boot leaves user data untouched.
+
+    The rename → rebuild → copy → drop dance runs inside ONE transaction: a
+    crash mid-migration must roll back to the legacy table so the next boot
+    retries, instead of leaving a committed empty table that the `grid_x`
+    detection would treat as already migrated (silently orphaning every row).
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(locations)")}
     if not existing or "grid_x" not in existing:
@@ -273,18 +285,24 @@ def _migrate_locations(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         "SELECT id, name, description, grid_x, grid_y, updated_at FROM locations"
     ).fetchall()
-    conn.execute("ALTER TABLE locations RENAME TO locations_legacy")
-    conn.executescript(LOCATIONS_SCHEMA)
-    for loc_id, name, description, grid_x, grid_y, updated_at in rows:
-        x = (grid_x + 0.5) / _LEGACY_GRID_SIZE if grid_x is not None else None
-        y = (grid_y + 0.5) / _LEGACY_GRID_SIZE if grid_y is not None else None
-        conn.execute(
-            "INSERT INTO locations (id, name, description, kind, parent, x, y, w, h, updated_at) "
-            "VALUES (?, ?, ?, 'point', NULL, ?, ?, NULL, NULL, ?)",
-            (loc_id, name, description, x, y, updated_at),
-        )
-    conn.execute("DROP TABLE locations_legacy")
-    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("ALTER TABLE locations RENAME TO locations_legacy")
+        for stmt in _script_statements(LOCATIONS_SCHEMA):
+            conn.execute(stmt)
+        for loc_id, name, description, grid_x, grid_y, updated_at in rows:
+            x = (grid_x + 0.5) / _LEGACY_GRID_SIZE if grid_x is not None else None
+            y = (grid_y + 0.5) / _LEGACY_GRID_SIZE if grid_y is not None else None
+            conn.execute(
+                "INSERT INTO locations (id, name, description, kind, parent, x, y, w, h, updated_at) "
+                "VALUES (?, ?, ?, 'point', NULL, ?, ?, NULL, NULL, ?)",
+                (loc_id, name, description, x, y, updated_at),
+            )
+        conn.execute("DROP TABLE locations_legacy")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _migrate_bt_nodes(conn: sqlite3.Connection) -> None:
@@ -305,15 +323,23 @@ def _migrate_bt_nodes(conn: sqlite3.Connection) -> None:
     if all(f"'{t}'" in sql for t in BT_NODE_TYPES):
         return  # CHECK already admits every node type we know
     rows = conn.execute("SELECT tree, node_id, type, parent, sort, params FROM bt_nodes").fetchall()
-    conn.execute("DROP INDEX IF EXISTS idx_bt_nodes_tree")
-    conn.execute("ALTER TABLE bt_nodes RENAME TO bt_nodes_legacy")
-    conn.executescript(BT_NODES_SCHEMA)
-    conn.executemany(
-        "INSERT INTO bt_nodes (tree, node_id, type, parent, sort, params) VALUES (?, ?, ?, ?, ?, ?)",
-        rows,
-    )
-    conn.execute("DROP TABLE bt_nodes_legacy")
-    conn.commit()
+    # One transaction for the same reason as _migrate_locations: a committed
+    # half-rebuild passes the CHECK-substring detection and never retries.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_bt_nodes_tree")
+        conn.execute("ALTER TABLE bt_nodes RENAME TO bt_nodes_legacy")
+        for stmt in _script_statements(BT_NODES_SCHEMA):
+            conn.execute(stmt)
+        conn.executemany(
+            "INSERT INTO bt_nodes (tree, node_id, type, parent, sort, params) VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.execute("DROP TABLE bt_nodes_legacy")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:

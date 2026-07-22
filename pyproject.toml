@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# >=77: the SPDX-string `license` + `license-files` keys below are PEP 639,
+# which older setuptools rejects at build time.
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]

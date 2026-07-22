@@ -1140,7 +1140,12 @@ class Scheduler:
                 ),
                 "location": brain.agent.blackboard.read("loc") or brain.agent.location or "",
             }
-        self._judge_pool.submit(self._user_judge_worker, agent_id, player_id, context)
+            # Submit under the lock: stop() nulls the pool refs while holding
+            # it, so here the pool is either alive or None — re-read it.
+            pool = self._judge_pool
+            if pool is None or self._stopped:
+                return
+            pool.submit(self._user_judge_worker, agent_id, player_id, context)
 
     def _user_judge_worker(self, agent_id: str, player_id: str, context: dict[str, Any]) -> None:
         judge = self.relationship_judge
@@ -1323,11 +1328,19 @@ class Scheduler:
         (default) keeps serve's original fast-shutdown behavior: anything
         not yet started is cancelled.
         """
-        for attr in ("_narrative_pool", "_planner_pool", "_judge_pool"):
-            pool = getattr(self, attr, None)
-            setattr(self, attr, None)
-            if pool is not None:
-                pool.shutdown(wait=wait, cancel_futures=not wait)
+        # Null the references under the lock so a request thread mid-submit
+        # (all submits happen while holding it) either sees a live pool or
+        # None — never a pool being shut down. The shutdowns themselves must
+        # run OUTSIDE the lock: with wait=True the workers need it to finish.
+        pools = []
+        with self._lock:
+            for attr in ("_narrative_pool", "_planner_pool", "_judge_pool"):
+                pool = getattr(self, attr, None)
+                setattr(self, attr, None)
+                if pool is not None:
+                    pools.append(pool)
+        for pool in pools:
+            pool.shutdown(wait=wait, cancel_futures=not wait)
         with self._lock:
             if self._stopped:
                 return

@@ -284,3 +284,53 @@ def test_browsable_url_never_hands_out_0_0_0_0():
     assert onboarding.browsable_url("127.0.0.1", 8000) == "http://127.0.0.1:8000"
 
 
+
+
+# ── 非 loopback 绑定时,本地 /api 组必须上锁 ─────────────────────────────────
+
+
+def test_public_bind_gates_local_api_behind_admin_token(tmp_path):
+    """/api/* 能写 llm.api_key、改所有提示词、暂停世界。loopback 上无鉴权是设计;
+    绑到非 loopback 时它不能是唯一敞开的那扇门。"""
+    from fastapi.testclient import TestClient
+
+    scheduler, app = _app(
+        tmp_path, admin_token="admin-secret", require_local_api_auth=True
+    )
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/state").status_code == 401
+            assert (
+                client.put("/api/config/llm.api_key", json={"value": "sk-x"}).status_code
+                == 401
+            )
+            ok = client.get(
+                "/api/state", headers={"Authorization": "Bearer admin-secret"}
+            )
+            assert ok.status_code == 200
+            # /internal/v1/meta 是平台健康探针,保持免鉴权
+            assert client.get("/internal/v1/meta").status_code == 200
+    finally:
+        scheduler.stop()
+
+
+def test_public_bind_without_admin_token_closes_local_api(tmp_path):
+    from fastapi.testclient import TestClient
+
+    scheduler, app = _app(tmp_path, require_local_api_auth=True)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/state").status_code == 401
+    finally:
+        scheduler.stop()
+
+
+def test_loopback_default_keeps_local_api_open(tmp_path):
+    from fastapi.testclient import TestClient
+
+    scheduler, app = _app(tmp_path)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/api/state").status_code == 200
+    finally:
+        scheduler.stop()

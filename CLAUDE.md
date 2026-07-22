@@ -54,7 +54,7 @@ anima-studio(创作台)──子进程──▶ 本仓库的某个版本 ──�
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 52 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 62 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
