@@ -59,6 +59,9 @@ pip install anima-world          # 发布后
 anima-world --help    # start / config / doctor / serve / simulate / world export|import
 ```
 
+> 每个命令的完整参数、三组 HTTP API 的逐端点说明、配置键 / 环境变量 / 节拍脚本格式,
+> 见 **[docs/REFERENCE.md](docs/REFERENCE.md)**(功能与接口参考)。
+
 `start` 是给人用的门(引导 + 演示速度);**`serve` 是给部署用的**,行为一如既往
 (不引导、不改时钟),世界镜像跑的是它。
 
