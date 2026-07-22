@@ -117,24 +117,12 @@ def test_seed_against_a_populated_db_is_ignored_and_says_so(tmp_path, minimal_se
 
 
 def test_state_names_the_reason_the_llm_is_mocked(tmp_path):
-    from fastapi.testclient import TestClient
+    from anima_world.api import World
 
-    from anima_world.world.app import create_app
-
-    scheduler = build_serve_scheduler(db_path=tmp_path / "w.db", force_mock_llm=True)
-    try:
-        app = create_app(
-            scheduler,
-            run_loop=False,
-            config_store=scheduler.config_store,
-            prompt_store=scheduler.prompt_store,
-        )
-        with TestClient(app) as client:
-            llm = client.get("/api/state").json()["runtime"]["llm"]
-        assert llm["mock"] is True
-        assert llm["degraded_reason"] == "llm.api_key is not configured"
-    finally:
-        scheduler.stop()
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        llm = world.state()["runtime"]["llm"]
+    assert llm["mock"] is True
+    assert llm["degraded_reason"] == "llm.api_key is not configured"
 
 
 def test_malformed_rich_seed_sections_degrade_instead_of_stranding_the_world(tmp_path, caplog):

@@ -4,7 +4,7 @@ The map's real source of truth is the `locations` table (`world_store.
 LocationStore`): an adjacency tree of regions and points with parent-relative
 0~1 geometry (nested-map D7). This module holds nothing but a minimal default
 point set, used where no DB is available: seeding a fresh world when
-`world_seed.json` is unreadable, and `/api/state` on a scheduler built without
+`world_seed.json` is unreadable, and `World.state()` on a scheduler built without
 a `LocationStore` (the headless `story` path).
 
 The flat 6×6 `GRID` dict, `get_coords`, `get_exits` and `agents_positions` are

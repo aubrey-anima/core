@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import logging
 import os
@@ -45,31 +44,6 @@ from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
 logger = logging.getLogger(__name__)
 
-LOCAL_DEV_WORLD_SERVICE_TOKEN = "anima-loopback-world-service"
-LOCAL_DEV_MEMBERSHIP_CLAIM_SECRET = "anima-loopback-membership-claim"
-
-
-def _is_loopback_host(host: str) -> bool:
-    value = host.strip().lower()
-    if value == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(value).is_loopback
-    except ValueError:
-        return False
-
-
-def _runtime_service_credentials(
-    host: str, raw_service_tokens: str, claim_secret: str | None
-) -> tuple[tuple[str, ...], str | None]:
-    if not raw_service_tokens.strip() and not claim_secret and _is_loopback_host(host):
-        return (LOCAL_DEV_WORLD_SERVICE_TOKEN,), LOCAL_DEV_MEMBERSHIP_CLAIM_SECRET
-    return (
-        tuple(token.strip() for token in raw_service_tokens.split(",") if token.strip()),
-        claim_secret,
-    )
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anima-world",
@@ -79,11 +53,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- start / config / doctor: the commands a person types --
     start = sub.add_parser(
-        "start", help="创建并启动一个世界(引导配置 LLM,自动打开浏览器)—— 从这里开始"
+        "start", help="创建并启动一个世界(引导配置 LLM,前台运行)—— 从这里开始"
     )
     start.add_argument("--db-path", default="saves/world.db", help="世界文件位置(不存在就新建)")
-    start.add_argument("--host", default="127.0.0.1", help="绑定地址(默认只监听本机)")
-    start.add_argument("--port", type=int, default=8000, help="端口;被占用时自动往后找")
     start.add_argument("--seed", default=None, help="世界种子 JSON(只对新建的世界生效)")
     start.add_argument("--beats", default=None, help="节拍脚本 JSON")
     start.add_argument("--no-input", action="store_true", help="不要交互提问(CI / 脚本)")
@@ -113,47 +85,20 @@ def _build_parser() -> argparse.ArgumentParser:
     story.add_argument("--ticks", type=int, default=50, help="Max ticks (default 50)")
     story.add_argument("--narrative", action="store_true", help="Enable narrative output")
 
-    serve = sub.add_parser("serve", help="Run web chat server")
-    serve.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
-    serve.add_argument("--port", type=int, default=8000, help="Bind port (default 8000)")
-    serve.add_argument(
-        "--agents", type=int, default=None,
-        help="Number of agents (default: full seed roster, or 3 without a seed)",
+    run = sub.add_parser(
+        "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
     )
-    serve.add_argument(
-        "--tick-rate", type=float, default=None,
-        help="Background ticks per second. FALLBACK ONLY: once the db exists, the seeded "
-             "scheduler.tick_rate config row wins (default 1/300 = real time). Change it "
-             "with PUT /api/config/scheduler.tick_rate.",
-    )
-    serve.add_argument("--db-path", default="saves/world.db", help="SQLite world DB path")
-    serve.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
-    serve.add_argument(
+    run.add_argument("--db-path", default="saves/world.db", help="SQLite world DB path")
+    run.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
+    run.add_argument(
         "--beats", default=None,
         help="Beat script JSON path (beat-director; invalid script fails startup)",
     )
-    serve.add_argument("--instance-id", default="legacy", help="Runtime instance identity")
-    serve.add_argument("--world-id", default="legacy", help="World lineage identity")
-    serve.add_argument("--world-name", default="", help="World display name for runtime admin")
-    serve.add_argument(
-        "--world-admin-token-env",
-        default="ANIMA_WORLD_ADMIN_TOKEN",
-        help="Environment variable containing the online world admin token",
+    run.add_argument(
+        "--agents", type=int, default=None,
+        help="Number of agents (default: full seed roster, or 3 without a seed)",
     )
-    serve.add_argument(
-        "--platform-service-token-env",
-        default="ANIMA_WORLD_SERVICE_TOKEN",
-        help="Environment variable containing comma-separated platform service credentials",
-    )
-    serve.add_argument(
-        "--membership-claim-secret-env",
-        default="ANIMA_MEMBERSHIP_CLAIM_SECRET",
-        help="Environment variable containing the membership claim signing secret",
-    )
-    serve.add_argument(
-        "--cors-origin", action="append", default=[],
-        help="Allowed independent frontend origin (repeatable; no wildcard)",
-    )
+    run.add_argument("--quiet", action="store_true", help="Do not echo narrative events")
     # -- simulate (novel-benchmark-loop) --
     simulate = sub.add_parser(
         "simulate", help="Fast-forward a world headlessly (no sleep, no web server)"
@@ -410,14 +355,14 @@ def _warn_if_llm_degraded(config_store: ConfigStore, db_path: str | Path) -> Non
             "llm.api_key cannot be decrypted — the keyfile %s.key most likely did not travel "
             "with this database. Narrative, free-time planner and relationship judge all "
             "degrade to Mock. Restore the keyfile, or write a new key with "
-            "PUT /api/config/llm.api_key.",
+            "anima-world config set llm.api_key sk-… .",
             db_path,
         )
     elif not (config_store.get("llm.api_key", default="") or ""):
         logger.warning(
             "llm.api_key is not configured — narrative, free-time planner and relationship "
             "judge degrade to Mock (the world still runs, but its text is templated and its "
-            "agents have no plans). Set it with PUT /api/config/llm.api_key, or seed it from "
+            "agents have no plans). Set it with `anima-world config set llm.api_key sk-…`, or seed it from "
             "ANIMA_LLM_API_KEY before the database is first created."
         )
 
@@ -604,8 +549,8 @@ def build_serve_scheduler(
         logger.warning(
             "--seed %s was NOT applied: this database already holds %d event(s), and a seed "
             "file is only ever read into an empty one. Point --db-path at a fresh file to "
-            "author against this seed, or edit the live world through /api/config, "
-            "/api/prompts and the locations/bt_nodes tables.",
+            "author against this seed, or edit the live world through World.config_set / "
+            "World.prompt_set and the locations/bt_nodes tables.",
             seed_path, len(persisted),
         )
     boot_projection = scheduler._memory_projection
@@ -1022,95 +967,67 @@ def run_story(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_serve(args: argparse.Namespace) -> int:
-    """Run the M3 FastAPI web chat server."""
+def _run_world_foreground(world: Any, *, quiet: bool = False) -> None:
+    """Drive an opened World in the foreground until SIGINT/SIGTERM.
+
+    The engine is a library — "running a world" just means some process holds
+    a World and lets its clock run. This is that process, for anyone who wants
+    a living world without writing a host program.
+    """
+    import queue as queue_module
     import signal
 
-    import uvicorn
-
-    from anima_world.world.app import create_app
-
-    try:
-        scheduler = build_serve_scheduler(
-            args.agents, db_path=args.db_path, seed_path=args.seed, beats_path=args.beats
-        )
-    except BeatScriptError as exc:
-        print(f"[serve] {exc}", file=sys.stderr)
-        return 2
-    raw_service_tokens = os.getenv(args.platform_service_token_env, "")
-    claim_secret = os.getenv(args.membership_claim_secret_env)
-    service_tokens, claim_secret = _runtime_service_credentials(
-        args.host, raw_service_tokens, claim_secret
-    )
-    if bool(service_tokens) != bool(claim_secret):
-        print(
-            "[serve] platform service token and membership claim secret must be configured together",
-            file=sys.stderr,
-        )
-        return 2
-    server_ref: dict[str, Any] = {}
-
-    # `--tick-rate` is only consulted when the config table has no row for it,
-    # and `seed_config_defaults` always seeds one — so on any real world the
-    # flag is silently inert. Say so rather than let it look applied.
-    tick_rate = 1.0 if args.tick_rate is None else args.tick_rate
-    configured_rate = (
-        scheduler.config_store.get("scheduler.tick_rate")
-        if scheduler.config_store is not None
-        else None
-    )
-    if args.tick_rate is not None and configured_rate is not None and configured_rate != args.tick_rate:
-        print(
-            f"[serve] --tick-rate {args.tick_rate} is ignored: config scheduler.tick_rate="
-            f"{configured_rate} wins (the DB row always beats the flag). Change it with "
-            f"PUT /api/config/scheduler.tick_rate.",
-            file=sys.stderr,
-        )
-
-    def request_shutdown() -> None:
-        server = server_ref.get("server")
-        if server is not None:
-            server.should_exit = True
-
-    admin_token = os.getenv(args.world_admin_token_env)
-    public_bind = not _is_loopback_host(args.host)
-    if public_bind:
-        print(
-            "[serve] non-loopback bind: /api/* now requires the world admin token"
-            + ("" if admin_token else " — none is configured, so the group is closed"),
-            file=sys.stderr,
-        )
-    app = create_app(
-        scheduler,
-        tick_rate=tick_rate,
-        config_store=scheduler.config_store,
-        prompt_store=scheduler.prompt_store,
-        instance_id=args.instance_id,
-        world_id=args.world_id,
-        world_name=args.world_name,
-        admin_token=admin_token,
-        shutdown_callback=request_shutdown,
-        cors_origins=args.cors_origin,
-        platform_service_credentials=service_tokens,
-        membership_claim_secret=claim_secret,
-        require_local_api_auth=public_bind,
-    )
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
-    server = uvicorn.Server(config)
-    server_ref["server"] = server
+    stop = threading.Event()
     old_sigint = signal.getsignal(signal.SIGINT)
     old_sigterm = signal.getsignal(signal.SIGTERM)
 
     def request_exit(signum, frame) -> None:
-        server.should_exit = True
+        stop.set()
 
     signal.signal(signal.SIGINT, request_exit)
     signal.signal(signal.SIGTERM, request_exit)
+    events = world.subscribe() if not quiet else None
+    world.start_clock()
     try:
-        server.run()
+        while not stop.is_set():
+            if events is None:
+                stop.wait(0.5)
+                continue
+            try:
+                batch = events.get(timeout=0.5)
+            except queue_module.Empty:
+                continue
+            for ev in batch.get("events", []):
+                if ev.get("type") != "narrative":
+                    continue
+                text = ev.get("text") or ev.get("payload", {}).get("text", "")
+                who = ev.get("who") or "?"
+                now = world.world_time()
+                print(f"  [第{now.day}天 {now.hour:02d}:{now.minute:02d}] {who}:{text}")
     finally:
+        if events is not None:
+            world.unsubscribe(events)
         signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
+        world.close()
+
+
+def run_run(args: argparse.Namespace) -> int:
+    """Foreground world host: open, let the clock run, Ctrl-C to stop."""
+    from anima_world.api import World
+
+    try:
+        world = World.open(
+            args.db_path, seed_path=args.seed, beats_path=args.beats, agents=args.agents
+        )
+    except BeatScriptError as exc:
+        print(f"[run] {exc}", file=sys.stderr)
+        return 2
+    roster = "、".join(brain.agent.name for brain in world.scheduler.agents.values())
+    print(f"[run] {args.db_path}  {len(world.scheduler.agents)} 个角色:{roster}")
+    print("[run] 时钟已启动,Ctrl-C 停止(嵌入用法见 anima_world.api.World)")
+    _run_world_foreground(world, quiet=args.quiet)
+    print("[run] 世界已停下,快照已保存。")
     return 0
 
 
@@ -1145,18 +1062,13 @@ def _print_llm_line(status: Any, *, indent: str = "  ") -> None:
 
 
 def run_start(args: argparse.Namespace) -> int:
-    """The front door: configure, create, launch, open — in that order.
+    """The front door: configure, create, run — in that order.
 
-    Everything `serve` does, plus the three things a newcomer cannot be
-    expected to know: that an unconfigured LLM degrades silently, that a fresh
-    world's clock runs in real time and therefore looks frozen, and that the
-    page lives on a port they were never told.
+    Everything `run` does, plus the two things a newcomer cannot be expected
+    to know: that an unconfigured LLM degrades silently, and that a fresh
+    world's clock runs in real time and therefore looks frozen.
     """
-    import signal
-
-    import uvicorn
-
-    from anima_world.world.app import create_app
+    from anima_world.api import World
 
     db_path = Path(args.db_path)
     is_new_world = not db_path.exists()
@@ -1200,65 +1112,26 @@ def run_start(args: argparse.Namespace) -> int:
         print(f"     {onboarding.dim('想要真实时间:anima-world config set scheduler.tick_rate 0.00333')}")
 
     try:
-        scheduler = build_serve_scheduler(
-            None, db_path=db_path, seed_path=args.seed, beats_path=args.beats,
-            llm_warning=False,  # ① already said it, better
-        )
+        world = World.open(str(db_path), seed_path=args.seed, beats_path=args.beats)
     except BeatScriptError as exc:
         print(f"\n  {onboarding.red(onboarding.BAD)} 节拍脚本有问题:\n{exc}", file=sys.stderr)
         return 2
-    print(f"     {onboarding.green(onboarding.OK)} {len(scheduler.agents)} 个角色就位:"
-          f" {'、'.join(brain.agent.name for brain in scheduler.agents.values())}")
+    print(f"     {onboarding.green(onboarding.OK)} {len(world.scheduler.agents)} 个角色就位:"
+          f" {'、'.join(brain.agent.name for brain in world.scheduler.agents.values())}")
 
-    # ③ Serve it. The engine is an API and nothing else — authoring lives in
-    #    the studio, a separate program with its own environment, because a
-    #    world is pinned to one engine version and the tool has to outlive it.
-    port = onboarding.find_free_port(args.host, args.port)
-    if port is None:
-        print(f"\n  {onboarding.red(onboarding.BAD)} {args.port}–{args.port + 9} 全被占用了,"
-              f"换一个:--port 9000", file=sys.stderr)
-        return 2
-    if port != args.port:
-        print(f"     {onboarding.yellow(onboarding.WARN)} 端口 {args.port} 被占用了,改用 {port}")
-    world_url = onboarding.browsable_url(args.host, port)
-
+    # ③ Let it live. The engine is a library — this process is the world's
+    #    host; anything else (a site, a tool) imports anima_world.api and
+    #    holds its own World. Authoring lives in the studio, a separate
+    #    program, because a world is pinned to one engine version.
     print(f"\n  {onboarding.bold('③ 运行')}")
-    print(f"     {green_url(world_url)}  {onboarding.dim('(API,没有网页界面)')}")
-    print(f"     {onboarding.dim('创作/编辑世界:anima-studio(单独的桌面程序)')}")
-    print(f"     {onboarding.dim('停止:Ctrl-C   体检:anima-world doctor   改配置:anima-world config list')}\n")
+    print(f"     {onboarding.dim('世界在本进程里运行,叙事会打印在下面;停止:Ctrl-C')}")
+    print(f"     {onboarding.dim('程序里用:from anima_world.api import World; World.open(…)')}")
+    print(f"     {onboarding.dim('体检:anima-world doctor   改配置:anima-world config list')}\n")
 
-    tokens, claim_secret = _runtime_service_credentials(args.host, "", None)
-    app = create_app(
-        scheduler,
-        tick_rate=tick_rate,
-        config_store=scheduler.config_store,
-        prompt_store=scheduler.prompt_store,
-        admin_token=os.getenv("ANIMA_WORLD_ADMIN_TOKEN"),
-        platform_service_credentials=tokens,
-        membership_claim_secret=claim_secret,
-    )
-    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=port, log_level="warning"))
-
-    old_sigint = signal.getsignal(signal.SIGINT)
-    old_sigterm = signal.getsignal(signal.SIGTERM)
-
-    def request_exit(signum, frame) -> None:
-        server.should_exit = True
-
-    signal.signal(signal.SIGINT, request_exit)
-    signal.signal(signal.SIGTERM, request_exit)
-    try:
-        server.run()
-    finally:
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
-    print("\n  世界已停下。下次接着跑:"
+    _run_world_foreground(world)
+    print("\n  世界已停下,快照已保存。下次接着跑:"
           f"anima-world start --db-path {db_path}\n")
     return 0
-
-
-def green_url(url: str) -> str:
-    return onboarding.paint(url, "1;32")
 
 
 def run_config(args: argparse.Namespace) -> int:
@@ -1401,7 +1274,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
 
 def run_simulate(args: argparse.Namespace) -> int:
-    """Fast-forward a world headlessly: no sleep, no web server, no uvicorn.
+    """Fast-forward a world headlessly: no sleep, no clock thread.
 
     Builds the exact same scheduler `serve` would (duties/planner/memory/
     persistence all wired), drives the tick loop synchronously, then drains
@@ -1591,7 +1464,8 @@ def _print_welcome() -> int:
       {onboarding.bold('anima-studio')}            {onboarding.dim('桌面程序:管 core 版本 · 小说 → 世界')}
       {onboarding.dim('它把世界钉在某个 core 版本上,所以独立于本引擎单独安装。')}
 
-  部署与打包:serve / simulate / world export|import
+  前台跑世界 / 快进 / 打包:run / simulate / world export|import
+  在程序里嵌入世界:from anima_world.api import World
   完整帮助:anima-world --help
 """)
     return 0
@@ -1608,8 +1482,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_doctor(args)
     if args.command == "story":
         return run_story(args)
-    if args.command == "serve":
-        return run_serve(args)
+    if args.command == "run":
+        return run_run(args)
     if args.command == "simulate":
         return run_simulate(args)
     if args.command == "world":

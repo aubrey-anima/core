@@ -111,7 +111,7 @@ class OpenAICompatibleNarrativeProvider:
             return self.api_key, self.base_url, self.model, self.timeout
         # No `or self.api_key` fallback here: an empty string from cfg is a
         # deliberate "key cleared" signal (an admin blanking it via
-        # /api/config) and must fall through to the mock provider below,
+        # World.config_set) and must fall through to the mock provider below,
         # not silently resurrect the stale constructor-time key.
         api_key = cfg.get("llm.api_key", default=self.api_key)
         base_url = (cfg.get("llm.base_url", default=self.base_url) or self.base_url).rstrip("/")

@@ -1,8 +1,8 @@
 # anima-world 功能与接口参考
 
-> 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(网站、运维台、创作台 anima-studio)。
+> 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
-> 对应引擎版本:0.1.0(db 格式 1,包格式 1,内部协议 v1)。
+> 对应引擎版本:0.1.0(db 格式 1,包格式 1)。
 
 ---
 
@@ -10,8 +10,8 @@
 
 1. [引擎是什么、不是什么](#1-引擎是什么不是什么)
 2. [功能详解](#2-功能详解)
-3. [CLI 参考](#3-cli-参考)
-4. [HTTP API 参考](#4-http-api-参考)
+3. [Python API 参考(主接口)](#3-python-api-参考主接口)
+4. [CLI 参考](#4-cli-参考)
 5. [环境变量](#5-环境变量)
 6. [配置键参考](#6-配置键参考)
 7. [提示词模板](#7-提示词模板)
@@ -22,16 +22,24 @@
 
 ## 1. 引擎是什么、不是什么
 
-**是**:一个可 pip 安装的世界运行时。一个 `world.db` 文件就是一个世界;引擎负责跑世界(时钟、
-角色决策、LLM 叙事/规划/关系)、快进世界、把世界打包成可分发的 `.cyberworld`。
+**是**:一个可 pip 安装的**纯库**。一个 `world.db` 文件就是一个世界;引擎负责跑世界
+(时钟、角色决策、LLM 叙事/规划/关系)、快进世界、把世界打包成可分发的 `.cyberworld`。
+任何要用世界的模块 import 本包,通过 `anima_world.api.World` 的函数操作 db ——
+**本质就是用函数操作数据库**,像 SQLite 那样被链接进宿主。
 
 **不是**:
-- **没有任何网页界面**。三组 HTTP API 全部只返回 JSON;`/` 返回一段自我说明。玩家界面归网站
-  (走 `/internal/v1`),管理台归运维台(走 `/api/admin/v1`)。
+- **没有 HTTP、没有端口、没有网页**。引擎不监听任何东西;要网络暴露,宿主应用自己包一层。
 - **没有创作功能**。把小说变成世界种子、编排剧情,是独立桌面程序 anima-studio 的事。
   studio 以子进程方式驱动本引擎(每个引擎版本一个隔离 venv),永不 import 本包 ——
   `tests/test_packaging.py` 机器强制这条边界。
 - **不做跨版本迁移**。一个世界钉死在生成它的引擎版本上(版本即契约,详见 §2.9)。
+
+**三条使用纪律**(权威版本在 `anima_world/api.py` docstring):
+
+1. 一个运行中的世界**独占**它的 world.db —— 世界的真相一半在内存(时钟/投影/锁/线程池),
+   第二个进程绕过 World 直写同一文件会立刻分叉;
+2. **一个进程一个引擎版本** —— 多版本共存按进程隔离(studio 的 venv+子进程模式);
+3. **信任边界是进程边界** —— `player_id` 只是参数,验证调用者是谁是宿主的责任。
 
 ---
 
@@ -82,11 +90,11 @@
 ### 2.4 LLM 子系统
 
 - **客户端注入**,OpenAI 兼容(`openai` SDK);配置(key/base_url/model/timeout)每次调用
-  live 读取,admin 改完下次调用即生效。**没有 key 时全线降级 Mock**:世界照跑、事件照发,
-  只是文本是模板 —— 降级不许无声(见 §2.8)。
+  live 读取,`config_set` 改完下次调用即生效。**没有 key 时全线降级 Mock**:世界照跑、
+  事件照发,只是文本是模板 —— 降级不许无声(见 §2.8)。
 - **三个独立线程池**(各 2 worker):叙事(把动作写成人读文本)、规划(自由时间计划)、
-  关系判定。**LLM 永不在 tick 线程或请求线程调用**;世界事件在提交前已记录,LLM 结果
-  回来时才补落地,LLM 挂了世界不停。
+  关系判定。**LLM 永不在 tick 线程调用**;世界事件在提交前已记录,LLM 结果回来时才
+  补落地,LLM 挂了世界不停。
 - **关系判定(relationship judge)**:一次聊天结束后,LLM 裁定双向**不对称**的好感度变化,
   单次上限 ±0.2;同一对角色同日多次判定按 0.5^(N-1) 阻尼;跨越关系档位
   (宿敌/交恶/淡漠/熟识/亲近/挚交)时由 LLM 用一句 ≤20 字中文短语重写关系描述。
@@ -103,13 +111,14 @@
 
 与事件核解耦:聊天回合本身不发事件,**整场会话只在关闭时发一个 summary 事件**
 (零消息会话静默关闭)。会话按 (agent, player) 键控;空闲超过 `chat.idle_timeout`
-(默认 600 秒)由收割线程自动关闭。
+(默认 600 秒)由收割线程自动关闭(`start_clock` 时启动)。
 
-`/internal/v1/chat` 路径**不落平台历史**:网站每次把最近 ≤20 条对话随请求带来,完整
-转录留在网站库里;世界侧的 prompt 由自持状态构成(persona + 世界观 + grounding 块 +
-认证身份块)。回复流式返回,内置一个 token 级状态机给全角括号内的动作描写补角色名前缀。
+`World.chat()` 路径**不落平台历史**:宿主每次把最近 ≤20 条对话传进来,完整转录留在
+宿主库里;世界侧的 prompt 由自持状态构成(persona + 世界观 + grounding 块 + 对话身份块)。
+回复流式产出,内置一个 token 级状态机给全角括号内的动作描写补角色名前缀。
 
-玩家会话关闭后触发关系判定(读真实转录),让玩家进入和 NPC 相同的关系机制。
+`World.record_chat_turn()` 把一个完成回合记入世界并立即关闭:摘要 + 一个事件 +
+关系判定(读真实转录),让玩家进入和 NPC 相同的关系机制。
 
 ### 2.7 剧情节拍(beat director)
 
@@ -122,45 +131,122 @@
 配置存 `config` 表,带类型(str/int/float/bool)、分类、是否 secret。secret 用 **Fernet
 加密**入库,密钥在 db 旁边的 `world.db.key` 文件(0600 权限)—— **搬迁 db 必须带上它**。
 丢了 keyfile,`llm.api_key` 读不出来,世界静默降级 Mock,但三处会点名真实原因
-("没配过" 与 "读不出来" 严格区分):serve 启动警告、`anima-world doctor`、
-`/api/state` 的 `runtime.llm.degraded_reason`。
+("没配过" 与 "读不出来" 严格区分):打开世界时的启动警告、`anima-world doctor`、
+`World.state()` 的 `runtime.llm.degraded_reason`。
 
 提示词模板(约 12 个)存 `prompt_templates` 表,拼 prompt 现场 live 读取,改完即生效;
-保存前用代表性变量试渲染一次,占位符错误直接 400。
+保存前用代表性变量试渲染一次,占位符错误抛 `PromptRenderError`。
 
 ### 2.9 版本即契约
 
-一个 core 版本 = (引擎代码, 内部协议版本, db 格式版本, claim 签名格式) 一起冻结:
+一个 core 版本 = (引擎代码, db 格式版本, 包格式版本) 一起冻结:
 
 - `anima_world.__version__` 是唯一版本源(pyproject 动态读取)
 - **主版本号 = db 格式**:db 格式变才升第一位;第二、三位都是程序优化(第二位加能力,
   第三位纯修 bug)
 - `DB_FORMAT_VERSION` 联锁:挂上更新格式的 db 当场拒绝打开,**不写入任何表**
-- membership claim 线格式**永久冻结**(黄金向量测试钉死到字节,见 `tests/test_claim_freeze.py`)
-- `/internal/v1` 冻结,只加字段;破坏性变更走 `/internal/v2` 并行
+- `anima_world.api` 的函数面**只加不改** —— 宿主应用的代码依赖它
 
 ---
 
-## 3. CLI 参考
+## 3. Python API 参考(主接口)
 
-命令分两拨:**给人打的**(`start` / `config` / `doctor`)和**给部署打的**
-(`serve` / `simulate` / `world`)。裸 `anima-world` 打印欢迎页指路 `start`。
+```python
+from anima_world.api import World
+```
 
-### 3.1 anima-world start —— 人的门
+### 生命周期
+
+| 函数 | 说明 |
+|---|---|
+| `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子);已有库的 seed 被忽略并警告;坏 beats 当场抛 `BeatScriptError` |
+| `world.close(wait=True)` | 停时钟、排干 LLM 线程池、存快照。幂等;`with World.open(...) as world:` 自动调用 |
+
+### 时钟
+
+| 函数 | 说明 |
+|---|---|
+| `world.tick(n=1)` | 手动推进 n 个 tick,返回当前时钟(测试/自定义宿主循环用) |
+| `world.start_clock(fallback_tick_rate=1.0)` | 后台线程按 `scheduler.tick_rate` 走时钟(热更新生效),并启动会话收割线程 |
+| `world.stop_clock()` | 停后台时钟 |
+| `world.pause()` / `world.resume()` / `world.paused` | 暂停位(时钟线程空转,不推进) |
+
+### 读世界
+
+| 函数 | 说明 |
+|---|---|
+| `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/快照/LLM 诊断,`runtime.llm.degraded_reason` 常驻) |
+| `world.world_time()` | 世界日历(day/hour/minute/minute_of_day) |
+| `world.memories(agent_id)` | 某角色的记忆行 |
+| `world.graph(agent_id=None)` | 关系图谱三元组 |
+| `world.events(since_seq=None)` | 近期事件缓冲(全量历史离线读 `events` 表) |
+| `world.subscribe()` / `world.unsubscribe(q)` | 事件推送订阅(线程安全队列,批量帧 `{type:'batch', events:[…]}`) |
+| `world.agent_context(agent_id, interlocutor_id)` | 有界 grounding:记忆 k 条 + 在场 + 关系 |
+
+### 聊天与玩家
+
+| 函数 | 说明 |
+|---|---|
+| `world.chat(agent_id, messages, *, player_id, display_name=None, role="player")` | 代玩家聊一轮,**流式**产出文本块。messages 是宿主持有的近期对话(≤20 条,末条须 user);世界不落转录。未知角色抛 KeyError |
+| `world.chat_reply(...)` | 同上,非流式,直接返回整段 |
+| `world.record_chat_turn(agent_id, player_id, messages)` | 把完成回合(恰好 user→assistant 两条)记入世界并关闭:摘要 + 一个 conversation 事件 + 关系判定。返回会话 id。失败即异常,重试由调用方决定 |
+| `world.conversations(agent_id)` / `world.conversation_messages(id)` | 会话列表 / 消息 |
+| `world.close_conversation(id)` | 手动关会话(摘要+事件+判定) |
+| `world.player_move(player_id, location)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError |
+| `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
+
+### 配置与提示词
+
+| 函数 | 说明 |
+|---|---|
+| `world.config_list(category=None, mask=True)` | 全部配置(secret 默认打码为 `前3***后4`) |
+| `world.config_get(key, default=None)` / `world.config_set(key, value)` | 读/写;写按声明类型强转、立即生效;未知键 KeyError,secret 空值 / 非法 tick_rate 抛 ValueError |
+| `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
+
+### 持久化与底层
+
+| 函数 | 说明 |
+|---|---|
+| `world.save_snapshot()` | 手动存一次投影快照(close 时自动) |
+| `world.scheduler` / `world.chat_store` | 底层对象,进阶用;绕过它们直写 db 违反纪律 1 |
+
+打包与校验是模块级函数(也是 CLI 的底座):
+`anima_world.world_package.export_world_package / import_world_package / inspect_world_package`、
+`anima_world.beats.BeatScript.load`(严格校验)、`anima_world.world_seed.is_valid_world_seed`。
+
+---
+
+## 4. CLI 参考
+
+命令分两拨:**给人打的**(`start` / `config` / `doctor`)和**给部署/脚本打的**
+(`run` / `simulate` / `world`)。裸 `anima-world` 打印欢迎页指路 `start`。
+创作台 anima-studio 只通过这些子进程命令驱动引擎。
+
+### 4.1 anima-world start —— 人的门
 
 引导配 LLM(真调一次验证连通;直接回车 = 先用 Mock)→ 建世界(新世界用演示速度
-1 tick/秒)→ 启动并打开浏览器。端口被占自动往后找(最多 10 个)。
+1 tick/秒)→ **前台运行**,叙事逐行打印,Ctrl-C 停止(自动存快照)。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--db-path` | `saves/world.db` | 世界文件位置,不存在就新建 |
-| `--host` / `--port` | `127.0.0.1` / `8000` | 绑定地址与起始端口 |
 | `--seed` | 内置种子 | 世界种子 JSON,**只对新建世界生效** |
 | `--beats` | 无 | 节拍脚本 JSON |
 | `--no-input` | - | 不交互提问(CI / 脚本) |
 | `--real-time` | - | 新世界也用真实时间,不用演示速度 |
 
-### 3.2 anima-world config —— 改配置不用 curl
+### 4.2 anima-world run —— 无引导的前台宿主
+
+不引导、不改时钟,打开世界让时钟跑,Ctrl-C 停。给部署和脚本;程序里嵌入请直接用
+`World.open`。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--db-path` | `saves/world.db` | 世界文件 |
+| `--seed` / `--beats` / `--agents` | - | 同 start;坏 beats 拒绝启动(退出码 2) |
+| `--quiet` | - | 不回显叙事事件 |
+
+### 4.3 anima-world config
 
 ```bash
 anima-world config list [--category llm]     # 密钥自动打码,未设置显示"(未设置)"
@@ -168,39 +254,15 @@ anima-world config get llm.model
 anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,立即生效
 ```
 
-`--db-path` 同上。`set` 未知键返回退出码 2。
+`set` 未知键返回退出码 2。
 
-### 3.3 anima-world doctor —— 体检
+### 4.4 anima-world doctor
 
-检查:世界文件是否存在、`world.db.key` 是否在(不在则警告旧密钥永久读不出)、db 格式
-版本、事件/角色计数、LLM 状态(四态:没建库 / 读不出来 / 没配 / 正常)+ **真调一次 LLM**
-(`--skip-probe` 跳过)、时钟快慢翻译成人话。有问题退出码 1。
+检查:世界文件、`world.db.key` 是否在(不在则警告旧密钥永久读不出)、db 格式版本、
+事件/角色计数、LLM 四态(没建库/读不出来/没配/正常)+ **真调一次 LLM**(`--skip-probe`
+跳过)、时钟快慢翻译成人话。有问题退出码 1。
 
-### 3.4 anima-world serve —— 部署的门
-
-生产入口:不引导、不改时钟。世界镜像跑的就是它。
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--host` / `--port` | `127.0.0.1` / `8000` | **绑非 loopback 时 `/api/*` 自动要求 admin token** |
-| `--db-path` | `saves/world.db` | 世界文件 |
-| `--seed` | 内置种子 | 只在空库首启读一次;对已有库会明说被忽略 |
-| `--beats` | 无 | 坏脚本直接拒绝启动 |
-| `--tick-rate` | 无 | **仅当 db 无配置行时生效**;db 里的 `scheduler.tick_rate` 永远赢 |
-| `--instance-id` / `--world-id` / `--world-name` | `legacy` | 运行时身份(claim 受众绑定用) |
-| `--agents` | 种子全员 | 注册角色数上限 |
-| `--world-admin-token-env` | `ANIMA_WORLD_ADMIN_TOKEN` | admin token 从哪个环境变量读 |
-| `--platform-service-token-env` | `ANIMA_WORLD_SERVICE_TOKEN` | 平台服务凭证(逗号分隔多个) |
-| `--membership-claim-secret-env` | `ANIMA_MEMBERSHIP_CLAIM_SECRET` | claim 签名密钥 |
-| `--cors-origin` | 无 | 可重复;不允许 `*` |
-
-服务凭证与 claim 密钥**必须成对配置**,否则退出码 2。loopback 上两者都缺省时自动注入
-本地开发默认值(`anima-loopback-*`),非 loopback 不注入(internal 组 fail-closed)。
-收 SIGINT/SIGTERM 优雅退出。
-
-### 3.5 anima-world simulate —— 无头快进
-
-不睡眠、不起 web,把世界快进 N 天/N tick。
+### 4.5 anima-world simulate —— 无头快进
 
 | 参数 | 说明 |
 |---|---|
@@ -209,97 +271,24 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 | `--llm full\|planner\|mock` | 三档:全真 / 真规划+Mock 叙事(长跑推荐)/ 全 Mock |
 | `--no-llm` | `--llm mock` 的别名,同时给时它赢 |
 | `--plan-wait-cap` | 每世界日等待在途计划的秒数上限(默认 2×planner.timeout) |
-| `--seed` / `--beats` / `--agents` | 同 serve |
+| `--seed` / `--beats` / `--agents` | 同 run |
 
 非 mock 档会**先预检 LLM 再建世界**(坏 key 不会把降级能力目录种进新库)。内置"计划
 等待预算":连续两个世界日等待耗尽则判定 planner 死亡、不再等待,绝不挂起。
 
-### 3.6 anima-world world export / import —— 打包
+### 4.6 anima-world world export / import —— 打包
 
 ```bash
-# 模板包(只有种子,世界首启自建 db)
 anima-world world export --seed seed.json --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode template
-
-# 快照包(带跑过的 world.db;secret 配置行会被剥除)
+    --world-id my-world --name "我的世界" --mode template          # 模板包
 anima-world world export --seed seed.json --db-path saves/world.db \
     [--beats beats.json] --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode snapshot \
-    [--summary … --genre … --setting … --theme …]
-
+    --world-id my-world --name "我的世界" --mode snapshot          # 快照包(secret 剥除)
 anima-world world import my.cyberworld --destination ./instances
 ```
 
-成功时 stdout 输出一行 JSON(export: `operation/world_id/revision_id/mode`;
-import: `operation/world_id/instance_id/path`);失败退出码 2。
-`--world-id` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
-
----
-
-## 4. HTTP API 参考
-
-三组受众、三种鉴权。所有响应都是 JSON;`/` 返回 404 + 自我说明。
-
-### 4.1 `/api/*` —— 本机查看与配置
-
-**鉴权**:loopback 绑定上无鉴权(面向本机运维);**非 loopback 绑定时整组要求
-`Authorization: Bearer <admin_token>`**,未配置 admin token 则整组关闭。
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/state`、`/api/v1/state` | 世界快照(角色/关系/地点/叙事,`runtime.llm.degraded_reason` 常驻);v1 前缀多带协议版本与身份 |
-| GET | `/api/v1/world` | 身份卡:protocol_version / instance_id / world_id / capabilities |
-| POST | `/api/simulation/toggle` | 暂停/继续世界时钟 |
-| GET | `/api/memories/{agent_id}` | 某角色的记忆 |
-| GET | `/api/graph` | 关系图谱三元组 |
-| GET | `/api/config` | 全部配置(secret 打码为 `前3***后4`) |
-| PUT | `/api/config/{key}` | 改配置,body `{"value": …}`;按声明类型强转,立即生效;secret 空值拒绝 |
-| GET | `/api/prompts` | 全部提示词模板 |
-| PUT | `/api/prompts/{name}` | 改模板;保存前试渲染,占位符错误 400 |
-| GET | `/api/conversations/{agent_id}` | 某角色的会话列表 |
-| GET | `/api/conversations/{id}/messages` | 会话消息 |
-| POST | `/api/conversations/{id}/close` | 手动关闭会话(触发摘要+事件) |
-| GET | `/api/stream`、`/api/v1/stream` | SSE:首帧 `catchup`(可带 `?since_seq=`),之后 `world` 事件 + `heartbeat` |
-
-### 4.2 `/internal/v1/*` —— 网站 → 世界容器
-
-**协议已冻结**:端点、claim 键集、header 回显只增不改;破坏性变更走 `/internal/v2`。
-
-**鉴权(双因子,缺一不可)**:
-
-```
-Authorization: Bearer <平台服务凭证>          # 长期,机器对机器,常量时间比对
-X-Cyberworld-Membership: <membership claim>  # 短期(默认 60s),每请求签发
-```
-
-claim 格式(**永久冻结**):`base64url(payload).base64url(HMAC-SHA256签名)`,payload
-恰好 6 个字段 `membership_id / world_id / role / instance_id / iat / exp`,按 key 排序、
-紧凑分隔符序列化,签名覆盖编码后文本。验签规则:多一个字段拒收;`world_id`+`instance_id`
-必须与本运行时一致(受众绑定);寿命必须 ≤300 秒;允许 30 秒时钟偏移。任何自由格式身份
-字段(`player_name` 等)出现在请求里直接 400 —— 身份只来自 claim。
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/internal/v1/meta` | **唯一免鉴权**:protocol / engine_version / db_format(健康探针) |
-| GET | `/internal/v1/state` | 世界快照 + 本 membership 视图(recent_events/narrative 截尾 100) |
-| GET | `/internal/v1/context/{agent_id}` | 有界 grounding:记忆截 8 条×500 字 + 在场 + 关系 |
-| POST | `/internal/v1/chat` | 代玩家聊天。body:`agent_id`、`messages`(1~20 条,role ∈ user/assistant,末条必须 user,每条 ≤4000 字);流式返回;不落平台历史 |
-| POST | `/internal/v1/chat-evolution` | 回传一个已完成回合(恰好 user→assistant 2 条)。带 `delivery_id` 幂等:重复投递返回原状态 + `duplicate:true`,指纹冲突 409;失败的投递可安全重试 |
-| POST | `/internal/v1/commands` | 命令白名单 `noop / player_move / player_action`,带 `command_id` 幂等回执;`player_move` 目标必须是 point 地点 |
-| GET | `/internal/v1/stream` | SSE:首帧 `event: ready` 确立身份,后续世界事件 |
-
-### 4.3 `/api/admin/v1/*` —— 运维台
-
-**鉴权**:`Authorization: Bearer <admin_token>`(环境变量 `ANIMA_WORLD_ADMIN_TOKEN`),
-常量时间比对;未配置时一律 401(fail-closed)。
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/admin/v1/runtime` | 世界身份 + endpoint / db 路径 / tick / 暂停位 / tick_rate |
-| POST | `/api/admin/v1/evolution/pause` / `resume` | 暂停/恢复世界演化 |
-| POST | `/api/admin/v1/server/stop` | 202 + 后台优雅停机(未配置回调则 503) |
-| GET | `/api/admin/v1/database/tables` | 库内全部表 + 行数 |
-| GET | `/api/admin/v1/database/tables/{name}` | 只读分页浏览(`offset` / `limit`≤500);表名白名单;blob 转 base64 |
+成功时 stdout 输出一行 JSON;失败退出码 2。`--world-id` 必须匹配
+`^[a-z0-9][a-z0-9._-]{0,63}$`。
 
 ---
 
@@ -307,9 +296,6 @@ claim 格式(**永久冻结**):`base64url(payload).base64url(HMAC-SHA256签名)`
 
 | 变量 | 用途 |
 |---|---|
-| `ANIMA_WORLD_ADMIN_TOKEN` | admin API token(serve 读取,变量名可用 `--world-admin-token-env` 改) |
-| `ANIMA_WORLD_SERVICE_TOKEN` | 平台服务凭证,逗号分隔多个 |
-| `ANIMA_MEMBERSHIP_CLAIM_SECRET` | claim 签名密钥(与服务凭证必须成对) |
 | `ANIMA_SETTINGS_KEY` | Fernet 密钥(优先于 `world.db.key` 文件) |
 | `ANIMA_LLM_API_KEY` / `OPENAI_API_KEY` / `LONGCAT_API_KEY` | 仅首启播种 `llm.api_key` 时读取 |
 | `ANIMA_LLM_BASE_URL` / `OPENAI_BASE_URL` | 仅首启播种 `llm.base_url` |
@@ -321,7 +307,7 @@ claim 格式(**永久冻结**):`base64url(payload).base64url(HMAC-SHA256签名)`
 
 ## 6. 配置键参考
 
-`anima-world config list` / `GET /api/config` 可见,全部支持热更新。
+`anima-world config list` / `world.config_list()` 可见,全部支持热更新。
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
@@ -345,7 +331,7 @@ claim 格式(**永久冻结**):`base64url(payload).base64url(HMAC-SHA256签名)`
 
 ## 7. 提示词模板
 
-`GET /api/prompts` 可见、`PUT` 可改、live 生效。清单:
+`world.prompt_list()` 可见、`prompt_set` 可改、live 生效。清单:
 
 `chat.system_persona`(角色人设)· `chat.memory_block` / `chat.world_memory_block` /
 `chat.presence_block` / `chat.relation_block`(四个 grounding 块)· `chat.session_summary`

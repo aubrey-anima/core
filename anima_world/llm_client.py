@@ -146,7 +146,7 @@ class ConfigBackedLLMClient:
     """`LLMClientProtocol` implementation that reads `llm.*` from a
     `ConfigStore` live on every call (M5), rebuilding the underlying client
     only when the fingerprint of api_key/base_url/model/timeout/max_retries
-    changes since the last call — an admin editing `/api/config` takes
+    changes since the last call — an admin editing config via `World.config_set` takes
     effect on the next call with no process restart, but an unchanged
     config reuses the existing client instead of reconnecting every time.
     """

@@ -16,7 +16,6 @@ Every message here is written for someone who has never seen this package.
 from __future__ import annotations
 
 import os
-import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -273,28 +272,3 @@ def configure_llm_interactively(
     return True
 
 
-# ── misc ─────────────────────────────────────────────────────────────────────
-
-
-def port_is_free(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host if host != "0.0.0.0" else "", port))
-        except OSError:
-            return False
-    return True
-
-
-def find_free_port(host: str, preferred: int, span: int = 10) -> int | None:
-    """The first free port at or after `preferred`. None when the whole span is taken."""
-    for candidate in range(preferred, preferred + span):
-        if port_is_free(host, candidate):
-            return candidate
-    return None
-
-
-def browsable_url(host: str, port: int) -> str:
-    """A URL that actually resolves in a browser — 0.0.0.0 does not."""
-    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-    return f"http://{shown}:{port}"

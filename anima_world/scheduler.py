@@ -1270,7 +1270,7 @@ class Scheduler:
 
     def update_agent_persona(self, agent_id: str, personality: str) -> None:
         """Atomically apply + persist a persona edit (design.md D4/D8 — no
-        HTTP/UI caller in this change; call directly against a running
+        UI caller in this change; call directly against a running
         process). Raises KeyError for an unknown agent id.
 
         This still goes through the event log, unlike its sibling

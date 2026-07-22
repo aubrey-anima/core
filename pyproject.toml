@@ -25,19 +25,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# The engine is the runtime a world image is pinned to; the author studio ships
-# with it so one install can both create a world and package it. Keep this list
-# minimal — every dependency here lands inside every world image.
+# The engine is a pure library — no HTTP server, no web framework. Anything
+# that uses a world imports this package (anima_world.api.World). Keep this
+# list minimal — every dependency lands inside every host that embeds a world.
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
     "cryptography>=42.0",  # Fernet encryption for config secrets (<db>.key)
     "openai>=1.30",        # LLM client: chat / narrative / planning / relationship judge
     "httpx>=0.27",         # injected transport for the OpenAI-compatible client
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "build>=1.2", "twine>=5.0"]
+dev = ["pytest>=8.0", "build>=1.2", "twine>=5.0"]
 
 [project.urls]
 Homepage = "https://animametaverse.com"

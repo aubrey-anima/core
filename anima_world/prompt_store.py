@@ -3,7 +3,7 @@
 Chat/narrative prompt wording used to be Python string literals in
 `chat_service.py`, `chat_session.py`, and `narrative.py`. It now lives in the
 `prompt_templates` table and is read live at the point each prompt is built,
-so an admin editing it via `/api/prompts` takes effect on the next call with
+so an admin editing it via `World.prompt_set` takes effect on the next call with
 no process restart (design.md D3). Saves are validated against a
 representative set of the variables the corresponding call site actually
 passes (design.md D7) so a typo can't silently break live chat/narrative —

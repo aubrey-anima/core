@@ -3,7 +3,7 @@
 Every value that used to be a Python constant or an env-var-only setting
 (LLM credentials, scheduler timing, chat/memory thresholds) now lives in the
 `config` table and is read live at the point of use, so an admin editing it
-via `/api/config` takes effect on the next call with no process restart (see
+via `World.config_set` takes effect on the next call with no process restart (see
 design.md D2/D3). Secret values (`is_secret=1`) are encrypted at rest with
 Fernet; the encryption key lives in a sibling keyfile next to the database,
 never in the database itself (design.md D4) — losing that keyfile makes
@@ -197,7 +197,7 @@ class ConfigStore:
 
         `get()` returns None for these, exactly as it does for a key that was
         never set — so callers see "unset" and degrade quietly. Boot checks and
-        `/api/state` use this to tell the two apart and name the real cause
+        `World.state()` use this to tell the two apart and name the real cause
         (a `<db>.key` that did not travel with the database).
         """
         with self._lock:
