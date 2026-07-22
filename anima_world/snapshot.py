@@ -51,6 +51,8 @@ def create_snapshot(proj: Projection, seq: int) -> dict:
             for lid, l_ in proj.locations.items()
         },
         "narrative_log": list(proj.narrative_log),
+        "balances": dict(proj.balances),
+        "inventories": {holder: dict(items) for holder, items in proj.inventories.items()},
         "capabilities": {
             cid: {
                 "id": c.id,
@@ -93,6 +95,11 @@ def load_snapshot(data: dict) -> Projection:
             for lid, l_ in data.get("locations", {}).items()
         },
         narrative_log=list(data.get("narrative_log", [])),
+        balances={k: float(v) for k, v in data.get("balances", {}).items()},
+        inventories={
+            holder: {i: int(q) for i, q in items.items()}
+            for holder, items in data.get("inventories", {}).items()
+        },
         capabilities={
             cid: Capability(
                 id=c["id"],

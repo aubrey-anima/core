@@ -253,6 +253,8 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "memory.half_life_days": (3.0, "float", "memory", False, "Recency half-life for memory retrieval (world days)"),
     "memory.reflection_threshold": (3.0, "float", "memory", False, "Accumulated importance that triggers a reflection"),
     "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
+    "economy.enabled": (False, "bool", "economy", False, "Items, money, shops and price drift"),
+    "economy.daily_wage": (20.0, "float", "economy", False, "Per-agent daily wage from the town treasury"),
 }
 
 # env vars consulted only during first-boot seeding of llm.* keys (design.md D5)

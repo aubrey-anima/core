@@ -70,3 +70,7 @@ class Projection:
     """M2: accumulated narrative entries (agent, text, ts) — backward compat default empty."""
     capabilities: dict[str, Capability] = field(default_factory=dict)
     """M6: capability catalog, folded from capability_registered events."""
+    balances: dict[str, float] = field(default_factory=dict)
+    """economy-v4: folded from payment events. Audit = replay."""
+    inventories: dict[str, dict[str, int]] = field(default_factory=dict)
+    """economy-v4: holder → {item_id: qty}, folded from item_transfer/consume."""

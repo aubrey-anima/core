@@ -169,6 +169,29 @@ CREATE TABLE IF NOT EXISTS agent_needs (
 );
 """
 
+# economy-v4: item definitions are authored data; shop_stock is the live
+# shelf (data-plane). Balances and inventories are NOT tables — they are
+# projections of payment/item_transfer/item_consume events (audit = replay).
+ITEM_DEFS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS item_defs (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('consumable','durable','artwork')),
+  base_price REAL NOT NULL DEFAULT 0,
+  restores   TEXT
+);
+"""
+
+SHOP_STOCK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS shop_stock (
+  location_id TEXT NOT NULL,
+  item_id     TEXT NOT NULL,
+  quantity    INTEGER NOT NULL DEFAULT 0,
+  price       REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (location_id, item_id)
+);
+"""
+
 BT_ACTIONS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bt_actions (
   node_id    TEXT PRIMARY KEY,
@@ -201,8 +224,8 @@ CREATE INDEX IF NOT EXISTS idx_bt_nodes_tree ON bt_nodes(tree);
 # data semantics; the stamp travels inside world.db (and therefore inside any
 # .cyberworld package or volume copy). An engine refuses formats newer than
 # it understands — never silently writes into one.
-DB_FORMAT_VERSION = 3
-MIN_SUPPORTED_DB_FORMAT = 3
+DB_FORMAT_VERSION = 4
+MIN_SUPPORTED_DB_FORMAT = 4
 
 
 class DBFormatError(RuntimeError):
@@ -284,6 +307,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_bt_nodes(conn)  # same reason: CHECK constraints are baked in at CREATE
     conn.executescript(BT_NODES_SCHEMA)
     conn.executescript(AGENT_NEEDS_SCHEMA)
+    conn.executescript(ITEM_DEFS_SCHEMA)
+    conn.executescript(SHOP_STOCK_SCHEMA)
     _ensure_columns(conn, "conversations", {"participants": "TEXT", "location": "TEXT", "player_id": "TEXT"})
     _ensure_columns(conn, "memories", {
         "strength": "REAL NOT NULL DEFAULT 1.0",

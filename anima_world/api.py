@@ -764,6 +764,81 @@ class World:
                 "details": dict(details or {}),
             })
 
+    # ── 经济(economy-v4) ──────────────────────────────────────────────────
+
+    def balance(self, holder: str) -> float:
+        """余额(事件账本的投影)。holder 可以是角色 id、`player:<id>`、`__town__`。"""
+        with self.scheduler._lock:
+            return float(self.scheduler._memory_projection.balances.get(holder, 0.0))
+
+    def inventory(self, holder: str) -> dict[str, int]:
+        with self.scheduler._lock:
+            return dict(self.scheduler._memory_projection.inventories.get(holder, {}))
+
+    def shop(self, location_id: str) -> list[dict[str, Any]]:
+        """某地货架:物品、现价、库存。"""
+        if self.scheduler.event_log is None:
+            return []
+        with self.scheduler._lock:
+            rows = self.scheduler.event_log.conn.execute(
+                "SELECT s.item_id, d.name, d.kind, s.price, s.quantity FROM shop_stock s"
+                " JOIN item_defs d ON d.id = s.item_id WHERE s.location_id = ?"
+                " ORDER BY s.item_id",
+                (location_id,),
+            ).fetchall()
+        return [
+            {"item_id": r[0], "name": r[1], "kind": r[2], "price": float(r[3]), "quantity": int(r[4])}
+            for r in rows
+        ]
+
+    def player_topup(self, player_id: str, amount: float) -> float:
+        """宿主给玩家钱包充值(玩家钱包是在场状态,持久化到 v7 才入库)。"""
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+        player = self.players.setdefault(player_id, {"role": "player", "location": None})
+        player["wallet"] = float(player.get("wallet", 0.0)) + float(amount)
+        return player["wallet"]
+
+    def player_buy(self, player_id: str, location_id: str, item_id: str) -> dict[str, Any]:
+        """玩家买货:钱包扣款、货架减一,payment + item_transfer 事件入账本。"""
+        from anima_world import economy
+
+        if self.scheduler.event_log is None:
+            raise ValueError("economy needs a persistent world")
+        player = self.players.get(player_id)
+        if player is None:
+            raise KeyError(f"player {player_id} not present")
+        with self.scheduler._lock:
+            conn = self.scheduler.event_log.conn
+            row = conn.execute(
+                "SELECT price, quantity FROM shop_stock WHERE location_id = ? AND item_id = ?",
+                (location_id, item_id),
+            ).fetchone()
+            if row is None or int(row[1]) <= 0:
+                raise KeyError(f"{location_id} 没有 {item_id} 的货")
+            price = float(row[0])
+            wallet = float(player.get("wallet", 0.0))
+            if wallet < price:
+                raise ValueError(f"钱包不够:{wallet} < {price}")
+            if not economy.take_stock(conn, location_id, item_id):
+                raise KeyError(f"{location_id} 没有 {item_id} 的货")
+            player["wallet"] = wallet - price
+            self.scheduler._shop_sales[(location_id, item_id)] = (
+                self.scheduler._shop_sales.get((location_id, item_id), 0) + 1
+            )
+            holder = f"player:{player_id}"
+            self._record_and_fan({
+                "type": "payment", "who": holder, "loc": location_id,
+                "payload": {"from": holder, "to": economy.TOWN, "amount": price,
+                            "reason": f"purchase:{item_id}"},
+            })
+            self._record_and_fan({
+                "type": "item_transfer", "who": holder, "loc": location_id,
+                "payload": {"from": f"shop:{location_id}", "to": holder,
+                            "item_id": item_id, "qty": 1},
+            })
+        return {"item_id": item_id, "price": price, "wallet": player["wallet"]}
+
     # ── 配置与提示词 ────────────────────────────────────────────────────────
 
     def config_list(self, category: str | None = None, *, mask: bool = True) -> list[dict[str, Any]]:

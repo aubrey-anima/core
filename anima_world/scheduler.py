@@ -165,6 +165,9 @@ class Scheduler:
         # truth. A restart drops journeys: the agent is simply still where it
         # set out from, and the BT sends it on its way again next tick.
         self._transit: dict[str, dict[str, Any]] = {}
+        # economy-v4: per-day sales counter feeding the price drift. Memory
+        # only — prices in shop_stock are the durable part.
+        self._shop_sales: dict[tuple[str, str], int] = {}
         self.planner = planner
         self._plans: dict[str, Any] = {}          # agent_id → Plan (cache of the `plan` event)
         self._planning: set[str] = set()          # agents with a replan in flight
@@ -670,6 +673,67 @@ class Scheduler:
                 except Exception:  # noqa: BLE001 - forgetting is best-effort
                     logger.warning("memory decay pass failed for %s", agent_id, exc_info=True)
         self._persist_all_needs()
+        self._settle_economy_day()
+
+    def _economy_enabled(self) -> bool:
+        return bool(
+            self.config_store is not None
+            and self.config_store.get("economy.enabled", default=False)
+        )
+
+    def _handle_eat_purchase(self, agent: Any) -> None:
+        """Lock held. Buy the cheapest meal on the local shelf if the agent
+        can afford it: stock decrements in the table (data-plane), the money
+        and the meal go through events (the ledger is a projection)."""
+        if not self._economy_enabled() or self.event_log is None:
+            return
+        from anima_world import economy
+
+        loc = agent.blackboard.read("loc") or agent.location
+        if not loc:
+            return
+        meal = economy.cheapest_meal(self.event_log.conn, loc)
+        if meal is None:
+            return
+        balance = self._memory_projection.balances.get(agent.id, 0.0)
+        if balance < meal["price"]:
+            return
+        if not economy.take_stock(self.event_log.conn, loc, meal["item_id"]):
+            return
+        self._shop_sales[(loc, meal["item_id"])] = (
+            self._shop_sales.get((loc, meal["item_id"]), 0) + 1
+        )
+        self._record_event({
+            "type": "payment", "who": agent.id, "loc": loc,
+            "payload": {"from": agent.id, "to": economy.TOWN,
+                        "amount": meal["price"], "reason": f"meal:{meal['item_id']}"},
+        })
+        self._record_event({
+            "type": "item_consume", "who": agent.id, "loc": loc,
+            "payload": {"who": agent.id, "item_id": meal["item_id"], "source": f"shop:{loc}"},
+        })
+
+    def _settle_economy_day(self) -> None:
+        """Day rollover (lock held): wages in, shelves restocked, prices drift."""
+        if not self._economy_enabled() or self.event_log is None:
+            return
+        from anima_world import economy
+
+        wage = 20.0
+        if self.config_store is not None:
+            wage = float(self.config_store.get("economy.daily_wage", default=wage))
+        if wage > 0:
+            for agent_id in list(self.agents):
+                self._record_event({
+                    "type": "payment", "who": agent_id,
+                    "payload": {"from": economy.TOWN, "to": agent_id,
+                                "amount": wage, "reason": "daily_wage"},
+                })
+        try:
+            economy.daily_price_pass(self.event_log.conn, self._shop_sales)
+        except Exception:  # noqa: BLE001 - a broken shelf must not stop the day
+            logger.warning("daily price pass failed", exc_info=True)
+        self._shop_sales.clear()
 
     def _needs_enabled(self) -> bool:
         return bool(
@@ -1133,6 +1197,10 @@ class Scheduler:
 
             if action.kind == "walk" and self._start_journey(agent, action):
                 return True  # under way; `location_join` follows on arrival
+            if action.kind == "eat":
+                # economy-v4: paying is a side effect, eating always succeeds —
+                # no stock / no money degrades to "吃随身干粮", never a stuck agent.
+                self._handle_eat_purchase(agent)
             if action.kind == "chat" and not self._is_colocated(agent, action.params.get("target")):
                 # Not a failure — a wait. The action is NOT recorded as current,
                 # so the BT retries next tick and the chat happens by itself the

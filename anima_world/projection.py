@@ -43,6 +43,58 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_agent_leave(proj, e)
     elif e.type == "agent_return":
         _apply_agent_return(proj, e)
+    elif e.type == "payment":
+        _apply_payment(proj, e)
+    elif e.type == "item_transfer":
+        _apply_item_transfer(proj, e)
+    elif e.type == "item_consume":
+        _apply_item_consume(proj, e)
+
+
+# ── economy-v4: the ledger is a projection — audit = replay ────────────────
+
+
+def _apply_payment(proj: Projection, e: Event) -> None:
+    payload = e.payload
+    src, dst = payload.get("from"), payload.get("to")
+    try:
+        amount = float(payload.get("amount", 0.0))
+    except (TypeError, ValueError):
+        return
+    if not src or not dst or amount <= 0:
+        return
+    proj.balances[src] = proj.balances.get(src, 0.0) - amount
+    proj.balances[dst] = proj.balances.get(dst, 0.0) + amount
+
+
+def _apply_item_transfer(proj: Projection, e: Event) -> None:
+    payload = e.payload
+    src, dst, item_id = payload.get("from"), payload.get("to"), payload.get("item_id")
+    try:
+        qty = int(payload.get("qty", 1))
+    except (TypeError, ValueError):
+        return
+    if not item_id or qty <= 0 or not dst:
+        return
+    if src:
+        holding = proj.inventories.setdefault(src, {})
+        holding[item_id] = holding.get(item_id, 0) - qty
+        if holding[item_id] <= 0:
+            holding.pop(item_id, None)
+    receiving = proj.inventories.setdefault(dst, {})
+    receiving[item_id] = receiving.get(item_id, 0) + qty
+
+
+def _apply_item_consume(proj: Projection, e: Event) -> None:
+    payload = e.payload
+    who, item_id = payload.get("who") or e.who, payload.get("item_id")
+    if not who or not item_id:
+        return
+    holding = proj.inventories.get(who)
+    if holding and item_id in holding:  # 直接吃货架上的餐不经过随身库存,no-op
+        holding[item_id] -= 1
+        if holding[item_id] <= 0:
+            holding.pop(item_id, None)
 
 
 def _apply_agent_join(proj: Projection, e: Event) -> None:

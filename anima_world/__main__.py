@@ -502,6 +502,12 @@ def build_serve_scheduler(
         location_store = LocationStore(conn, lock=shared_lock)
         bt_store = BTStore(conn, lock=shared_lock)
         _seed_world_defs(location_store, bt_store, world_seed)
+        # economy-v4: default items + cafe shelf, empty-table-only (authored
+        # rows always win). Costless while economy.enabled stays off.
+        from anima_world.economy import seed_defaults as seed_economy_defaults
+
+        with shared_lock:
+            seed_economy_defaults(conn)
     # llm-relationship-judge: judge only exists with a config store (it needs
     # the live llm.* stack); --no-llm gives it a mock client whose garbage
     # reply degrades every verdict to None — chat then simply produces no
@@ -809,6 +815,16 @@ def _seed_initial_world(
                 "state": {},
                 "location": agent.location,
             },
+        })
+
+    # economy-v4: genesis stipend (安家费). Costless when economy stays off —
+    # payment events just fold into an unused ledger.
+    from anima_world.economy import TOWN
+
+    for aid in scheduler.agents:
+        event_log.append({
+            "ts": 0, "who": aid, "type": "payment",
+            "payload": {"from": TOWN, "to": aid, "amount": 30.0, "reason": "genesis_stipend"},
         })
 
     if world_seed is not None:
