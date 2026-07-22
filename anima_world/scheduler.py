@@ -87,6 +87,7 @@ class Scheduler:
         location_store: Any | None = None,
         planner: Any | None = None,
         relationship_judge: Any | None = None,
+        reflector: Any | None = None,
         lock: threading.RLock | None = None,
         beat_script: BeatScript | None = None,
         beat_agent_factory: Any | None = None,
@@ -181,6 +182,9 @@ class Scheduler:
         # recording-only (relations/memories, never behavior), so nothing
         # ever waits on this pool except the final stop() drain.
         self.relationship_judge = relationship_judge
+        # memory-2.0: reflection is the fourth LLM job. It rides the judge
+        # pool (recording-only, same latency profile) — no new thread pool.
+        self.reflector = reflector
         self._judge_pool = (
             ThreadPoolExecutor(max_workers=2, thread_name_prefix="judge")
             if relationship_judge is not None
@@ -289,15 +293,18 @@ class Scheduler:
             if not agent_id:
                 logger.warning("memory_seed event has no agent_id; skipping")
             else:
+                kind = payload.get("kind", "seed")
                 self.memory_store.add(
                     agent_id=agent_id,
                     tick=int(event.get("ts") or 0),
-                    kind=payload.get("kind", "seed"),
+                    kind=kind,
                     summary=payload.get("summary", ""),
                     importance=payload.get("importance", 0.5),
                     anchor=bool(payload.get("anchor", False)),
                     event_seq=event.get("seq"),
+                    source_ids=payload.get("source_ids"),
                 )
+                self._note_memory_written(agent_id, float(payload.get("importance", 0.5)), kind)
             return
         if self.trigger_engine is not None and self.memory_store is not None:
             descriptor = self.trigger_engine.process(event, self._memory_projection)
@@ -311,6 +318,9 @@ class Scheduler:
                     anchor=descriptor.anchor,
                     event_seq=descriptor.event_seq,
                 )
+                self._note_memory_written(
+                    descriptor.agent_id, float(descriptor.importance), descriptor.kind
+                )
                 if descriptor.kind == "relation_shift":
                     self._on_relation_shift(event, descriptor)
 
@@ -323,6 +333,97 @@ class Scheduler:
             payload=dict(event.get("payload") or {}),
         )
         project_events([ev], base=self._memory_projection)
+
+    # ── Reflection (memory-2.0) ────────────────────────────────────────────
+
+    REFLECTION_KIND = "reflection"
+
+    def _note_memory_written(self, agent_id: str, importance: float, kind: str) -> None:
+        """Accumulate importance toward the reflection threshold (lock held).
+
+        Reflections themselves don't accumulate — an insight spawning more
+        insights is a storm, not thinking."""
+        if (
+            kind == self.REFLECTION_KIND
+            or self.reflector is None
+            or self._judge_pool is None
+            or self.event_log is None
+        ):
+            return
+        threshold = 3.0
+        if self.config_store is not None:
+            threshold = float(
+                self.config_store.get("memory.reflection_threshold", default=threshold)
+            )
+        conn = self.event_log.conn
+        conn.execute(
+            "INSERT INTO reflection_state (agent_id, accumulated_importance) VALUES (?, ?)"
+            " ON CONFLICT(agent_id) DO UPDATE SET"
+            " accumulated_importance = accumulated_importance + excluded.accumulated_importance",
+            (agent_id, max(0.0, importance)),
+        )
+        row = conn.execute(
+            "SELECT accumulated_importance FROM reflection_state WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if row is None or float(row[0]) < threshold:
+            conn.commit()
+            return
+        conn.execute(
+            "UPDATE reflection_state SET accumulated_importance = 0,"
+            " last_reflection_tick = ? WHERE agent_id = ?",
+            (self.clock, agent_id),
+        )
+        conn.commit()
+        self._submit_reflection(agent_id)
+
+    def _submit_reflection(self, agent_id: str) -> None:
+        """Snapshot context under the lock, reflect on the judge pool."""
+        brain = self.agents.get(agent_id)
+        if brain is None or self.memory_store is None:
+            return
+        recent = self.memory_store.query(agent_id=agent_id)[:10]
+        context = {
+            "name": brain.agent.name,
+            "personality": brain.agent.blackboard.read("personality") or "",
+            "memories": [(int(m["id"]), str(m["summary"])) for m in recent],
+        }
+        pool = self._judge_pool
+        if pool is None or self._stopped:
+            return
+        pool.submit(self._reflection_worker, agent_id, context)
+
+    def _reflection_worker(self, agent_id: str, context: dict[str, Any]) -> None:
+        """Pool thread: LLM synthesizes insights; each lands as an ordinary
+        memory_seed event (kind='reflection') — replayable history, and the
+        strict path: the reflector proposes, the event log records."""
+        try:
+            insights = self.reflector(
+                context["name"], context["personality"],
+                [summary for _, summary in context["memories"]],
+            )
+        except Exception:  # noqa: BLE001 - a dead reflector must not stop the world
+            logger.warning("reflection failed for %s", agent_id, exc_info=True)
+            return
+        source_ids = [mid for mid, _ in context["memories"]]
+        for insight in list(insights or [])[:3]:
+            text = str(insight).strip()
+            if not text:
+                continue
+            with self._lock:
+                if self._stopped:
+                    return
+                self._record_event({
+                    "type": "memory_seed",
+                    "who": agent_id,
+                    "payload": {
+                        "agent_id": agent_id,
+                        "kind": self.REFLECTION_KIND,
+                        "summary": text,
+                        "importance": 0.8,
+                        "source_ids": source_ids,
+                    },
+                })
 
     def _on_relation_shift(self, event: dict[str, Any], descriptor: Any) -> None:
         """relationship-stage-machine: a relation_shift now feeds two things —
@@ -499,7 +600,10 @@ class Scheduler:
             if self._stopped:
                 return
 
+            prev_day = self.world_time().day
             self.clock += self.tick_delta
+            if self.world_time().day != prev_day:
+                self._on_day_rollover()
 
             # 1. Drain pending events (process, then trigger brains)
             pending = list(self._queue)
@@ -548,6 +652,25 @@ class Scheduler:
 
             # 5. Idle watchdog (inject idle events to dormant agents)
             self._idle_watchdog()
+
+    def _on_day_rollover(self) -> None:
+        """World-day boundary housekeeping (called with the lock held).
+
+        Everything here must be pure arithmetic/SQL — the same no-LLM rule as
+        the rest of the tick frame. Per-day cost, not per-tick."""
+        now_tick = self.clock
+        if self.memory_store is not None and hasattr(self.memory_store, "decay_pass"):
+            ticks_per_day = max(1, 1440 // self._minutes_per_tick())
+            for agent_id in list(self.agents):
+                try:
+                    self.memory_store.decay_pass(agent_id, now_tick, ticks_per_day)
+                except Exception:  # noqa: BLE001 - forgetting is best-effort
+                    logger.warning("memory decay pass failed for %s", agent_id, exc_info=True)
+
+    def _minutes_per_tick(self) -> int:
+        if self.config_store is not None:
+            return int(self.config_store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
+        return DEFAULT_MINUTES_PER_TICK
 
     # ── Beat director (beat-director) ─────────────────────────────────────────
 

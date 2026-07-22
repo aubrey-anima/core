@@ -587,6 +587,25 @@ class World:
             return []
         return self.scheduler.memory_store.query(agent_id=agent_id)
 
+    def retrieve_memories(
+        self, agent_id: str, query: str | None = None, k: int = 5
+    ) -> list[dict[str, Any]]:
+        """memory-2.0 三因子检索(时近×重要×相关),命中即加固遗忘曲线。"""
+        store = self.scheduler.memory_store
+        if store is None:
+            return []
+        return store.retrieve(
+            agent_id, now_tick=self.scheduler.clock, query=query, k=k,
+            ticks_per_day=max(1, 1440 // int(self.config_get("world.minutes_per_tick", 5))),
+        )
+
+    def reflections(self, agent_id: str) -> list[dict[str, Any]]:
+        """角色的反思(由记忆归纳出的洞察)。"""
+        store = self.scheduler.memory_store
+        if store is None:
+            return []
+        return store.query(agent_id=agent_id, kind="reflection")
+
     def graph(self, agent_id: str | None = None) -> list[dict[str, Any]]:
         if self.scheduler.knowledge_graph is None:
             return []
@@ -821,9 +840,21 @@ class World:
                         config_store.get("chat.recall_k", default=3)
                         if config_store is not None else 3
                     )
-                    rows = scheduler.memory_store.query(agent_id=agent_id)
-                    rows.sort(key=lambda m: (-float(m.get("importance") or 0), -int(m.get("tick") or 0)))
-                    ctx["memories"] = [m["summary"] for m in rows[: int(k)]]
+                    store = scheduler.memory_store
+                    if hasattr(store, "retrieve"):
+                        # memory-2.0: three-factor retrieval; the interlocutor's
+                        # name is the query, so "who I'm talking to" pulls the
+                        # memories about them. Retrieval reinforces — chatting
+                        # about something keeps it remembered.
+                        rows = store.retrieve(
+                            agent_id, now_tick=scheduler.clock,
+                            query=interlocutor_id, k=int(k),
+                        )
+                    else:
+                        rows = store.query(agent_id=agent_id)
+                        rows.sort(key=lambda m: (-float(m.get("importance") or 0), -int(m.get("tick") or 0)))
+                        rows = rows[: int(k)]
+                    ctx["memories"] = [m["summary"] for m in rows]
                 except Exception:  # noqa: BLE001 - memories are flavor, never fatal
                     pass
             now = scheduler.world_time()

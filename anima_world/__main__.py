@@ -513,6 +513,31 @@ def build_serve_scheduler(
             llm=SyncLLM(judge_client, config_store=config_store, timeout_key="judge.timeout"),
             prompt_store=prompt_store,
         )
+    # memory-2.0: the reflector proposes insights; the event log records.
+    # Mock tier gets a deterministic one-liner so reflection is testable offline.
+    reflector = None
+    if config_store is not None:
+        if force_mock_llm:
+            def reflector(name, personality, summaries):  # noqa: ARG001
+                if not summaries:
+                    return []
+                return [f"{name}把最近的事在心里过了一遍:{summaries[0][:30]}"]
+        else:
+            reflector_llm = SyncLLM(
+                create_llm_client_from_config(config_store),
+                config_store=config_store,
+                timeout_key="judge.timeout",
+            )
+
+            def reflector(name, personality, summaries):
+                prompt = (
+                    f"你是{name}({personality})。下面是你最近的经历:\n"
+                    + "\n".join(f"- {s}" for s in summaries[:10])
+                    + "\n\n从这些经历里归纳出 1~2 条你此刻会有的想法或领悟,"
+                    "每条一行,第一人称,不超过 40 字,不要编号。"
+                )
+                raw = reflector_llm.complete_sync([{"role": "user", "content": prompt}])
+                return [line.strip("-· ").strip() for line in raw.splitlines() if line.strip()][:2]
     # beat-director: the factory is created unconditionally (not only with
     # --beats) — a DB whose history contains a mid-run agent_join must
     # reconstruct that agent on ANY later boot, beats flag or not.
@@ -524,6 +549,7 @@ def build_serve_scheduler(
             else create_narrative_provider_from_env(prompt_store, config_store)
         ),
         relationship_judge=relationship_judge,
+        reflector=reflector,
         event_log=event_log,
         db_path=db_path_str,
         memory_store=memory_store,

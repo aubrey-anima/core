@@ -248,8 +248,10 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "chat.idle_timeout": (600, "int", "chat", False, "Chat session auto-close threshold (seconds)"),
     "chat.recall_k": (3, "int", "chat", False, "Closed-session summaries recalled into the prompt"),
     "chat.recall_n": (10, "int", "chat", False, "Recent turns of the open conversation kept in the prompt"),
-    "memory.capacity": (50, "int", "memory", False, "Per-agent memory row cap before LRU eviction"),
+    "memory.capacity": (50, "int", "memory", False, "Per-agent memory row cap before strength-based eviction"),
     "memory.sentiment_threshold": (0.3, "float", "memory", False, "Relationship-shift memory trigger threshold"),
+    "memory.half_life_days": (3.0, "float", "memory", False, "Recency half-life for memory retrieval (world days)"),
+    "memory.reflection_threshold": (3.0, "float", "memory", False, "Accumulated importance that triggers a reflection"),
 }
 
 # env vars consulted only during first-boot seeding of llm.* keys (design.md D5)

@@ -11,10 +11,13 @@ access-scoping is a call-site convention, not a store-level check).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
+
+from anima_world.memory_retrieval import HALF_LIFE_DAYS_DEFAULT, score
 
 _DEFAULT_CAPACITY = 50
 
@@ -77,15 +80,20 @@ class MemoryStore:
         anchor: bool = False,
         event_seq: int | None = None,
         created_at: int | None = None,
+        source_ids: list[int] | None = None,
     ) -> int:
         if created_at is None:
             created_at = tick
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO memories "
-                "(agent_id, tick, kind, summary, importance, anchor, event_seq, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (agent_id, tick, kind, summary, importance, int(anchor), event_seq, created_at),
+                "(agent_id, tick, kind, summary, importance, anchor, event_seq, created_at, source_ids) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    agent_id, tick, kind, summary, importance, int(anchor),
+                    event_seq, created_at,
+                    json.dumps(source_ids) if source_ids else None,
+                ),
             )
             memory_id = int(cur.lastrowid)
             self._conn.commit()
@@ -101,14 +109,63 @@ class MemoryStore:
         overflow = total - self._capacity
         if overflow <= 0:
             return
+        # memory-2.0: evict the WEAKEST, not the oldest — a frequently
+        # retrieved old memory outlives an ignored new one. Anchors never go.
         self._conn.execute(
             "DELETE FROM memories WHERE id IN ("
             "  SELECT id FROM memories WHERE agent_id = ? AND anchor = 0 "
-            "  ORDER BY id ASC LIMIT ?"
+            "  ORDER BY strength ASC, id ASC LIMIT ?"
             ")",
             (agent_id, overflow),
         )
         self._conn.commit()
+
+    def retrieve(
+        self,
+        agent_id: str,
+        *,
+        now_tick: int,
+        query: str | None = None,
+        k: int = 5,
+        ticks_per_day: int = 288,
+    ) -> list[dict[str, Any]]:
+        """memory-2.0 三因子检索(时近×重要×相关),命中即加固。
+
+        检索就是复习:返回的记忆 strength +0.3(上限 3.0),遗忘曲线由此
+        对"被想起的事"变平。无 query 时退化为 recency+importance。"""
+        half_life = HALF_LIFE_DAYS_DEFAULT
+        if self._config_store is not None:
+            half_life = self._config_store.get("memory.half_life_days", default=half_life)
+        rows = self.query(agent_id=agent_id)
+        rows.sort(
+            key=lambda m: -score(
+                m, now_tick=now_tick, query=query,
+                ticks_per_day=ticks_per_day, half_life_days=float(half_life),
+            )
+        )
+        top = rows[: max(0, int(k))]
+        if top:
+            with self._lock:
+                self._conn.executemany(
+                    "UPDATE memories SET strength = MIN(strength + 0.3, 3.0),"
+                    " last_access = ?, access_count = access_count + 1 WHERE id = ?",
+                    [(now_tick, m["id"]) for m in top],
+                )
+                self._conn.commit()
+        return top
+
+    def decay_pass(self, agent_id: str, now_tick: int, ticks_per_day: int = 288) -> None:
+        """每世界日一次的遗忘曲线结算(Ebbinghaus):强度越高忘得越慢,
+        闲置越久掉得越多。anchor 不衰减。"""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE memories SET strength = strength * pow(0.5,"
+                " (CAST(? - COALESCE(last_access, tick) AS REAL) / ?)"
+                " / MAX(strength, 0.1))"
+                " WHERE agent_id = ? AND anchor = 0",
+                (now_tick, max(1, ticks_per_day), agent_id),
+            )
+            self._conn.commit()
 
     def query(
         self,

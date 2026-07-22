@@ -29,17 +29,32 @@ CREATE TABLE IF NOT EXISTS snapshots (
 
 MEMORIES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_id   TEXT NOT NULL,
-  tick       INTEGER NOT NULL,
-  kind       TEXT NOT NULL,
-  summary    TEXT NOT NULL,
-  importance REAL NOT NULL,
-  anchor     INTEGER NOT NULL DEFAULT 0,
-  event_seq  INTEGER,
-  created_at INTEGER NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id     TEXT NOT NULL,
+  tick         INTEGER NOT NULL,
+  kind         TEXT NOT NULL,
+  summary      TEXT NOT NULL,
+  importance   REAL NOT NULL,
+  anchor       INTEGER NOT NULL DEFAULT 0,
+  event_seq    INTEGER,
+  created_at   INTEGER NOT NULL,
+  strength     REAL NOT NULL DEFAULT 1.0,
+  last_access  INTEGER,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  source_ids   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_agent_id ON memories(agent_id);
+"""
+
+# memory-2.0: reflection trigger watermark — accumulated importance since the
+# agent's last reflection. Current-value data (data-plane), not history: the
+# reflections themselves are memory_seed events and replay fine without this.
+REFLECTION_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS reflection_state (
+  agent_id TEXT PRIMARY KEY,
+  accumulated_importance REAL NOT NULL DEFAULT 0,
+  last_reflection_tick INTEGER NOT NULL DEFAULT 0
+);
 """
 
 EDGES_SCHEMA = """
@@ -173,8 +188,8 @@ CREATE INDEX IF NOT EXISTS idx_bt_nodes_tree ON bt_nodes(tree);
 # data semantics; the stamp travels inside world.db (and therefore inside any
 # .cyberworld package or volume copy). An engine refuses formats newer than
 # it understands — never silently writes into one.
-DB_FORMAT_VERSION = 1
-MIN_SUPPORTED_DB_FORMAT = 1
+DB_FORMAT_VERSION = 2
+MIN_SUPPORTED_DB_FORMAT = 2
 
 
 class DBFormatError(RuntimeError):
@@ -244,6 +259,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(EVENTS_SCHEMA)
     conn.executescript(SNAPSHOTS_SCHEMA)
     conn.executescript(MEMORIES_SCHEMA)
+    conn.executescript(REFLECTION_STATE_SCHEMA)
     conn.executescript(EDGES_SCHEMA)
     conn.executescript(CONVERSATIONS_SCHEMA)
     conn.executescript(MESSAGES_SCHEMA)
@@ -255,6 +271,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_bt_nodes(conn)  # same reason: CHECK constraints are baked in at CREATE
     conn.executescript(BT_NODES_SCHEMA)
     _ensure_columns(conn, "conversations", {"participants": "TEXT", "location": "TEXT", "player_id": "TEXT"})
+    _ensure_columns(conn, "memories", {
+        "strength": "REAL NOT NULL DEFAULT 1.0",
+        "last_access": "INTEGER",
+        "access_count": "INTEGER NOT NULL DEFAULT 0",
+        "source_ids": "TEXT",
+    })
     _stamp_format(conn)
     conn.commit()
 
