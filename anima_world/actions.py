@@ -40,6 +40,7 @@ class ActionTable:
                 "chat_with_alice": ActionDescriptor("chat", {"target": "alice"}),
                 "do_work": ActionDescriptor("work", {"location": "workshop"}),
                 "go_sleep": ActionDescriptor("sleep", {}),
+                "eat": ActionDescriptor("eat", {}),
                 "idle_wander": ActionDescriptor("idle_wander", {}),
                 "idle_social": ActionDescriptor("idle_social", {}),
             }

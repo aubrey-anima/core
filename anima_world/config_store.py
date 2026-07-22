@@ -252,6 +252,7 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "memory.sentiment_threshold": (0.3, "float", "memory", False, "Relationship-shift memory trigger threshold"),
     "memory.half_life_days": (3.0, "float", "memory", False, "Recency half-life for memory retrieval (world days)"),
     "memory.reflection_threshold": (3.0, "float", "memory", False, "Accumulated importance that triggers a reflection"),
+    "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
 }
 
 # env vars consulted only during first-boot seeding of llm.* keys (design.md D5)

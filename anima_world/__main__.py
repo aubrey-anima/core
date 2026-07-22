@@ -17,7 +17,7 @@ from anima_world.actions import ActionTable
 from anima_world.agent import Agent
 from anima_world.beats import BeatScript, BeatScriptError, coerce_goals
 from anima_world.brain import Brain
-from anima_world.bt_nodes import Action, Condition, Selector, Sequence, Status, default_bt
+from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequence, Status, default_bt
 from anima_world.config_store import ConfigStore, load_or_create_key
 from anima_world.config_store import seed_defaults as seed_config_defaults
 from anima_world.db import open_db
@@ -401,11 +401,13 @@ def _make_beat_agent_factory(bt_store: BTStore | None):
             bt_store.ensure_plan_node(aid)
             if not any(r["node_id"] == f"chat_with_{aid}" for r in bt_store.actions()):
                 bt_store.set_action(f"chat_with_{aid}", "chat", {"target": aid})
+            _ensure_need_actions(bt_store)
             bt_root = bt_store.build_tree(aid)
             action_table = bt_store.action_table()
         else:
             bt_root = default_bt()
             action_table = ActionTable.default()
+        bt_root = _wrap_with_needs_band(bt_root)
         agent = Agent(id=aid, name=bundle.get("name", aid), bt_root=bt_root, location=location)
         agent.blackboard.write("loc", location)
         agent.blackboard.write("personality", bundle.get("personality", ""))
@@ -596,9 +598,11 @@ def build_serve_scheduler(
         if bt_store is not None:
             bt_store.seed_duties(entry["id"], _duties_for(entry["id"], world_seed))
             bt_store.ensure_plan_node(entry["id"])  # trees seeded before the planner existed
+            _ensure_need_actions(bt_store)
             bt_root = bt_store.build_tree(entry["id"])
         else:
             bt_root = default_bt()
+        bt_root = _wrap_with_needs_band(bt_root)
         agent = Agent(id=entry["id"], name=entry["name"], bt_root=bt_root, location=entry["location"])
         agent.blackboard.write("loc", entry["location"])
         projected_agent = boot_projection.agents.get(entry["id"])
@@ -812,6 +816,31 @@ def _seed_initial_world(
         _seed_relations(event_log, registered_ids, world_seed)
         _seed_goals(event_log, registered_ids, world_seed)
         _seed_memories(event_log, registered_ids, world_seed)
+
+
+def _wrap_with_needs_band(bt_root: Any) -> Any:
+    """needs-v3: the urgent-needs band sits ABOVE the authored tree — a
+    starving agent eats before it opens the shop. Wrapped unconditionally:
+    NeedAction is inert (FAILURE) until the scheduler settles `need.*` onto
+    the blackboard, which only happens when `needs.enabled` is on, so an
+    unlit world behaves tick-for-tick like before."""
+    from anima_world.needs import URGENT
+
+    return Selector(children=[
+        NeedAction("energy", URGENT, "go_sleep"),
+        NeedAction("hunger", URGENT, "eat"),
+        NeedAction("social", URGENT, "idle_social"),
+        bt_root,
+    ])
+
+
+def _ensure_need_actions(bt_store: Any) -> None:
+    """The need band's leaf ids must resolve in the action table, or the
+    lookup falls back to idle_wander and a hungry agent just... wanders."""
+    existing = {row["node_id"] for row in bt_store.actions()}
+    for node_id, kind in (("eat", "eat"), ("go_sleep", "sleep"), ("idle_social", "idle_social")):
+        if node_id not in existing:
+            bt_store.set_action(node_id, kind, {})
 
 
 def _coerce_bool(value: Any) -> bool:

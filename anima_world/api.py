@@ -577,6 +577,10 @@ class World:
             "paused": self._paused,
             "tick_rate": _resolve_tick_rate(1.0, self.scheduler.config_store),
         }
+        for aid, agent_state in state["agents"].items():
+            need_values = self.needs(aid)
+            if need_values:
+                agent_state["needs"] = need_values
         return state
 
     def world_time(self) -> Any:
@@ -605,6 +609,20 @@ class World:
         if store is None:
             return []
         return store.query(agent_id=agent_id, kind="reflection")
+
+    def needs(self, agent_id: str) -> dict[str, float]:
+        """needs-v3:当前需求水平(energy/hunger/social/mood)。未点亮或
+        首 tick 前返回空 dict。"""
+        brain = self.scheduler.agents.get(agent_id)
+        if brain is None:
+            return {}
+        bb = brain.agent.blackboard
+        if bb.read("need.energy") is None:
+            return {}
+        return {
+            key: bb.read(f"need.{key}")
+            for key in ("energy", "hunger", "social", "mood")
+        }
 
     def graph(self, agent_id: str | None = None) -> list[dict[str, Any]]:
         if self.scheduler.knowledge_graph is None:

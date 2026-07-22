@@ -156,6 +156,19 @@ CREATE INDEX IF NOT EXISTS idx_locations_parent ON locations(parent);
 # The flat 6×6 grid the legacy `locations` table was built around.
 _LEGACY_GRID_SIZE = 6
 
+# needs-v3: current need levels (data-plane). The curves are pure math over
+# ticks — the event log never carries them; this table only checkpoints the
+# latest values (day rollover / shutdown) so a restart resumes mid-curve.
+AGENT_NEEDS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_needs (
+  agent_id     TEXT NOT NULL,
+  need         TEXT NOT NULL CHECK (need IN ('energy','hunger','social')),
+  value        REAL NOT NULL DEFAULT 1.0,
+  updated_tick INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, need)
+);
+"""
+
 BT_ACTIONS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bt_actions (
   node_id    TEXT PRIMARY KEY,
@@ -168,13 +181,13 @@ CREATE TABLE IF NOT EXISTS bt_actions (
 # `time_window` joined the node types in bt-duties (a duty like "08:00–18:00"
 # is not expressible as an equality Condition). One tree per agent lives here,
 # keyed by the long-standing `tree` column.
-BT_NODE_TYPES = ("selector", "sequence", "condition", "action", "time_window", "plan")
+BT_NODE_TYPES = ("selector", "sequence", "condition", "action", "time_window", "plan", "need_action")
 
 BT_NODES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bt_nodes (
   tree    TEXT NOT NULL,
   node_id TEXT NOT NULL,
-  type    TEXT NOT NULL CHECK (type IN ('selector','sequence','condition','action','time_window','plan')),
+  type    TEXT NOT NULL CHECK (type IN ('selector','sequence','condition','action','time_window','plan','need_action')),
   parent  TEXT,
   sort    INTEGER NOT NULL DEFAULT 0,
   params  TEXT NOT NULL DEFAULT '{}',
@@ -188,8 +201,8 @@ CREATE INDEX IF NOT EXISTS idx_bt_nodes_tree ON bt_nodes(tree);
 # data semantics; the stamp travels inside world.db (and therefore inside any
 # .cyberworld package or volume copy). An engine refuses formats newer than
 # it understands — never silently writes into one.
-DB_FORMAT_VERSION = 2
-MIN_SUPPORTED_DB_FORMAT = 2
+DB_FORMAT_VERSION = 3
+MIN_SUPPORTED_DB_FORMAT = 3
 
 
 class DBFormatError(RuntimeError):
@@ -270,6 +283,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(BT_ACTIONS_SCHEMA)
     _migrate_bt_nodes(conn)  # same reason: CHECK constraints are baked in at CREATE
     conn.executescript(BT_NODES_SCHEMA)
+    conn.executescript(AGENT_NEEDS_SCHEMA)
     _ensure_columns(conn, "conversations", {"participants": "TEXT", "location": "TEXT", "player_id": "TEXT"})
     _ensure_columns(conn, "memories", {
         "strength": "REAL NOT NULL DEFAULT 1.0",

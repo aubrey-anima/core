@@ -180,6 +180,31 @@ class PlanAction(Node):
 
 
 @dataclass
+class NeedAction(Node):
+    """needs-v3 leaf: fire a restorative action when a need runs low.
+
+    Reads `need.<name>` the scheduler settles onto the blackboard each tick.
+    A blackboard with no need values (needs disabled, or pre-first-tick)
+    yields FAILURE — the band is inert and the tree behaves exactly as v2,
+    which is what makes wrapping every tree unconditionally safe.
+    """
+
+    need: str
+    threshold: float
+    action_id: str
+    name: ClassVar[str] = "need_action"
+
+    def tick(self, blackboard: Blackboard) -> Status:
+        value = blackboard.read(f"need.{self.need}")
+        if not isinstance(value, (int, float)):
+            return Status.FAILURE
+        if float(value) >= self.threshold:
+            return Status.FAILURE
+        blackboard.write("_selected_action_id", self.action_id)
+        return Status.SUCCESS
+
+
+@dataclass
 class Selector(Node):
     """Try children in order; return SUCCESS on first non-FAILURE child.
 

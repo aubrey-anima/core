@@ -628,12 +628,15 @@ class Scheduler:
             #    bt-duties D1: the tree is driven by TIME, not by boredom. The
             #    old loop only reached the BT through the idle watchdog, so a
             #    duty that starts at 08:00 could never fire.
+            needs_enabled = self._needs_enabled()
             for brain in list(self.agents.values()):
                 bb = brain.agent.blackboard
                 bb.write("time.day", now.day)
                 bb.write("time.hour", now.hour)
                 bb.write("time.minute", now.minute)
                 bb.write("time.minute_of_day", now.minute_of_day)
+                if needs_enabled:
+                    self._settle_agent_needs(brain)
 
                 mailbox = bb.read("mailbox") or []
                 if mailbox:
@@ -666,6 +669,50 @@ class Scheduler:
                     self.memory_store.decay_pass(agent_id, now_tick, ticks_per_day)
                 except Exception:  # noqa: BLE001 - forgetting is best-effort
                     logger.warning("memory decay pass failed for %s", agent_id, exc_info=True)
+        self._persist_all_needs()
+
+    def _needs_enabled(self) -> bool:
+        return bool(
+            self.config_store is not None
+            and self.config_store.get("needs.enabled", default=False)
+        )
+
+    def _settle_agent_needs(self, brain: BrainLike) -> None:
+        """needs-v3: advance one agent's need curves by tick_delta (lock held).
+
+        Pure arithmetic on the blackboard; the agent_needs table is only a
+        checkpoint (day rollover / shutdown). First touch hydrates from it."""
+        from anima_world import needs as needs_mod
+
+        bb = brain.agent.blackboard
+        agent_id = brain.agent.id
+        if bb.read("need.energy") is None:
+            values = (
+                needs_mod.load(self.event_log.conn, agent_id)
+                if self.event_log is not None
+                else {n: 1.0 for n in needs_mod.NEEDS}
+            )
+        else:
+            values = {n: bb.read(f"need.{n}") for n in needs_mod.NEEDS}
+        action = self._current_action.get(agent_id)
+        settled = needs_mod.settle(values, self.tick_delta, action.kind if action else None)
+        for key, value in settled.items():
+            bb.write(f"need.{key}", value)
+
+    def _persist_all_needs(self) -> None:
+        if not self._needs_enabled() or self.event_log is None:
+            return
+        from anima_world import needs as needs_mod
+
+        for agent_id, brain in self.agents.items():
+            bb = brain.agent.blackboard
+            if bb.read("need.energy") is None:
+                continue
+            values = {n: bb.read(f"need.{n}") for n in needs_mod.NEEDS}
+            try:
+                needs_mod.persist(self.event_log.conn, agent_id, values, self.clock)
+            except Exception:  # noqa: BLE001 - a checkpoint is best-effort
+                logger.warning("needs persist failed for %s", agent_id, exc_info=True)
 
     def _minutes_per_tick(self) -> int:
         if self.config_store is not None:
@@ -1471,4 +1518,5 @@ class Scheduler:
             while self._queue:
                 event = self._queue.popleft()
                 self._deliver(event)
+            self._persist_all_needs()  # needs-v3: checkpoint curves at shutdown
             self._stopped = True
