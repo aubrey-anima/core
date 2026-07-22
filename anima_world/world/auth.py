@@ -2,6 +2,15 @@
 
 This module deliberately knows nothing about platform persistence or services.  It
 only protects and validates the membership facts a platform sends over HTTP.
+
+**此线格式已永久冻结(2026-07)。**
+
+claim 是身份断言,不是行李箱:它只把一个 membership_id 可信地绑定到一次请求上,
+任何新的数据需求一律走请求体等其他通道,因此它永远不需要长新字段。禁止增删字段、
+禁止更换序列化方式或签名算法;若密码学层面出现必须更换的黑天鹅,规则是并行加一个
+新 header(如 X-Cyberworld-Membership-V2),本格式原样保留——契约从不修改,只会有
+新契约在旁边出生。冻结由两道机器强制:验签对未知字段直接拒收(见下),以及
+tests/test_claim_freeze.py 的黄金向量(与网站仓库共享同一组向量,逐字节钉死输出)。
 """
 
 from __future__ import annotations

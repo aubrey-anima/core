@@ -45,12 +45,16 @@ anima-studio(创作台)──子进程──▶ 本仓库的某个版本 ──�
 数据包与种子两项由运维台的 `test/contract.test.js` 与本包**双向互验**(引擎不可用时整体 skip)。
 节拍脚本的严格校验有个硬要求:**坏脚本必须在加载时当场报错,不能流到世界启动**。
 
+其中 **claim 线格式已永久冻结**:字段集(恰好 6 个)、序列化、签名算法都不许动,
+新需求走请求体或并行新 header,永不修改本格式。`tests/test_claim_freeze.py` 用黄金向量
+(固定密钥+固定 payload → 逐字节钉死的 token)机器强制这条冻结,网站仓库持有同一组向量。
+
 ## 常用命令
 
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 43 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 52 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
