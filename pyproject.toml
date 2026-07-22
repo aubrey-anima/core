@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "anima-world"
 dynamic = ["version"]
-description = "ANIMA 世界引擎 + 创作工作台:事件溯源内核、行为树调度、LLM 叙事/聊天/记忆,小说 → 世界种子 → .cyberworld 数据包"
+description = "ANIMA 世界引擎:事件溯源内核、行为树调度、LLM 叙事/聊天/记忆,可打包成 .cyberworld 数据包"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
@@ -42,7 +42,6 @@ Homepage = "https://animametaverse.com"
 
 [project.scripts]
 anima-world = "anima_world.__main__:main"
-anima-author = "anima_world.author.__main__:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "anima_world.__version__" }
@@ -51,7 +50,13 @@ version = { attr = "anima_world.__version__" }
 include = ["anima_world*"]
 
 [tool.setuptools.package-data]
-anima_world = ["world_seed.json", "world/static/*.html", "author/static/*.html"]
+anima_world = ["world_seed.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A ROS install on PYTHONPATH makes its pytest plugins visible to entry-point
+# autoload, and they explode at import time (launch_testing → launch → lark),
+# before any test runs. Blocking a plugin name that isn't installed is a no-op,
+# so this costs nothing on a clean machine and removes the `PYTHONPATH= pytest`
+# dance on one that has ROS sourced.
+addopts = "-p no:launch_testing -p no:launch_ros"

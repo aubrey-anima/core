@@ -1,9 +1,9 @@
-"""The distribution contract: an installed anima-world can create and package.
+"""The distribution contract: an installed anima-world can run and package.
 
-These tests exercise the two things the pip package exists to do — author a
-world and turn it into a portable ``.cyberworld`` unit — through the public
-import surface only, so they fail if the wheel ships a broken package layout
-(missing package data, unreachable subpackage, stale import path).
+Exercised through the public import surface only, so they fail if the wheel
+ships a broken layout (missing package data, unreachable module, stale import
+path). Authoring is NOT here any more — that moved to anima-studio, which
+manages engine versions and therefore cannot live inside one.
 """
 from __future__ import annotations
 
@@ -12,15 +12,13 @@ from importlib import resources
 
 import pytest
 
-from anima_world.author import (
-    AuthorStore,
-    BeatScript,
-    BeatScriptError,
+from anima_world.beats import BeatScript, BeatScriptError
+from anima_world.world_package import (
     export_world_package,
     import_world_package,
     inspect_world_package,
-    is_valid_world_seed,
 )
+from anima_world.world_seed import is_valid_world_seed
 
 
 def _bundled_seed() -> dict:
@@ -34,13 +32,21 @@ def test_bundled_seed_is_shipped_and_valid():
     assert is_valid_world_seed(_bundled_seed())
 
 
-@pytest.mark.parametrize(
-    "surface, asset",
-    [("world", "static/index.html"), ("author", "static/index.html")],
-)
-def test_web_assets_are_packaged(surface, asset):
-    """Both web UIs must survive the wheel — they are package data, not repo files."""
-    assert (resources.files("anima_world") / surface / asset).is_file()
+def test_engine_ships_no_ui_at_all():
+    """This package is an engine. The player surface belongs to the site, the
+    admin console to the operator, and authoring to anima-studio — a wheel that
+    grows an HTML file again means one of those boundaries slipped."""
+    root = resources.files("anima_world")
+    assert not (root / "world" / "static" / "index.html").is_file()
+    assert not (root / "author").is_dir()
+
+
+def test_authoring_is_not_importable_from_the_engine():
+    """`anima_world.author` moved out. Leaving a shim would let the studio
+    import the engine again, which is exactly what makes version switching a
+    lie — the studio drives engines as subprocesses, never as imports."""
+    with pytest.raises(ModuleNotFoundError):
+        __import__("anima_world.author")
 
 
 def test_template_export_import_roundtrip(tmp_path):
@@ -89,12 +95,6 @@ def test_snapshot_export_carries_the_live_database(tmp_path):
     )
     imported = import_world_package(package, tmp_path / "instances")
     assert (imported.path / "world.db").is_file()
-
-
-def test_author_store_opens_a_fresh_job_db(tmp_path):
-    """The creation half: the studio's own store must stand up from the wheel."""
-    store = AuthorStore(tmp_path / "author.db")
-    assert store is not None
 
 
 def test_beat_script_rejects_a_bad_script():

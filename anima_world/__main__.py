@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from anima_world import onboarding
 from anima_world.actions import ActionTable
 from anima_world.agent import Agent
 from anima_world.beats import BeatScript, BeatScriptError, coerce_goals
@@ -40,6 +41,7 @@ from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
 from anima_world.world_store import BTStore, LocationStore
 from anima_world.world_seed import is_valid_world_seed as _is_valid_world_seed
+from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
 logger = logging.getLogger(__name__)
 
@@ -57,22 +59,6 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _resolve_legacy_flag(args: argparse.Namespace) -> bool:
-    """Return True iff legacy player routes should be enabled.
-
-    Priority (highest first):
-    1. --disable-legacy-player-routes → False (explicit off)
-    2. --legacy-player-routes         → True  (explicit on)
-    3. loopback host                  → True  (default on for local dev)
-    4. non-loopback host              → False (default off for production)
-    """
-    if args.disable_legacy_player_routes:
-        return False
-    if args.legacy_player_routes:
-        return True
-    return _is_loopback_host(args.host)
-
-
 def _runtime_service_credentials(
     host: str, raw_service_tokens: str, claim_secret: str | None
 ) -> tuple[tuple[str, ...], str | None]:
@@ -87,9 +73,39 @@ def _runtime_service_credentials(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anima-world",
-        description="ANIMA 世界引擎 + 创作工作台:运行世界、创作世界、打包成 .cyberworld",
+        description="ANIMA 世界引擎:运行世界、快进、打包成 .cyberworld",
     )
     sub = parser.add_subparsers(dest="command")
+
+    # -- start / config / doctor: the commands a person types --
+    start = sub.add_parser(
+        "start", help="创建并启动一个世界(引导配置 LLM,自动打开浏览器)—— 从这里开始"
+    )
+    start.add_argument("--db-path", default="saves/world.db", help="世界文件位置(不存在就新建)")
+    start.add_argument("--host", default="127.0.0.1", help="绑定地址(默认只监听本机)")
+    start.add_argument("--port", type=int, default=8000, help="端口;被占用时自动往后找")
+    start.add_argument("--seed", default=None, help="世界种子 JSON(只对新建的世界生效)")
+    start.add_argument("--beats", default=None, help="节拍脚本 JSON")
+    start.add_argument("--no-input", action="store_true", help="不要交互提问(CI / 脚本)")
+    start.add_argument(
+        "--real-time", action="store_true",
+        help="新世界也用真实时间(5 现实分钟 = 5 世界分钟),不用演示速度",
+    )
+
+    config_cmd = sub.add_parser("config", help="读写世界配置(LLM 密钥、时钟快慢…),不用 curl")
+    config_cmd.add_argument("--db-path", default="saves/world.db", help="世界文件位置")
+    config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
+    config_list = config_sub.add_parser("list", help="列出全部配置(密钥自动打码)")
+    config_list.add_argument("--category", default=None, help="只看某一类:llm / scheduler / chat …")
+    config_get = config_sub.add_parser("get", help="读一个配置项")
+    config_get.add_argument("key")
+    config_set = config_sub.add_parser("set", help="改一个配置项(立即生效,无需重启)")
+    config_set.add_argument("key")
+    config_set.add_argument("value")
+
+    doctor = sub.add_parser("doctor", help="体检:世界文件、密钥、LLM 连通性、时钟快慢")
+    doctor.add_argument("--db-path", default="saves/world.db", help="世界文件位置")
+    doctor.add_argument("--skip-probe", action="store_true", help="不要真的调用一次 LLM")
 
     # -- story (M2) --
     story = sub.add_parser("story", help="Run agent story simulation")
@@ -104,7 +120,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--agents", type=int, default=None,
         help="Number of agents (default: full seed roster, or 3 without a seed)",
     )
-    serve.add_argument("--tick-rate", type=float, default=1.0, help="Background ticks per second")
+    serve.add_argument(
+        "--tick-rate", type=float, default=None,
+        help="Background ticks per second. FALLBACK ONLY: once the db exists, the seeded "
+             "scheduler.tick_rate config row wins (default 1/300 = real time). Change it "
+             "with PUT /api/config/scheduler.tick_rate.",
+    )
     serve.add_argument("--db-path", default="saves/world.db", help="SQLite world DB path")
     serve.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
     serve.add_argument(
@@ -133,18 +154,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cors-origin", action="append", default=[],
         help="Allowed independent frontend origin (repeatable; no wildcard)",
     )
-    _legacy_group = serve.add_mutually_exclusive_group()
-    _legacy_group.add_argument(
-        "--disable-legacy-player-routes",
-        action="store_true",
-        help="Force legacy player identity routes OFF (overrides loopback default)",
-    )
-    _legacy_group.add_argument(
-        "--legacy-player-routes",
-        action="store_true",
-        help="Force legacy player identity routes ON (overrides non-loopback default of OFF)",
-    )
-
     # -- simulate (novel-benchmark-loop) --
     simulate = sub.add_parser(
         "simulate", help="Fast-forward a world headlessly (no sleep, no web server)"
@@ -198,34 +207,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default="saves/operator/instances",
         help="Instances root the imported world lands under (default: the project-local "
         "operator instances dir; pass an absolute path for a backend-managed root)",
-    )
-
-    author = sub.add_parser("author", help="World-creator tools (LLM seed generation)")
-    author_commands = author.add_subparsers(dest="author_command", required=True)
-    author_generate = author_commands.add_parser(
-        "generate", help="Generate a validated world seed from a concept via the configured LLM"
-    )
-    author_generate.add_argument("--concept", required=True, help="One-line world concept (中文即可)")
-    author_generate.add_argument("--output", required=True, help="Seed JSON output path")
-    author_generate.add_argument("--agents", type=int, default=4, help="Number of characters")
-    author_generate.add_argument("--locations", type=int, default=5, help="Number of locations")
-
-    author_serve = author_commands.add_parser("serve", help="Run the author studio web server")
-    author_serve.add_argument("--db", default="saves/author.db", help="Author SQLite DB path (default saves/author.db)")
-    author_serve.add_argument(
-        "--data-dir", default=None,
-        help="Directory for novel files (default: <db stem>-data/ next to the db)",
-    )
-    author_serve.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
-    author_serve.add_argument("--port", type=int, default=8402, help="Bind port (default 8402)")
-    author_serve.add_argument(
-        "--db-editor-port", type=int, default=None,
-        help="Port of a sibling sqlite-web instance to embed in the studio UI",
-    )
-    author_serve.add_argument(
-        "--db-editor-url", default=None,
-        help="Full public URL of that sqlite-web instance (wins over --db-editor-port; "
-        "use behind a tunnel/reverse proxy)",
     )
 
     return parser
@@ -378,6 +359,16 @@ def _build_planner(
     if not config_store.get("planner.enabled", default=True):
         logger.info("planner disabled by config; agents will idle in their free time")
         return None
+    # A mock LLM cannot produce a parseable plan — every attempt ends in
+    # "produced no usable steps", once per agent per world day, which at demo
+    # speed is a wall of warnings about a thing that was never going to work.
+    # Not wiring it is the same behavior (idle_wander) without the noise.
+    if force_mock_llm or not (config_store.get("llm.api_key", default="") or ""):
+        logger.info(
+            "no usable LLM configured: free-time planning is off and agents fall back to "
+            "idle_wander (configure one with `anima-world config set llm.api_key …`)"
+        )
+        return None
 
     def persona_provider(agent_id: str) -> dict[str, Any]:
         brain = scheduler.agents.get(agent_id)
@@ -402,6 +393,33 @@ def _build_planner(
         prompt_store=prompt_store,
         memory_store=memory_store,
     )
+
+
+def _warn_if_llm_degraded(config_store: ConfigStore, db_path: str | Path) -> None:
+    """Say out loud, at boot, that this world will run on the Mock LLM.
+
+    An unset key and an unreadable one both read as "unset" downstream, and the
+    result is a world that boots fine, ticks fine, and produces nothing but
+    template text — the failure mode `onboarding.probe_llm` exists to stop for
+    `simulate`. `serve` cannot borrow that check (a world image that refuses to
+    start is worse than a degraded one), so it warns instead. `start` reports
+    the same thing in its banner and turns this off.
+    """
+    if "llm.api_key" in config_store.undecryptable_secrets():
+        logger.warning(
+            "llm.api_key cannot be decrypted — the keyfile %s.key most likely did not travel "
+            "with this database. Narrative, free-time planner and relationship judge all "
+            "degrade to Mock. Restore the keyfile, or write a new key with "
+            "PUT /api/config/llm.api_key.",
+            db_path,
+        )
+    elif not (config_store.get("llm.api_key", default="") or ""):
+        logger.warning(
+            "llm.api_key is not configured — narrative, free-time planner and relationship "
+            "judge degrade to Mock (the world still runs, but its text is templated and its "
+            "agents have no plans). Set it with PUT /api/config/llm.api_key, or seed it from "
+            "ANIMA_LLM_API_KEY before the database is first created."
+        )
 
 
 def _away_agents(persisted: list[Event]) -> set[str]:
@@ -468,6 +486,7 @@ def build_serve_scheduler(
     force_mock_llm: bool = False,
     mock_narrative: bool = False,
     beats_path: str | Path | None = None,
+    llm_warning: bool = True,
 ) -> Scheduler:
     """Build the default M3 web-chat world.
 
@@ -517,6 +536,10 @@ def build_serve_scheduler(
         # idempotent (no-op past the first boot).
         config_store = ConfigStore(conn, fernet_key=load_or_create_key(db_path), lock=shared_lock)
         seed_config_defaults(config_store)
+        # An explicitly-mocked run is not "degraded", and `start` reports the
+        # same thing far better in its own banner (llm_warning=False).
+        if llm_warning and not force_mock_llm:
+            _warn_if_llm_degraded(config_store, db_path)
         prompt_store = PromptStore(conn, lock=shared_lock)
         seed_prompt_defaults(prompt_store)
         # M4: memory/graph share the same world.db connection.
@@ -573,6 +596,18 @@ def build_serve_scheduler(
     # reuse it here for persona resolution BEFORE constructing agents,
     # instead of folding the same event list into a second Projection.
     persisted: list[Event] = event_log.replay() if event_log is not None else []
+    if seed_path is not None and persisted:
+        # The seed file is first-boot-only (M6 D7). Editing one and pointing it
+        # at a world that already exists looks like it should work and silently
+        # does nothing — the event log and the definition tables are the running
+        # world's only source of truth from genesis onward.
+        logger.warning(
+            "--seed %s was NOT applied: this database already holds %d event(s), and a seed "
+            "file is only ever read into an empty one. Point --db-path at a fresh file to "
+            "author against this seed, or edit the live world through /api/config, "
+            "/api/prompts and the locations/bt_nodes tables.",
+            seed_path, len(persisted),
+        )
     boot_projection = scheduler._memory_projection
     scheduler.bt_store = bt_store
     # agent-leave-return D4: whoever's last presence event is a leave stays
@@ -974,6 +1009,23 @@ def run_serve(args: argparse.Namespace) -> int:
         return 2
     server_ref: dict[str, Any] = {}
 
+    # `--tick-rate` is only consulted when the config table has no row for it,
+    # and `seed_config_defaults` always seeds one — so on any real world the
+    # flag is silently inert. Say so rather than let it look applied.
+    tick_rate = 1.0 if args.tick_rate is None else args.tick_rate
+    configured_rate = (
+        scheduler.config_store.get("scheduler.tick_rate")
+        if scheduler.config_store is not None
+        else None
+    )
+    if args.tick_rate is not None and configured_rate is not None and configured_rate != args.tick_rate:
+        print(
+            f"[serve] --tick-rate {args.tick_rate} is ignored: config scheduler.tick_rate="
+            f"{configured_rate} wins (the DB row always beats the flag). Change it with "
+            f"PUT /api/config/scheduler.tick_rate.",
+            file=sys.stderr,
+        )
+
     def request_shutdown() -> None:
         server = server_ref.get("server")
         if server is not None:
@@ -981,7 +1033,7 @@ def run_serve(args: argparse.Namespace) -> int:
 
     app = create_app(
         scheduler,
-        tick_rate=args.tick_rate,
+        tick_rate=tick_rate,
         config_store=scheduler.config_store,
         prompt_store=scheduler.prompt_store,
         instance_id=args.instance_id,
@@ -992,7 +1044,6 @@ def run_serve(args: argparse.Namespace) -> int:
         cors_origins=args.cors_origin,
         platform_service_credentials=service_tokens,
         membership_claim_secret=claim_secret,
-        legacy_player_routes=_resolve_legacy_flag(args),
     )
     config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
     server = uvicorn.Server(config)
@@ -1013,31 +1064,290 @@ def run_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _preflight_llm(config_store: Any | None) -> str | None:
-    """Probe the real LLM stack before a fast-forward run; error string or None.
+def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
+    """Open a world's config, creating the database if it isn't there yet.
 
-    sim-ff-usability: Window-1 Round 1 ran an entire "real" benchmark round
-    on a silently-degraded mock (empty key → MockLLMClient → template
-    narrative + planless agents) and the review was worthless. A benchmark
-    run must be real or fail loudly — never quietly mock.
+    Shared by `start` / `config` / `doctor`, all of which need to read or write
+    settings without standing up a whole scheduler.
+
+    ConfigStore logs a raw warning per unreadable secret while it hydrates.
+    That is right for `serve`, where nothing else would say it, and wrong here:
+    these three commands report the same condition properly a moment later, so
+    the raw line would just land above their output as noise.
     """
-    from anima_world.llm_client import create_llm_client_from_config
-    from anima_world.planner import SyncLLM
-
-    if config_store is None:
-        return "no config store — an in-memory world has no LLM configuration"
-    api_key = config_store.get("llm.api_key", default="") or ""
-    if not api_key:
-        return "config.llm.api_key is empty — configure a key or run with --llm mock / --no-llm"
+    cfg_logger = logging.getLogger("anima_world.config_store")
+    previous_level = cfg_logger.level
+    cfg_logger.setLevel(logging.ERROR)
     try:
-        reply = SyncLLM(
-            create_llm_client_from_config(config_store), config_store=config_store
-        ).complete_sync([{"role": "user", "content": "ping——只回复 pong"}])
-    except Exception as exc:  # noqa: BLE001 - any probe failure means "not usable"
-        return f"LLM probe call failed: {exc}"
-    if not (reply or "").strip():
-        return "LLM probe call returned empty output"
-    return None
+        conn = open_db(db_path)
+        store = ConfigStore(conn, fernet_key=load_or_create_key(db_path), lock=threading.RLock())
+        seed_config_defaults(store)
+    finally:
+        cfg_logger.setLevel(previous_level)
+    return conn, store
+
+
+def _print_llm_line(status: Any, *, indent: str = "  ") -> None:
+    mark = onboarding.green(onboarding.OK) if not status.degraded else onboarding.yellow(onboarding.WARN)
+    print(f"{indent}{mark} {status.summary}")
+    if status.fix:
+        print(f"{indent}  {onboarding.dim('修复:' + status.fix)}")
+
+
+def run_start(args: argparse.Namespace) -> int:
+    """The front door: configure, create, launch, open — in that order.
+
+    Everything `serve` does, plus the three things a newcomer cannot be
+    expected to know: that an unconfigured LLM degrades silently, that a fresh
+    world's clock runs in real time and therefore looks frozen, and that the
+    page lives on a port they were never told.
+    """
+    import signal
+
+    import uvicorn
+
+    from anima_world.world.app import create_app
+
+    db_path = Path(args.db_path)
+    is_new_world = not db_path.exists()
+
+    print(onboarding.rule("ANIMA 世界引擎"))
+
+    # ① LLM — first, because it decides what kind of world you get.
+    conn, config_store = _open_config_store(db_path)
+    status = onboarding.llm_status(config_store, db_path)
+    print(f"\n  {onboarding.bold('① LLM')}")
+    if status.degraded and not args.no_input and onboarding.can_prompt():
+        _print_llm_line(status, indent="     ")
+        if onboarding.configure_llm_interactively(config_store, db_path):
+            status = onboarding.llm_status(config_store, db_path)
+            error = onboarding.probe_llm(config_store)
+            if error is None:
+                print(f"     {onboarding.green(onboarding.OK)} 连通性测试通过")
+            else:
+                print(f"     {onboarding.yellow(onboarding.WARN)} 连通性测试没过:{error}")
+                print(f"       {onboarding.dim('世界照常启动;改好后用 anima-world doctor 复测')}")
+        else:
+            print(f"     {onboarding.dim('跳过 —— 这个世界会用 Mock 跑(文本是模板,agent 没有空闲计划)')}")
+            print(f"       {onboarding.dim('随时可配:anima-world config set llm.api_key sk-…')}")
+    else:
+        _print_llm_line(status, indent="     ")
+
+    # ② The world file, and how fast its clock runs.
+    print(f"\n  {onboarding.bold('② 世界')}")
+    if is_new_world and not args.real_time:
+        # The packaged default is real time (1 tick / 5 real minutes), which
+        # makes a brand-new world look frozen for the first five minutes
+        # somebody watches it. A world they just created gets a visible clock.
+        config_store.set("scheduler.tick_rate", 1.0)
+    tick_rate = config_store.get("scheduler.tick_rate", default=1.0)
+    minutes_per_tick = config_store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK)
+    conn.close()
+
+    print(f"     {onboarding.green(onboarding.OK)} {'新建' if is_new_world else '沿用'} {db_path}")
+    print(f"     {onboarding.dim('时钟:' + onboarding.human_tick_rate(tick_rate, int(minutes_per_tick)))}")
+    if is_new_world and not args.real_time:
+        print(f"     {onboarding.dim('想要真实时间:anima-world config set scheduler.tick_rate 0.00333')}")
+
+    try:
+        scheduler = build_serve_scheduler(
+            None, db_path=db_path, seed_path=args.seed, beats_path=args.beats,
+            llm_warning=False,  # ① already said it, better
+        )
+    except BeatScriptError as exc:
+        print(f"\n  {onboarding.red(onboarding.BAD)} 节拍脚本有问题:\n{exc}", file=sys.stderr)
+        return 2
+    print(f"     {onboarding.green(onboarding.OK)} {len(scheduler.agents)} 个角色就位:"
+          f" {'、'.join(brain.agent.name for brain in scheduler.agents.values())}")
+
+    # ③ Serve it. The engine is an API and nothing else — authoring lives in
+    #    the studio, a separate program with its own environment, because a
+    #    world is pinned to one engine version and the tool has to outlive it.
+    port = onboarding.find_free_port(args.host, args.port)
+    if port is None:
+        print(f"\n  {onboarding.red(onboarding.BAD)} {args.port}–{args.port + 9} 全被占用了,"
+              f"换一个:--port 9000", file=sys.stderr)
+        return 2
+    if port != args.port:
+        print(f"     {onboarding.yellow(onboarding.WARN)} 端口 {args.port} 被占用了,改用 {port}")
+    world_url = onboarding.browsable_url(args.host, port)
+
+    print(f"\n  {onboarding.bold('③ 运行')}")
+    print(f"     {green_url(world_url)}  {onboarding.dim('(API,没有网页界面)')}")
+    print(f"     {onboarding.dim('创作/编辑世界:anima-studio(单独的桌面程序)')}")
+    print(f"     {onboarding.dim('停止:Ctrl-C   体检:anima-world doctor   改配置:anima-world config list')}\n")
+
+    tokens, claim_secret = _runtime_service_credentials(args.host, "", None)
+    app = create_app(
+        scheduler,
+        tick_rate=tick_rate,
+        config_store=scheduler.config_store,
+        prompt_store=scheduler.prompt_store,
+        admin_token=os.getenv("ANIMA_WORLD_ADMIN_TOKEN"),
+        platform_service_credentials=tokens,
+        membership_claim_secret=claim_secret,
+    )
+    server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=port, log_level="warning"))
+
+    old_sigint = signal.getsignal(signal.SIGINT)
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_exit(signum, frame) -> None:
+        server.should_exit = True
+
+    signal.signal(signal.SIGINT, request_exit)
+    signal.signal(signal.SIGTERM, request_exit)
+    try:
+        server.run()
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        signal.signal(signal.SIGTERM, old_sigterm)
+    print("\n  世界已停下。下次接着跑:"
+          f"anima-world start --db-path {db_path}\n")
+    return 0
+
+
+def green_url(url: str) -> str:
+    return onboarding.paint(url, "1;32")
+
+
+def run_config(args: argparse.Namespace) -> int:
+    """Read/write world settings without curl — including the encrypted ones."""
+    from anima_world.config_store import mask_secret
+
+    if not Path(args.db_path).exists() and args.config_command != "set":
+        print(f"[config] 还没有这个世界:{args.db_path}\n"
+              f"         先跑一次 anima-world start 创建它。", file=sys.stderr)
+        return 2
+    conn, store = _open_config_store(args.db_path)
+    try:
+        if args.config_command == "list":
+            rows = store.list(category=args.category)
+            if not rows:
+                print(f"[config] 没有 {args.category!r} 这一类。可用类别:"
+                      f"{', '.join(sorted({r['category'] for r in store.list()}))}", file=sys.stderr)
+                return 2
+            width = max(len(r["key"]) for r in rows)
+            for row in sorted(rows, key=lambda r: (r["category"], r["key"])):
+                value = mask_secret(row["value"] or "") if row["is_secret"] else row["value"]
+                if row["is_secret"] and not row["value"]:
+                    value = onboarding.dim("(未设置)")
+                print(f"  {row['key']:<{width}}  {value}")
+                if row["description"]:
+                    print(f"  {' ' * width}  {onboarding.dim(row['description'])}")
+            return 0
+
+        if not store.has(args.key):
+            print(f"[config] 没有 {args.key!r} 这个配置项。"
+                  f"用 anima-world config list 看看有哪些。", file=sys.stderr)
+            return 2
+
+        if args.config_command == "get":
+            meta = store.meta(args.key) or {}
+            value = store.get(args.key)
+            if meta.get("is_secret"):
+                value = mask_secret(value or "") if value else "(未设置)"
+            print(value)
+            return 0
+
+        # set — coerce to the key's declared type first, or the in-memory cache
+        # would hold a string where every reader expects a float/int/bool.
+        meta = store.meta(args.key) or {}
+        try:
+            value = _coerce_config_value(args.value, meta.get("value_type", "str"))
+        except ValueError:
+            print(f"[config] {args.key} 需要 {meta.get('value_type')} 类型,"
+                  f"{args.value!r} 不是。", file=sys.stderr)
+            return 2
+        store.set(args.key, value)
+        shown = mask_secret(str(value)) if meta.get("is_secret") else value
+        print(f"{onboarding.green(onboarding.OK)} {args.key} = {shown}")
+        if meta.get("is_secret"):
+            print(onboarding.dim(f"  已加密写入 {args.db_path};密钥在 {args.db_path}.key —— 搬 db 必须带上"))
+        return 0
+    finally:
+        conn.close()
+
+
+def _coerce_config_value(raw: str, value_type: str) -> Any:
+    if value_type == "int":
+        return int(raw)
+    if value_type == "float":
+        return float(raw)
+    if value_type == "bool":
+        lowered = raw.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+        raise ValueError(raw)
+    return raw
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    """Check the things that fail quietly. Non-zero exit when one of them has."""
+    db_path = Path(args.db_path)
+    print(onboarding.rule("体检"))
+    problems = 0
+
+    if not db_path.exists():
+        print(f"  {onboarding.red(onboarding.BAD)} 没有世界文件:{db_path}")
+        print(f"      {onboarding.dim('anima-world start 会创建它')}")
+        return 1
+    print(f"  {onboarding.green(onboarding.OK)} 世界文件 {db_path}")
+
+    keyfile = Path(f"{db_path}.key")
+    if keyfile.exists():
+        print(f"  {onboarding.green(onboarding.OK)} 密钥文件 {keyfile.name}(搬 db 时必须一起搬)")
+    else:
+        print(f"  {onboarding.yellow(onboarding.WARN)} 没有 {keyfile.name} —— 下次启动会新建一把,"
+              f"已加密的旧密钥将永久读不出来")
+
+    conn, store = _open_config_store(db_path)
+    try:
+        from anima_world.db import DB_FORMAT_VERSION, read_db_format
+
+        print(f"  {onboarding.green(onboarding.OK)} db 格式版本 {read_db_format(conn)}"
+              f"(本引擎支持到 {DB_FORMAT_VERSION})")
+
+        events, = conn.execute("SELECT COUNT(*) FROM events").fetchone()
+        agents, = conn.execute(
+            "SELECT COUNT(DISTINCT who) FROM events WHERE type='agent_join'"
+        ).fetchone()
+        print(f"  {onboarding.green(onboarding.OK)} {agents} 个角色,{events} 条事件")
+
+        status = onboarding.llm_status(store, db_path)
+        if status.degraded:
+            problems += 1
+            print(f"  {onboarding.yellow(onboarding.WARN)} {status.summary}")
+            if status.fix:
+                print(f"      {onboarding.dim('修复:' + status.fix)}")
+        else:
+            print(f"  {onboarding.green(onboarding.OK)} {status.summary}"
+                  f" {onboarding.dim(status.masked_key or '')}")
+            if not args.skip_probe:
+                print(f"    {onboarding.dim('正在调用一次 LLM …')}", end="", flush=True)
+                error = onboarding.probe_llm(store)
+                print("\r" + " " * 30 + "\r", end="")
+                if error is None:
+                    print(f"  {onboarding.green(onboarding.OK)} LLM 连通性正常")
+                else:
+                    problems += 1
+                    print(f"  {onboarding.red(onboarding.BAD)} LLM 调不通:{error}")
+                    print(f"      {onboarding.dim('检查 llm.base_url / llm.model:anima-world config list --category llm')}")
+
+        rate = store.get("scheduler.tick_rate", default=1.0)
+        mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
+        print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
+    finally:
+        conn.close()
+
+    print()
+    if problems:
+        print(f"  {onboarding.yellow(str(problems) + ' 项需要处理')}(世界仍然能跑,只是会降级)\n")
+        return 1
+    print(f"  {onboarding.green('一切正常。')} anima-world start --db-path {db_path}\n")
+    return 0
 
 
 def run_simulate(args: argparse.Namespace) -> int:
@@ -1049,7 +1359,7 @@ def run_simulate(args: argparse.Namespace) -> int:
     the run is meant to be picked up by `serve --db-path` afterward.
     """
     from anima_world.snapshot import create_snapshot, save_snapshot
-    from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, TICKS_PER_DAY
+    from anima_world.world_time import TICKS_PER_DAY
 
     tier = "mock" if args.no_llm else args.llm  # --no-llm wins (back-compat alias)
 
@@ -1063,11 +1373,13 @@ def run_simulate(args: argparse.Namespace) -> int:
         try:
             preflight_store = ConfigStore(conn, fernet_key=load_or_create_key(args.db_path))
             seed_config_defaults(preflight_store)
-            error = _preflight_llm(preflight_store)
+            error = onboarding.probe_llm(preflight_store)
         finally:
             conn.close()
         if error is not None:
-            print(f"[simulate] LLM preflight failed: {error}", file=sys.stderr)
+            print(f"[simulate] LLM 预检没过:{error}\n"
+                  f"           配置一个:anima-world config set llm.api_key sk-…\n"
+                  f"           或改用 --llm mock / --no-llm 空跑。", file=sys.stderr)
             return 2
 
     try:
@@ -1207,105 +1519,43 @@ def run_world_package(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_author_app(
-    db_path: str | Path,
-    data_dir: str | Path | None,
-    db_editor_port: int | None = None,
-    db_editor_url: str | None = None,
-):
-    """Build and return a FastAPI author studio app (testable without uvicorn).
+def _print_welcome() -> int:
+    """What a bare `anima-world` should say: the next command, not a flag dump.
 
-    Derives data_dir from db_path when not given: <db stem>-data/ next to the db.
-    Creates the db parent directory (and data_dir's novels subdirectory on lifespan
-    start) so callers need not pre-create anything.
+    argparse's help lists eight subcommands with equal weight, which tells a
+    newcomer nothing about which one to run first.
     """
-    from anima_world.author.app import create_author_app
-    from anima_world.author.store import AuthorStore
-    from anima_world.llm_client import create_llm_client_from_env
+    print(onboarding.rule("ANIMA 世界引擎"))
+    print(f"""
+  第一次用?一条命令就够:
 
-    db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if data_dir is None:
-        data_dir = db_path.parent / (db_path.stem + "-data")
-    data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    store = AuthorStore(db_path)
-    return create_author_app(
-        store,
-        llm_factory=create_llm_client_from_env,
-        data_dir=data_dir,
-        db_editor_port=db_editor_port,
-        db_editor_url=db_editor_url,
-    )
+      {onboarding.bold('anima-world start')}      {onboarding.dim('创建并启动一个世界,引导你配 LLM')}
 
+  然后:
 
-def run_author_serve(args: argparse.Namespace) -> int:
-    """Run the author studio FastAPI server."""
-    import uvicorn
+      anima-world doctor       {onboarding.dim('体检:密钥、LLM 连通性、时钟快慢')}
+      anima-world config list  {onboarding.dim('看/改配置(密钥自动打码)')}
 
-    app = _build_author_app(
-        args.db,
-        data_dir=args.data_dir,
-        db_editor_port=args.db_editor_port,
-        db_editor_url=args.db_editor_url,
-    )
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-    return 0
+  想造一个自己的世界?那是另一个程序 —— 创作工作台:
 
+      {onboarding.bold('anima-studio')}            {onboarding.dim('桌面程序:管 core 版本 · 小说 → 世界')}
+      {onboarding.dim('它把世界钉在某个 core 版本上,所以独立于本引擎单独安装。')}
 
-def run_author(args: argparse.Namespace) -> int:
-    """Run creator-surface tools (currently: LLM world seed generation)."""
-    if args.author_command == "serve":
-        return run_author_serve(args)
-
-    import asyncio
-
-    from anima_world.author import SeedGenerationError, generate_world_seed
-    from anima_world.llm_client import LLMClient
-    from anima_world.narrative import resolve_llm_env_settings
-
-    settings = resolve_llm_env_settings()
-    if settings is None:
-        print(
-            "[author] 生成世界种子需要真实 LLM。请配置 ANIMA_LLM_API_KEY /"
-            " OPENAI_API_KEY / LONGCAT_API_KEY（及对应 BASE_URL/MODEL）后重试。",
-            file=sys.stderr,
-        )
-        return 2
-    api_key, base_url, model, timeout = settings
-    # A whole world seed is a long generation — the chat-sized default timeout
-    # aborts it mid-thought.
-    llm = LLMClient(api_key=api_key, base_url=base_url, model=model,
-                    timeout=max(timeout, 120.0))
-    try:
-        seed = asyncio.run(
-            generate_world_seed(
-                llm, args.concept, n_agents=args.agents, n_locations=args.locations
-            )
-        )
-    except SeedGenerationError as exc:
-        print(f"[author] 种子生成失败：{exc}", file=sys.stderr)
-        return 2
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(seed, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(
-        json.dumps(
-            {
-                "operation": "generate",
-                "output": str(output),
-                "agents": [a["id"] for a in seed["agents"]],
-                "locations": [loc["id"] for loc in seed["locations"]],
-            },
-            ensure_ascii=False,
-        )
-    )
+  部署与打包:serve / simulate / world export|import
+  完整帮助:anima-world --help
+""")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "start":
+        return run_start(args)
+    if args.command == "config":
+        return run_config(args)
+    if args.command == "doctor":
+        return run_doctor(args)
     if args.command == "story":
         return run_story(args)
     if args.command == "serve":
@@ -1314,10 +1564,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_simulate(args)
     if args.command == "world":
         return run_world_package(args)
-    if args.command == "author":
-        return run_author(args)
-    parser.print_help()
-    return 1
+    return _print_welcome()
 
 
 if __name__ == "__main__":

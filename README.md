@@ -1,31 +1,78 @@
-# anima-world — 世界引擎 + 创作工作台(可发布 pip 包)
+# anima-world — 世界引擎(可发布 pip 包)
 
-一个 pip 包,两件事:**能创作**(小说/概念 → 世界种子)、**能打包**(→ 可分发的 `.cyberworld` 数据包)。
-一个 `world.db` 就是一个世界。这是整套系统里**唯一的库**:player/platform 向下依赖这里的契约模块,反向零依赖。
+一个 `world.db` 就是一个世界。这个包**只做引擎**:跑世界、快进世界、把世界打包成可分发的
+`.cyberworld`。**创作是另一个程序** —— `anima-studio`(见 `../tool`),它管理多个 core 版本,
+所以不能住在其中任何一个里面。
+
+这是整套系统里**唯一的库**:其他仓库向下依赖这里的契约模块,反向零依赖。
+
+## 30 秒上手
+
+```bash
+pip install -e .        # ← 现在只能这样:包还没发布到 PyPI,从源码装
+anima-world start
+```
+
+装完 `anima-world` 命令就在 PATH 上了。**没装之前它是找不到的命令** ——
+临时想跑可以在仓库根目录用 `python -m anima_world start`,但换个目录就不灵了。
+
+> 发布之后这里会变成 `pip install anima-world`。
+
+`start` 依次做三件事,不用你先读任何文档:
+
+1. **配 LLM** —— 检测到没配就当场问你要 key(直接回车 = 先用 Mock 试跑),写进 db 时自动加密,
+   并**真的调用一次**确认能通
+2. **建世界** —— 没有 db 就新建,新世界的时钟用**演示速度**(1 tick/秒,约 5 分钟走完一个世界日);
+   想要真实时间的一行命令会打印出来
+3. **运行** —— 端口被占就自动往后找
+
+```
+  ① LLM      ✓ 已加密写入 saves/world.db  ✓ 连通性测试通过
+  ② 世界     ✓ 新建 saves/world.db   时钟:1 tick/秒 —— 约 5 分钟走完一个世界日
+             ✓ 3 个角色就位: 苏晚夏、陆知遥、沈亦柔
+  ③ 运行     http://127.0.0.1:8000   (API,没有网页界面)
+```
+
+**引擎不发 HTML。** 玩家界面是网站仓库的事(走 `/internal/v1`),管理台是运维台的事,
+创作是 `anima-studio` 的事。`/` 返回一段说明自己是什么的 JSON,而不是空白 404。
+
+出问题了先跑体检 —— 它检查密钥文件、db 格式、**真实调用一次 LLM**,并把时钟快慢翻译成人话:
+
+```bash
+anima-world doctor
+anima-world config list            # 看配置(密钥自动打码)
+anima-world config set llm.api_key sk-…      # 改配置,立即生效,不用 curl 也不用重启
+anima-world config set scheduler.tick_rate 0.00333   # 切回真实时间
+```
 
 ## 安装
 
 ```bash
+pip install -e .                 # 从源码装(当前唯一可用方式)
+pip install -e ".[dev]"          # 本地开发,多带 pytest/build/twine
 pip install anima-world          # 发布后
-pip install -e ".[dev]"          # 本地开发(含 pytest/build/twine)
 ```
 
-## 两个命令行入口
+## 命令
 
 ```bash
-anima-world  --help              # 引擎 + 打包:serve / story / simulate / world export|import / author
-anima-author --help              # 创作工作台,等价于 anima-world author
+anima-world --help    # start / config / doctor / serve / simulate / world export|import
 ```
 
-### 能创作
+`start` 是给人用的门(引导 + 演示速度);**`serve` 是给部署用的**,行为一如既往
+(不引导、不改时钟),世界镜像跑的是它。
+
+### 想创作一个世界?
+
+那是 `anima-studio` 的事 —— 一个独立的桌面程序,在 `../tool`:
 
 ```bash
-# 一句话概念 → 世界种子
-anima-author generate --concept "雨季不停的港口小镇" --output seed.json --agents 4 --locations 5
-
-# 打开工作台:上传小说 → LLM 扫描 → 蒸馏 → 实体卡片 → 物化数据包
-anima-author serve --port 8402 --db saves/author.db
+cd ../tool && .venv/bin/anima-studio
 ```
+
+它把小说变成世界种子,然后**用你选定的那个 core 版本**生成世界文件。
+之所以独立成一个程序,是因为世界文件钉死在生成它的引擎版本上,
+而工具要能同时持有好几个版本。
 
 ### 能打包
 
@@ -62,12 +109,15 @@ anima_world/
 ├── 配置       config_store.py(Fernet 加密 secret,keyfile=<db>.key)prompt_store.py
 ├── 世界定义   world_store.py world_seed.py world_seed.json locations.py beats.py
 ├── 打包       world_package.py(.cyberworld 导入导出)
-├── web 层     world/app.py(/api、/internal/v1、/api/admin/v1)world/auth.py world/static/
-├── 创作台     author/(app.py extract.py distill.py generate.py store.py static/)
+├── web 层     world/app.py(/api、/internal/v1、/api/admin/v1)world/auth.py —— 纯 API,不发 HTML
 └── CLI        __main__.py
 ```
 
-`world_seed.json` 与两个 `static/index.html` 是 **package data**,随 wheel 分发(见 `tests/test_packaging.py` 的回归)。
+`world_seed.json` 是本包**唯一的 package data**,随 wheel 分发(见 `tests/test_packaging.py` 的回归)。
+
+**世界引擎不发 HTML。** 它只有三组 API:`/api/*`(本地查看与改配置)、`/internal/v1/*`(网站,
+服务凭证 + membership claim)、`/api/admin/v1/*`(运维台)。玩家界面是网站仓库的事;
+`/` 返回一段说明自己是什么的 JSON。
 
 ## 对外契约(其他 surface 只依赖这四个)
 
@@ -79,7 +129,7 @@ anima_world/
 | `anima_world.world.auth` | membership claim 的 HMAC 签名/验签 | 网站后端 `app/services/claims.py` |
 | `anima_world.world_package` | `.cyberworld` 数据包格式 | 运维台 `lib/worldPackage.js` |
 | `anima_world.world_seed` | 种子 schema 校验 | 运维台 `lib/worldSeed.js` |
-| `anima_world.beats` | 节拍脚本严格校验(坏脚本必须在创作台报错) | (无镜像,只有本包内的创作台用) |
+| `anima_world.beats` | 节拍脚本严格校验 | 创作工作台(`anima-studio`)通过 CLI 委托校验 |
 
 数据包与种子两项由 `src/platform/test/contract.test.js` 与本包**双向互验**。
 

@@ -1,7 +1,9 @@
 """FastAPI web server for the anima_world.
 
-Serves a single-page frontend and exposes REST + SSE endpoints for
-observing and interacting with the running simulation.
+An API, not a site: REST + SSE for observing and driving a running world.
+Three audiences, three prefixes — `/api/*` for local inspection and settings,
+`/internal/v1/*` for the site (service credential + membership claim), and
+`/api/admin/v1/*` for the operator. No HTML is served from here.
 """
 
 from __future__ import annotations
@@ -19,8 +21,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
 from anima_world.chat_service import ChatService
@@ -51,10 +53,11 @@ _REAP_INTERVAL = 30.0
 _LOCATION_KEYS = ("id", "name", "description", "kind", "parent", "x", "y", "w", "h")
 
 
-STATIC_INDEX = Path(__file__).with_name("static") / "index.html"
-# The admin *control API* (/api/admin/v1) stays in the self-contained world
-# runtime; the admin *console UI* is a maintainer surface served by the operator
-# tool (see the anima-platform operator), so the runtime no longer serves an HTML shell.
+# This runtime serves NO HTML, and owns no authoring code. Every UI belongs to
+# somebody else: the admin console to the operator tool, the player experience
+# to the site (which reaches worlds through /internal/v1), and world authoring
+# to the studio — a separate program that manages engine versions, which it
+# could not do if it lived inside one of them.
 
 
 def _resolve_tick_rate(fallback: float, config_store: Any | None) -> float:
@@ -354,6 +357,24 @@ class _ServeWorld:
             "runtime": self._runtime_status(recent_events),
         }
 
+    def _llm_degraded_reason(self) -> str | None:
+        """Why this world is answering with the Mock LLM.
+
+        A never-configured key and an unreadable one are indistinguishable to
+        every consumer (both read as "unset"), and a degraded world looks
+        perfectly healthy from the outside — same tick rate, same events, just
+        template text forever. This is the one place that names the cause.
+        """
+        config_store = self.scheduler.config_store
+        if config_store is None:
+            return "no config store: this world has no LLM configuration (in-memory run)"
+        undecryptable = getattr(config_store, "undecryptable_secrets", None)
+        if callable(undecryptable) and "llm.api_key" in undecryptable():
+            return "llm.api_key could not be decrypted — did <db>.key travel with the database?"
+        if not (config_store.get("llm.api_key", default="") or ""):
+            return "llm.api_key is not configured"
+        return None  # a key is set; the provider is mock for some other reason
+
     def _runtime_status(self, recent_events: list[dict[str, Any]]) -> dict[str, Any]:
         conn = self.scheduler.event_log.conn if self.scheduler.event_log is not None else None
         if conn is not None:
@@ -389,15 +410,23 @@ class _ServeWorld:
                 "mock": False,
                 "model": provider.model,
                 "base_url": provider.base_url,
+                "degraded_reason": None,
             }
         elif isinstance(provider, MockNarrativeProvider) or provider is None:
-            llm_status = {"provider": "mock", "mock": True, "model": None, "base_url": None}
+            llm_status = {
+                "provider": "mock",
+                "mock": True,
+                "model": None,
+                "base_url": None,
+                "degraded_reason": self._llm_degraded_reason(),
+            }
         else:
             llm_status = {
                 "provider": provider.__class__.__name__,
                 "mock": False,
                 "model": getattr(provider, "model", None),
                 "base_url": getattr(provider, "base_url", None),
+                "degraded_reason": None,
             }
 
         return {
@@ -432,7 +461,6 @@ def create_app(
     cors_origins: tuple[str, ...] | list[str] = (),
     platform_service_credentials: tuple[str, ...] | list[str] = (),
     membership_claim_secret: str | None = None,
-    legacy_player_routes: bool = True,
 ) -> FastAPI:
     """Build the FastAPI app bound to `scheduler`.
 
@@ -623,11 +651,9 @@ def create_app(
     # player-visitor: who is visiting, and where they stand. Deliberately
     # in-memory (a restart is a fresh visit); the durable part of a player —
     # conversations, memories about them, relations — lives in the DB.
+    # Keyed by membership id: the only identity a world accepts now that the
+    # name-based legacy routes are gone.
     players: dict[str, dict[str, Any]] = {}
-
-    def _player_id(name: str | None) -> str:
-        name = (name or "").strip()
-        return f"user:{name[:24]}" if name else "user"
 
     def _advance_once() -> None:
         with _tick_lock:
@@ -719,10 +745,6 @@ def create_app(
         except MembershipClaimError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-    def _require_legacy_player_routes() -> None:
-        if not legacy_player_routes:
-            raise HTTPException(status_code=404, detail="legacy player routes are disabled")
-
     async def _require_world_admin(request: Request) -> None:
         authorization = request.headers.get("Authorization", "")
         scheme, _, supplied = authorization.partition(" ")
@@ -765,8 +787,19 @@ def create_app(
 
     @app.get("/")
     async def index():
-        return HTMLResponse(STATIC_INDEX.read_text(encoding="utf-8"))
-
+        """No UI here, and none coming: the player surface belongs to the site
+        and authoring belongs to the studio, a separate desktop program. Say so
+        rather than 404 blankly at whoever opened this in a browser."""
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": "这是世界引擎的 API,没有网页界面。"
+                          "创作/编辑世界用创作工作台(anima-studio);玩家界面由网站提供。",
+                "world_id": world_id,
+                "instance_id": instance_id,
+                "api": ["/api/v1/world", "/api/state", "/api/config", "/internal/v1/meta"],
+            },
+        )
 
     @app.get("/api/admin/v1/runtime")
     async def admin_runtime(
@@ -1222,72 +1255,6 @@ def create_app(
             "paused": _simulation_paused["value"],
             "tick": scheduler.clock,
         }
-
-    @app.post("/api/v1/player/move")
-    @app.post("/api/player/move")
-    async def player_move(body: dict[str, Any], response: Response):
-        _require_legacy_player_routes()
-        name = (body.get("player_name") or "").strip()
-        location = body.get("location")
-        if not name:
-            raise HTTPException(status_code=400, detail="player_name is required")
-        if not location:
-            raise HTTPException(status_code=400, detail="location is required")
-        if scheduler.location_store is not None:
-            row = scheduler.location_store.get(location)
-            if row is None or row.get("kind", "point") != "point":
-                raise HTTPException(status_code=404, detail=f"没有 {location} 这个地方")
-        pid = _player_id(name)
-        players[pid] = {"name": name, "location": location}
-        response.headers["X-Cyberworld-Protocol-Version"] = "1"
-        response.headers["X-Cyberworld-Instance-Id"] = instance_id
-        return {"player_id": pid, "location": location}
-
-    @app.post("/api/v1/chat")
-    @app.post("/api/chat")
-    async def post_chat(body: dict[str, Any]):
-        _require_legacy_player_routes()
-        agent_id = body.get("agent_id")
-        text = body.get("text", "")
-        player_name = (body.get("player_name") or "").strip() or None
-        pid = _player_id(player_name)
-        if not agent_id or agent_id not in scheduler.agents:
-            # Departed (agent_leave) vs never-existed: the projection still
-            # remembers a departed agent — the friendly line is part of the
-            # fiction, not an error page.
-            projected = scheduler._memory_projection.agents.get(agent_id or "")
-            if projected is not None:
-                raise HTTPException(status_code=404, detail="他现在不在城里。")
-            raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
-        # Co-location gate (player-visitor D2): only when BOTH sides have a
-        # known position — a legacy client (no player_name) is never gated.
-        player = players.get(pid)
-        if player_name and player is not None and player.get("location"):
-            brain = scheduler.agents[agent_id]
-            agent_loc = brain.agent.blackboard.read("loc") or brain.agent.location
-            if agent_loc and agent_loc != player["location"]:
-                loc_name = agent_loc
-                if scheduler.location_store is not None:
-                    row = scheduler.location_store.get(agent_loc)
-                    if row is not None:
-                        loc_name = row.get("name") or agent_loc
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"{brain.agent.name}现在在{loc_name}（{agent_loc}），你们不在同一个地方。",
-                )
-
-        async def token_stream():
-            async for token in chat_service.send(agent_id, text, player_id=pid, player_name=player_name):
-                yield token
-
-        return StreamingResponse(
-            token_stream(),
-            media_type="text/plain; charset=utf-8",
-            headers={
-                "X-Cyberworld-Protocol-Version": "1",
-                "X-Cyberworld-Instance-Id": instance_id,
-            },
-        )
 
     @app.get("/api/memories/{agent_id}")
     async def get_memories(agent_id: str):

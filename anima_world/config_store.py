@@ -101,6 +101,11 @@ class ConfigStore:
         self._fernet = Fernet(fernet_key) if fernet_key else None
         self._cache: dict[str, Any] = {}
         self._meta: dict[str, dict[str, Any]] = {}
+        # Secrets that are STORED but unreadable (almost always a lost keyfile).
+        # They decode to None, which every caller reads as "unset" — without
+        # this set there is no way to tell an unconfigured key from a broken
+        # one, and the world silently degrades to Mock either way.
+        self._undecryptable: set[str] = set()
         self._hydrate()
 
     def _hydrate(self) -> None:
@@ -123,11 +128,13 @@ class ConfigStore:
         if is_secret:
             if self._fernet is None:
                 logger.warning("config %s is a secret but no encryption key is configured", key)
+                self._undecryptable.add(key)
                 return None
             try:
                 raw_value = self._fernet.decrypt(raw_value.encode()).decode()
             except InvalidToken:
                 logger.warning("config %s could not be decrypted (missing/corrupted keyfile)", key)
+                self._undecryptable.add(key)
                 return None
         return _coerce(raw_value, value_type)
 
@@ -183,6 +190,18 @@ class ConfigStore:
                 "description": description,
             }
             self._cache[key] = value
+            self._undecryptable.discard(key)  # rewritten under the current key
+
+    def undecryptable_secrets(self) -> list[str]:
+        """Secret keys that are stored but could not be read back.
+
+        `get()` returns None for these, exactly as it does for a key that was
+        never set — so callers see "unset" and degrade quietly. Boot checks and
+        `/api/state` use this to tell the two apart and name the real cause
+        (a `<db>.key` that did not travel with the database).
+        """
+        with self._lock:
+            return sorted(self._undecryptable)
 
     def has(self, key: str) -> bool:
         with self._lock:
