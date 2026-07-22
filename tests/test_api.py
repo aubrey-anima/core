@@ -96,15 +96,20 @@ def test_config_set_coerces_and_validates(world):
 
 
 def test_close_saves_snapshot_and_world_reopens(tmp_path):
+    """时钟恢复语义:回到事件日志里最后一个世界时间戳。没有事件的静默 tick
+    不是历史(事件溯源的本义),所以用一个确定性事件钉住最后时刻 ——
+    依赖异步叙事事件恰好落盘的写法会 flaky。"""
     db = str(tmp_path / "w.db")
     with World.open(db, force_mock_llm=True) as world:
         world.tick(3)
+        world.player_action("p1", "留下到此一游")  # ts = 当前时钟,同步落盘
         tick = world.state()["world_time"]["tick"]
+        assert tick == 3
 
     with World.open(db, force_mock_llm=True) as reopened:
         state = reopened.state()
         assert state["runtime"]["snapshot"]["available"] is True
-        assert state["world_time"]["tick"] == tick, "重开必须接着上次的时钟走"
+        assert state["world_time"]["tick"] == tick, "重开必须接着最后一个事件的时钟走"
 
 
 def test_subscribe_receives_events(world):
