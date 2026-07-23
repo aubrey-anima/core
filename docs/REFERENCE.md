@@ -213,7 +213,7 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子);已有库的 seed 被忽略并警告;坏 beats 当场抛 `BeatScriptError` |
+| `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子);已有库的 seed 被忽略并警告;**显式指定**的坏 seed / 坏 beats 当场抛 `WorldSeedError` / `BeatScriptError` |
 | `world.close(wait=True)` | 停时钟、排干 LLM 线程池。幂等;`with World.open(...) as world:` 自动调用。事件每 tick 已落盘,退出时不额外写 |
 
 ### 时钟
@@ -310,7 +310,7 @@ from anima_world.api import World
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--db-path` | `saves/world.db` | 世界文件 |
-| `--seed` / `--beats` / `--agents` | - | 同 start;坏 beats 拒绝启动(退出码 2) |
+| `--seed` / `--beats` / `--agents` | - | 同 start;坏 seed / 坏 beats 拒绝启动(退出码 2) |
 | `--quiet` | - | 不回显叙事事件 |
 
 ### 4.3 anima-world config
@@ -420,7 +420,7 @@ anima-world world import my.cyberworld --destination ./instances
 |---|---|
 | `world.db` | SQLite(WAL):事件、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳 |
 | `world.db.key` | Fernet 密钥,**搬迁必须随行**;丢失 = secret 永久读不出(降级 Mock,但会点名) |
-| `world_seed.json` | 种子:`agents`(id/name/location/personality,可选 duties/goals)、`locations`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、可选 `relations`/`memories`。畸形条目降级跳过,永不阻断启动 |
+| `world_seed.json` | 种子:`agents`(id/name/location/personality,可选 duties/goals)、`locations`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、可选 `relations`/`memories`。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空库一次,静默降级不可挽回 |
 | `beats.json` | 可选节拍脚本(见 §9) |
 
 **`.cyberworld` 包** = 受严格约束的 ZIP:

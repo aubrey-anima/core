@@ -158,3 +158,94 @@ def test_state_reports_live_locations(tmp_path):
         }
         reported = {aid: d["location"] for aid, d in world.state()["agents"].items()}
         assert {k: v for k, v in reported.items() if k in live} == live
+
+
+def _tick_into_quiet_tail(world, budget: int = 600) -> int:
+    """走到"最后一个 tick 没发事件"为止,返回当时的时钟。
+
+    这正是旧写法丢时间的状态:时钟从 max(事件 ts) 倒推,而末尾这段安静 tick
+    在日志里没有任何痕迹。世界的事件疏密逐次运行都不同(角色行为带骰子),
+    所以固定 tick 数的写法会时红时绿 —— 必须按"有没有事件"构造。
+    """
+    conn = world.scheduler.event_log.conn
+
+    def count() -> int:
+        return conn.execute("SELECT count(*) FROM events").fetchone()[0]
+
+    world.tick(30)  # 先离开开局的密集播种段
+    for _ in range(budget):
+        before = count()
+        world.tick(1)
+        if count() == before:
+            return world.state()["world_time"]["tick"]
+    raise AssertionError(f"{budget} tick 内没出现无事件的 tick,构造不出安静尾巴")
+
+
+def test_clock_survives_close_and_reopen(tmp_path):
+    """回归:世界时钟必须落盘,不能靠"最后一条事件的 ts"倒推。
+
+    时钟曾经只在 `load_persisted_events` 里恢复成 max(事件 ts) —— 世界末尾
+    那段没有事件的安静 tick(角色都在睡)于是被无声丢掉:CLI 报 clock=350、
+    重开读到 320,而且欠账永久追不回来。ARCHITECTURE.md 第 2 节的判据是
+    "'发生了一件事'进事件日志,'现在是多少'进 data-plane 表",时钟正是后者。
+    """
+    db = str(tmp_path / "w.db")
+    with World.open(db, force_mock_llm=True) as world:
+        reported = _tick_into_quiet_tail(world)
+
+    with World.open(db, force_mock_llm=True) as world:
+        assert world.state()["world_time"]["tick"] == reported, (
+            "重开后的时钟必须等于关闭时报告的时钟"
+        )
+
+
+def test_clock_deficit_never_accumulates_across_restarts(tmp_path):
+    """同一条 bug 的累积面:欠账是永久的,反复重启会让世界日历越落越后。"""
+    db = str(tmp_path / "w.db")
+    expected = 0
+    for _ in range(3):
+        with World.open(db, force_mock_llm=True) as world:
+            expected = _tick_into_quiet_tail(world)
+        with World.open(db, force_mock_llm=True) as world:
+            assert world.state()["world_time"]["tick"] == expected, (
+                "上一轮关闭时走到的时钟必须原样还在,欠账不许攒下来"
+            )
+
+
+def test_explicit_seed_that_cannot_be_read_fails_loudly(tmp_path):
+    """回归:显式指定的种子读不了,必须当场报错,不能静默换成内置演示世界。
+
+    种子只在空库首启读一次 —— 静默降级因此不可挽回:路径打错一个字母,你
+    拿到的是内置三人世界(夏/遥/柔),而且改对路径重开也救不回来(库已非空,
+    seed 被忽略)。CLI 那边更糟:`simulate --seed typo.json` 退出码 0,部署
+    脚本会以为成功了。坏节拍脚本一直是当场硬失败,种子没有理由更宽松。
+    """
+    from anima_world.world_seed import WorldSeedError
+
+    with pytest.raises(WorldSeedError) as excinfo:
+        World.open(
+            str(tmp_path / "w.db"),
+            seed_path=str(tmp_path / "typo.json"),
+            force_mock_llm=True,
+        )
+    assert "typo.json" in str(excinfo.value), "报错必须点名是哪个文件"
+
+
+def test_explicit_seed_failing_schema_says_what_is_wrong(tmp_path):
+    """同上,但种子读得到、schema 不过:必须说清缺什么,而不是只说"无效"。"""
+    import json
+
+    from anima_world.world_seed import WorldSeedError
+
+    seed = tmp_path / "myworld.json"
+    seed.write_text(
+        json.dumps({"agents": [{"id": "阿茶", "name": "阿茶"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(WorldSeedError) as excinfo:
+        World.open(str(tmp_path / "w.db"), seed_path=str(seed), force_mock_llm=True)
+    message = str(excinfo.value)
+    assert "locations" in message, "缺了整个 locations 列表,报错得说出来"
+    assert "location" in message and "personality" in message, (
+        "角色缺的字段也要逐个点名,像坏节拍脚本那样"
+    )

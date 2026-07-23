@@ -42,6 +42,8 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 
 数据包与种子两项由运维台的 `test/contract.test.js` 与本包**双向互验**(引擎不可用时整体 skip)。
 节拍脚本的严格校验有个硬要求:**坏脚本必须在加载时当场报错,不能流到世界启动**。
+**显式指定的种子同规矩**(`WorldSeedError`):种子只读进空库一次,静默降级成内置演示世界
+不可挽回;只有内置种子才降级(装坏了也得能开机)。
 
 Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)。它是宿主应用
 依赖的 API 面:**只加不改**,破坏性变更等于跨仓库破坏。
@@ -51,7 +53,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 78 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 109 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 

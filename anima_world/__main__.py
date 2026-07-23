@@ -1,4 +1,4 @@
-"""CLI entrypoint for anima_world (M1 recover, M2 story)."""
+"""CLI entrypoint for anima_world."""
 
 from __future__ import annotations
 
@@ -38,7 +38,8 @@ from anima_world.prompt_store import seed_defaults as seed_prompt_defaults
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
 from anima_world.world_store import BTStore, LocationStore
-from anima_world.world_seed import is_valid_world_seed as _is_valid_world_seed
+from anima_world.world_seed import WorldSeedError
+from anima_world.world_seed import world_seed_errors as _world_seed_errors
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     start = sub.add_parser(
         "start", help="创建并启动一个世界(引导配置 LLM,前台运行)—— 从这里开始"
     )
-    start.add_argument("--db-path", default="saves/world.db", help="世界文件位置(不存在就新建)")
+    start.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置(不存在就新建)")
     start.add_argument("--seed", default=None, help="世界种子 JSON(只对新建的世界生效)")
     start.add_argument("--beats", default=None, help="节拍脚本 JSON")
     start.add_argument("--no-input", action="store_true", help="不要交互提问(CI / 脚本)")
@@ -64,30 +65,43 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     config_cmd = sub.add_parser("config", help="读写世界配置(LLM 密钥、时钟快慢…),不用 curl")
-    config_cmd.add_argument("--db-path", default="saves/world.db", help="世界文件位置")
+    config_cmd.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
-    config_list = config_sub.add_parser("list", help="列出全部配置(密钥自动打码)")
+
+    def _config_leaf(name: str, help_text: str) -> argparse.ArgumentParser:
+        """A config leaf that also takes --db-path.
+
+        Registered on the leaf as well as the group because every other
+        command takes `--db-path` trailing (`doctor … --db-path w.db`), and
+        argparse stops honouring the group's copy once a leaf's positionals
+        have been consumed. Without this, the habit that works everywhere
+        else dies on `config set k v --db-path w.db` with a bare top-level
+        usage error. Both positions now mean the same thing; the leaf wins
+        when given twice, which is the one the user typed last.
+        """
+        leaf = config_sub.add_parser(name, help=help_text)
+        # SUPPRESS, not None: a subparser writes its defaults onto the SAME
+        # namespace, so a plain default would blank out the group's --db-path
+        # whenever the leaf's copy is omitted.
+        leaf.add_argument("--db-path", default=argparse.SUPPRESS, help="世界文件位置")
+        return leaf
+
+    config_list = _config_leaf("list", "列出全部配置(密钥自动打码)")
     config_list.add_argument("--category", default=None, help="只看某一类:llm / scheduler / chat …")
-    config_get = config_sub.add_parser("get", help="读一个配置项")
+    config_get = _config_leaf("get", "读一个配置项")
     config_get.add_argument("key")
-    config_set = config_sub.add_parser("set", help="改一个配置项(立即生效,无需重启)")
+    config_set = _config_leaf("set", "改一个配置项(立即生效,无需重启)")
     config_set.add_argument("key")
     config_set.add_argument("value")
 
     doctor = sub.add_parser("doctor", help="体检:世界文件、密钥、LLM 连通性、时钟快慢")
-    doctor.add_argument("--db-path", default="saves/world.db", help="世界文件位置")
+    doctor.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
     doctor.add_argument("--skip-probe", action="store_true", help="不要真的调用一次 LLM")
-
-    # -- story (M2) --
-    story = sub.add_parser("story", help="Run agent story simulation")
-    story.add_argument("--agents", type=int, default=3, help="Number of agents (default 3)")
-    story.add_argument("--ticks", type=int, default=50, help="Max ticks (default 50)")
-    story.add_argument("--narrative", action="store_true", help="Enable narrative output")
 
     run = sub.add_parser(
         "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
     )
-    run.add_argument("--db-path", default="saves/world.db", help="SQLite world DB path")
+    run.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="SQLite world DB path")
     run.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
     run.add_argument(
         "--beats", default=None,
@@ -100,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--quiet", action="store_true", help="Do not echo narrative events")
     # -- simulate (novel-benchmark-loop) --
     simulate = sub.add_parser(
-        "simulate", help="Fast-forward a world headlessly (no sleep, no web server)"
+        "simulate", help="Fast-forward a world headlessly (no sleep, no onboarding)"
     )
     simulate.add_argument("--db-path", required=True, help="SQLite world DB path")
     simulate.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
@@ -180,20 +194,33 @@ CHARACTER_ROSTER: list[dict[str, str]] = [
 
 WORLD_SEED_PATH = Path(__file__).parent / "world_seed.json"
 
-def _load_world_seed(path: Path | str = WORLD_SEED_PATH) -> dict[str, Any] | None:
-    """Load + validate the bundled world seed file (D7).
+def _load_world_seed(
+    path: Path | str = WORLD_SEED_PATH, *, authored: bool = False
+) -> dict[str, Any] | None:
+    """Load + validate a world seed file (D7).
 
-    Returns None (the "fall back to hardcoded defaults" signal) on any
-    missing file, unreadable file, or schema mismatch — logging a warning
-    rather than raising, so a bad seed file can never take `serve` down at
-    boot. Only consulted at first boot against a fresh (empty) database.
+    The bundled seed degrades: on a missing/unreadable/invalid file it logs a
+    warning and returns None ("fall back to hardcoded defaults"), so a damaged
+    install can never stop a world from booting.
+
+    An *authored* seed — one the caller named via `--seed` / `seed_path` —
+    raises `WorldSeedError` instead. Degrading there is unrecoverable rather
+    than merely lossy: a seed is only ever read into an EMPTY database, so a
+    single typo'd path silently produces the built-in demo world for good, and
+    re-running with the path fixed no longer helps. Same rule as beat scripts:
+    an authored file that cannot be honoured fails at load, loudly.
     """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
+        if authored:
+            raise WorldSeedError([f"cannot read seed file {path}: {exc}"]) from exc
         logger.warning("world_seed.json unavailable or invalid (%s); falling back to hardcoded defaults", exc)
         return None
-    if not _is_valid_world_seed(data):
+    errors = _world_seed_errors(data)
+    if errors:
+        if authored:
+            raise WorldSeedError([f"{path}: {e}" for e in errors])
         logger.warning("world_seed.json failed schema validation; falling back to hardcoded defaults")
         return None
     return data
@@ -453,9 +480,12 @@ def build_serve_scheduler(
     call each is what made a 30-world-day run undrainable — while the
     planner and capability catalog stay on the configured stack.
     beats_path (beat-director): authored beat script; loading is STRICT
-    (BeatScriptError propagates and fails startup — the opposite of the seed
-    file's never-block philosophy, deliberately: --beats is an explicit
+    (BeatScriptError propagates and fails startup: --beats is an explicit
     opt-in and an authoring error should surface at load, not mid-run).
+    seed_path: same rule, same reason (WorldSeedError). Only the BUNDLED seed
+    degrades to hardcoded defaults — an authored seed that quietly became the
+    built-in demo world could never be corrected afterwards, since a seed is
+    read once into an empty database.
     """
     beat_script = BeatScript.load(beats_path) if beats_path is not None else None
     event_log = None
@@ -471,7 +501,11 @@ def build_serve_scheduler(
     shared_lock = threading.RLock()
     location_store = None
     bt_store = None
-    world_seed = _load_world_seed(seed_path) if seed_path is not None else _load_world_seed()
+    world_seed = (
+        _load_world_seed(seed_path, authored=True)
+        if seed_path is not None
+        else _load_world_seed()
+    )
     if n_agents is None:
         n_agents = len(world_seed["agents"]) if world_seed is not None else len(CHARACTER_ROSTER)
     if db_path is not None:
@@ -1008,35 +1042,6 @@ def _seed_capability_catalog(
         })
 
 
-def run_story(args: argparse.Namespace) -> int:
-    """Run M2 story simulation."""
-    n = args.agents
-    provider = create_narrative_provider_from_env() if args.narrative else None
-    scheduler = Scheduler(narrative_provider=provider)
-
-    world_seed = _load_world_seed()
-    locs = ["cafe", "workshop", "home"]
-    for i in range(n):
-        entry = _roster_entry(i, locs, world_seed)
-        bt = Selector([Action(lambda bb: Status.SUCCESS, "go_to_cafe")])
-        agent = Agent(id=entry["id"], name=entry["name"], bt_root=bt, location=entry["location"])
-        agent.blackboard.write("loc", entry["location"])
-        agent.blackboard.write("personality", entry["personality"])
-        brain = Brain(agent=agent, action_table=ActionTable.default())
-        scheduler.register(brain)
-
-    print(f"[story] starting with {n} agent(s), {args.ticks} ticks\n")
-    for _ in range(args.ticks):
-        scheduler.tick()
-        if provider and scheduler.narrative_history:
-            last = scheduler.narrative_history[-1]
-            t = scheduler.clock
-            print(f"[{t:04d}] {last}")
-
-    print(f"\n[story] done. clock={scheduler.clock}")
-    return 0
-
-
 def _run_world_foreground(world: Any, *, quiet: bool = False) -> None:
     """Drive an opened World in the foreground until SIGINT/SIGTERM.
 
@@ -1090,7 +1095,7 @@ def run_run(args: argparse.Namespace) -> int:
         world = World.open(
             args.db_path, seed_path=args.seed, beats_path=args.beats, agents=args.agents
         )
-    except BeatScriptError as exc:
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[run] {exc}", file=sys.stderr)
         return 2
     roster = "、".join(brain.agent.name for brain in world.scheduler.agents.values())
@@ -1142,6 +1147,9 @@ def run_start(args: argparse.Namespace) -> int:
 
     db_path = Path(args.db_path)
     is_new_world = not db_path.exists()
+    # Every pasteable hint below has to point at THIS world; without it the
+    # reader's `config set` silently builds a second one at the default path.
+    where = "" if args.db_path == onboarding.DEFAULT_DB_PATH else f" --db-path {args.db_path}"
 
     print(onboarding.rule("ANIMA 世界引擎"))
 
@@ -1161,7 +1169,7 @@ def run_start(args: argparse.Namespace) -> int:
                 print(f"       {onboarding.dim('世界照常启动;改好后用 anima-world doctor 复测')}")
         else:
             print(f"     {onboarding.dim('跳过 —— 这个世界会用 Mock 跑(文本是模板,agent 没有空闲计划)')}")
-            print(f"       {onboarding.dim('随时可配:anima-world config set llm.api_key sk-…')}")
+            print(f"       {onboarding.dim('随时可配:anima-world config set llm.api_key sk-…' + where)}")
     else:
         _print_llm_line(status, indent="     ")
 
@@ -1179,12 +1187,13 @@ def run_start(args: argparse.Namespace) -> int:
     print(f"     {onboarding.green(onboarding.OK)} {'新建' if is_new_world else '沿用'} {db_path}")
     print(f"     {onboarding.dim('时钟:' + onboarding.human_tick_rate(tick_rate, int(minutes_per_tick)))}")
     if is_new_world and not args.real_time:
-        print(f"     {onboarding.dim('想要真实时间:anima-world config set scheduler.tick_rate 0.00333')}")
+        print(f"     {onboarding.dim('想要真实时间:anima-world config set scheduler.tick_rate 0.00333' + where)}")
 
     try:
         world = World.open(str(db_path), seed_path=args.seed, beats_path=args.beats)
-    except BeatScriptError as exc:
-        print(f"\n  {onboarding.red(onboarding.BAD)} 节拍脚本有问题:\n{exc}", file=sys.stderr)
+    except (BeatScriptError, WorldSeedError) as exc:
+        what = "节拍脚本" if isinstance(exc, BeatScriptError) else "世界种子"
+        print(f"\n  {onboarding.red(onboarding.BAD)} {what}有问题:\n{exc}", file=sys.stderr)
         return 2
     print(f"     {onboarding.green(onboarding.OK)} {len(world.scheduler.agents)} 个角色就位:"
           f" {'、'.join(brain.agent.name for brain in world.scheduler.agents.values())}")
@@ -1371,8 +1380,10 @@ def run_simulate(args: argparse.Namespace) -> int:
         finally:
             conn.close()
         if error is not None:
+            where = ("" if args.db_path == onboarding.DEFAULT_DB_PATH
+                     else f" --db-path {args.db_path}")
             print(f"[simulate] LLM 预检没过:{error}\n"
-                  f"           配置一个:anima-world config set llm.api_key sk-…\n"
+                  f"           配置一个:anima-world config set llm.api_key sk-…{where}\n"
                   f"           或改用 --llm mock / --no-llm 空跑。", file=sys.stderr)
             return 2
 
@@ -1385,7 +1396,7 @@ def run_simulate(args: argparse.Namespace) -> int:
             mock_narrative=(tier == "planner"),
             beats_path=args.beats,
         )
-    except BeatScriptError as exc:
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[simulate] {exc}", file=sys.stderr)
         return 2
 
@@ -1541,8 +1552,6 @@ def main(argv: list[str] | None = None) -> int:
         return run_config(args)
     if args.command == "doctor":
         return run_doctor(args)
-    if args.command == "story":
-        return run_story(args)
     if args.command == "run":
         return run_run(args)
     if args.command == "simulate":

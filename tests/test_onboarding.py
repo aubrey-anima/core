@@ -203,3 +203,51 @@ def test_guided_setup_accepts_defaults_on_bare_enter(world):
     )
     assert store.get("llm.base_url") == onboarding.DEFAULT_BASE_URL
     assert store.get("llm.model") == onboarding.DEFAULT_MODEL
+
+
+@pytest.mark.parametrize("db_path", ["worlds/mine.db", __import__("pathlib").Path("worlds/mine.db")])
+def test_fix_command_names_the_world_it_applies_to(world, db_path):
+    """回归:自定义路径的世界,修复提示必须带上 --db-path。
+
+    不带的话,照抄提示的人会在默认路径下静默新建一个空世界、把密钥写进那个
+    幽灵世界,自己的世界依旧降级 —— 再跑 doctor 还是同一句提示,原地打转。
+    Path 与 str 两种传法都要认(doctor 传 Path,start 传 str)。
+    """
+    _, store, _ = world
+    fix = onboarding.llm_status(store, db_path).fix
+    assert "--db-path worlds/mine.db" in fix
+
+
+def test_fix_command_stays_bare_on_the_default_world(world):
+    """反过来:世界就在默认路径时,提示不该塞进冗余的 --db-path。"""
+    _, store, _ = world
+    fix = onboarding.llm_status(store, onboarding.DEFAULT_DB_PATH).fix
+    assert "--db-path" not in fix
+
+
+def test_config_accepts_db_path_trailing_like_every_other_command(world, capsys):
+    """回归:`config set k v --db-path w.db` 必须和前置写法等价。
+
+    --db-path 曾只挂在 config 这一层组解析器上,是六个子命令里唯一的例外:
+    doctor/run/simulate 乃至同为两级的 `world export` 都接受尾置写法,而
+    config 尾置会撞上一句顶层 usage 错(exit 2),连正确位置都不提示。
+    """
+    db, _, conn = world
+    conn.close()
+
+    assert main(["config", "set", "scheduler.tick_rate", "0.25", "--db-path", str(db)]) == 0
+    capsys.readouterr()
+    assert main(["config", "get", "scheduler.tick_rate", "--db-path", str(db)]) == 0
+    assert capsys.readouterr().out.strip() == "0.25"
+    assert main(["config", "list", "--db-path", str(db)]) == 0
+    assert "scheduler.tick_rate" in capsys.readouterr().out
+
+
+def test_config_leaf_db_path_wins_over_the_group_copy(world, capsys):
+    """两处都给时,以叶子(用户最后打的那个)为准 —— 不能各写各的。"""
+    db, _, conn = world
+    conn.close()
+
+    assert main(["config", "--db-path", "saves/nonexistent.db", "get",
+                 "scheduler.tick_rate", "--db-path", str(db)]) == 0
+    assert capsys.readouterr().out.strip()  # 读到了真实世界,而不是那个不存在的

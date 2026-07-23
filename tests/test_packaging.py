@@ -19,7 +19,7 @@ from anima_world.world_package import (
     import_world_package,
     inspect_world_package,
 )
-from anima_world.world_seed import is_valid_world_seed
+from anima_world.world_seed import is_valid_world_seed, world_seed_errors
 
 
 def _bundled_seed() -> dict:
@@ -31,6 +31,33 @@ def _bundled_seed() -> dict:
 
 def test_bundled_seed_is_shipped_and_valid():
     assert is_valid_world_seed(_bundled_seed())
+
+
+# 每条都是"这份数据合不合法"的裁决,与运维台 lib/worldSeed.js 的镜像一一对应。
+# `world_seed_errors` 是后加的解释层,只准解释、不准改判 —— 改判就是单方面
+# 改了跨仓库契约,而契约互验(operator 的 test/contract.test.js)未必当场发现。
+SEED_VERDICTS = [
+    ({"agents": [], "locations": []}, True),
+    ({"agents": [{"id": "a", "name": "A", "location": "l", "personality": "p"}],
+      "locations": [{"id": "l", "name": "L", "description": "d"}]}, True),
+    (None, False),
+    ([], False),
+    ({"agents": []}, False),
+    ({"locations": []}, False),
+    ({"agents": {}, "locations": []}, False),
+    ({"agents": [{"id": "a", "name": "A", "location": "l"}], "locations": []}, False),
+    ({"agents": ["not-a-dict"], "locations": []}, False),
+    ({"agents": [], "locations": [{"id": "l", "name": "L"}]}, False),
+    ({"agents": [], "locations": [42]}, False),
+]
+
+
+@pytest.mark.parametrize("data, valid", SEED_VERDICTS)
+def test_seed_verdict_is_unchanged_by_the_explanation_layer(data, valid):
+    assert is_valid_world_seed(data) is valid
+    assert bool(world_seed_errors(data)) is (not valid), (
+        "解释层的判定必须与 is_valid_world_seed 完全一致"
+    )
 
 
 def test_engine_ships_no_ui_at_all():

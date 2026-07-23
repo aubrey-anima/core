@@ -398,6 +398,55 @@ class Scheduler:
         conn.commit()
         self._submit_reflection(agent_id)
 
+    def _persist_clock(self) -> None:
+        """Checkpoint the world clock into `db_meta` (lock held).
+
+        The clock cannot be recovered from the event log alone: a stretch of
+        ticks where nobody does anything leaves no trace, so restoring from
+        max(event ts) silently rewinds the world to its last eventful moment.
+        The deficit is permanent — the world never catches back up — and it is
+        the common case, since agents are idle for most of the night.
+
+        This is the `agent_needs` pattern, and the same architectural criterion:
+        "发生了一件事" belongs in the event log, "现在是多少" belongs in a
+        data-plane row. Best-effort — a failed checkpoint costs at most the
+        quiet tail, which is what the old behaviour lost on every close.
+        """
+        if self.event_log is None:
+            return
+        try:
+            conn = self.event_log.conn
+            conn.execute(
+                "INSERT INTO db_meta (key, value) VALUES ('clock', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(int(self.clock)),),
+            )
+            conn.commit()
+        except Exception:  # noqa: BLE001 - a clock checkpoint is never fatal
+            logger.warning("world clock checkpoint failed", exc_info=True)
+
+    def _restore_clock(self) -> None:
+        """Adopt the checkpointed clock if it is ahead of the replayed events.
+
+        `max()` rather than a plain read: a database written by an older build
+        has no `clock` row, and one killed mid-run may have a stale one, but
+        events are always at least as new as the last checkpoint.
+        """
+        if self.event_log is None:
+            return
+        try:
+            row = self.event_log.conn.execute(
+                "SELECT value FROM db_meta WHERE key = 'clock'"
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - fall back to the event-derived clock
+            return
+        if row is None:
+            return
+        try:
+            self.clock = max(self.clock, int(row[0]))
+        except (TypeError, ValueError):
+            logger.warning("db_meta.clock is not an integer (%r); ignoring", row[0])
+
     def _persist_reflection_watermarks(self) -> None:
         """Checkpoint the in-memory watermarks (lock held). Best-effort: losing
         one only means a reflection arrives a little later."""
@@ -607,6 +656,9 @@ class Scheduler:
                 ts = int(persisted.ts)
                 if ts < _WALL_CLOCK_FLOOR:
                     self.clock = max(self.clock, ts)
+            # Events only pin the clock to the last eventful tick; the quiet
+            # tail after it lives in `db_meta` (see `_persist_clock`).
+            self._restore_clock()
 
     @staticmethod
     def _stream_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -1718,4 +1770,5 @@ class Scheduler:
                 self._deliver(event)
             self._persist_all_needs()  # needs-v3: checkpoint curves at shutdown
             self._persist_reflection_watermarks()  # memory-2.0: same reason
+            self._persist_clock()  # the quiet tail leaves no event to restore from
             self._stopped = True

@@ -23,6 +23,11 @@ from typing import Any, Callable
 
 from anima_world.world_time import MINUTES_PER_DAY
 
+# Where `start`/`config`/`doctor` look when nobody says otherwise. Also the
+# test for "did the user name their own world?" — pasted fix commands only
+# need `--db-path` when the answer is yes.
+DEFAULT_DB_PATH = "saves/world.db"
+
 # ── output helpers ───────────────────────────────────────────────────────────
 
 OK = "✓"
@@ -102,13 +107,21 @@ def llm_status(config_store: Any | None, db_path: str | Path | None = None) -> L
             fix=None,
         )
 
+    # A fix the reader can paste has to name the world it applies to: without
+    # it, `config set` cheerfully creates a brand-new database at the default
+    # path and writes the key into that ghost world, leaving the real one
+    # degraded and the next doctor run printing this very same advice.
+    # str(): callers hand this in as either a Path or a str, and a Path never
+    # compares equal to the default string.
+    where = f" --db-path {db_path}" if db_path and str(db_path) != DEFAULT_DB_PATH else ""
+
     undecryptable = getattr(config_store, "undecryptable_secrets", None)
     if callable(undecryptable) and "llm.api_key" in undecryptable():
         keyfile = f"{db_path}.key" if db_path else "<db>.key"
         return LLMStatus(
             state="unreadable",
             summary=f"llm.api_key 解不开 —— {keyfile} 多半没跟着 db 一起搬过来",
-            fix="补回 keyfile,或 anima-world config set llm.api_key sk-…",
+            fix=f"补回 keyfile,或 anima-world config set llm.api_key sk-…{where}",
         )
 
     from anima_world.config_store import mask_secret
@@ -120,7 +133,7 @@ def llm_status(config_store: Any | None, db_path: str | Path | None = None) -> L
         return LLMStatus(
             state="unset",
             summary="LLM 未配置 —— 叙事、空闲计划、关系判定都会降级成模板文本",
-            fix="anima-world config set llm.api_key sk-…",
+            fix=f"anima-world config set llm.api_key sk-…{where}",
             model=model,
             base_url=base_url,
         )
