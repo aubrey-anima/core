@@ -1,0 +1,112 @@
+name: Release
+
+# Push a tag, get a release. No API token anywhere — PyPI trusts this workflow
+# through OIDC (trusted publishing), so there is no secret to leak or rotate.
+#
+#   git tag -a v1.0.1 -m "..." && git push origin v1.0.1
+#
+# Requires a one-time setup on PyPI: project page → Manage → Publishing →
+# add a GitHub publisher with owner `aubrey-anima`, repo `core`,
+# workflow `release.yml`, environment `pypi`.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: The tag must match the version the package reports
+        # Version is contract here: one release freezes (engine code, db format,
+        # package format) together, and `__init__.py` is the single source. A tag
+        # that disagrees with it would publish a version nobody can reproduce from
+        # the repository. `__init__.py` imports nothing, so this needs no install.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(python -c "import anima_world; print(anima_world.__version__)")
+          echo "tag=$tag  __version__=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match __version__ $pkg — bump one of them"
+            exit 1
+          fi
+
+      - run: pip install -e ".[dev]"
+
+      - run: python -m pytest -q
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # The whole point: this token is minted per-run by GitHub and exchanged
+      # with PyPI. Nothing long-lived is stored anywhere.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install build twine
+
+      - run: python -m build
+
+      - run: python -m twine check dist/*
+
+      - name: Install the built wheel clean and use it
+        # The suite above ran against the working tree. A wheel can still differ
+        # from it — a missing package-data entry is invisible until something
+        # installs the artifact and finds the file gone.
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/clean/bin/python -c "
+          from anima_world.api import World
+          with World.open('rel.db', force_mock_llm=True) as w:
+              before = w.tick(50)
+              assert len(w.state()['agents']) == 3
+          with World.open('rel.db', force_mock_llm=True) as w:
+              assert w.state()['world_time']['tick'] == before, 'clock must survive a restart'
+          print('wheel works, clock persists')
+          "
+          /tmp/clean/bin/anima-world --help > /dev/null
+
+      - name: Publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Publish to PyPI
+        if: startsWith(github.ref, 'refs/tags/') || inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

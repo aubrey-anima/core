@@ -126,6 +126,28 @@ keeping:
   whichever the surrounding file uses. Do not translate a file as a side effect of
   editing it.
 
+## Releasing (maintainers)
+
+Releases are automated. There is no API token anywhere — PyPI trusts
+`.github/workflows/release.yml` directly through OIDC.
+
+1. Bump `__version__` in `anima_world/__init__.py`. It is the single version source;
+   `pyproject.toml` reads it dynamically. Remember that the **major version is the db
+   format version** — bump the first digit only if the database schema changed.
+2. Update `CHANGELOG.md`.
+3. Commit, then tag and push:
+
+   ```bash
+   git tag -a v1.0.1 -m "..." && git push origin v1.0.1
+   ```
+
+The workflow runs the suite on 3.11/3.12/3.13, refuses to continue if the tag disagrees
+with `__version__`, builds, installs the resulting wheel into a clean environment and
+runs a world in it, and only then publishes.
+
+To rehearse without publishing for real, run the workflow manually from the Actions tab
+and pick `testpypi` as the target.
+
 ## Reporting bugs
 
 Include the engine version (`python -c "import anima_world; print(anima_world.__version__)"`),
