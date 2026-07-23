@@ -96,14 +96,22 @@ jobs:
           "
           /tmp/clean/bin/anima-world --help > /dev/null
 
+      # Both conditions name the event explicitly. Testing `github.ref` alone is
+      # not enough: workflow_dispatch can be aimed at a tag, and then a rehearsal
+      # picked from the Actions tab would publish for real as well.
       - name: Publish to TestPyPI
         if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # A rehearsal is worth repeating; TestPyPI rejects a version it already
+          # holds, and that failure would say nothing about the real release path.
+          skip-existing: true
 
       - name: Publish to PyPI
-        if: startsWith(github.ref, 'refs/tags/') || inputs.target == 'pypi'
+        if: >-
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
         uses: pypa/gh-action-pypi-publish@release/v1
 
       - uses: actions/upload-artifact@v4
