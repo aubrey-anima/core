@@ -146,7 +146,10 @@ with `__version__`, builds, installs the resulting wheel into a clean environmen
 runs a world in it, and only then publishes.
 
 To rehearse without publishing for real, run the workflow manually from the Actions tab
-and pick `testpypi` as the target.
+and pick `testpypi` as the target. This needs a **separate** trusted publisher registered
+at [test.pypi.org](https://test.pypi.org) — it is a different service with different
+accounts, and the PyPI publisher grants nothing there. Without it the rehearsal fails at
+the final step with `invalid-publisher` while every field is in fact correct.
 
 ## Reporting bugs
 

@@ -8,6 +8,13 @@ name: Release
 # Requires a one-time setup on PyPI: project page → Manage → Publishing →
 # add a GitHub publisher with owner `aubrey-anima`, repo `core`,
 # workflow `release.yml`, environment `pypi`.
+#
+# The TestPyPI rehearsal below needs its OWN publisher, registered separately at
+# test.pypi.org — it is a different service with different accounts, and a PyPI
+# publisher grants nothing there. Without it a rehearsal fails at the last step
+# with `invalid-publisher` even though every field is correct, which reads like a
+# broken release pipeline and is not one. Register it as a *pending* publisher,
+# since the project does not exist on TestPyPI yet.
 
 on:
   push:
@@ -29,9 +36,9 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -64,9 +71,9 @@ jobs:
       # with PyPI. Nothing long-lived is stored anywhere.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -114,7 +121,7 @@ jobs:
           (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
         uses: pypa/gh-action-pypi-publish@release/v1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
