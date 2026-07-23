@@ -167,3 +167,12 @@ python -m pytest                 # tests/(db 格式闸门 + 打包契约 + api �
 python -m build                  # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*    # 发布
 ```
+
+## 许可证
+
+[Apache License 2.0](LICENSE) —— 随便用、改、闭源商用,保留版权声明并标注改动过
+哪些文件即可。相比 MIT 多一条**专利授权与报复条款**:贡献者授予你专利许可,而谁
+拿这份代码去打专利官司,他自己的授权当场终止。
+
+引擎是给宿主 `import` 的库,所以许可证必须宽松到能嵌进闭源应用 —— copyleft
+(GPL/AGPL)会传染到每一个宿主,那和这个包存在的理由是矛盾的。
