@@ -1347,12 +1347,13 @@ def run_doctor(args: argparse.Namespace) -> int:
 def run_simulate(args: argparse.Namespace) -> int:
     """Fast-forward a world headlessly: no sleep, no clock thread.
 
-    Builds the exact same scheduler `serve` would (duties/planner/memory/
+    Builds the exact same scheduler `run` would (duties/planner/memory/
     persistence all wired), drives the tick loop synchronously, then drains
-    the narrative/planner pools and persists a snapshot before exiting —
-    the run is meant to be picked up by `serve --db-path` afterward.
+    the narrative/planner pools before exiting — the run is meant to be
+    picked up by `run --db-path` afterward. Nothing extra is written on the
+    way out: every tick's events are already in the log, and the log is the
+    only truth a reopen needs.
     """
-    from anima_world.snapshot import create_snapshot, save_snapshot
     from anima_world.world_time import TICKS_PER_DAY
 
     tier = "mock" if args.no_llm else args.llm  # --no-llm wins (back-compat alias)
@@ -1454,16 +1455,6 @@ def run_simulate(args: argparse.Namespace) -> int:
     # A planner we declared dead must not hold the exit hostage either —
     # its in-flight results were written off when the budget fired.
     scheduler.stop(wait=not planner_gave_up)
-
-    if scheduler.event_log is not None:
-        # scheduler._memory_projection is folded on every recorded event
-        # (Scheduler._apply_memory_trigger), unconditionally — reusing it
-        # here avoids a second full replay of a run that may span many
-        # world-days' worth of events (code-review Round 1).
-        row = scheduler.event_log.conn.execute("SELECT MAX(seq) FROM events").fetchone()
-        seq = int(row[0] or 0)
-        snap = create_snapshot(scheduler._memory_projection, seq=seq)
-        save_snapshot(scheduler.event_log.conn, snap)
 
     print(f"[simulate] done. clock={scheduler.clock}")
     return 0

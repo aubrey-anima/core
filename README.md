@@ -20,7 +20,7 @@ anima-world start
    并**真的调用一次**确认能通
 2. **建世界** —— 没有 db 就新建,新世界的时钟用**演示速度**(1 tick/秒,约 5 分钟走完一个世界日);
    想要真实时间的一行命令会打印出来
-3. **运行** —— 世界在本进程里活起来,叙事逐行打印,Ctrl-C 停止(自动存快照)
+3. **运行** —— 世界在本进程里活起来,叙事逐行打印,Ctrl-C 停止
 
 出问题了先跑体检:
 
@@ -53,7 +53,7 @@ with World.open("saves/world.db") as world:
 
     world.player_move("p1", "cafe")          # 玩家移动/动作
     world.config_set("scheduler.tick_rate", 1.0)   # 热改配置
-# 离开 with:停时钟、排干 LLM 线程池、存快照
+# 离开 with:停时钟、排干 LLM 线程池(事件每 tick 已落盘,退出时不额外写)
 ```
 
 三条使用纪律(`anima_world/api.py` 的 docstring 是权威版本):
@@ -114,7 +114,7 @@ anima-world simulate --db-path w.db --ticks 288      # 无头快进
 ```
 anima_world/
 ├── 库门面     api.py(World:开世界/时钟/状态/聊天/玩家/配置 —— 对外的主接口)
-├── 事件核     events.py(append-only 日志)projection.py types.py db.py snapshot.py
+├── 事件核     events.py(append-only 日志)projection.py types.py db.py
 ├── 决策       agent.py bt_nodes.py(行为树)brain.py actions.py world_time.py
 ├── 编排       scheduler.py(世界时钟/邮箱;系统唯一的 RLock)
 ├── 叙事/LLM   narrative.py llm_client.py planner.py relationship_judge.py
@@ -144,7 +144,7 @@ Python 侧的对外接口是 `anima_world.api`(函数门面)与 CLI;宿主应用
 
 ## 数据(一个世界=一个卷)
 
-`world.db`(事件/快照/聊天/记忆/配置)+ `world.db.key`(**搬迁必须随行**,丢了 `llm.api_key` 静默降级 Mock)
+`world.db`(事件/聊天/记忆/配置)+ `world.db.key`(**搬迁必须随行**,丢了 `llm.api_key` 静默降级 Mock)
 + `world_seed.json` + `beats.json`。空卷首启自播种。
 
 ## 版本即契约(硬钉版模型)

@@ -108,7 +108,6 @@ def test_close_saves_snapshot_and_world_reopens(tmp_path):
 
     with World.open(db, force_mock_llm=True) as reopened:
         state = reopened.state()
-        assert state["runtime"]["snapshot"]["available"] is True
         assert state["world_time"]["tick"] == tick, "重开必须接着最后一个事件的时钟走"
 
 

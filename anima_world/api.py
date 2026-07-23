@@ -44,7 +44,6 @@ from anima_world.locations import DEFAULT_POINTS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
 from anima_world.projection import project_events
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
-from anima_world.snapshot import create_snapshot, load_latest_snapshot, load_snapshot, save_snapshot
 from anima_world.types import AgentState, Projection
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
@@ -108,15 +107,16 @@ class _WorldView:
             )
 
     def _recover_projection(self) -> Projection:
+        """事件日志是唯一真相,开机全量重放。
+
+        这里曾经先加载 `snapshots` 表里的物化投影、再补重放尾巴。那张表已
+        删除:它只服务这一处,而真正驱动世界的 `scheduler._memory_projection`
+        从来都是全量重放建的(scheduler.py `boot_events`),所以快照一次也
+        没省下重放,却因为写回的是半更新的投影而在库里留下会累积的错账。
+        """
         if self.scheduler.event_log is None:
             return Projection()
-        conn = self.scheduler.event_log.conn
-        snap = load_latest_snapshot(conn)
-        if snap is None:
-            return project_events(self.scheduler.event_log.replay())
-        projection = load_snapshot(snap)
-        tail = self.scheduler.event_log.replay(since_seq=int(snap.get("seq", 0) or 0))
-        return project_events(tail, base=projection)
+        return project_events(self.scheduler.event_log.replay())
 
     def _latest_recovered_narrative_seq(self) -> int:
         with self.scheduler._lock:
@@ -204,17 +204,6 @@ class _WorldView:
             recent_events = list(self.scheduler.recent_events)
             with self._projection_lock:
                 return self._snapshot_locked(recent_events)
-
-    def save_persistent_snapshot(self) -> dict[str, Any] | None:
-        if self.scheduler.event_log is None:
-            return None
-        with self.scheduler._lock:
-            self._sync_projection_locked()
-            seq = self._latest_event_seq()
-            with self._projection_lock:
-                snap = create_snapshot(self.projection, seq=seq)
-        save_snapshot(self.scheduler.event_log.conn, snap)
-        return snap
 
     def _latest_event_seq(self) -> int:
         if self.scheduler.event_log is None:
@@ -347,17 +336,11 @@ class _WorldView:
         conn = self.scheduler.event_log.conn if self.scheduler.event_log is not None else None
         if conn is not None:
             event_row = conn.execute("SELECT COUNT(*), MAX(seq) FROM events").fetchone()
-            snap = load_latest_snapshot(conn)
             db_status = {"enabled": True, "path": self.scheduler.db_path}
             events_status = {
                 "count": int(event_row[0] or 0),
                 "latest_seq": int(event_row[1] or 0),
                 "buffered_count": len(recent_events),
-            }
-            snapshot_status = {
-                "available": snap is not None,
-                "seq": snap.get("seq") if snap else None,
-                "ts": snap.get("ts") if snap else None,
             }
         else:
             db_status = {"enabled": False, "path": None}
@@ -366,7 +349,6 @@ class _WorldView:
                 "latest_seq": max((int(ev.get("seq", 0) or 0) for ev in recent_events), default=0),
                 "buffered_count": len(recent_events),
             }
-            snapshot_status = {"available": False, "seq": None, "ts": None}
 
         provider = self.scheduler.narrative_provider
         if isinstance(provider, OpenAICompatibleNarrativeProvider):
@@ -398,7 +380,6 @@ class _WorldView:
             "db": db_status,
             "events": events_status,
             "llm": llm_status,
-            "snapshot": snapshot_status,
         }
 
 
@@ -485,7 +466,6 @@ class World:
         self._closed = True
         self.stop_clock()
         self.scheduler.stop(wait=wait)
-        self._view.save_persistent_snapshot()
 
     def __enter__(self) -> "World":
         return self
@@ -907,11 +887,6 @@ class World:
         if store is None or not store.has(name):
             raise KeyError(f"prompt {name} not found")
         store.set(name, template)
-
-    # ── 持久化 ──────────────────────────────────────────────────────────────
-
-    def save_snapshot(self) -> dict[str, Any] | None:
-        return self._view.save_persistent_snapshot()
 
     # ── 内部 ────────────────────────────────────────────────────────────────
 

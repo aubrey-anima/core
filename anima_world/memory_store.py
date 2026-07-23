@@ -1,7 +1,7 @@
 """MemoryStore: per-agent episodic memory persistence (M4).
 
 Memory is derived truth, not source truth (see design.md D1) — the `memories`
-table lives alongside `events`/`snapshots` in `world.db` but is purely a
+table lives alongside `events` in `world.db` but is purely a
 projection of "sufficiently important" events, decided by a trigger callable
 supplied by the caller (kept decoupled from `memory_triggers.TriggerEngine`
 so the two modules can be built/tested independently, per design.md D7:

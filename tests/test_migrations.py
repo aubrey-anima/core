@@ -128,3 +128,42 @@ def test_bt_nodes_check_rebuild_survives_reopen(tmp_path):
         )
     finally:
         conn.close()
+
+
+def test_retired_snapshots_table_is_dropped(tmp_path):
+    """快照表已废弃:老库打开时必须就地删掉,且不碰事件日志。
+
+    它曾是投影在某个 seq 的缓存,但真正驱动世界的 `_memory_projection` 一直是
+    全量重放建的,缓存一次也没省下重放;写回的又是半更新的投影,反倒在库里留
+    下会累积的错账。删掉零损失——事件日志是唯一真相,重放即可精确重建。
+    """
+    path = str(tmp_path / "legacy_snap.db")
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "CREATE TABLE snapshots (seq INTEGER PRIMARY KEY, ts INTEGER NOT NULL,"
+        " snapshot TEXT NOT NULL, created_at INTEGER NOT NULL)"
+    )
+    raw.execute("INSERT INTO snapshots VALUES (7, 7, '{\"seq\": 7}', 7)")
+    raw.execute(
+        "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,"
+        " type TEXT NOT NULL, who TEXT, loc TEXT, payload TEXT NOT NULL)"
+    )
+    raw.execute("INSERT INTO events (ts, type, who, loc, payload) VALUES (1, 'agent_join', '夏', 'cafe', '{}')")
+    raw.commit()
+    raw.close()
+
+    conn = open_db(path)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "snapshots" not in tables, "残留的快照表必须被删除"
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1, "事件日志不许被动到"
+    finally:
+        conn.close()
+
+    conn = open_db(path)  # 幂等:表已不在,第二次打开照样安静
+    try:
+        assert "snapshots" not in {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        conn.close()

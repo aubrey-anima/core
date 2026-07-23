@@ -8,7 +8,6 @@ from anima_world.cliques import compute_cliques
 from anima_world.gossip import pick_gossip
 from anima_world.projection import project_events
 from anima_world.relationship_judge import RelationshipJudge
-from anima_world.snapshot import create_snapshot, load_snapshot
 from anima_world.types import Event
 
 
@@ -44,21 +43,6 @@ def test_projection_folds_axes_and_stays_backward_compatible():
     assert rel.sentiment == pytest.approx(0.15)
     assert rel.trust == pytest.approx(0.2)
     assert rel.respect == 0.0, "坏轴值跳过,单轴 fold 不受影响"
-
-
-def test_snapshot_roundtrips_axes():
-    proj = project_events([
-        Event(seq=1, ts=1, type="state_change", loc=None, who="夏",
-              payload={"kind": "sentiment_delta", "as": "夏", "target": "遥",
-                       "delta": 0.1, "axes": {"affection": 0.15}}),
-    ])
-    restored = load_snapshot(create_snapshot(proj, seq=1))
-    assert restored.relations[("夏", "遥")].affection == pytest.approx(0.15)
-    # 老快照(无轴字段)load 出默认 0
-    legacy = create_snapshot(proj, seq=1)
-    for rel in legacy["relations"].values():
-        rel.pop("trust"), rel.pop("affection"), rel.pop("respect")
-    assert load_snapshot(legacy).relations[("夏", "遥")].trust == 0.0
 
 
 class _Roll:

@@ -18,15 +18,6 @@ CREATE INDEX IF NOT EXISTS idx_events_ts   ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 """
 
-SNAPSHOTS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS snapshots (
-  seq        INTEGER PRIMARY KEY,
-  ts         INTEGER NOT NULL,
-  snapshot   TEXT NOT NULL,
-  created_at INTEGER NOT NULL
-);
-"""
-
 MEMORIES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -301,9 +292,8 @@ def open_db(path: str | Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create events, snapshots, memories, edges, conversations, messages, config, and prompt_templates tables + indexes if missing."""
+    """Create events, memories, edges, conversations, messages, config, and prompt_templates tables + indexes if missing."""
     conn.executescript(EVENTS_SCHEMA)
-    conn.executescript(SNAPSHOTS_SCHEMA)
     conn.executescript(MEMORIES_SCHEMA)
     conn.executescript(REFLECTION_STATE_SCHEMA)
     conn.executescript(EDGES_SCHEMA)
@@ -327,8 +317,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "access_count": "INTEGER NOT NULL DEFAULT 0",
         "source_ids": "TEXT",
     })
+    _drop_snapshots(conn)
     _stamp_format(conn)
     conn.commit()
+
+
+def _drop_snapshots(conn: sqlite3.Connection) -> None:
+    """Remove the retired `snapshots` table from databases that still carry it.
+
+    The table cached the projection at some seq so a reopen could load it and
+    replay only the tail. It never paid for itself: the projection that
+    actually drives the world (`Scheduler._memory_projection`) is built by a
+    full replay in every case, so the cache saved no work — while the writer
+    persisted a half-updated projection stamped with the current MAX(seq),
+    quietly losing every event folded in between. Dropping it loses nothing:
+    the event log is the only truth, and a full replay rebuilds the projection
+    exactly. Safe to run on every boot — a no-op once the table is gone.
+    """
+    conn.execute("DROP TABLE IF EXISTS snapshots")
 
 
 def _script_statements(script: str) -> list[str]:

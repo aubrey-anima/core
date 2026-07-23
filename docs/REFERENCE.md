@@ -54,8 +54,7 @@
 
 世界的全部历史是一条 **append-only 事件日志**(`events` 表,`seq` 自增主键即全局逻辑时钟)。
 只有 INSERT,没有 UPDATE/DELETE。当前状态(角色、关系、地点、叙事日志)是把事件流 fold
-出来的**投影**,随时可以从 seq=0 重放重建;快照(`snapshots` 表)只是投影在某个 seq 的缓存,
-恢复 = 最新快照 + 尾部增量重放。
+出来的**投影**,开世界时从 seq=0 全量重放重建 —— 日志是唯一真相,没有第二处物化状态。
 
 事件类型(投影器处理的全集):`agent_join` / `agent_move` / `agent_action` / `agent_idle` /
 `agent_leave` / `agent_return` / `location_join` / `narrative` / `user_message` /
@@ -165,7 +164,7 @@ from anima_world.api import World
 | 函数 | 说明 |
 |---|---|
 | `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子);已有库的 seed 被忽略并警告;坏 beats 当场抛 `BeatScriptError` |
-| `world.close(wait=True)` | 停时钟、排干 LLM 线程池、存快照。幂等;`with World.open(...) as world:` 自动调用 |
+| `world.close(wait=True)` | 停时钟、排干 LLM 线程池。幂等;`with World.open(...) as world:` 自动调用。事件每 tick 已落盘,退出时不额外写 |
 
 ### 时钟
 
@@ -180,7 +179,7 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/快照/LLM 诊断,`runtime.llm.degraded_reason` 常驻) |
+| `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/LLM 诊断,`runtime.llm.degraded_reason` 常驻) |
 | `world.world_time()` | 世界日历(day/hour/minute/minute_of_day) |
 | `world.memories(agent_id)` | 某角色的记忆行 |
 | `world.graph(agent_id=None)` | 关系图谱三元组 |
@@ -212,7 +211,6 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `world.save_snapshot()` | 手动存一次投影快照(close 时自动) |
 | `world.scheduler` / `world.chat_store` | 底层对象,进阶用;绕过它们直写 db 违反纪律 1 |
 
 打包与校验是模块级函数(也是 CLI 的底座):
@@ -230,7 +228,7 @@ from anima_world.api import World
 ### 4.1 anima-world start —— 人的门
 
 引导配 LLM(真调一次验证连通;直接回车 = 先用 Mock)→ 建世界(新世界用演示速度
-1 tick/秒)→ **前台运行**,叙事逐行打印,Ctrl-C 停止(自动存快照)。
+1 tick/秒)→ **前台运行**,叙事逐行打印,Ctrl-C 停止。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -350,7 +348,7 @@ anima-world world import my.cyberworld --destination ./instances
 
 | 文件 | 说明 |
 |---|---|
-| `world.db` | SQLite(WAL):事件、快照、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳 |
+| `world.db` | SQLite(WAL):事件、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳 |
 | `world.db.key` | Fernet 密钥,**搬迁必须随行**;丢失 = secret 永久读不出(降级 Mock,但会点名) |
 | `world_seed.json` | 种子:`agents`(id/name/location/personality,可选 duties/goals)、`locations`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、可选 `relations`/`memories`。畸形条目降级跳过,永不阻断启动 |
 | `beats.json` | 可选节拍脚本(见 §9) |
