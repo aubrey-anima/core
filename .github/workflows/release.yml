@@ -5,16 +5,23 @@ name: Release
 #
 #   git tag -a v1.0.1 -m "..." && git push origin v1.0.1
 #
+# The pipeline is staged: everything goes to TestPyPI first, gets installed back
+# out of that index and actually run, and only then reaches PyPI. PyPI refuses to
+# ever re-upload a version, so the first attempt is the only attempt — a staging
+# index that permits mistakes is the only place left to find them.
+#
+#   verify → build → testpypi → smoke (install FROM the index) → pypi
+#
 # Requires a one-time setup on PyPI: project page → Manage → Publishing →
 # add a GitHub publisher with owner `aubrey-anima`, repo `core`,
 # workflow `release.yml`, environment `pypi`.
 #
-# The TestPyPI rehearsal below needs its OWN publisher, registered separately at
-# test.pypi.org — it is a different service with different accounts, and a PyPI
-# publisher grants nothing there. Without it a rehearsal fails at the last step
-# with `invalid-publisher` even though every field is correct, which reads like a
-# broken release pipeline and is not one. Register it as a *pending* publisher,
-# since the project does not exist on TestPyPI yet.
+# TestPyPI needs its OWN publisher, registered separately at test.pypi.org — it
+# is a different service with different accounts, and a PyPI publisher grants
+# nothing there. Without it the run fails at the TestPyPI step with
+# `invalid-publisher` even though every field is correct, which reads like a
+# broken release pipeline and is not one. Register it as a *pending* publisher
+# if the project does not exist on TestPyPI yet.
 
 on:
   push:
@@ -22,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Where to publish"
+        description: "How far to go"
         required: true
         default: testpypi
         type: choice
@@ -62,14 +69,15 @@ jobs:
 
       - run: python -m pytest -q
 
-  publish:
+  build:
+    # Built exactly once, and every later job consumes this artifact. Building
+    # separately per publish target would mean TestPyPI validated one set of
+    # bytes while PyPI received another — the staging run would prove nothing
+    # about what users actually download.
     needs: verify
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      # The whole point: this token is minted per-run by GitHub and exchanged
-      # with PyPI. Nothing long-lived is stored anywhere.
-      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -84,9 +92,16 @@ jobs:
 
       - run: python -m twine check dist/*
 
+      - id: version
+        run: |
+          v=$(python -c "import anima_world; print(anima_world.__version__)")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "building $v"
+
       - name: Install the built wheel clean and use it
-        # The suite above ran against the working tree. A wheel can still differ
-        # from it — a missing package-data entry is invisible until something
+        # Cheap local gate before anything leaves the runner. The suite in
+        # `verify` ran against the working tree; a wheel can still differ from
+        # it — a missing package-data entry is invisible until something
         # installs the artifact and finds the file gone.
         run: |
           python -m venv /tmp/clean
@@ -103,25 +118,106 @@ jobs:
           "
           /tmp/clean/bin/anima-world --help > /dev/null
 
-      # Both conditions name the event explicitly. Testing `github.ref` alone is
-      # not enough: workflow_dispatch can be aimed at a tag, and then a rehearsal
-      # picked from the Actions tab would publish for real as well.
-      - name: Publish to TestPyPI
-        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          # A rehearsal is worth repeating; TestPyPI rejects a version it already
-          # holds, and that failure would say nothing about the real release path.
-          skip-existing: true
-
-      - name: Publish to PyPI
-        if: >-
-          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
-          (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
-        uses: pypa/gh-action-pypi-publish@release/v1
-
       - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # A rehearsal is worth repeating. Note the consequence: re-running the
+          # SAME version leaves the earlier upload in place, so the smoke job
+          # below then exercises those older files rather than this build. For a
+          # real release the version is always new, so this only affects reruns.
+          skip-existing: true
+
+  smoke:
+    # The point of the whole exercise: install from an index, the way a user
+    # will, and run a world out of what came back. Everything up to here tested
+    # files sitting on the runner's disk.
+    needs: [build, testpypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install from TestPyPI and run a world
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # --extra-index-url is not optional: cryptography, openai and httpx do
+          # not exist on TestPyPI, so a bare --index-url cannot resolve them.
+          # --no-cache-dir keeps a previously cached wheel from standing in for
+          # the one that was just uploaded.
+          #
+          # TestPyPI's index takes a moment to reflect a fresh upload, so retry
+          # rather than fail on a race that says nothing about the package.
+          for attempt in 1 2 3 4 5 6; do
+            if pip install --no-cache-dir \
+                 --index-url https://test.pypi.org/simple/ \
+                 --extra-index-url https://pypi.org/simple/ \
+                 "anima-world==${VERSION}"; then
+              installed=yes && break
+            fi
+            echo "not visible on the index yet (attempt $attempt) — waiting"
+            sleep 20
+          done
+          [ "${installed:-no}" = yes ] || { echo "::error::anima-world==${VERSION} never became installable from TestPyPI"; exit 1; }
+
+          cd /tmp
+          python -c "
+          import anima_world
+          from anima_world.api import World
+          assert anima_world.__version__ == '${VERSION}', anima_world.__version__
+
+          # The bundled seed is the package's only package-data file, and the
+          # failure mode it guards against is silent: without it a world still
+          # boots, just with hardcoded defaults instead of the authored roster.
+          with World.open('smoke.db', force_mock_llm=True) as w:
+              agents = w.state()['agents']
+              assert len(agents) == 3, agents
+              tick = w.tick(100)
+              assert w.memories(next(iter(agents))), 'memory subsystem produced nothing'
+          with World.open('smoke.db', force_mock_llm=True) as w:
+              assert w.state()['world_time']['tick'] == tick, 'clock did not survive a restart'
+          print('installed from TestPyPI and ran a world:', anima_world.__version__)
+          "
+          anima-world --help > /dev/null
+          anima-world simulate --db-path /tmp/smoke2.db --ticks 20 --llm mock
+
+      - name: Report what a user would see
+        run: |
+          pip show anima-world | grep -E "^(Name|Version|License|Requires)"
+
+  pypi:
+    # Only after a build of these exact bytes has been installed out of an index
+    # and run. Skipped for a rehearsal.
+    needs: [build, testpypi, smoke]
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

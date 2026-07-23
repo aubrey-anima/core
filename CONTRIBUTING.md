@@ -141,15 +141,42 @@ Releases are automated. There is no API token anywhere — PyPI trusts
    git tag -a v1.0.1 -m "..." && git push origin v1.0.1
    ```
 
-The workflow runs the suite on 3.11/3.12/3.13, refuses to continue if the tag disagrees
-with `__version__`, builds, installs the resulting wheel into a clean environment and
-runs a world in it, and only then publishes.
+Everything reaches TestPyPI before it reaches PyPI:
 
-To rehearse without publishing for real, run the workflow manually from the Actions tab
-and pick `testpypi` as the target. This needs a **separate** trusted publisher registered
-at [test.pypi.org](https://test.pypi.org) — it is a different service with different
-accounts, and the PyPI publisher grants nothing there. Without it the rehearsal fails at
-the final step with `invalid-publisher` while every field is in fact correct.
+```
+verify → build → testpypi → smoke → pypi
+```
+
+| Stage | What it proves |
+|---|---|
+| `verify` | The suite passes on 3.11/3.12/3.13, and the tag agrees with `__version__` |
+| `build` | The artifact builds, `twine check` passes, and the wheel runs a world in a clean venv |
+| `testpypi` | The artifact uploads to a real index |
+| `smoke` | `pip install anima-world==X.Y.Z` **from that index** works, and the installed package runs a world |
+| `pypi` | Only now, and only the exact bytes that stage tested |
+
+The build happens **once** and every later stage consumes that artifact. Building per
+target would mean TestPyPI validated one set of bytes while PyPI received another, which
+would make the staging run prove nothing.
+
+The `smoke` stage is the one that cannot be replaced by a local check: it installs from
+an index the way a user does, which is the only way to catch a package that builds fine
+but cannot actually be resolved and installed. It needs `--extra-index-url` pointing at
+real PyPI, because `cryptography`, `openai`, and `httpx` do not exist on TestPyPI.
+
+This matters because **PyPI never lets a version be re-uploaded.** A bad 1.0.1 cannot be
+replaced, only yanked and followed by 1.0.2. TestPyPI is the last place a mistake is
+still free.
+
+To rehearse without releasing, run the workflow manually from the Actions tab and pick
+`testpypi` — it stops after `smoke`. This needs a **separate** trusted publisher
+registered at [test.pypi.org](https://test.pypi.org): a different service with different
+accounts, where the PyPI publisher grants nothing. Without it the run fails at the
+TestPyPI step with `invalid-publisher` while every field is in fact correct.
+
+One caveat on reruns: TestPyPI uploads use `skip-existing`, so re-running the *same*
+version leaves the earlier upload in place and `smoke` then exercises those older files.
+For a real release the version is always new, so this only affects repeated rehearsals.
 
 ## Reporting bugs
 
