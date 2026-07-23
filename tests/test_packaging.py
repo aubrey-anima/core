@@ -8,6 +8,7 @@ manages engine versions and therefore cannot live inside one.
 from __future__ import annotations
 
 import json
+import pathlib
 from importlib import resources
 
 import pytest
@@ -106,9 +107,7 @@ def test_beat_script_rejects_a_bad_script():
 # ── 发布产物只装代码:测试、文档、世界数据都不许搭车 ──────────────────────
 
 
-def _package_dir() -> "pathlib.Path":
-    import pathlib
-
+def _package_dir() -> pathlib.Path:
     return pathlib.Path(str(resources.files("anima_world")))
 
 

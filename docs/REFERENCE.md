@@ -232,7 +232,7 @@ from anima_world.api import World
 | `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/LLM 诊断,`runtime.llm.degraded_reason` 常驻) |
 | `world.world_time()` | 世界日历(day/hour/minute/minute_of_day) |
 | `world.memories(agent_id)` | 某角色的全部记忆行(按存储序) |
-| `world.retrieve_memories(agent_id, query=None, k=5)` | 三因子检索(时近×重要×相关),返回最相关的 k 条。**命中即加固**遗忘曲线(写库) |
+| `world.retrieve_memories(agent_id, query=None, k=5)` | 三因子检索(时近×重要×相关),返回最相关的 k 条。**命中即加固**遗忘曲线 —— 这个「读」接口会写库,是设计不是副作用。底层 `MemoryStore.retrieve(..., reinforce=False)` 可走纯读路径(调试 / 只读视图) |
 | `world.reflections(agent_id)` | 该角色的反思(由记忆归纳出的洞察) |
 | `world.needs(agent_id)` | 当前需求 `{energy, hunger, social, mood}`;未点亮或首 tick 前返回 `{}` |
 | `world.graph(agent_id=None)` | 关系图谱三元组 |

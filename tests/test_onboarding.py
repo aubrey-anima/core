@@ -9,7 +9,6 @@ that silently rots: a status that stops distinguishing "unset" from
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
