@@ -2,7 +2,12 @@
 
 > 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
-> 对应引擎版本:0.1.0(db 格式 1,包格式 1)。
+> 对应引擎版本:1.0.0(db 格式 1,包格式 1)。首发已并入原 [ROADMAP](ROADMAP.md)
+> 2.0–5.0 的四大机制:记忆 2.0(检索/反思/遗忘,常开)、需求系统(`needs.enabled`)、
+> 物品经济(`economy.enabled`)、社交(三轴关系常开 + 八卦/小团体 `social.enabled`)。
+> 新增 World 函数:`retrieve_memories` / `reflections` / `needs` / `balance` /
+> `inventory` / `shop` / `player_topup` / `player_buy` / `cliques`;
+> 新增配置键见 `anima-world config list` 的 memory/needs/economy/social 分类。
 
 ---
 

@@ -51,7 +51,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 50 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 78 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
@@ -103,7 +103,15 @@ anima-world world import my.cyberworld --destination ./instances
 
 ## 当前状态
 
-包已就绪但**尚未发布到包索引**(首发版本号应按"主版本 = db 格式"对齐为 1.0.0)。
+**首发版本 1.0.0(db 格式 1),尚未发布到包索引。** 主版本 = db 格式由
+`tests/test_version_contract.py` 机器强制。原路线图(docs/ROADMAP.md)的
+2.0–5.0 四大机制已并入首发,全部带默认关闭的开关:
+
+- **记忆 2.0**(常开):三因子检索、反思、遗忘曲线
+- **需求系统** `needs.enabled`:energy/hunger/social 曲线驱动行为树紧急带
+- **经济** `economy.enabled`:物品/钱/店铺/价格漂移,账本是事件投影
+- **社交** `social.enabled`:三轴关系(常开)+ 八卦传播 + 小团体
+
 HTTP 层于 2026-07 移除:网站/运维台若要对接,走 import(Python)或 CLI + `.cyberworld`
 (非 Python);旧的 `/internal/v1` 协议与 membership claim 实现在 git 历史里
 (commit `e7e3188` 之前)可考古。

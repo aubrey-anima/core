@@ -174,6 +174,19 @@ def _apply_state_change(proj: Projection, e: Event) -> None:
         except (TypeError, ValueError):
             return
         rel.sentiment = max(-1.0, min(1.0, rel.sentiment + delta))
+        # relations-v5: optional finer axes ride the same event; absent or
+        # malformed axes leave the single-axis fold untouched (old events
+        # replay identically).
+        axes = payload.get("axes")
+        if isinstance(axes, dict):
+            for axis in ("trust", "affection", "respect"):
+                if axis in axes:
+                    try:
+                        step = float(axes[axis])
+                    except (TypeError, ValueError):
+                        continue
+                    value = getattr(rel, axis) + step
+                    setattr(rel, axis, max(-1.0, min(1.0, value)))
 
     elif kind == "r_type":
         as_id = payload.get("as") or e.who

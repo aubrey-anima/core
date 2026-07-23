@@ -192,6 +192,16 @@ CREATE TABLE IF NOT EXISTS shop_stock (
 );
 """
 
+# social-v5: derived cache of friendship connected components. Recomputed at
+# every day rollover — the table exists only to avoid recomputing on reads.
+CLIQUES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cliques (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_ids    TEXT NOT NULL,
+  computed_tick INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 BT_ACTIONS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bt_actions (
   node_id    TEXT PRIMARY KEY,
@@ -224,8 +234,8 @@ CREATE INDEX IF NOT EXISTS idx_bt_nodes_tree ON bt_nodes(tree);
 # data semantics; the stamp travels inside world.db (and therefore inside any
 # .cyberworld package or volume copy). An engine refuses formats newer than
 # it understands — never silently writes into one.
-DB_FORMAT_VERSION = 4
-MIN_SUPPORTED_DB_FORMAT = 4
+DB_FORMAT_VERSION = 1
+MIN_SUPPORTED_DB_FORMAT = 1
 
 
 class DBFormatError(RuntimeError):
@@ -309,6 +319,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(AGENT_NEEDS_SCHEMA)
     conn.executescript(ITEM_DEFS_SCHEMA)
     conn.executescript(SHOP_STOCK_SCHEMA)
+    conn.executescript(CLIQUES_SCHEMA)
     _ensure_columns(conn, "conversations", {"participants": "TEXT", "location": "TEXT", "player_id": "TEXT"})
     _ensure_columns(conn, "memories", {
         "strength": "REAL NOT NULL DEFAULT 1.0",

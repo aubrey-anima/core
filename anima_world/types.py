@@ -44,6 +44,11 @@ class Relation:
     r_type: str = "acquaintance"
     r_type_back: str = "acquaintance"
     sentiment: float = 0.0
+    # relations-v5: three finer axes riding the same delta machinery.
+    # `sentiment` stays the headline (bands/edges/relabel key off it).
+    trust: float = 0.0
+    affection: float = 0.0
+    respect: float = 0.0
 
 
 @dataclass

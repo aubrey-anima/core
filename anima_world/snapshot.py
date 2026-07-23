@@ -39,6 +39,9 @@ def create_snapshot(proj: Projection, seq: int) -> dict:
                 "r_type": r.r_type,
                 "r_type_back": r.r_type_back,
                 "sentiment": r.sentiment,
+                "trust": r.trust,
+                "affection": r.affection,
+                "respect": r.respect,
             }
             for (a, b), r in proj.relations.items()
         },
@@ -83,6 +86,9 @@ def load_snapshot(data: dict) -> Projection:
                 r_type=v["r_type"],
                 r_type_back=v["r_type_back"],
                 sentiment=v["sentiment"],
+                trust=float(v.get("trust", 0.0)),
+                affection=float(v.get("affection", 0.0)),
+                respect=float(v.get("respect", 0.0)),
             )
             for k, v in data.get("relations", {}).items()
         },

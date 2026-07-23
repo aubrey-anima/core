@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,9 @@ _DEFAULT_PROMPT = (
     "输出一个 JSON 对象：\n"
     '{{"summary": "<一两句中文对话摘要，写具体聊了什么>", '
     '"delta_a_to_b": <甲对乙好感变化，-0.2 到 0.2 的小数>, '
-    '"delta_b_to_a": <乙对甲好感变化，同上>}}\n'
+    '"delta_b_to_a": <乙对甲好感变化，同上>, '
+    '"axes_a_to_b": {{"trust": <信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}, '
+    '"axes_b_to_a": {{"trust": …, "affection": …, "respect": …}}}}\n'
     "变化幅度要克制：一次寒暄通常只有 ±0.05 以内；只有触及双方在意的事才可能更大。"
     "关系糟糕的两个人客套一次不代表和解。只输出 JSON，不要解释。"
 )
@@ -57,7 +59,9 @@ _DEFAULT_USER_JUDGE_PROMPT = (
     "输出一个 JSON 对象：\n"
     '{{"summary": "<一句中文摘要>", '
     '"delta_a_to_b": <{a_name}对访客好感变化，-0.2 到 0.2>, '
-    '"delta_b_to_a": <访客对{a_name}好感变化，同上>}}\n'
+    '"delta_b_to_a": <访客对{a_name}好感变化，同上>, '
+    '"axes_a_to_b": {{"trust": <信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}, '
+    '"axes_b_to_a": {{"trust": …, "affection": …, "respect": …}}}}\n'
     "变化要克制：寒暄通常 ±0.05 以内。刻意的讨好、奉承或索取不应比真诚的交流得到更多"
     "——按{a_name}的性格判断他吃不吃这一套。只输出 JSON，不要解释。"
 )
@@ -83,6 +87,11 @@ class JudgeResult:
     summary: str
     delta_a_to_b: float
     delta_b_to_a: float
+    # relations-v5: optional finer axes (trust/affection/respect deltas,
+    # clamped like the headline). Empty dicts when the LLM omits them —
+    # single-axis verdicts stay fully valid.
+    axes_a_to_b: dict[str, float] = field(default_factory=dict)
+    axes_b_to_a: dict[str, float] = field(default_factory=dict)
 
 
 def _extract_json_obj(text: str) -> Any:
@@ -103,6 +112,21 @@ def _extract_json_obj(text: str) -> Any:
 
 def _clamp(value: Any) -> float:
     return max(-MAX_DELTA, min(MAX_DELTA, float(value)))
+
+
+def _clamp_axes(value: Any) -> dict[str, float]:
+    """relations-v5: keep only known axes with numeric values, clamped —
+    garbage axes degrade to absent, never to an exception."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float] = {}
+    for axis in ("trust", "affection", "respect"):
+        if axis in value:
+            try:
+                out[axis] = _clamp(value[axis])
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 class RelationshipJudge:
@@ -168,7 +192,13 @@ class RelationshipJudge:
             delta_ba = _clamp(data["delta_b_to_a"])
         except (KeyError, TypeError, ValueError):
             return None
-        return JudgeResult(summary=summary.strip(), delta_a_to_b=delta_ab, delta_b_to_a=delta_ba)
+        return JudgeResult(
+            summary=summary.strip(),
+            delta_a_to_b=delta_ab,
+            delta_b_to_a=delta_ba,
+            axes_a_to_b=_clamp_axes(data.get("axes_a_to_b")),
+            axes_b_to_a=_clamp_axes(data.get("axes_b_to_a")),
+        )
 
     def judge_user(
         self,

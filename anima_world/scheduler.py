@@ -168,6 +168,9 @@ class Scheduler:
         # economy-v4: per-day sales counter feeding the price drift. Memory
         # only — prices in shop_stock are the durable part.
         self._shop_sales: dict[tuple[str, str], int] = {}
+        # social-v5: one gossip roll per (speaker, listener) per world day.
+        # Memory only — resets at rollover and on restart.
+        self._gossip_rolled: set[tuple[str, str, int]] = set()
         self.planner = planner
         self._plans: dict[str, Any] = {}          # agent_id → Plan (cache of the `plan` event)
         self._planning: set[str] = set()          # agents with a replan in flight
@@ -674,6 +677,15 @@ class Scheduler:
                     logger.warning("memory decay pass failed for %s", agent_id, exc_info=True)
         self._persist_all_needs()
         self._settle_economy_day()
+        self._gossip_rolled.clear()
+        if self._social_enabled() and self.knowledge_graph is not None and self.event_log is not None:
+            from anima_world import cliques as cliques_mod
+
+            try:
+                groups = cliques_mod.compute_cliques(self.knowledge_graph.query())
+                cliques_mod.store_cliques(self.event_log.conn, groups, now_tick)
+            except Exception:  # noqa: BLE001 - a derived cache must not stop the day
+                logger.warning("clique recompute failed", exc_info=True)
 
     def _economy_enabled(self) -> bool:
         return bool(
@@ -740,6 +752,46 @@ class Scheduler:
             self.config_store is not None
             and self.config_store.get("needs.enabled", default=False)
         )
+
+    def _social_enabled(self) -> bool:
+        return bool(
+            self.config_store is not None
+            and self.config_store.get("social.enabled", default=False)
+        )
+
+    def _maybe_gossip(self, agent: Agent, target_id: str | None) -> None:
+        """social-v5 (lock held): one dice roll per pair per day. The tick
+        thread only samples; the hearsay lands as an ordinary memory_seed
+        event — replayable, and the trigger pipeline stays untouched."""
+        import random
+
+        from anima_world import gossip as gossip_mod
+
+        if (
+            not self._social_enabled()
+            or self.memory_store is None
+            or not target_id
+            or target_id not in self.agents
+        ):
+            return
+        day = self.world_time().day
+        key = (agent.id, target_id, day)
+        if key in self._gossip_rolled:
+            return
+        self._gossip_rolled.add(key)
+        try:
+            memories = self.memory_store.query(agent_id=agent.id)[:10]
+        except Exception:  # noqa: BLE001 - gossip is flavor, never fatal
+            return
+        rng = random.Random((self.clock << 16) ^ (hash((agent.id, target_id)) & 0xFFFF))
+        picked = gossip_mod.pick_gossip(rng, agent.name, memories, target_id)
+        if picked is None:
+            return
+        self._record_event({
+            "type": "memory_seed",
+            "who": target_id,
+            "payload": picked,
+        })
 
     def _settle_agent_needs(self, brain: BrainLike) -> None:
         """needs-v3: advance one agent's need curves by tick_delta (lock held).
@@ -1240,6 +1292,8 @@ class Scheduler:
             # under the lock — the worker never reads live state.
             if action.kind == "chat" and self._judge_pool is not None:
                 self._submit_chat_judgment(agent, action.params.get("target"))
+            if action.kind in ("chat", "idle_social"):
+                self._maybe_gossip(agent, action.params.get("target"))
             return True
 
     def _submit_chat_judgment(self, agent: Agent, target_id: str | None) -> None:
@@ -1309,16 +1363,19 @@ class Scheduler:
             # much did THIS conversation matter"; how much the Nth same-day
             # conversation still moves the world is the world's call.
             factor = self._damped_factor(a_id, b_id)
-            for as_id, target_id, delta in (
-                (a_id, b_id, result.delta_a_to_b * factor),
-                (b_id, a_id, result.delta_b_to_a * factor),
+            for as_id, target_id, delta, axes in (
+                (a_id, b_id, result.delta_a_to_b * factor, result.axes_a_to_b),
+                (b_id, a_id, result.delta_b_to_a * factor, result.axes_b_to_a),
             ):
                 if abs(delta) < 0.01:
                     continue  # damped-to-noise or a no-op delta — event-log/SSE noise
+                payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id, "delta": delta}
+                if axes:  # relations-v5: finer axes ride the same event, same damping
+                    payload["axes"] = {k: v * factor for k, v in axes.items()}
                 self._record_and_deliver({
                     "type": "state_change",
                     "who": as_id,
-                    "payload": {"kind": "sentiment_delta", "as": as_id, "target": target_id, "delta": delta},
+                    "payload": payload,
                 })
             for agent_id in (a_id, b_id):
                 self._record_and_deliver({
@@ -1400,16 +1457,19 @@ class Scheduler:
             if self._stopped:
                 return
             factor = self._damped_factor(agent_id, player_id)
-            for as_id, target_id, delta in (
-                (agent_id, player_id, result.delta_a_to_b * factor),
-                (player_id, agent_id, result.delta_b_to_a * factor),
+            for as_id, target_id, delta, axes in (
+                (agent_id, player_id, result.delta_a_to_b * factor, result.axes_a_to_b),
+                (player_id, agent_id, result.delta_b_to_a * factor, result.axes_b_to_a),
             ):
                 if abs(delta) < 0.01:
                     continue
+                payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id, "delta": delta}
+                if axes:
+                    payload["axes"] = {k: v * factor for k, v in axes.items()}
                 self._record_and_deliver({
                     "type": "state_change",
                     "who": as_id,
-                    "payload": {"kind": "sentiment_delta", "as": as_id, "target": target_id, "delta": delta},
+                    "payload": payload,
                 })
 
     def _start_journey(self, agent: Agent, action: ActionDescriptor) -> bool:

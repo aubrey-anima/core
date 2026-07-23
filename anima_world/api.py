@@ -317,7 +317,12 @@ class _WorldView:
             },
             "locations": locations,
             "relations": {
-                f"{a}|{b}": {"sentiment": r.sentiment}
+                f"{a}|{b}": {
+                    "sentiment": r.sentiment,
+                    "trust": r.trust,
+                    "affection": r.affection,
+                    "respect": r.respect,
+                }
                 for (a, b), r in self.projection.relations.items()
             },
             "narrative_log": list(self.projection.narrative_log)[-200:],
@@ -630,6 +635,15 @@ class World:
         if agent_id is not None:
             return self.scheduler.knowledge_graph.query(subject=agent_id)
         return self.scheduler.knowledge_graph.query()
+
+    def cliques(self) -> list[dict[str, Any]]:
+        """social-v5:小团体(friendship 连通分量,日切重算的派生缓存)。"""
+        if self.scheduler.event_log is None:
+            return []
+        from anima_world.cliques import load_cliques
+
+        with self.scheduler._lock:
+            return load_cliques(self.scheduler.event_log.conn)
 
     def events(self, since_seq: int | None = None) -> list[dict[str, Any]]:
         """内存事件缓冲(近期);全量历史请离线读 events 表。"""

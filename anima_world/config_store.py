@@ -255,6 +255,7 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
     "economy.enabled": (False, "bool", "economy", False, "Items, money, shops and price drift"),
     "economy.daily_wage": (20.0, "float", "economy", False, "Per-agent daily wage from the town treasury"),
+    "social.enabled": (False, "bool", "social", False, "Gossip propagation and clique detection"),
 }
 
 # env vars consulted only during first-boot seeding of llm.* keys (design.md D5)
