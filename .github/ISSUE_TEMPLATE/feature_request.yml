@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a capability the engine does not have
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The engine has a deliberately narrow job: run worlds, fast-forward them, package
+        them. Things that live **outside** it on purpose:
+
+        - **HTTP / networking** — the engine is a library. Network exposure belongs to
+          the host application that embeds it.
+        - **Authoring** — creating worlds is a separate desktop tool, because a world
+          file is pinned to the engine version that produced it and the tool must hold
+          several versions at once.
+        - **UI of any kind** — no HTML ships in this package, by test.
+
+        Proposals in those areas are likely to be declined, though saying what you were
+        trying to do is still useful.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The situation, not the solution. What are you building, and where does the engine
+        get in the way?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: If you have a shape in mind, describe it. Rough is fine.
+    validations:
+      required: false
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you are doing instead today
+      description: >
+        Whether a workaround exists says a lot about priority. "Impossible" and
+        "annoying" get treated differently.
+    validations:
+      required: false

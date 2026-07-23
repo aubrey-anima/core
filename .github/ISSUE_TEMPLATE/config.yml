@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/aubrey-anima/core/blob/main/SECURITY.md
+    about: Do not open a public issue. Email aubrey@animametaverse.com instead.
+  - name: Reference documentation
+    url: https://github.com/aubrey-anima/core/blob/main/docs/REFERENCE.md
+    about: Every command, every World method, every config key (Chinese).
+  - name: Architecture and design decisions
+    url: https://github.com/aubrey-anima/core/blob/main/docs/ARCHITECTURE.md
+    about: Why the engine is shaped this way, and what is deliberately absent (Chinese).

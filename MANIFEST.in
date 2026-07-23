@@ -8,6 +8,7 @@ prune tests
 prune docs
 prune dist
 prune build
+prune .github
 
 exclude CLAUDE.md
 exclude MANIFEST.in

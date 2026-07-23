@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "anima-world"
 dynamic = ["version"]
-description = "ANIMA 世界引擎:事件溯源内核、行为树调度、LLM 叙事/聊天/记忆,可打包成 .cyberworld 数据包"
+description = "A world-simulation engine for LLM-driven agents: event-sourced core, behavior-tree scheduling, memory and relationships, packaged as portable .cyberworld files"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -39,6 +39,9 @@ dev = ["pytest>=8.0", "build>=1.2", "twine>=5.0"]
 
 [project.urls]
 Homepage = "https://animametaverse.com"
+Source = "https://github.com/aubrey-anima/core"
+Issues = "https://github.com/aubrey-anima/core/issues"
+Changelog = "https://github.com/aubrey-anima/core/blob/main/CHANGELOG.md"
 
 [project.scripts]
 anima-world = "anima_world.__main__:main"

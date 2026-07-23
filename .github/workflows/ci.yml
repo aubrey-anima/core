@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - run: pip install -e ".[dev]"
+
+      - run: python -m pytest -q
+
+  package:
+    # The test suite verifies the package, but it runs against the working tree.
+    # A wheel can still differ from it — a missing package-data entry is invisible
+    # until something installs the artifact and finds the file gone.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install build twine
+
+      - run: python -m build
+
+      - run: python -m twine check dist/*
+
+      - name: Install the wheel into a clean environment and use it
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/clean/bin/python -c "
+          from anima_world.api import World
+          with World.open('ci.db', force_mock_llm=True) as w:
+              before = w.tick(50)
+              assert len(w.state()['agents']) == 3
+          with World.open('ci.db', force_mock_llm=True) as w:
+              assert w.state()['world_time']['tick'] == before, 'clock must survive a restart'
+          print('wheel works, clock persists')
+          "
+          /tmp/clean/bin/anima-world --help > /dev/null
+          /tmp/clean/bin/anima-world simulate --db-path /tmp/ci2.db --ticks 20 --llm mock
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

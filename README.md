@@ -1,178 +1,213 @@
-# anima-world — 世界引擎(纯库,可发布 pip 包)
+# anima-world
 
-一个 `world.db` 就是一个世界。这个包**只做引擎**:跑世界、快进世界、把世界打包成可分发的
-`.cyberworld`。**创作是另一个程序** —— `anima-studio`(见 `../tool`),它管理多个 core 版本,
-所以不能住在其中任何一个里面。
+**A world-simulation engine for LLM-driven agents.** Characters wake up, get hungry,
+go to work, gossip about each other, form cliques, spend money, remember what happened
+last week, and change how they feel about you. One SQLite file is one world.
 
-**引擎是一个库,不是一个服务。** 没有 HTTP、没有端口:任何要用世界的模块 import 本包,
-通过 `anima_world.api.World` 的函数操作 `world.db`。世界活在调用方进程里。
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/aubrey-anima/core/blob/main/LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://github.com/aubrey-anima/core/blob/main/pyproject.toml)
+[![PyPI](https://img.shields.io/pypi/v/anima-world.svg)](https://pypi.org/project/anima-world/)
 
-## 30 秒上手
+English | [中文](https://github.com/aubrey-anima/core/blob/main/README.zh-CN.md)
 
-```bash
-pip install -e .        # ← 现在只能这样:包还没发布到 PyPI,从源码装
-anima-world start
+---
+
+## What this is
+
+Most "AI agent" frameworks give you a chatbot with tools. This gives you a **place** —
+one that keeps running whether or not anyone is watching, and remembers what happened
+while they were away.
+
+A world is a tick-driven simulation. On every tick each character runs a behavior tree
+against its own needs and the state of the world, and acts. Those acts become events in
+an append-only log, which is the world's only source of truth — balances, relationships,
+and locations are all *projections* of that log, never separately stored rows that could
+drift out of sync.
+
+The LLM sits beside the simulation, not inside it. It writes the narration, plans what a
+character does with free time, and judges how a conversation changed a relationship —
+all on background threads. **The clock never blocks on a network call.** Take the LLM
+away entirely and the world still runs; it just narrates in templates.
+
+The engine is **a library, not a service.** There is no HTTP server and no port. Your
+application imports it, and the world lives inside your process:
+
+```
+your app  ──import anima_world.api──▶  world.db
 ```
 
-`start` 依次做三件事,不用你先读任何文档:
+## See it run
 
-1. **配 LLM** —— 检测到没配就当场问你要 key(直接回车 = 先用 Mock 试跑),写进 db 时自动加密,
-   并**真的调用一次**确认能通
-2. **建世界** —— 没有 db 就新建,新世界的时钟用**演示速度**(1 tick/秒,约 5 分钟走完一个世界日);
-   想要真实时间的一行命令会打印出来
-3. **运行** —— 世界在本进程里活起来,叙事逐行打印,Ctrl-C 停止
+```console
+$ pip install anima-world
+$ anima-world start
 
-出问题了先跑体检:
+  ANIMA 世界引擎
+  ────────────────────────────────────────────
 
-```bash
-anima-world doctor
-anima-world config list            # 看配置(密钥自动打码)
-anima-world config set llm.api_key sk-…      # 改配置,立即生效
-anima-world config set scheduler.tick_rate 0.00333   # 切回真实时间
+  ① LLM
+     ! LLM 未配置 —— 叙事、空闲计划、关系判定都会降级成模板文本
+       修复:anima-world config set llm.api_key sk-…
+
+  ② 世界
+     ✓ 新建 saves/world.db
+     时钟:1 tick/秒 —— 约 5 分钟走完一个世界日(现实时间的 300 倍速)
+     ✓ 3 个角色就位: 苏晚夏、陆知遥、沈亦柔
+
+  ③ 运行
+     世界在本进程里运行,叙事会打印在下面;停止:Ctrl-C
+
+  [第0天 00:10] 遥:遥 wandered around
+  [第0天 00:10] 夏:夏 went to sleep
+  [第0天 00:35] 遥:遥 went to sleep
+  ^C
+  世界已停下,快照已保存。下次接着跑:anima-world start
 ```
 
-## 在程序里用(这是主要接口)
+`start` configures the LLM, creates the world, and runs it — in that order, with no
+documentation required first. Without an API key everything still works; narration is
+templated and characters have no plans. That degradation is deliberate, and it is never
+silent (`anima-world doctor` will tell you, and `World.state()` carries the reason).
+
+> **Heads up on language:** the engine speaks Chinese. CLI output, narration prompts, the
+> built-in seed world, and the reference docs are all in Chinese. The API itself is
+> English (`World.open`, `world.tick`, `world.chat`), so embedding it in an
+> English-language application works fine — you supply your own seed and prompts.
+
+## Install
+
+```bash
+pip install anima-world          # Python 3.11+
+```
+
+Three runtime dependencies, chosen to stay out of your way since they land in every host
+that embeds a world: `cryptography` (encrypts the API key at rest), `openai` (any
+OpenAI-compatible endpoint), `httpx`.
+
+From source:
+
+```bash
+git clone https://github.com/aubrey-anima/core.git anima-world
+cd anima-world && pip install -e ".[dev]" && python -m pytest
+```
+
+## Use it in your app
+
+This is the main interface. `World` is a plain object with a lifetime — open it, drive
+it, close it.
 
 ```python
 from anima_world.api import World
 
 with World.open("saves/world.db") as world:
-    world.start_clock()                      # 后台走时钟;或手动 world.tick(n)
-    print(world.state()["world_time"])       # 完整世界快照
+    world.start_clock()                        # background clock; or drive it yourself
+    print(world.state()["world_time"])         # {'day': 0, 'hour': 6, 'minute': 25, ...}
 
-    # 代玩家和角色聊天(流式;完整转录归宿主应用管,世界不落)
+    # Talk to a character on a player's behalf. Streams; your app owns the transcript.
     for chunk in world.chat("夏", [{"role": "user", "content": "你好"}],
                             player_id="p1", display_name="阿宇"):
         print(chunk, end="")
 
-    # 把一个完成的回合记入世界:摘要 + 一个事件 + 关系判定
+    # Commit a finished exchange: summary + one world event + a relationship verdict
     world.record_chat_turn("夏", "p1", [
         {"role": "user", "content": "你好"},
         {"role": "assistant", "content": "你好呀"},
     ])
 
-    world.player_move("p1", "cafe")          # 玩家移动/动作
-    world.config_set("scheduler.tick_rate", 1.0)   # 热改配置
-# 离开 with:停时钟、排干 LLM 线程池(事件每 tick 已落盘,退出时不额外写)
+    world.player_move("p1", "cafe")
+    world.config_set("scheduler.tick_rate", 1.0)
 ```
 
-三条使用纪律(`anima_world/api.py` 的 docstring 是权威版本):
+For batch work, drive the clock yourself — `world.tick(n)` is synchronous and
+deterministic, which is what makes fast-forwarding and testing possible:
 
-1. **一个运行中的世界独占它的 world.db** —— 别的进程不要碰同一个文件;
-2. **一个进程一个引擎版本** —— 世界钉死在生成它的版本上,多版本按进程隔离
-   (anima-studio 的隔离 venv + 子进程就是这个模式);
-3. **信任边界是进程边界** —— `player_id` 只是参数,验证调用者是宿主应用的责任。
-
-## 命令
-
-```bash
-anima-world --help    # start / config / doctor / run / simulate / world export|import
+```python
+with World.open("w.db") as world:
+    world.tick(288)                     # one world day
+    print(world.memories("夏"))         # what she remembers, ranked
+    print(world.needs("夏"))            # {'energy': 0.59, 'hunger': 0.16, ...}
+    print(world.cliques())              # who has clustered together
 ```
 
-> 每个命令的完整参数、World 的逐函数说明、配置键 / 环境变量 / 节拍脚本格式,
-> 见 **[docs/REFERENCE.md](docs/REFERENCE.md)**(功能与接口参考)。
-> 想先理解**为什么是这样**——真相模型、tick 帧、线程与锁、不变量、已知架构债,
-> 见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**(架构)。
+## What a world contains
 
-`start` 是给人用的门(引导 + 演示速度);`run` 是无引导的前台宿主(给部署 / 脚本);
-真正嵌入到应用里用 `anima_world.api.World`。
+Four subsystems, each an opt-in flag except memory. They are off by default because a
+world that only walks around and talks is a legitimate world, and every mechanism you
+enable is more LLM spend and more surface to reason about.
 
-### 想创作一个世界?
-
-那是 `anima-studio` 的事 —— 一个独立的桌面程序,在 `../tool`:
+| Subsystem | Flag | What it adds |
+|---|---|---|
+| **Memory** | always on | Retrieval scored on relevance × recency × importance, periodic reflection that writes higher-order memories, and a forgetting curve |
+| **Needs** | `needs.enabled` | `energy` / `hunger` / `social` decay per tick and drive an urgency band in the behavior tree — a tired character stops what it is doing and goes to sleep |
+| **Economy** | `economy.enabled` | Items, money, shops, wages, and price drift. The ledger is a projection of `payment` events, so balances cannot be forged |
+| **Social** | `social.enabled` | Three-axis relationships (always on) plus gossip that propagates second-hand with confidence decay, and emergent cliques |
 
 ```bash
-cd ../tool && .venv/bin/anima-studio
+anima-world config set needs.enabled true --db-path saves/world.db
 ```
 
-它把小说变成世界种子,然后**用你选定的那个 core 版本**生成世界文件。
-之所以独立成一个程序,是因为世界文件钉死在生成它的引擎版本上,
-而工具要能同时持有好几个版本。
+## How it is built
 
-### 能打包
+**One file is one world.** `world.db` holds events, chats, memories, and config.
+`world.db.key` sits next to it and encrypts the API key — **it must travel with the
+database**, or the key becomes unreadable and the world silently drops to Mock. (Not
+actually silently: the engine says so at boot and keeps saying so in `state()`.)
+
+**The event log is the only truth.** There is no `balances` table, because two sources
+of truth eventually disagree and you cannot tell which one is right. `world.db` does not
+store "夏 has 50 coins" — it stores *why* she has 50 coins. Reconciliation is replay.
+
+**One running world owns its file.** Half the truth lives in memory (clock, projection,
+locks, thread pools), so a second process writing the same `world.db` forks it
+immediately. Offline work — packaging, fast-forwarding — happens after the world closes.
+
+**Version is contract.** One release freezes (engine code, db format, package format)
+together. The major version *is* the db format version, and `db.py` enforces it at
+runtime: mount a database from an incompatible format and it refuses on the spot rather
+than quietly writing garbage.
+
+## Ship a world to someone else
+
+Worlds package into a single `.cyberworld` file — either a template (just the seed, the
+world builds itself on first boot) or a snapshot (a database that has already lived).
 
 ```bash
-# 模板包(只有种子,世界首启自建 db)
 anima-world world export --seed seed.json --output my.cyberworld \
     --world-id my-world --name "我的世界" --mode template
-
-# 快照包(带一个跑过的 world.db)
-anima-world world export --seed seed.json --db-path saves/world.db \
-    --beats beats.json --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode snapshot
 
 anima-world world import my.cyberworld --destination ./instances
 ```
 
-### 能跑
+## Commands
 
 ```bash
-anima-world run --db-path saves/world.db             # 前台宿主,Ctrl-C 停
-anima-world simulate --db-path w.db --ticks 288      # 无头快进
+anima-world start          # create + run, with guided setup — start here
+anima-world doctor         # health check: files, keys, a real LLM call, clock speed
+anima-world config         # read/write settings, secrets encrypted and masked
+anima-world run            # foreground host, no onboarding (for deployment)
+anima-world simulate       # headless fast-forward
+anima-world world          # export / import .cyberworld packages
 ```
 
-## 包结构
+## Documentation
 
-```
-anima_world/
-├── 库门面     api.py(World:开世界/时钟/状态/聊天/玩家/配置 —— 对外的主接口)
-├── 事件核     events.py(append-only 日志)projection.py types.py db.py
-├── 决策       agent.py bt_nodes.py(行为树)brain.py actions.py world_time.py
-├── 编排       scheduler.py(世界时钟/邮箱;系统唯一的 RLock)
-├── 叙事/LLM   narrative.py llm_client.py planner.py relationship_judge.py
-├── 聊天       chat_service.py chat_session.py chat_store.py(与事件核解耦)
-├── 记忆/图谱  memory_store.py memory_triggers.py graph.py
-├── 配置       config_store.py(Fernet 加密 secret,keyfile=<db>.key)prompt_store.py
-├── 世界定义   world_store.py world_seed.py world_seed.json locations.py beats.py
-├── 打包       world_package.py(.cyberworld 导入导出)
-└── CLI        __main__.py onboarding.py
-```
+| | |
+|---|---|
+| [docs/REFERENCE.md](https://github.com/aubrey-anima/core/blob/main/docs/REFERENCE.md) | Every command, every `World` method, every config key, the beat-script format 🇨🇳 |
+| [docs/ARCHITECTURE.md](https://github.com/aubrey-anima/core/blob/main/docs/ARCHITECTURE.md) | Why it is shaped this way: the truth model, the tick frame, threads and locks, invariants, known debt 🇨🇳 |
+| [CONTRIBUTING.md](https://github.com/aubrey-anima/core/blob/main/CONTRIBUTING.md) | Development setup, the invariants a patch must not break, how to propose changes |
+| [CHANGELOG.md](https://github.com/aubrey-anima/core/blob/main/CHANGELOG.md) | Release history |
 
-`world_seed.json` 是本包**唯一的 package data**,随 wheel 分发(见 `tests/test_packaging.py` 的回归)。
+## Contributing
 
-## 对外契约(其他 surface 只依赖这三个文件格式)
+Issues and pull requests are welcome. Start with [CONTRIBUTING.md](https://github.com/aubrey-anima/core/blob/main/CONTRIBUTING.md) —
+it lists the handful of invariants that a change must not break (there is exactly one
+lock in the system, the LLM is never called on the tick thread, and a few file formats
+are mirrored by other repositories).
 
-跨仓库协作走**文件与 import**,不走网络。文件格式的权威定义在这里,
-对端(如运维台的 JS 实现)持有冻结镜像,靠互验测试对齐:
+## License
 
-| 模块 | 权威内容 | 谁镜像了它 |
-|---|---|---|
-| `anima_world.world_package` | `.cyberworld` 数据包格式 | 运维台 `lib/worldPackage.js` |
-| `anima_world.world_seed` | 种子 schema 校验 | 运维台 `lib/worldSeed.js` |
-| `anima_world.beats` | 节拍脚本严格校验 | 创作工作台(`anima-studio`)通过 CLI 委托校验 |
-
-Python 侧的对外接口是 `anima_world.api`(函数门面)与 CLI;宿主应用直接 import,
-版本以 pip 钉死(一个进程一个版本)。
-
-## 数据(一个世界=一个卷)
-
-`world.db`(事件/聊天/记忆/配置)+ `world.db.key`(**搬迁必须随行**,丢了 `llm.api_key` 静默降级 Mock)
-+ `world_seed.json` + `beats.json`。空卷首启自播种。
-
-## 版本即契约(硬钉版模型)
-
-一个 core 版本 = **(引擎代码, db format 版本, 包格式版本)** 一起冻结。
-宿主基于某个 core 版本装上后就只依赖该版本,不做跨版本迁移:
-
-- `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
-- **主版本号 = db 格式**:db 格式变才升第一位,第二/三位都是程序优化
-- `db.py` 的 `DB_FORMAT_VERSION` / `MIN_SUPPORTED_DB_FORMAT` 是运行期安全联锁:
-  挂错卷会当场拒绝而不是静默写坏
-
-## 测试与发布
-
-```bash
-pip install -e ".[dev]"
-python -m pytest                 # tests/(db 格式闸门 + 打包契约 + api 门面)
-python -m build                  # → dist/*.whl + dist/*.tar.gz
-python -m twine upload dist/*    # 发布
-```
-
-## 许可证
-
-[Apache License 2.0](LICENSE) —— 随便用、改、闭源商用,保留版权声明并标注改动过
-哪些文件即可。相比 MIT 多一条**专利授权与报复条款**:贡献者授予你专利许可,而谁
-拿这份代码去打专利官司,他自己的授权当场终止。
-
-引擎是给宿主 `import` 的库,所以许可证必须宽松到能嵌进闭源应用 —— copyleft
-(GPL/AGPL)会传染到每一个宿主,那和这个包存在的理由是矛盾的。
+[Apache License 2.0](https://github.com/aubrey-anima/core/blob/main/LICENSE). Use it, modify it, ship it inside closed-source products;
+keep the copyright notice and state what you changed. Apache rather than MIT for the
+patent grant, and permissive rather than copyleft because an engine that hosts embed
+cannot be copyleft without infecting every host that embeds it.
