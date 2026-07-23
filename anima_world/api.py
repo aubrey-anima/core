@@ -33,7 +33,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Iterator
 
 from anima_world.chat_service import ChatService
 from anima_world.chat_session import ChatSessionManager
@@ -42,7 +42,6 @@ from anima_world.config_store import mask_secret
 from anima_world.llm_client import create_llm_client_from_config, create_llm_client_from_env
 from anima_world.locations import DEFAULT_POINTS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
-from anima_world.projection import project_events
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
 from anima_world.types import AgentState, Projection
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
@@ -77,15 +76,8 @@ class _WorldView:
     def __init__(self, scheduler: Scheduler) -> None:
         self.scheduler = scheduler
         self._recovered_from_persistence = scheduler.event_log is not None
-        self.projection = self._recover_projection()
-        self._projection_lock = threading.Lock()
         self._subscribers: list[queue.Queue[dict[str, Any]]] = []
         self._subscribers_lock = threading.Lock()
-        self._last_narrative_seq = (
-            self._latest_recovered_narrative_seq()
-            if self._recovered_from_persistence
-            else 0
-        )
         self._last_fanout_seq = 0
 
         for aid, brain in scheduler.agents.items():
@@ -106,60 +98,20 @@ class _WorldView:
                 updated_at=0,
             )
 
-    def _recover_projection(self) -> Projection:
-        """事件日志是唯一真相,开机全量重放。
+    @property
+    def projection(self) -> Projection:
+        """系统里只有一份投影 —— scheduler 的那份。
 
-        这里曾经先加载 `snapshots` 表里的物化投影、再补重放尾巴。那张表已
-        删除:它只服务这一处,而真正驱动世界的 `scheduler._memory_projection`
-        从来都是全量重放建的(scheduler.py `boot_events`),所以快照一次也
-        没省下重放,却因为写回的是半更新的投影而在库里留下会累积的错账。
+        这里曾经维护第二份:开机全量重放建起来,此后只同步叙事日志和角色位置,
+        经济与关系变化一概不折叠。于是它在运行中停在开机状态,而
+        `scheduler._memory_projection` 才是每条事件都折叠、始终正确的那份
+        (`_apply_memory_trigger` 无条件 `project_events`)。两份投影既是重复
+        开销(开世界要重放两遍),也是陷阱 —— 从这份读余额或关系会读到旧值。
+        已删除的 `snapshots` 表正是把这份陈旧投影写回库里,才留下会累积的错账。
         """
-        if self.scheduler.event_log is None:
-            return Projection()
-        return project_events(self.scheduler.event_log.replay())
-
-    def _latest_recovered_narrative_seq(self) -> int:
-        with self.scheduler._lock:
-            return max(
-                (
-                    int(ev.get("seq", 0) or 0)
-                    for ev in self.scheduler.recent_events
-                    if ev.get("type") == "narrative"
-                ),
-                default=0,
-            )
-
-    def _sync_projection_from_scheduler(self) -> None:
-        with self.scheduler._lock:
-            self._sync_projection_locked()
-
-    def _sync_projection_locked(self) -> None:
-        with self._projection_lock:
-            for ev in self.scheduler.recent_events:
-                seq = int(ev.get("seq", 0) or 0)
-                if ev.get("type") != "narrative" or seq <= self._last_narrative_seq:
-                    continue
-                agent_id = ev.get("who") or ev.get("target_agent_id") or "?"
-                text = ev.get("text") or ev.get("payload", {}).get("text", "")
-                self.projection.narrative_log.append({
-                    "agent": agent_id,
-                    "speaker": agent_id,
-                    "text": text,
-                    "ts": ev.get("ts", self.scheduler.clock),
-                })
-                self._last_narrative_seq = seq
-
-            for aid, brain in self.scheduler.agents.items():
-                loc = brain.agent.blackboard.read("loc") or brain.agent.location
-                if aid in self.projection.agents:
-                    self.projection.agents[aid].location = loc
-                else:
-                    self.projection.agents[aid] = AgentState(
-                        spec={}, state={}, location=loc, joined_at=0, updated_at=0,
-                    )
+        return self.scheduler._memory_projection
 
     def on_tick(self) -> None:
-        self._sync_projection_from_scheduler()
         self._fan_out()
 
     def _fan_out(self) -> None:
@@ -199,11 +151,11 @@ class _WorldView:
                 self._subscribers.remove(q)
 
     def snapshot(self) -> dict[str, Any]:
+        # scheduler 的 RLock 是系统唯一的锁,投影既然是它的,读也走它 ——
+        # 这里曾经还有一把 _projection_lock 守着第二份投影。
         with self.scheduler._lock:
-            self._sync_projection_locked()
             recent_events = list(self.scheduler.recent_events)
-            with self._projection_lock:
-                return self._snapshot_locked(recent_events)
+            return self._snapshot_locked(recent_events)
 
     def _latest_event_seq(self) -> int:
         if self.scheduler.event_log is None:
@@ -265,9 +217,16 @@ class _WorldView:
         agents = {}
         for aid, a in self.projection.agents.items():
             brain = self.scheduler.agents.get(aid)
+            # 在场角色的位置读活黑板(在途时黑板才是真的),离场的读投影。
+            # 以前这是靠每 tick 往第二份投影里回写一次维护的。
+            location = (
+                (brain.agent.blackboard.read("loc") or brain.agent.location)
+                if brain is not None
+                else a.location
+            )
             agents[aid] = {
                 "name": brain.agent.name if brain else a.spec.get("name", aid),
-                "location": a.location,
+                "location": location,
                 "state": dict(a.state),
                 "activity": self._agent_activity(aid),
                 "away": brain is None,

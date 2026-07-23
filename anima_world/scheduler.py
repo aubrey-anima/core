@@ -172,6 +172,11 @@ class Scheduler:
         # social-v5: one gossip roll per (speaker, listener) per world day.
         # Memory only — resets at rollover and on restart.
         self._gossip_rolled: set[tuple[str, str, int]] = set()
+        # memory-2.0: reflection watermark, hydrated from reflection_state on
+        # first touch. Kept in memory so the per-memory path stays db-free;
+        # `_reflection_dirty` is what still needs a checkpoint.
+        self._reflection_watermark: dict[str, float] = {}
+        self._reflection_dirty: set[str] = set()
         self.planner = planner
         self._plans: dict[str, Any] = {}          # agent_id → Plan (cache of the `plan` event)
         self._planning: set[str] = set()          # agents with a replan in flight
@@ -348,8 +353,16 @@ class Scheduler:
     def _note_memory_written(self, agent_id: str, importance: float, kind: str) -> None:
         """Accumulate importance toward the reflection threshold (lock held).
 
+        The watermark lives in memory and only touches the db when it matters:
+        on the first read per agent (so a restart resumes mid-accumulation),
+        when a reflection fires, and at the day-rollover checkpoint. It used to
+        do INSERT + SELECT + COMMIT on EVERY memory write, inside the world's
+        only lock — a per-tick db round-trip to maintain a counter that costs
+        nothing to lose (a dropped watermark just delays one reflection).
+
         Reflections themselves don't accumulate — an insight spawning more
-        insights is a storm, not thinking."""
+        insights is a storm, not thinking.
+        """
         if (
             kind == self.REFLECTION_KIND
             or self.reflector is None
@@ -362,27 +375,47 @@ class Scheduler:
             threshold = float(
                 self.config_store.get("memory.reflection_threshold", default=threshold)
             )
+        if agent_id not in self._reflection_watermark:
+            row = self.event_log.conn.execute(
+                "SELECT accumulated_importance FROM reflection_state WHERE agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+            self._reflection_watermark[agent_id] = float(row[0]) if row else 0.0
+        total = self._reflection_watermark[agent_id] + max(0.0, importance)
+        if total < threshold:
+            self._reflection_watermark[agent_id] = total
+            self._reflection_dirty.add(agent_id)
+            return
+        self._reflection_watermark[agent_id] = 0.0
+        self._reflection_dirty.discard(agent_id)
         conn = self.event_log.conn
         conn.execute(
-            "INSERT INTO reflection_state (agent_id, accumulated_importance) VALUES (?, ?)"
-            " ON CONFLICT(agent_id) DO UPDATE SET"
-            " accumulated_importance = accumulated_importance + excluded.accumulated_importance",
-            (agent_id, max(0.0, importance)),
-        )
-        row = conn.execute(
-            "SELECT accumulated_importance FROM reflection_state WHERE agent_id = ?",
-            (agent_id,),
-        ).fetchone()
-        if row is None or float(row[0]) < threshold:
-            conn.commit()
-            return
-        conn.execute(
-            "UPDATE reflection_state SET accumulated_importance = 0,"
-            " last_reflection_tick = ? WHERE agent_id = ?",
-            (self.clock, agent_id),
+            "INSERT INTO reflection_state (agent_id, accumulated_importance, last_reflection_tick)"
+            " VALUES (?, 0, ?) ON CONFLICT(agent_id) DO UPDATE SET"
+            " accumulated_importance = 0, last_reflection_tick = excluded.last_reflection_tick",
+            (agent_id, self.clock),
         )
         conn.commit()
         self._submit_reflection(agent_id)
+
+    def _persist_reflection_watermarks(self) -> None:
+        """Checkpoint the in-memory watermarks (lock held). Best-effort: losing
+        one only means a reflection arrives a little later."""
+        if self.event_log is None or not self._reflection_dirty:
+            return
+        try:
+            conn = self.event_log.conn
+            for agent_id in self._reflection_dirty:
+                conn.execute(
+                    "INSERT INTO reflection_state (agent_id, accumulated_importance)"
+                    " VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET"
+                    " accumulated_importance = excluded.accumulated_importance",
+                    (agent_id, float(self._reflection_watermark.get(agent_id, 0.0))),
+                )
+            conn.commit()
+            self._reflection_dirty.clear()
+        except Exception:  # noqa: BLE001 - a watermark checkpoint is never fatal
+            logger.warning("reflection watermark checkpoint failed", exc_info=True)
 
     def _submit_reflection(self, agent_id: str) -> None:
         """Snapshot context under the lock, reflect on the judge pool."""
@@ -677,6 +710,7 @@ class Scheduler:
                 except Exception:  # noqa: BLE001 - forgetting is best-effort
                     logger.warning("memory decay pass failed for %s", agent_id, exc_info=True)
         self._persist_all_needs()
+        self._persist_reflection_watermarks()
         self._settle_economy_day()
         self._gossip_rolled.clear()
         if self._social_enabled() and self.knowledge_graph is not None and self.event_log is not None:
@@ -1683,4 +1717,5 @@ class Scheduler:
                 event = self._queue.popleft()
                 self._deliver(event)
             self._persist_all_needs()  # needs-v3: checkpoint curves at shutdown
+            self._persist_reflection_watermarks()  # memory-2.0: same reason
             self._stopped = True

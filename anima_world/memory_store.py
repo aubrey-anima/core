@@ -128,11 +128,17 @@ class MemoryStore:
         query: str | None = None,
         k: int = 5,
         ticks_per_day: int = 288,
+        reinforce: bool = True,
     ) -> list[dict[str, Any]]:
         """memory-2.0 三因子检索(时近×重要×相关),命中即加固。
 
         检索就是复习:返回的记忆 strength +0.3(上限 3.0),遗忘曲线由此
-        对"被想起的事"变平。无 query 时退化为 recency+importance。"""
+        对"被想起的事"变平。无 query 时退化为 recency+importance。
+
+        **注意这个"读"接口会写库** —— 加固是设计的一部分,不是副作用。
+        只想看看而不想影响角色记忆(调试、后台分析、给运维台做只读视图)
+        就传 `reinforce=False`,那样它是纯读。
+        """
         half_life = HALF_LIFE_DAYS_DEFAULT
         if self._config_store is not None:
             half_life = self._config_store.get("memory.half_life_days", default=half_life)
@@ -144,7 +150,7 @@ class MemoryStore:
             )
         )
         top = rows[: max(0, int(k))]
-        if top:
+        if top and reinforce:
             with self._lock:
                 self._conn.executemany(
                     "UPDATE memories SET strength = MIN(strength + 0.3, 3.0),"
@@ -156,16 +162,33 @@ class MemoryStore:
 
     def decay_pass(self, agent_id: str, now_tick: int, ticks_per_day: int = 288) -> None:
         """每世界日一次的遗忘曲线结算(Ebbinghaus):强度越高忘得越慢,
-        闲置越久掉得越多。anchor 不衰减。"""
+        闲置越久掉得越多。anchor 不衰减。
+
+        算术在 Python 里做,不用 SQL 的 `pow()` —— 那个函数要 SQLite 编译时
+        打开 SQLITE_ENABLE_MATH_FUNCTIONS 才有(3.35+ 也只是"可能有")。
+        缺了它这条 UPDATE 会抛 OperationalError,而调用方(日切)把异常吞成
+        一条 warning,于是**遗忘会静默地永不发生**。一天一次、每人几十行,
+        取回来算完写回去的代价可以忽略。
+        """
         with self._lock:
-            self._conn.execute(
-                "UPDATE memories SET strength = strength * pow(0.5,"
-                " (CAST(? - COALESCE(last_access, tick) AS REAL) / ?)"
-                " / MAX(strength, 0.1))"
+            rows = self._conn.execute(
+                "SELECT id, strength, COALESCE(last_access, tick) FROM memories"
                 " WHERE agent_id = ? AND anchor = 0",
-                (now_tick, max(1, ticks_per_day), agent_id),
-            )
-            self._conn.commit()
+                (agent_id,),
+            ).fetchall()
+            span = max(1, int(ticks_per_day))
+            updates = []
+            for memory_id, strength, last_touch in rows:
+                strength = float(strength)
+                idle_days = max(0, int(now_tick) - int(last_touch)) / span
+                updates.append(
+                    (strength * (0.5 ** (idle_days / max(strength, 0.1))), memory_id)
+                )
+            if updates:
+                self._conn.executemany(
+                    "UPDATE memories SET strength = ? WHERE id = ?", updates
+                )
+                self._conn.commit()
 
     def query(
         self,

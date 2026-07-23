@@ -2,7 +2,7 @@
 
 引擎没有 HTTP:任何用世界的模块 import 本包,用函数操作 world.db。
 这里守住门面的核心动线:开世界 → 走时钟 → 读状态 → 聊天 → 记回合 →
-玩家动作 → 改配置 → 关闭(存快照)→ 重开(恢复)。全程 Mock LLM,离线。
+玩家动作 → 改配置 → 关闭 → 重开(从事件日志重放恢复)。全程 Mock LLM,离线。
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_config_set_coerces_and_validates(world):
     assert "llm.api_key" in masked
 
 
-def test_close_saves_snapshot_and_world_reopens(tmp_path):
+def test_world_reopens_from_the_event_log(tmp_path):
     """时钟恢复语义:回到事件日志里最后一个世界时间戳。没有事件的静默 tick
     不是历史(事件溯源的本义),所以用一个确定性事件钉住最后时刻 ——
     依赖异步叙事事件恰好落盘的写法会 flaky。"""
@@ -125,3 +125,36 @@ def test_agent_context_is_bounded_grounding(world):
     ctx = world.agent_context("夏", "p1")
     assert "presence" in ctx
     assert ctx["presence"]["location_id"]
+
+
+def test_world_has_exactly_one_projection(tmp_path):
+    """回归:曾经有两份投影,第二份在运行中会停在开机状态。
+
+    `_WorldView` 自己维护一份,开机全量重放建起来,此后只同步叙事日志和角色
+    位置 —— 经济与关系变化一概不折叠。而 `scheduler._memory_projection` 每条
+    事件都折叠。于是从 view 那份读余额会读到开机时的旧值(已删除的 snapshots
+    表正是把它写回库里,才留下会累积的错账)。
+    """
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        world.config_set("economy.enabled", "true")
+        assert world._view.projection is world.scheduler._memory_projection, (
+            "系统里只允许有一份投影"
+        )
+        world.tick(300)  # 跨过日切,工资会入账
+        agent_id = next(iter(world.scheduler.agents))
+        assert world._view.projection.balances[agent_id] == world.balance(agent_id), (
+            "view 读到的余额必须与对外 API 一致 —— 不许停在开机状态"
+        )
+        assert world.balance("__town__") < 0, "金库发了工资就该是负的"
+
+
+def test_state_reports_live_locations(tmp_path):
+    """位置改成快照时读活黑板后,state() 必须仍与角色实际所在一致。"""
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        world.tick(50)
+        live = {
+            aid: (brain.agent.blackboard.read("loc") or brain.agent.location)
+            for aid, brain in world.scheduler.agents.items()
+        }
+        reported = {aid: d["location"] for aid, d in world.state()["agents"].items()}
+        assert {k: v for k, v in reported.items() if k in live} == live
