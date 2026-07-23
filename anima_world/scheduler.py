@@ -6,9 +6,10 @@ import logging
 import math
 import threading
 import time
+import zlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Protocol
+from typing import Any, Iterable, Protocol
 
 from anima_world.actions import ActionDescriptor, to_event
 from anima_world.agent import Agent
@@ -759,39 +760,69 @@ class Scheduler:
             and self.config_store.get("social.enabled", default=False)
         )
 
-    def _maybe_gossip(self, agent: Agent, target_id: str | None) -> None:
+    def _colocated_agents(self, agent: Agent) -> list[str]:
+        """Everyone standing where `agent` stands, minus itself. Same rule as
+        `_is_colocated` — an agent in transit is nowhere, so it neither
+        overhears nor is overheard. Sorted so the roll order is stable."""
+        here = agent.blackboard.read("loc") or agent.location
+        if not here or agent.id in self._transit:
+            return []
+        return sorted(
+            other_id
+            for other_id, loc in self._agent_locations().items()
+            if other_id != agent.id and loc == here
+        )
+
+    def _gossip_seed(self, speaker_id: str, listener_id: str) -> int:
+        """Stable across processes — `hash()` on str is salted per interpreter
+        (PYTHONHASHSEED), which would make the same (tick, pair) roll
+        differently on every run and cost `simulate` its reproducibility."""
+        pair = zlib.crc32(f"{speaker_id}|{listener_id}".encode("utf-8"))
+        return (self.clock << 16) ^ (pair & 0xFFFF)
+
+    def _maybe_gossip(self, agent: Agent, listener_ids: Iterable[str | None]) -> None:
         """social-v5 (lock held): one dice roll per pair per day. The tick
         thread only samples; the hearsay lands as an ordinary memory_seed
-        event — replayable, and the trigger pipeline stays untouched."""
+        event — replayable, and the trigger pipeline stays untouched.
+
+        `chat` names its listener; `idle_social` ("looked for someone to talk
+        to") names nobody, so its listeners are whoever is standing there —
+        that is how a rumor reaches someone who was merely in the room.
+        """
         import random
 
         from anima_world import gossip as gossip_mod
 
-        if (
-            not self._social_enabled()
-            or self.memory_store is None
-            or not target_id
-            or target_id not in self.agents
-        ):
+        if not self._social_enabled() or self.memory_store is None:
             return
         day = self.world_time().day
-        key = (agent.id, target_id, day)
-        if key in self._gossip_rolled:
+        listeners = []
+        for listener_id in listener_ids:
+            if not listener_id or listener_id == agent.id or listener_id not in self.agents:
+                continue
+            key = (agent.id, listener_id, day)
+            if key in self._gossip_rolled:
+                continue
+            self._gossip_rolled.add(key)
+            listeners.append(listener_id)
+        if not listeners:
             return
-        self._gossip_rolled.add(key)
         try:
+            # Read once, roll many: the speaker's memories are the same for
+            # every listener in the room.
             memories = self.memory_store.query(agent_id=agent.id)[:10]
         except Exception:  # noqa: BLE001 - gossip is flavor, never fatal
             return
-        rng = random.Random((self.clock << 16) ^ (hash((agent.id, target_id)) & 0xFFFF))
-        picked = gossip_mod.pick_gossip(rng, agent.name, memories, target_id)
-        if picked is None:
-            return
-        self._record_event({
-            "type": "memory_seed",
-            "who": target_id,
-            "payload": picked,
-        })
+        for listener_id in listeners:
+            rng = random.Random(self._gossip_seed(agent.id, listener_id))
+            picked = gossip_mod.pick_gossip(rng, agent.name, memories, listener_id)
+            if picked is None:
+                continue
+            self._record_event({
+                "type": "memory_seed",
+                "who": listener_id,
+                "payload": picked,
+            })
 
     def _settle_agent_needs(self, brain: BrainLike) -> None:
         """needs-v3: advance one agent's need curves by tick_delta (lock held).
@@ -1292,8 +1323,13 @@ class Scheduler:
             # under the lock — the worker never reads live state.
             if action.kind == "chat" and self._judge_pool is not None:
                 self._submit_chat_judgment(agent, action.params.get("target"))
-            if action.kind in ("chat", "idle_social"):
-                self._maybe_gossip(agent, action.params.get("target"))
+            if action.kind == "chat":
+                self._maybe_gossip(agent, [action.params.get("target")])
+            elif action.kind == "idle_social":
+                # `idle_social` carries no target (ActionTable gives it empty
+                # params), so passing action.params here meant the listener was
+                # always None and this whole branch never fired.
+                self._maybe_gossip(agent, self._colocated_agents(agent))
             return True
 
     def _submit_chat_judgment(self, agent: Agent, target_id: str | None) -> None:

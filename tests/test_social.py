@@ -95,12 +95,12 @@ def test_world_integration_gossip_and_cliques(tmp_path, monkeypatch):
         })
         agent = world.scheduler.agents["夏"].agent
         with world.scheduler._lock:
-            world.scheduler._maybe_gossip(agent, "柔")
+            world.scheduler._maybe_gossip(agent, ["柔"])
         hearsay = [m for m in world.memories("柔") if m["kind"].startswith("hearsay")]
         assert hearsay and "着过火" in hearsay[0]["summary"]
         # 同日第二次不再掷骰子
         with world.scheduler._lock:
-            world.scheduler._maybe_gossip(agent, "柔")
+            world.scheduler._maybe_gossip(agent, ["柔"])
         assert len([m for m in world.memories("柔") if m["kind"].startswith("hearsay")]) == 1
 
         # 小团体:种 friendship 边,日切重算
@@ -109,3 +109,66 @@ def test_world_integration_gossip_and_cliques(tmp_path, monkeypatch):
         world.tick(1)
         groups = world.cliques()
         assert groups and set(groups[0]["member_ids"]) == {"夏", "遥"}
+
+
+def test_idle_social_gossips_to_whoever_is_in_the_room(tmp_path, monkeypatch):
+    """回归:`idle_social` 那条八卦分支曾是死代码。
+
+    调用点传的是 `action.params.get("target")`,而 ActionTable 给 idle_social
+    的 params 恒为 `{}` —— 听众永远是 None,`_maybe_gossip` 第一个 guard 就返回。
+    结果八卦只在 chat 时传播,"闲聊时谣言传给在场的人"从没发生过。
+    """
+    import anima_world.gossip as gossip_mod
+    from anima_world.actions import ActionDescriptor
+
+    monkeypatch.setattr(gossip_mod, "GOSSIP_PROBABILITY", 1.0)
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        world.config_set("social.enabled", "true")
+        sched = world.scheduler
+        speaker = sched.agents["夏"].agent
+        others = [aid for aid in sched.agents if aid != "夏"]
+        assert others, "种子世界应当不止一个角色"
+
+        # 把所有人挪到同一个地点,并给夏一条值得传的记忆
+        with sched._lock:
+            for aid in sched.agents:
+                sched.agents[aid].agent.blackboard.write("loc", "cafe")
+            sched._record_event({
+                "type": "memory_seed", "who": "夏",
+                "payload": {"agent_id": "夏", "kind": "obs",
+                            "summary": "码头昨夜来了艘无名的船", "importance": 0.9},
+            })
+            assert sched._colocated_agents(speaker) == sorted(others)
+            # 走真实调用点,而不是直接调 _maybe_gossip
+            sched.emit_action(speaker, ActionDescriptor("idle_social", {}))
+
+        for aid in others:
+            hearsay = [m for m in world.memories(aid) if m["kind"].startswith("hearsay")]
+            assert hearsay, f"{aid} 在场却没听到八卦"
+            assert "无名的船" in hearsay[0]["summary"]
+
+
+def test_gossip_seed_is_stable_across_processes():
+    """回归:种子曾用 `hash((a, b))`,而 str 的 hash 每解释器随机加盐。
+
+    同一个 (tick, 角色对) 在不同进程里掷出不同的骰子,`simulate` 因此不可复现。
+    这条测试用两个不同 PYTHONHASHSEED 的子进程比对,直接盯住那个属性。
+    """
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "from anima_world.scheduler import Scheduler;"
+        "s = Scheduler.__new__(Scheduler);"
+        "s.clock = 100;"
+        "print(s._gossip_seed('夏', '遥'))"
+    )
+    seeds = set()
+    for hashseed in ("0", "1", "12345"):
+        env = {**os.environ, "PYTHONHASHSEED": hashseed}
+        out = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True
+        )
+        seeds.add(out.stdout.strip())
+    assert len(seeds) == 1, f"不同 PYTHONHASHSEED 下种子必须一致,实得 {seeds}"
