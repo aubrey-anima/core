@@ -67,6 +67,30 @@
 **data-plane 原则**:事件日志只放"发生了什么";地图、行为树、种子、节拍脚本是"配置",
 存在表里或 JSON 文件里,不进日志。
 
+#### 事件的 payload 字段
+
+`events` 表每行有 `seq` / `ts`(世界 tick)/ `type` / `who` / `loc` / `payload`(JSON)。
+宿主要自己搭时间线或做统计,直接读这张表即可(世界关闭后)。下表是各类型 `payload`
+里的字段:
+
+| 类型 | payload 字段 | 说明 |
+|---|---|---|
+| `narrative` | `text`, `speaker` | 叙事文本;LLM 未配置时是模板 |
+| `agent_action` | `action` | 动作名(`idle_wander` / `eat` / `go_sleep` …) |
+| `state_change` | `kind`, `state`, `location` | 按 `kind` 二级分发,见上文 |
+| `agent_join` | `spec`, `state`, `location` | `spec` 里有 `name` / `personality` / `goals`;创世的 `ts=0` |
+| `location_join` | `id`, `name`, `description` | 创世时播下的地点 |
+| `travel` | `from`, `to`, `minutes`, `arrive_at` | `arrive_at` 是到达的 tick |
+| `payment` | `from`, `to`, `amount`, `reason` | 经济账本的唯一真相,余额是它的投影 |
+| `item_consume` | `who`, `item_id`, `source` | |
+| `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)或 `reflection`(反思) |
+| `conversation` | `agent_id`, `conversation_id`, `summary`, `message_count`, `started_at`, `closed_at`, `participants`, `location` | 整场会话只发这一条,在关闭时 |
+| `capability_registered` | `id`, `kind`, `description`, `params_schema` | 首启生成的能力目录 |
+| `player_action` | (空) | 字段在事件顶层:`player_id` / `role` / `action` / `details` |
+
+**稳定性**:字段**只加不改**,与 `World` 门面同一条纪律 —— 已有类型不会删字段或改语义。
+未知类型投影器静默忽略,所以将来新增类型不会让旧宿主的读取逻辑崩掉。
+
 ### 2.2 世界时间
 
 世界时钟是**一个整数 tick**,日历(第几天、几点几分)永远现算、从不存储。

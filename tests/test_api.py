@@ -249,3 +249,51 @@ def test_explicit_seed_failing_schema_says_what_is_wrong(tmp_path):
     assert "location" in message and "personality" in message, (
         "角色缺的字段也要逐个点名,像坏节拍脚本那样"
     )
+
+
+def _authored_seed() -> dict:
+    """A world that is deliberately NOT the bundled demo roster."""
+    return {
+        "agents": [
+            {"id": "顾昀", "name": "顾昀", "location": "teahouse", "personality": "沉默"},
+            {"id": "白露", "name": "白露", "location": "teahouse", "personality": "话痨"},
+            {"id": "老陈", "name": "老陈", "location": "market", "personality": "精明"},
+        ],
+        "locations": [
+            {"id": "teahouse", "name": "茶馆", "description": "老城的茶馆"},
+            {"id": "market", "name": "集市", "description": "热闹的集市"},
+        ],
+    }
+
+
+def test_reopening_a_world_keeps_its_own_cast(tmp_path):
+    """回归:重开一个已有世界,角色必须来自这个世界自己的事件日志。
+
+    曾经 roster 完全由种子文件驱动 —— 不传 --seed 重开时,注册的是内置演示
+    角色(夏/遥/柔),世界自己的角色一个 tick 都不跑,而这三个陌生人的
+    narrative / state_change 事件被永久写进用户的库,全程没有任何提示。
+    命中的正是文档推荐的工作流(先 simulate --seed 建库,再 run)。
+
+    唯一能从事件重建的路径(节拍导演的重启扫描)明确跳过 ts <= 0,而创世的
+    agent_join 恰恰是 ts=0 写的,所以创世角色结构性地被排除在外。
+    """
+    import json
+
+    seed = tmp_path / "authored.json"
+    seed.write_text(json.dumps(_authored_seed(), ensure_ascii=False), encoding="utf-8")
+    db = str(tmp_path / "w.db")
+
+    with World.open(db, seed_path=str(seed), force_mock_llm=True) as world:
+        assert set(world.state()["agents"]) == {"顾昀", "白露", "老陈"}
+
+    # 不传 seed 重开 —— 世界必须还是那三个人,一个外人都不许进来
+    with World.open(db, force_mock_llm=True) as world:
+        assert set(world.state()["agents"]) == {"顾昀", "白露", "老陈"}
+        world.tick(30)
+
+    who = {
+        e.get("who")
+        for e in World.open(db, force_mock_llm=True).events()
+        if e.get("who")
+    }
+    assert who <= {"顾昀", "白露", "老陈"}, f"外来角色污染了世界:{who}"

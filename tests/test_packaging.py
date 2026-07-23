@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sqlite3
 from importlib import resources
 
 import pytest
@@ -193,3 +194,60 @@ def test_sdist_excludes_tests_and_world_data():
     assert any(n.endswith("anima_world/world_seed.json") for n in names), (
         "world_seed.json 是唯一的 package data,漏了会让宿主环境少文件"
     )
+
+
+# ── 跨仓库契约:版本识别必须在 --no-deps 环境里可用 ──────────────────────────
+# anima-studio 给每个引擎版本装一个隔离 venv、全程走子进程。识别一个引擎跑在
+# 一次性的 --no-deps venv 里,所以识别一个版本的代价是一次下载而不是一整棵
+# 依赖树。这依赖两件事:`__init__.py` 什么都不 import,`db.py` 只 import 标准库。
+# 往 `__init__.py` 里加一句 `from anima_world.api import World`(极常见的便利
+# 重导出)就会打断它 —— 而全量测试照样全绿,发布照样通过,坏的是别人已经
+# 发布的工具。
+
+def test_version_identification_needs_no_third_party_imports():
+    """`__version__` 与 db 格式常量必须在没有依赖的环境里读得到。"""
+    import subprocess
+    import sys
+
+    probe = (
+        "import anima_world;"
+        "from anima_world.db import DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT;"
+        "print(anima_world.__version__, DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT)"
+    )
+    # -S 不加载 site-packages,所以第三方包在子进程里根本不存在 —— 这正是
+    # --no-deps venv 的形状。开发机上依赖装得好好的,少了这层隔离,测试会
+    # 恒绿、什么都守不住。cwd 设成仓库根,让 anima_world 从源码树可见。
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", probe],
+        capture_output=True, text=True, cwd=repo_root,
+    )
+    assert result.returncode == 0, (
+        "版本识别探针在无依赖环境里失败了 —— 多半是有人往 anima_world/__init__.py "
+        f"或 db.py 里加了第三方 import:\n{result.stderr}"
+    )
+    version, fmt, floor = result.stdout.split()
+    assert version and int(fmt) >= 1 and int(floor) >= 1
+
+
+def test_ticks_zero_initializes_a_world_without_running_it(tmp_path):
+    """跨仓库契约:`simulate --ticks 0` = 建库但不跑。
+
+    这是唯一能无头建出世界文件的办法(没有 init/create 子命令),外部工具
+    靠它建库再交给宿主。将来给 tick 数加一条"必须为正"的校验 —— 一个看起来
+    完全合理的加固 —— 会悄悄拿掉这个能力。
+    """
+    from anima_world.__main__ import main
+
+    db = tmp_path / "w.db"
+    assert main(["simulate", "--db-path", str(db), "--ticks", "0", "--llm", "mock"]) == 0
+    assert db.exists()
+
+    conn = sqlite3.connect(db)
+    try:
+        joins = conn.execute("SELECT count(*) FROM events WHERE type='agent_join'").fetchone()[0]
+        ticked = conn.execute("SELECT count(*) FROM events WHERE ts > 0").fetchone()[0]
+    finally:
+        conn.close()
+    assert joins > 0, "建库应该播下创世角色"
+    assert ticked == 0, "--ticks 0 不该推进世界"

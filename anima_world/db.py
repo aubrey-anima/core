@@ -253,13 +253,17 @@ def _check_and_stamp_format(conn: sqlite3.Connection) -> None:
     """
     stamp = read_db_format(conn)
     if stamp is not None and (stamp > DB_FORMAT_VERSION or stamp < MIN_SUPPORTED_DB_FORMAT):
+        # Name the engine that CAN open it. The major version is the db format
+        # version, so the stamp already says which one to install — leaving the
+        # reader to derive that from the version policy is a step they should
+        # never have to take.
+        newer = stamp > DB_FORMAT_VERSION
         raise DBFormatError(
             f"database format {stamp} is outside this engine's supported range "
-            f"{MIN_SUPPORTED_DB_FORMAT}..{DB_FORMAT_VERSION} — "
-            "use a matching engine version (a newer engine wrote this database)"
-            if stamp > DB_FORMAT_VERSION
-            else f"database format {stamp} predates the oldest supported format "
-            f"{MIN_SUPPORTED_DB_FORMAT}"
+            f"{MIN_SUPPORTED_DB_FORMAT}..{DB_FORMAT_VERSION}"
+            + (" (a newer engine wrote it)" if newer else " (an older engine wrote it)")
+            + f" — install a {stamp}.x engine to open this world; "
+            "worlds do not migrate between majors"
         )
 
 

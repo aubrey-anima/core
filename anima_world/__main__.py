@@ -19,7 +19,12 @@ from anima_world.brain import Brain
 from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequence, Status, default_bt
 from anima_world.config_store import ConfigStore, load_or_create_key
 from anima_world.config_store import seed_defaults as seed_config_defaults
-from anima_world.db import open_db
+from anima_world.db import (
+    DB_FORMAT_VERSION,
+    MIN_SUPPORTED_DB_FORMAT,
+    DBFormatError,
+    open_db,
+)
 from anima_world.events import EventLog
 from anima_world.graph import KnowledgeGraph
 from anima_world.locations import DEFAULT_POINTS
@@ -48,6 +53,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="anima-world",
         description="ANIMA 世界引擎:运行世界、快进、打包成 .cyberworld",
+    )
+    # For an engine whose headline contract is "the version IS the
+    # compatibility promise", self-report is a first-class concern: it is the
+    # first thing an external tool managing several engines asks. Both formats
+    # ride along, since the version alone does not say which db a build opens.
+    from anima_world import __version__
+    from anima_world.world_package import PACKAGE_FORMAT_VERSION
+
+    parser.add_argument(
+        "--version", action="version",
+        version=(
+            f"anima-world {__version__}"
+            f"  (db format {DB_FORMAT_VERSION}, 支持到 {MIN_SUPPORTED_DB_FORMAT}"
+            f";包格式 {PACKAGE_FORMAT_VERSION})"
+        ),
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -266,6 +286,36 @@ def _roster_entry(i: int, locs: list[str], seed: dict[str, Any] | None = None) -
         }
     aid = chr(ord("A") + i) if i < 26 else f"agent_{i}"
     return {"id": aid, "name": aid, "location": locs[i % len(locs)], "personality": ""}
+
+
+def _roster_from_events(persisted: list[Event], projection: Any) -> list[dict[str, str]]:
+    """The cast of a world that already exists, taken from its own event log.
+
+    A non-empty database is the authority on who lives in it. The seed file is
+    read once, into an empty database — so consulting it on restart hands the
+    world whatever roster happens to be on disk, which for a host that seeded a
+    database and shipped it is the BUNDLED demo cast. The world's own agents
+    then never tick again while three strangers append events to it, and
+    nothing says so.
+
+    Order follows the log, so a roster stays stable across restarts.
+    """
+    roster: list[dict[str, str]] = []
+    for event in persisted:
+        if event.type != "agent_join" or not event.who:
+            continue
+        if any(entry["id"] == event.who for entry in roster):
+            continue
+        projected = getattr(projection, "agents", {}).get(event.who)
+        spec = projected.spec if projected is not None else dict(event.payload.get("spec") or {})
+        location = (projected.location if projected is not None else None) or event.payload.get("location")
+        roster.append({
+            "id": event.who,
+            "name": spec.get("name", event.who),
+            "location": location or "",
+            "personality": spec.get("personality", ""),
+        })
+    return roster
 
 
 # Normalize a hand-authored goals field to a list — `list("守住店")` would
@@ -615,7 +665,8 @@ def build_serve_scheduler(
         # world's only source of truth from genesis onward.
         logger.warning(
             "--seed %s was NOT applied: this database already holds %d event(s), and a seed "
-            "file is only ever read into an empty one. Point --db-path at a fresh file to "
+            "file is only ever read into an empty one. Its own roster and world state come "
+            "from its event log, so it does not need one. Point --db-path at a fresh file to "
             "author against this seed, or edit the live world through World.config_set / "
             "World.prompt_set and the locations/bt_nodes tables.",
             seed_path, len(persisted),
@@ -626,8 +677,15 @@ def build_serve_scheduler(
     # off-stage — skipped in both the roster loop and the mid-run-join scan.
     away = _away_agents(persisted)
     locs = ["cafe", "workshop", "home"]
-    for i in range(n_agents):
-        entry = _roster_entry(i, locs, world_seed)
+    # An existing world names its own cast; the seed file only ever furnishes an
+    # empty one. `--agents` is a seeding knob and does not apply to a world that
+    # already has a roster.
+    roster = (
+        _roster_from_events(persisted, boot_projection)
+        if persisted
+        else [_roster_entry(i, locs, world_seed) for i in range(n_agents)]
+    )
+    for entry in roster:
         if entry["id"] in away:
             continue
         # bt-duties D5/D6: each agent gets its OWN tree (duties first, idle
@@ -1095,7 +1153,7 @@ def run_run(args: argparse.Namespace) -> int:
         world = World.open(
             args.db_path, seed_path=args.seed, beats_path=args.beats, agents=args.agents
         )
-    except (BeatScriptError, WorldSeedError) as exc:
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
         print(f"[run] {exc}", file=sys.stderr)
         return 2
     roster = "、".join(brain.agent.name for brain in world.scheduler.agents.values())
@@ -1191,8 +1249,9 @@ def run_start(args: argparse.Namespace) -> int:
 
     try:
         world = World.open(str(db_path), seed_path=args.seed, beats_path=args.beats)
-    except (BeatScriptError, WorldSeedError) as exc:
-        what = "节拍脚本" if isinstance(exc, BeatScriptError) else "世界种子"
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        what = ("节拍脚本" if isinstance(exc, BeatScriptError)
+                else "世界文件" if isinstance(exc, DBFormatError) else "世界种子")
         print(f"\n  {onboarding.red(onboarding.BAD)} {what}有问题:\n{exc}", file=sys.stderr)
         return 2
     print(f"     {onboarding.green(onboarding.OK)} {len(world.scheduler.agents)} 个角色就位:"
@@ -1396,7 +1455,7 @@ def run_simulate(args: argparse.Namespace) -> int:
             mock_narrative=(tier == "planner"),
             beats_path=args.beats,
         )
-    except (BeatScriptError, WorldSeedError) as exc:
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
         print(f"[simulate] {exc}", file=sys.stderr)
         return 2
 

@@ -96,6 +96,32 @@ shape worth preserving: `is_valid_world_seed` returns the bare verdict that the 
 implements, and `world_seed_errors` only *explains* that verdict — it must never change
 it. `tests/test_packaging.py` pins the two in lockstep.
 
+Three more contracts are behavioral rather than file formats. They are load-bearing for
+hosts that manage several engine versions at once, and each is now pinned by a test —
+because all three used to hold by accident, where a reasonable refactor would break
+already-released external tools with nothing going red here.
+
+**`anima_world/__init__.py` and `db.py` must import only the standard library.** Version
+identification runs in a throwaway `--no-deps` virtualenv, so identifying an engine costs
+one download instead of a whole dependency tree:
+
+```bash
+pip install --no-deps anima-world==X.Y.Z
+python -c "import anima_world; print(anima_world.__version__)"
+python -c "from anima_world.db import DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT"
+```
+
+Adding a convenience re-export to `__init__.py` (`from anima_world.api import World`) is
+what breaks this, and it is an extremely natural thing to write.
+
+**`DB_FORMAT_VERSION` and `MIN_SUPPORTED_DB_FORMAT` are read by external tools** at those
+import paths, to decide whether a world file and an engine belong together. Do not move
+them into a private module.
+
+**`simulate --ticks 0` means "initialize and stop".** It is the only way to build a world
+database headlessly — there is no `init` subcommand. A future "reject non-positive tick
+counts" validation would silently remove that ability.
+
 ## Making a change
 
 1. Open an issue first for anything beyond a bug fix. Worth knowing before you write

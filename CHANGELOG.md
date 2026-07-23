@@ -17,7 +17,62 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
-## [1.0.0] — unreleased
+## [1.0.1] — 2026-07-23
+
+Same db format (**1**) and package format (**1**) as 1.0.0. Worlds built by 1.0.0 open
+unchanged.
+
+### Fixed
+
+- **Reopening a world registered the bundled demo cast instead of its own agents**
+  ([#1]). The roster was built from the seed file on every boot, and the seed file
+  defaults to the bundled `world_seed.json` when `--seed` is absent. So a database that a
+  host seeded and shipped came back up running 苏晚夏 / 陆知遥 / 沈亦柔 — the world's own
+  agents never ticked again, while the three strangers appended `narrative`,
+  `state_change`, and `agent_action` events to it permanently. Nothing warned; the output
+  looked healthy. This hit the documented workflow (`simulate --seed … --ticks 0`, then
+  `run`). A non-empty database is now the authority on its own cast, rebuilt from its
+  genesis `agent_join` events.
+
+  The related `--seed was NOT applied` warning was also misleading: passing `--seed` was
+  the only way to get the right cast, so the one workaround that worked told you that you
+  had done it wrong.
+
+- **A db-format mismatch surfaced as an uncaught traceback** ([#5]). `DBFormatError` is
+  the outcome the whole version model exists to produce, and it was the only one of the
+  three user-facing precondition failures the CLI did not catch. It now prints one line
+  and exits 2, like `BeatScriptError` and `WorldSeedError`. The message also names the
+  engine to install (`install a 2.x engine to open this world`) rather than leaving the
+  reader to derive it from the version policy.
+
+### Added
+
+- `anima-world --version`, reporting the engine version plus the db and package format
+  versions ([#5]). For an engine whose headline contract is "the version *is* the
+  compatibility promise", self-report should not have been missing.
+- Event `payload` field reference in [docs/REFERENCE.md](docs/REFERENCE.md) §2.1, with a
+  stability note ([#7]). Hosts are told to read the `events` table directly for full
+  history; until now they had to reverse-engineer the fields.
+- Tests pinning three cross-repo contracts that previously held by accident ([#2]):
+  `__init__.py` / `db.py` importing only the standard library (version identification
+  runs in `--no-deps` virtualenvs), the db-format constants being externally read at
+  their import paths, and `simulate --ticks 0` meaning "initialize and stop". All three
+  are now documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Changed
+
+- `Development Status` classifier from Alpha to Beta ([#7]) — it contradicted the
+  add-only API promise and the mechanically-enforced version contract.
+- [docs/ROADMAP.md](docs/ROADMAP.md) now says up front that its v2.0–v5.0 predictions
+  shipped inside 1.0.0 ([#7]). It was written before the release and read as though
+  memory 2.0 were still unimplemented.
+
+[#1]: https://github.com/aubrey-anima/core/issues/1
+[#2]: https://github.com/aubrey-anima/core/issues/2
+[#5]: https://github.com/aubrey-anima/core/issues/5
+[#7]: https://github.com/aubrey-anima/core/issues/7
+
+## [1.0.0] — 2026-07-23
 
 First public release. db format **1**, package format **1**.
 
@@ -95,5 +150,6 @@ so there is nothing to migrate.
   versions at once.
 - The `story` subcommand, an M2-era leftover that no documentation mentioned.
 
-[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/aubrey-anima/core/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aubrey-anima/core/releases/tag/v1.0.0
