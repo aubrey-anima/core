@@ -71,6 +71,8 @@ anima-world --help    # start / config / doctor / run / simulate / world export|
 
 > 每个命令的完整参数、World 的逐函数说明、配置键 / 环境变量 / 节拍脚本格式,
 > 见 **[docs/REFERENCE.md](docs/REFERENCE.md)**(功能与接口参考)。
+> 想先理解**为什么是这样**——真相模型、tick 帧、线程与锁、不变量、已知架构债,
+> 见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**(架构)。
 
 `start` 是给人用的门(引导 + 演示速度);`run` 是无引导的前台宿主(给部署 / 脚本);
 真正嵌入到应用里用 `anima_world.api.World`。

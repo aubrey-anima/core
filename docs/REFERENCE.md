@@ -3,11 +3,8 @@
 > 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
 > 对应引擎版本:1.0.0(db 格式 1,包格式 1)。首发已并入原 [ROADMAP](ROADMAP.md)
-> 2.0–5.0 的四大机制:记忆 2.0(检索/反思/遗忘,常开)、需求系统(`needs.enabled`)、
-> 物品经济(`economy.enabled`)、社交(三轴关系常开 + 八卦/小团体 `social.enabled`)。
-> 新增 World 函数:`retrieve_memories` / `reflections` / `needs` / `balance` /
-> `inventory` / `shop` / `player_topup` / `player_buy` / `cliques`;
-> 新增配置键见 `anima-world config list` 的 memory/needs/economy/social 分类。
+> 2.0–5.0 的四大机制,详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
+> 想先理解"为什么是这样",读 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
@@ -22,6 +19,8 @@
 7. [提示词模板](#7-提示词模板)
 8. [数据文件](#8-数据文件)
 9. [节拍脚本格式](#9-节拍脚本格式)
+
+设计意图与不变量:[ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
@@ -103,15 +102,66 @@
   单次上限 ±0.2;同一对角色同日多次判定按 0.5^(N-1) 阻尼;跨越关系档位
   (宿敌/交恶/淡漠/熟识/亲近/挚交)时由 LLM 用一句 ≤20 字中文短语重写关系描述。
 
-### 2.5 记忆与图谱
+### 2.5 记忆 2.0
 
-- **记忆**(每角色私有):规则式触发器决定什么值得记 —— 会话摘要、关系跨档位。容量
-  `memory.capacity`(默认 50)条,超出按最旧淘汰,`anchor` 记忆永不删。记忆是派生真相,
-  `memories` 表清空后可从事件日志重建。
+**常开,没有开关。**
+
+- **写入**:规则式触发器决定什么值得记 —— 会话摘要、关系跨档位。容量 `memory.capacity`
+  (默认 50)条,`anchor` 记忆永不删。
+- **检索**(`world.retrieve_memories`):三因子打分
+  `score = 时近 + 重要 + 1.5×相关`。时近按 tick 年龄指数衰减(半衰期
+  `memory.half_life_days`,默认 3 个世界日);相关用字符二元组重叠系数 —— 对中文友好、
+  零依赖。**命中即加固**:返回的记忆 `strength += 0.3`(上限 3.0),检索就是复习。
+- **遗忘**(日切自动):Ebbinghaus 曲线,强度越高忘得越慢、闲置越久掉得越多;
+  `anchor` 不衰减。容量淘汰按 **strength 最弱**优先,不再是最旧 —— 一条常被想起的
+  旧记忆活得过一条没人搭理的新记忆。
+- **反思**(`world.reflections`):累计重要度越过 `memory.reflection_threshold`
+  (默认 3.0)时,LLM 由近期记忆归纳出洞察,作为 `kind='reflection'` 的普通记忆落地。
+  反思本身不累计 —— 洞察催生洞察是风暴,不是思考。
 - **图谱**(跨角色共享):`edges` 表存 (subject, predicate, object) 三元组,只编码关系
   **结构**(friendship / rivalry / conversation),永不含消息内容。
 
-### 2.6 聊天子系统
+### 2.6 需求系统(`needs.enabled`,默认关)
+
+三条需求随 tick 衰减、由动作恢复,`mood` 是前三者的**木桶效应**派生值(永不存储):
+
+| 需求 | 衰减 | 恢复 |
+|---|---|---|
+| `energy` | 一天不睡见底 | `sleep`(8 小时回满) |
+| `hunger` | 约 18 小时饿透 | `eat`(约一小时回 0.6) |
+| `social` | 一天半不社交就孤独 | `chat` / `idle_social` |
+
+低于 `0.15` 触发**需求带** —— 它包在作者写的行为树外面,饿了就先吃,不管今天该开店。
+需求带在未点亮时是惰性的(黑板上没有需求值 → FAILURE),树的行为逐 tick 与不带它一致。
+
+需求是连续量,不进事件日志;`agent_needs` 表在日切与关闭时做检查点。
+
+### 2.7 物品与经济(`economy.enabled`,默认关)
+
+- **账本是投影**:余额和库存**没有表**,是 `payment` / `item_transfer` /
+  `item_consume` 事件折叠出来的。对账 = 重放,天生防复制品 bug。
+- **表里只有定义与当前值**:`item_defs`(作者数据)、`shop_stock`(货架现价与库存)。
+- **价格漂移**:每世界日一次的纯函数结算,卖得多涨、卖不动跌,夹在
+  `[base×0.25, base×4]` 之间 —— 把咖啡买断,明天真的更贵。
+- **日结**:小镇金库 `__town__` 按 `economy.daily_wage` 发工资(允许无限负债),
+  货架补 3 件、上限 20。
+- 角色吃饭会在本地货架买最便宜的吃食;**没货或没钱不会卡住** —— 降级成"吃随身干粮"。
+
+### 2.8 社交:八卦与小团体
+
+**三轴关系常开**;八卦与小团体由 `social.enabled` 控制(默认关)。
+
+- **三轴关系**:`sentiment` 仍是主轴(档位、边、改称呼都以它为准),另加
+  `trust` / `affection` / `respect` 三条细轴,搭同一套增量机制。老事件没有轴字段时
+  逐字节重放一致。
+- **八卦**:同地社交时,说者一条重要度 ≥0.5 的记忆以 25% 概率复制给听者,
+  `kind='hearsay<N>'`,每转一手重要度打折 15%,**三手之后自然消亡** —— 谣言有半衰期。
+  声誉由此涌现:没见过你的人也可能"听说过你"。每对角色每世界日只掷一次骰子。
+  `chat` 传给对话对象,`idle_social` 传给**同地在场的每一个人**。
+- **小团体**(`world.cliques`):friendship 边的连通分量(≥2 人),日切重算的派生缓存。
+  刻意不用 LLM —— 50 角色毫秒级,结果确定、可测试。
+
+### 2.9 聊天子系统
 
 与事件核解耦:聊天回合本身不发事件,**整场会话只在关闭时发一个 summary 事件**
 (零消息会话静默关闭)。会话按 (agent, player) 键控;空闲超过 `chat.idle_timeout`
@@ -124,13 +174,13 @@
 `World.record_chat_turn()` 把一个完成回合记入世界并立即关闭:摘要 + 一个事件 +
 关系判定(读真实转录),让玩家进入和 NPC 相同的关系机制。
 
-### 2.7 剧情节拍(beat director)
+### 2.10 剧情节拍(beat director)
 
 节拍脚本是编排好的剧情,打进运行中的世界。**加载严格**(坏脚本当场列出全部错误、拒绝
 启动),**触发降级**(运行时谓词失败读作"未满足",坏 op 跳过并警告,绝不让世界崩溃)。
 哪些 beat 已触发是历史(`beat_fired` 事件),重启后不重放。格式详见 §9。
 
-### 2.8 配置与密钥
+### 2.11 配置与密钥
 
 配置存 `config` 表,带类型(str/int/float/bool)、分类、是否 secret。secret 用 **Fernet
 加密**入库,密钥在 db 旁边的 `world.db.key` 文件(0600 权限)—— **搬迁 db 必须带上它**。
@@ -141,7 +191,7 @@
 提示词模板(约 12 个)存 `prompt_templates` 表,拼 prompt 现场 live 读取,改完即生效;
 保存前用代表性变量试渲染一次,占位符错误抛 `PromptRenderError`。
 
-### 2.9 版本即契约
+### 2.12 版本即契约
 
 一个 core 版本 = (引擎代码, db 格式版本, 包格式版本) 一起冻结:
 
@@ -181,11 +231,15 @@ from anima_world.api import World
 |---|---|
 | `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/LLM 诊断,`runtime.llm.degraded_reason` 常驻) |
 | `world.world_time()` | 世界日历(day/hour/minute/minute_of_day) |
-| `world.memories(agent_id)` | 某角色的记忆行 |
+| `world.memories(agent_id)` | 某角色的全部记忆行(按存储序) |
+| `world.retrieve_memories(agent_id, query=None, k=5)` | 三因子检索(时近×重要×相关),返回最相关的 k 条。**命中即加固**遗忘曲线(写库) |
+| `world.reflections(agent_id)` | 该角色的反思(由记忆归纳出的洞察) |
+| `world.needs(agent_id)` | 当前需求 `{energy, hunger, social, mood}`;未点亮或首 tick 前返回 `{}` |
 | `world.graph(agent_id=None)` | 关系图谱三元组 |
+| `world.cliques()` | 小团体(friendship 连通分量,日切重算) |
 | `world.events(since_seq=None)` | 近期事件缓冲(全量历史离线读 `events` 表) |
 | `world.subscribe()` / `world.unsubscribe(q)` | 事件推送订阅(线程安全队列,批量帧 `{type:'batch', events:[…]}`) |
-| `world.agent_context(agent_id, interlocutor_id)` | 有界 grounding:记忆 k 条 + 在场 + 关系 |
+| `world.agent_context(agent_id, interlocutor_id)` | 有界 grounding:锁内一次快照角色的 lived state(检索 `chat.recall_k` 条记忆 + 在场 + 关系档位),只读、无 LLM、无 IO。`world.world_context(...)` 是同一个函数的别名 |
 
 ### 聊天与玩家
 
@@ -198,6 +252,16 @@ from anima_world.api import World
 | `world.close_conversation(id)` | 手动关会话(摘要+事件+判定) |
 | `world.player_move(player_id, location)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError |
 | `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
+
+### 经济(`economy.enabled` 点亮后才有意义)
+
+| 函数 | 说明 |
+|---|---|
+| `world.balance(holder)` | 余额(事件账本的投影)。`holder` 可以是角色 id、`player:<id>`、`__town__` |
+| `world.inventory(holder)` | 随身库存 `{item_id: qty}` |
+| `world.shop(location_id)` | 某地货架:物品、名称、类别、现价、库存 |
+| `world.player_topup(player_id, amount)` | 给玩家钱包充值,返回新余额。`amount ≤ 0` 抛 ValueError。**钱包是在场状态,重启即清** |
+| `world.player_buy(player_id, location_id, item_id)` | 玩家买货:钱包扣款、货架减一,落 `payment` + `item_transfer`。没货 KeyError,钱不够 ValueError |
 
 ### 配置与提示词
 
@@ -329,8 +393,14 @@ anima-world world import my.cyberworld --destination ./instances
 | `chat.idle_timeout` | int | 600 | 会话闲置自动关闭(秒) |
 | `chat.recall_k` | int | 3 | 拼进 prompt 的历史会话摘要条数 |
 | `chat.recall_n` | int | 10 | 拼进 prompt 的当前会话轮数 |
-| `memory.capacity` | int | 50 | 每角色记忆容量(anchor 不占淘汰) |
+| `memory.capacity` | int | 50 | 每角色记忆容量(anchor 不占淘汰),超出按 strength 最弱优先 |
 | `memory.sentiment_threshold` | float | 0.3 | 关系变动触发记忆的阈值 |
+| `memory.half_life_days` | float | 3.0 | 检索时近因子的半衰期(世界日) |
+| `memory.reflection_threshold` | float | 3.0 | 累计重要度越过它就触发一次反思 |
+| `needs.enabled` | bool | false | 需求曲线(energy/hunger/social)驱动行为 |
+| `economy.enabled` | bool | false | 物品、金钱、店铺与价格漂移 |
+| `economy.daily_wage` | float | 20.0 | 小镇金库每日发给每个角色的工资 |
+| `social.enabled` | bool | false | 八卦传播与小团体检测(三轴关系不受此开关影响,常开) |
 
 ## 7. 提示词模板
 
