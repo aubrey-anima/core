@@ -1,0 +1,20 @@
+# 发布产物只装引擎代码。测试、文档、开发配置留在仓库里,不进 sdist ——
+# setuptools 默认会把 tests/ 扫进源码包,这里明确剪掉。
+#
+# 世界数据(*.db / *.db.key)由 .gitignore 挡在仓库外,这里再挡一道:
+# 一个 world.db 是某个人的世界,绝不该搭着发行包走。
+
+prune tests
+prune docs
+prune dist
+prune build
+
+exclude CLAUDE.md
+exclude MANIFEST.in
+
+global-exclude *.db
+global-exclude *.db.key
+global-exclude *.db-shm
+global-exclude *.db-wal
+global-exclude *.pyc
+global-exclude .DS_Store

@@ -101,3 +101,69 @@ def test_beat_script_rejects_a_bad_script():
     """Authoring-time validation is a contract: bad beats must never reach a world."""
     with pytest.raises(BeatScriptError):
         BeatScript.from_data({"beats": [{"nonsense": True}]})
+
+
+# ── 发布产物只装代码:测试、文档、世界数据都不许搭车 ──────────────────────
+
+
+def _package_dir() -> "pathlib.Path":
+    import pathlib
+
+    return pathlib.Path(str(resources.files("anima_world")))
+
+
+def test_package_directory_carries_no_world_data():
+    """`anima_world/` 里除了代码只允许有 world_seed.json。
+
+    一个 world.db 是某个人的世界(还带着 Fernet 密钥能解开的 llm.api_key),
+    掉进包目录就会被 package-data 或 sdist 扫进发行包。这条测试盯着实际的
+    包目录,而不是盯打包声明——声明对了但文件躺在那里同样会出事。
+    """
+    strays = sorted(
+        p.name
+        for p in _package_dir().rglob("*")
+        if p.is_file()
+        and p.suffix not in {".py", ".pyc", ".typed"}
+        and p.name != "world_seed.json"
+        and "__pycache__" not in p.parts
+    )
+    assert strays == [], f"包目录里混进了非代码文件:{strays}"
+
+
+def test_package_directory_carries_no_tests():
+    offenders = sorted(
+        p.name for p in _package_dir().rglob("test_*.py") if "__pycache__" not in p.parts
+    )
+    assert offenders == [], f"测试不该住在发布包里:{offenders}"
+
+
+def test_sdist_excludes_tests_and_world_data():
+    """真构建一次 sdist,看清单——MANIFEST.in 的 prune 规则很容易写错却无声。
+
+    setuptools 默认会把 tests/ 扫进 sdist;wheel 不受影响(它只装
+    `[tool.setuptools.packages.find]` 找到的包),所以这里专门盯 sdist。
+    """
+    import pathlib
+    import subprocess
+    import sys
+    import tarfile
+    import tempfile
+
+    build = pytest.importorskip("build", reason="需要 `pip install build` 才能验证 sdist")
+    assert build  # 仅用于存在性检查
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory() as out:
+        proc = subprocess.run(
+            [sys.executable, "-m", "build", "--sdist", "--outdir", out, str(root)],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, f"sdist 构建失败:\n{proc.stdout}\n{proc.stderr}"
+        (tarball,) = pathlib.Path(out).glob("*.tar.gz")
+        names = tarfile.open(tarball).getnames()
+
+    assert not [n for n in names if "/tests/" in n or n.endswith("/tests")], "sdist 不许带 tests/"
+    assert not [n for n in names if n.endswith((".db", ".db.key"))], "sdist 不许带世界数据"
+    assert any(n.endswith("anima_world/world_seed.json") for n in names), (
+        "world_seed.json 是唯一的 package data,漏了会让宿主环境少文件"
+    )
