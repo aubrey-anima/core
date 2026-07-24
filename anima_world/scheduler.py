@@ -466,6 +466,21 @@ class Scheduler:
         except Exception:  # noqa: BLE001 - a watermark checkpoint is never fatal
             logger.warning("reflection watermark checkpoint failed", exc_info=True)
 
+    def checkpoint(self) -> None:
+        """Flush every lazy checkpoint (needs / reflection watermarks / clock)
+        so the db is complete as of NOW, without stopping the world.
+
+        The trio is deliberately lazy on the tick path (day rollover /
+        shutdown) — but an interaction moment is the opposite trade: a player
+        just touched the world, and "the db is whole the instant you spoke"
+        is what live export and crash recovery lean on. Cost: one single-row
+        commit per store. Idempotent; each _persist_* is already never-fatal.
+        """
+        with self._lock:
+            self._persist_all_needs()
+            self._persist_reflection_watermarks()
+            self._persist_clock()
+
     def _submit_reflection(self, agent_id: str) -> None:
         """Snapshot context under the lock, reflect on the judge pool."""
         brain = self.agents.get(agent_id)

@@ -502,6 +502,29 @@ def _bt_for(loc: str) -> Selector:
     )
 
 
+def _store_genesis_seed(conn: Any, world_seed: dict[str, Any] | None) -> None:
+    """Record the seed that is about to populate a FRESH database (1.0.2).
+
+    Empty-db-only, the same contract as every seed_defaults: an existing
+    world's provenance must never be rewritten to whatever today's seed is.
+    Live export (`World.export_snapshot`) reads this back so a snapshot
+    always carries its true birth certificate. Pre-1.0.2 databases simply
+    lack the row — export falls back to the bundled seed and says so.
+    """
+    if world_seed is None:
+        return
+    (events,) = conn.execute("SELECT COUNT(*) FROM events").fetchone()
+    (locations,) = conn.execute("SELECT COUNT(*) FROM locations").fetchone()
+    if events or locations:
+        return
+    conn.execute(
+        "INSERT INTO db_meta (key, value) VALUES ('world_seed', ?)"
+        " ON CONFLICT(key) DO NOTHING",
+        (json.dumps(world_seed, ensure_ascii=False),),
+    )
+    conn.commit()
+
+
 def build_serve_scheduler(
     n_agents: int | None = None,
     db_path: str | Path | None = None,
@@ -560,6 +583,7 @@ def build_serve_scheduler(
         n_agents = len(world_seed["agents"]) if world_seed is not None else len(CHARACTER_ROSTER)
     if db_path is not None:
         conn = open_db(db_path)
+        _store_genesis_seed(conn, world_seed)  # 空库首启才写,出生证明随 db 走
         event_log = EventLog(conn)
         db_path_str = str(db_path)
         # M5: config/prompts share the same world.db connection; seeding is

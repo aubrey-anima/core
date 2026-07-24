@@ -31,8 +31,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import sqlite3
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any, Iterator
 
 from anima_world.chat_service import ChatService
@@ -44,6 +47,7 @@ from anima_world.locations import DEFAULT_POINTS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
 from anima_world.types import AgentState, Projection
+from anima_world.world_package import WorldPackageManifest, export_world_package
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
 logger = logging.getLogger(__name__)
@@ -390,6 +394,17 @@ class World:
         # 在场玩家(刻意内存态:重启即新访;持久的部分——会话/记忆/关系——在 db 里)
         self.players: dict[str, dict[str, Any]] = {}
 
+        # 开机补完:会话只在 record_chat_turn 一次调用内开与关,且运行中的
+        # 世界独占 db,所以此刻还 open 的行只能是上次崩溃的遗留。消息早已
+        # 逐条落盘,补上总结与那一个 conversation 事件即可 —— 崩溃从
+        # "丢总结"降级为"总结晚到"。
+        try:
+            orphans = asyncio.run(self.session_manager.reap_orphans())
+            if orphans:
+                logger.info("closed %d orphaned conversation(s) from a previous run", len(orphans))
+        except Exception:  # noqa: BLE001 - recovery must never block open
+            logger.warning("orphan conversation recovery failed", exc_info=True)
+
     # ── 生命周期 ────────────────────────────────────────────────────────────
 
     @classmethod
@@ -431,6 +446,70 @@ class World:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    def export_snapshot(
+        self,
+        output_path: str | Path,
+        *,
+        world_id: str,
+        name: str,
+        seed_path: str | Path | None = None,
+        beats_path: str | Path | None = None,
+        summary: str = "",
+        genre: str = "",
+        setting: str = "",
+        theme: str = "default",
+    ) -> WorldPackageManifest:
+        """活体导出:世界不停,当场打出一个完整的 snapshot 包。
+
+        先刷检查点(needs/反思水位/时钟),再持世界锁用 SQLite backup API
+        拷一致副本 —— 锁只挡拷贝那一瞬,打包在锁外进行。种子按
+        显式 seed_path → 建库时存进 db_meta 的出生种子 → 内置种子(记警告)
+        解析。分发纪律不变:密文(is_secret=1)在副本落地时即剥除。
+        """
+        if self._closed:
+            raise RuntimeError("world is closed; use export_world_package offline instead")
+        scheduler = self.scheduler
+        with tempfile.TemporaryDirectory(prefix="anima_world-live-export-") as temp_dir:
+            temp_db = Path(temp_dir) / "world.db"
+            scheduler.checkpoint()
+            with scheduler._lock:
+                target = sqlite3.connect(temp_db)
+                try:
+                    scheduler.event_log.conn.backup(target)
+                    target.execute("DELETE FROM config WHERE is_secret=1")
+                    target.commit()
+                finally:
+                    target.close()
+                genesis_row = scheduler.event_log.conn.execute(
+                    "SELECT value FROM db_meta WHERE key='world_seed'"
+                ).fetchone()
+            if seed_path is not None:
+                resolved_seed = Path(seed_path)
+            elif genesis_row is not None:
+                resolved_seed = Path(temp_dir) / "world_seed.json"
+                resolved_seed.write_text(genesis_row[0], encoding="utf-8")
+            else:
+                import anima_world
+
+                resolved_seed = Path(anima_world.__file__).parent / "world_seed.json"
+                logger.warning(
+                    "this database predates genesis-seed provenance (1.0.2); the exported "
+                    "package carries the BUNDLED seed — pass seed_path to override"
+                )
+            return export_world_package(
+                seed_path=resolved_seed,
+                output_path=output_path,
+                world_id=world_id,
+                name=name,
+                mode="snapshot",
+                db_path=temp_db,
+                beats_path=beats_path,
+                summary=summary,
+                genre=genre,
+                setting=setting,
+                theme=theme,
+            )
 
     # ── 时钟 ────────────────────────────────────────────────────────────────
 
@@ -670,6 +749,8 @@ class World:
                 conversation_id, message["role"], content, int(time.time())
             )
         asyncio.run(self.session_manager.close_conversation(conversation_id))
+        # 交互即检查点:说完这句话的瞬间,db 就是完整的(可打包、可崩)。
+        self.scheduler.checkpoint()
         return conversation_id
 
     def conversations(self, agent_id: str) -> list[dict[str, Any]]:
@@ -680,7 +761,9 @@ class World:
 
     def close_conversation(self, conversation_id: int) -> bool:
         """手动关闭会话(摘要 + 事件 + 判定);返回是否发了世界事件。"""
-        return asyncio.run(self.session_manager.close_conversation(conversation_id))
+        emitted = asyncio.run(self.session_manager.close_conversation(conversation_id))
+        self.scheduler.checkpoint()  # 交互即检查点
+        return emitted
 
     def player_move(self, player_id: str, location: str, *, role: str = "player") -> None:
         """玩家移动到某个 point 地点。未知地点抛 KeyError。"""
@@ -716,6 +799,7 @@ class World:
                 "action": action,
                 "details": dict(details or {}),
             })
+            self.scheduler.checkpoint()  # 交互即检查点(RLock,可重入)
 
     # ── 经济(economy-v4) ──────────────────────────────────────────────────
 
@@ -790,6 +874,7 @@ class World:
                 "payload": {"from": f"shop:{location_id}", "to": holder,
                             "item_id": item_id, "qty": 1},
             })
+            self.scheduler.checkpoint()  # 交互即检查点
         return {"item_id": item_id, "price": price, "wallet": player["wallet"]}
 
     # ── 配置与提示词 ────────────────────────────────────────────────────────

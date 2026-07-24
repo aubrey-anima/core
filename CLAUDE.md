@@ -53,7 +53,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 109 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 119 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 

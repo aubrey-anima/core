@@ -17,6 +17,39 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-07-23
+
+Same db format (**1**) and package format (**1**) as 1.0.0/1.0.1. Worlds built by either
+open unchanged. Theme: **the db is whole the instant a player touches the world** — no
+more "close the world first to get a complete file".
+
+### Added
+
+- **`World.export_snapshot()` — live export.** Package a running world into a
+  `.cyberworld` snapshot without stopping it: checkpoints are flushed first, the db is
+  copied under the world lock via the SQLite backup API (ticks are blocked only for the
+  copy itself), and packaging happens outside the lock. Secrets are stripped the moment
+  the copy lands. The exported seed resolves explicit `seed_path` → the genesis seed
+  recorded in `db_meta` → the bundled seed (with a warning).
+- **Genesis-seed provenance.** First boot into an empty database now records the seed it
+  was born from in `db_meta` (`world_seed`), so a snapshot always carries its true birth
+  certificate. Empty-db-only, like every other seeding step; pre-1.0.2 databases simply
+  lack the row. Additive row in an existing table — not a format change.
+
+### Fixed
+
+- **Interaction moments now flush the lazy checkpoints.** `record_chat_turn`,
+  `player_action`, `player_buy`, and `close_conversation` write the needs / reflection
+  watermark / clock checkpoints on the spot instead of waiting for day rollover or
+  shutdown. A crash (or a live export) right after a player interaction no longer loses
+  the quiet-tail clock or the day's needs drift for that moment.
+- **Orphaned conversations are recovered at open.** A crash between
+  `start_conversation` and the close inside `record_chat_turn` used to leave the
+  conversation `open` forever (embedded hosts without the idle reaper never closed it,
+  and its one `conversation` event was never emitted). `World.open` now sweeps all open
+  conversations — messages were already durable, so the summary and event are generated
+  late instead of lost.
+
 ## [1.0.1] — 2026-07-23
 
 Same db format (**1**) and package format (**1**) as 1.0.0. Worlds built by 1.0.0 open
@@ -150,6 +183,7 @@ so there is nothing to migrate.
   versions at once.
 - The `story` subcommand, an M2-era leftover that no documentation mentioned.
 
-[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/aubrey-anima/core/releases/tag/v1.0.2
 [1.0.1]: https://github.com/aubrey-anima/core/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aubrey-anima/core/releases/tag/v1.0.0

@@ -237,8 +237,13 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子);已有库的 seed 被忽略并警告;**显式指定**的坏 seed / 坏 beats 当场抛 `WorldSeedError` / `BeatScriptError` |
+| `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子),并把这份种子存进 `db_meta` 当出生证明;已有库的 seed 被忽略并警告;**显式指定**的坏 seed / 坏 beats 当场抛 `WorldSeedError` / `BeatScriptError`。开机会收割上次崩溃遗留的 open 会话(补摘要、发事件) |
 | `world.close(wait=True)` | 停时钟、排干 LLM 线程池。幂等;`with World.open(...) as world:` 自动调用。事件每 tick 已落盘,退出时不额外写 |
+| `world.export_snapshot(output_path, *, world_id, name, seed_path=None, beats_path=None, …)` | **活体导出**:世界不停,当场打出完整 snapshot 包。先刷检查点,持锁瞬间用 SQLite backup 拷一致副本,打包在锁外;密文当场剥除。种子按 显式参数 → db_meta 出生种子 → 内置种子(记警告) 解析。返回 `WorldPackageManifest` |
+
+交互即检查点:`record_chat_turn` / `player_action` / `player_buy` / `close_conversation`
+结束时会顺手把 needs / 反思水位 / 时钟检查点刷进 db —— 玩家碰过世界的那一刻,db 就是
+完整的,崩溃或活体导出都不缩水。安静挂机的损失上限仍是"上个日切以来的检查点数据"。
 
 ### 时钟
 

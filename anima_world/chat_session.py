@@ -114,6 +114,22 @@ class ChatSessionManager:
                 closed.append(int(conv["id"]))
         return closed
 
+    async def reap_orphans(self) -> list[int]:
+        """Close EVERY open conversation, ignoring the idle timeout.
+
+        Only correct at boot: conversations open and close inside a single
+        `record_chat_turn` call, and a running world owns its db exclusively,
+        so on a freshly opened World any 'open' row is a crash leftover. The
+        messages are already durable — closing here turns "崩溃丢总结" into
+        "总结晚到", the same one-event contract as a normal close.
+        """
+        now = self._clock()
+        closed: list[int] = []
+        for conv in self._store.idle_open_conversations(now, 0):
+            if await self.close_conversation(int(conv["id"])):
+                closed.append(int(conv["id"]))
+        return closed
+
     async def _summarize(self, conv: dict[str, Any], messages: list[dict[str, Any]]) -> str:
         transcript = "\n".join(f'{m["role"]}: {m["content"]}' for m in messages)
         instruction = (
