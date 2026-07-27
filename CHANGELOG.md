@@ -17,7 +17,7 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
-## [1.1.0] — 2026-07-26
+## [1.1.0] — 2026-07-27
 
 Same db format (**1**) and package format (**1**) as the whole 1.0.x line. Worlds built
 by 1.0.0–1.0.2 open unchanged. Theme: **the engine stops swallowing what it knows** —
@@ -269,7 +269,8 @@ so there is nothing to migrate.
   versions at once.
 - The `story` subcommand, an M2-era leftover that no documentation mentioned.
 
-[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/aubrey-anima/core/releases/tag/v1.1.0
 [1.0.2]: https://github.com/aubrey-anima/core/releases/tag/v1.0.2
 [1.0.1]: https://github.com/aubrey-anima/core/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aubrey-anima/core/releases/tag/v1.0.0
