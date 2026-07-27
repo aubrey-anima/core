@@ -17,6 +17,72 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-26
+
+Same db format (**1**) and package format (**1**) as the whole 1.0.x line. Worlds built
+by 1.0.0–1.0.2 open unchanged. Theme: **the engine stops swallowing what it knows** —
+a package says what it needs, a rejection says which thing is wrong, a fast-forward hands
+back numbers, and the front door finally has a way in.
+
+### Added
+
+- **`anima-world world inspect <package> [--json]`** — read a `.cyberworld`'s manifest
+  without being able to run it (#3). Reading the envelope no longer depends on passing
+  the engine-compat gate, so a launcher managing several engine versions can ask
+  "which engine does this need?" *before* it has that engine. An incompatible package
+  gets an **answer** and exit code 0; only an unreadable one is refused. The JSON field
+  set is documented in REFERENCE §8 as a wire contract. New public helpers:
+  `read_package_manifest()`, `WorldPackageManifest.validate_structure()` /
+  `validate_engine_range()` / `runs_on()` / `compatibility()`.
+- **`anima-world chat --db-path <db> --agent <id>`** — talk to a character from the
+  command line (#6). Everything it needs was already on the facade (`chat_reply` →
+  `record_chat_turn`); what was missing was a door. Omitting `--agent` lists the cast,
+  which is also the first way a world file has ever been able to say who lives in it.
+  The clock does not advance while you type.
+- **`anima-world simulate --report PATH`** — a machine-readable run summary (#11):
+  per-world-day event density by bucket, pairwise encounter counts and durations,
+  relationship curves with turning points, and per-resident time allocation with an
+  explicit `idle_only` flag. Carries its own `report_format_version`, separate from the
+  engine version. New module `anima_world.sim_report` (a pure function over an event
+  list, so it can be recomputed offline against any `world.db`).
+- **The world seed can author the material layer** (#12): top-level `items`,
+  `agents[].money`, `agents[].inventory`, and `locations[].stock`. Economy/needs shipped
+  with mechanisms but no genesis entry, so an authored keepsake ("she never takes her
+  father's pocket watch off") could only be dropped or demoted to a memory string. An
+  item id that is only referenced gets an automatic definition, so the short form just
+  works. Same tolerance as every other seed field: absent = today's behaviour, bad
+  entries dropped one by one, never blocks boot.
+- **The world seed can author Mock narration** via `mock_narration` (#9), including
+  action kinds this engine has never heard of.
+
+### Changed
+
+- **Template packages now travel within a major** (#4). `engine_min` for a `template`
+  export is the floor of the current major instead of the exact exporting version. A
+  snapshot carries a format-stamped `world.db` and keeps the exact floor; a template
+  carries only `world_seed.json` — version-neutral authored data whose schema is a
+  mirrored cross-repo contract precisely so it can travel. Stamping both alike turned
+  "you cannot carry your save forward" (the documented, accepted trade-off) into
+  "you cannot carry your **content** forward", which nobody decided.
+- **Mock narration follows the world's language instead of the engine's** (#9). The
+  templates moved from hardcoded English in `narrative.py` into the prompt store
+  (`narrative.mock.<kind>`, `narrative.mock_memory_suffix`), read live and authorable
+  per world. No API key is the *default* state, so `遥 wandered around——还记着…` —
+  English verbs, Chinese name, Chinese memory suffix, all in one line — was the first
+  screen, not an edge case. A failing real LLM falls back to the same world-owned
+  templates. `eat` gained a template of its own instead of rendering as "did something
+  custom".
+
+### Fixed
+
+- **Package rejections name which thing is wrong** (#10). Checksum mismatch, engine
+  range, seed schema, and the zip guards each printed the identical
+  `invalid or inaccessible package data`. The operator can only relay what the engine
+  says, so its 400 carried no reason either and an author could not tell "re-export with
+  a matching core" from "fix the seed". Seed problems now carry the per-entry detail
+  `world_seed_errors()` was already producing and the package layer was discarding.
+  Exit code is unchanged (2).
+
 ## [1.0.2] — 2026-07-23
 
 Same db format (**1**) and package format (**1**) as 1.0.0/1.0.1. Worlds built by either

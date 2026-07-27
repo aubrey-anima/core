@@ -2,7 +2,7 @@
 
 > 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
-> 对应引擎版本:1.0.0(db 格式 1,包格式 1)。首发已并入原 [ROADMAP](ROADMAP.md)
+> 对应引擎版本:1.1.0(db 格式 1,包格式 1)。首发已并入原 [ROADMAP](ROADMAP.md)
 > 2.0–5.0 的四大机制,详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
 > 想先理解"为什么是这样",读 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
@@ -165,6 +165,7 @@
 - **账本是投影**:余额和库存**没有表**,是 `payment` / `item_transfer` /
   `item_consume` 事件折叠出来的。对账 = 重放,天生防复制品 bug。
 - **表里只有定义与当前值**:`item_defs`(作者数据)、`shop_stock`(货架现价与库存)。
+  两者都能从世界种子创世注入(初始物品、钱财、店铺存货),见 §8。
 - **价格漂移**:每世界日一次的纯函数结算,卖得多涨、卖不动跌,夹在
   `[base×0.25, base×4]` 之间 —— 把咖啡买断,明天真的更贵。
 - **日结**:小镇金库 `__town__` 按 `economy.daily_wage` 发工资(允许无限负债),
@@ -224,6 +225,30 @@
   第三位纯修 bug)
 - `DB_FORMAT_VERSION` 联锁:挂上更新格式的 db 当场拒绝打开,**不写入任何表**
 - `anima_world.api` 的函数面**只加不改** —— 宿主应用的代码依赖它
+
+#### 下一个大版本发布时,已有的世界会怎样
+
+这套机制是为了保护**数据完整性**:读不懂的世界当场拒绝打开,而不是悄悄写坏它。它把
+这件事做得很好。但它的另一面从来没有被写下来过 —— 宿主和作者在大版本边界该做什么。
+先如实说清楚现状,再谈能不能改善:
+
+| | 跨得过大版本吗 | 靠什么 |
+|---|---|---|
+| 作者写的种子(`world_seed.json`) | **能** | 它是版本中立的 JSON,schema 是跨仓库镜像契约 |
+| `template` 包 | **大版本内自由流动**;跨大版本**不能** | 见 §4.7 的区间算法 |
+| `snapshot` 包 / `world.db` | **不能** | 里面是盖了格式戳的数据库 |
+| 事件历史、积累的记忆、关系状态 | **不能** | 它们只活在 `world.db` 里 |
+
+也就是说:**世界的设定活得下来,世界经历过的事活不下来。** 一个跑了三个月、
+角色之间攒出真实关系的世界,在大版本边界上只能留下它出生时的样子。
+
+引擎标榜的正是"会积累记忆与历史的世界",而这条规则按字面读把那份积累的寿命封顶在
+一个大版本内 —— 这两件事不可能都保持原样。目前**没有**官方的延续通路(没有事件日志
+导出、没有从既有世界反向生成种子)。事件日志是唯一真相、其余都是派生,所以一份格式
+中立的事件导出在概念上是成立的;要不要做、跨 schema 断裂时"重放"意味着什么,是一个
+真实的设计问题,但"没有延续通路"应该是一个决定,而不是一次遗漏。
+
+支持窗口(旧大版本还发不发安全补丁、发多久)见 [SECURITY.md](../SECURITY.md)。
 
 ---
 
@@ -331,7 +356,29 @@ from anima_world.api import World
 | `--no-input` | - | 不交互提问(CI / 脚本) |
 | `--real-time` | - | 新世界也用真实时间,不用演示速度 |
 
-### 4.2 anima-world run —— 无引导的前台宿主
+### 4.2 anima-world chat —— 和一个角色说话
+
+```bash
+anima-world chat --db-path saves/world.db                  # 不给 --agent:列出这个世界住着谁
+anima-world chat --db-path saves/world.db --agent 夏 --name 阿檀
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--db-path` | `saves/world.db` | 世界文件 |
+| `--agent` | 无 | 找谁说话;省略或写错都会列出名册(写错时退出码 2) |
+| `--player-id` | `cli` | 你的身份 id —— **角色对你的印象记在它头上**,换 id 就是换个人 |
+| `--name` | `访客` | 你在角色眼里的称呼 |
+| `--list` | - | 只列名册就退出 |
+
+空行或 Ctrl-D / Ctrl-C 结束。每说完一轮就落进世界(会话关闭、摘要、关系判定),
+所以**说完一句话那一刻 db 就是完整的**。
+
+**时钟不走**:对话发生在世界的此刻,退出时世界还停在原地。要一边活一边聊,那是
+宿主应用的事(`World.open` + `start_clock` + `World.chat`)—— 一个 CLI 不该趁你
+打字偷偷推进别人的世界。转录留在这个进程里,每轮只把最近 20 条传进世界。
+
+### 4.3 anima-world run —— 无引导的前台宿主
 
 不引导、不改时钟,打开世界让时钟跑,Ctrl-C 停。给部署和脚本;程序里嵌入请直接用
 `World.open`。
@@ -342,7 +389,7 @@ from anima_world.api import World
 | `--seed` / `--beats` / `--agents` | - | 同 start;坏 seed / 坏 beats 拒绝启动(退出码 2) |
 | `--quiet` | - | 不回显叙事事件 |
 
-### 4.3 anima-world config
+### 4.4 anima-world config
 
 ```bash
 anima-world config list [--category llm]     # 密钥自动打码,未设置显示"(未设置)"
@@ -352,13 +399,13 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 
 `set` 未知键返回退出码 2。
 
-### 4.4 anima-world doctor
+### 4.5 anima-world doctor
 
 检查:世界文件、`world.db.key` 是否在(不在则警告旧密钥永久读不出)、db 格式版本、
 事件/角色计数、LLM 四态(没建库/读不出来/没配/正常)+ **真调一次 LLM**(`--skip-probe`
 跳过)、时钟快慢翻译成人话。有问题退出码 1。
 
-### 4.5 anima-world simulate —— 无头快进
+### 4.6 anima-world simulate —— 无头快进
 
 | 参数 | 说明 |
 |---|---|
@@ -367,12 +414,42 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 | `--llm full\|planner\|mock` | 三档:全真 / 真规划+Mock 叙事(长跑推荐)/ 全 Mock |
 | `--no-llm` | `--llm mock` 的别名,同时给时它赢 |
 | `--plan-wait-cap` | 每世界日等待在途计划的秒数上限(默认 2×planner.timeout) |
+| `--report PATH` | 跑完写一份运行摘要 JSON(`-` = 写到 stdout) |
 | `--seed` / `--beats` / `--agents` | 同 run |
 
 非 mock 档会**先预检 LLM 再建世界**(坏 key 不会把降级能力目录种进新库)。内置"计划
 等待预算":连续两个世界日等待耗尽则判定 planner 死亡、不再等待,绝不挂起。
 
-### 4.6 anima-world world export / import —— 打包
+`--ticks 0` = 建库但不跑,这是唯一的无头建世界口径(没有 init/create 子命令)。
+
+#### 运行摘要(`--report`)
+
+这份数据全在事件日志里,但 **db 格式与事件 schema 是引擎的私有契约** —— 消费方伸手
+进 `world.db` 去数会把自己钉死在某个 db format 上。所以口径归引擎定,消费方按需读取。
+`anima_world.sim_report.build_run_report()` 是同一份逻辑的库入口(纯函数,可离线对
+任何 `world.db` 重算)。
+
+顶层带 `report_format_version`(**与引擎版本分开**:口径变了不该逼消费方升引擎)、
+`engine_version`、`db_format_version`。
+
+| 字段 | 内容 |
+|---|---|
+| `world` | `ticks` / `days` / `minutes_per_tick` / `ticks_per_day` / `agents`(名册取自 `agent_join`) |
+| `events.total` / `events.by_type` | 总数与按细分类型计数(`state_change` 按 `payload.kind` 细分) |
+| `events.by_day[]` | `day` / `total` / `buckets` —— 桶:`move` `work` `sleep` `chat` `idle` `plan` `narrative` `relation` `economy` `memory` `genesis` `other`。**一个事件只进一个桶,桶的并集恒等于 total** |
+| `agents[]` | `id` / `events` / `ticks_by_activity` / `share_by_activity` / **`idle_only`** |
+| `encounters[]` | `a` / `b` / `meetings`(相遇次数)/ `ticks` / `minutes` / `by_location` |
+| `relationships[]` | `as` / `target` / `start` / `end` / `min` / `max` / `changes` / `turning_points` |
+
+两条口径值得写明:
+
+- **在途不算在场**。出发即离场,到达才算到 —— 否则"作息设计的相遇窗口兑现没有"永远
+  答"兑现了"。
+- **一段活动持续到下一段开始**,与引擎"动作变了才发事件"的语义一致;叙事事件与关系
+  判定事件不打断活动(它们是对刚才那个动作的描写与事后结算)。
+  `idle_only` = 整场只有闲逛/睡觉/赶路,没有一件"发生了什么"。
+
+### 4.7 anima-world world export / import / inspect —— 打包
 
 ```bash
 anima-world world export --seed seed.json --output my.cyberworld \
@@ -381,10 +458,49 @@ anima-world world export --seed seed.json --db-path saves/world.db \
     [--beats beats.json] --output my.cyberworld \
     --world-id my-world --name "我的世界" --mode snapshot          # 快照包(secret 剥除)
 anima-world world import my.cyberworld --destination ./instances
+anima-world world inspect my.cyberworld [--json]                  # 它需要什么引擎?
 ```
 
-成功时 stdout 输出一行 JSON;失败退出码 2。`--world-id` 必须匹配
-`^[a-z0-9][a-z0-9._-]{0,63}$`。
+成功时 stdout 输出一行 JSON(`export` / `import`)或一份清单(`inspect`,`--json` 给
+一行 JSON);失败退出码 2。`--world-id` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
+
+#### 各命令的 JSON 字段集
+
+第三方工具按这几组字段编码,所以它们是**线格式**,与 `.cyberworld` 本身同一条纪律。
+
+| 命令 | 字段 |
+|---|---|
+| `export` | `operation` / `world_id` / `revision_id` / `mode` |
+| `import` | `operation` / `world_id` / `instance_id` / `path` |
+| `inspect --json` | manifest 全字段(`world_id` / `name` / `summary` / `genre` / `setting` / `theme` / `export_mode` / `revision_id` / `created_at` / `files` / `source_engine_version` / `package_format_version` / `engine_min` / `engine_max_exclusive`)+ `current_engine_version` / `runnable` / `operation` |
+
+#### `inspect` 跑不了的包也要回答
+
+**读封皮不需要先能跑它**。`inspect` 只做与版本无关的校验(归档安全、`checksums.json`
+与归档一一对应、`manifest.json` 的摘要对得上、manifest 结构合法),然后把兼容性作为
+**数据**给出:`runnable: false` + 退出码 **0**。
+
+这条是格式存在的意义:`.cyberworld` 就是用来在引擎不匹配的机器之间搬运的,拒绝回答
+"你需要什么"给最需要问的那个调用方,方向是反的。只有 `package_format_version` 允许
+硬拒解析 —— 那是封皮自己的版本。归档读不了(不是 ZIP、校验和不符)照旧退出码 2。
+
+拒收时 stderr 按类别给一句人话,四类各说各的:校验和不符(包坏了,重传没用,重新
+导出)/ 引擎区间不匹配(换匹配的 core 重导)/ 种子不合 schema(逐条点名哪个 agent
+缺哪个键)/ 归档防护触发。
+
+#### 引擎兼容区间怎么算
+
+导出时盖章,`[engine_min, engine_max_exclusive)`:
+
+| | `engine_min` | `engine_max_exclusive` |
+|---|---|---|
+| `snapshot` | **导出它的那个引擎版本** | 下一个大版本 |
+| `template` | **当前大版本的地板**(`{major}.0.0`) | 下一个大版本 |
+
+差别的理由:snapshot 带着盖了格式戳的 `world.db`,老引擎没有理由能打开它;template
+只装 `world_seed.json` —— 版本中立的作者数据,其 schema 本来就是跨仓库镜像契约,
+为的正是能travel。两者盖同一个章,代价就从"存档带不走"(已决定、已写进文档的取舍)
+变成"作品带不走"(没有人决定过)。
 
 ---
 
@@ -441,6 +557,15 @@ anima-world world import my.cyberworld --destination ./instances
 `judge.relationship` / `judge.user_relationship` / `judge.relabel`(关系判定三件套)·
 `world.setting`(世界观,**原样使用不做 format**,可放字面量 `{}`)。
 
+另有 **Mock 叙事模板**:`narrative.mock.<动作种类>`(`walk` / `chat` / `work` / `sleep` /
+`eat` / `idle_wander` / `idle_social` / `custom`,占位符 `{agent}` `{location}` `{target}`)
+与 `narrative.mock_memory_suffix`(占位符 `{summary}`)。
+
+没有配 key 是**默认状态**,所以这些是新用户看到的第一屏,而引擎无从知道自己在跑哪个
+世界 —— 那是种子决定的。因此模板跟着世界走:种子的 `mock_narration` 首启写入,之后
+`prompt_set` 热改即生效。引擎没听说过的动作种类(节拍脚本里的自定义动作)也可以写
+自己的模板。保存时会按调用点真正传的变量做渲染检查,占位符写错当场拒绝。
+
 ## 8. 数据文件
 
 **一个世界 = 一个卷**,包含:
@@ -449,8 +574,45 @@ anima-world world import my.cyberworld --destination ./instances
 |---|---|
 | `world.db` | SQLite(WAL):事件、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳 |
 | `world.db.key` | Fernet 密钥,**搬迁必须随行**;丢失 = secret 永久读不出(降级 Mock,但会点名) |
-| `world_seed.json` | 种子:`agents`(id/name/location/personality,可选 duties/goals)、`locations`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、可选 `relations`/`memories`。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空库一次,静默降级不可挽回 |
+| `world_seed.json` | 种子,字段见下表。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空库一次,静默降级不可挽回 |
 | `beats.json` | 可选节拍脚本(见 §9) |
+
+**种子字段**。只有 `agents` 与 `locations` 的必填键进**校验**(那是运维台
+`lib/worldSeed.js` 镜像的最小契约);其余全是可选,遵守同一条宽容原则:
+**缺字段 = 今天的行为,坏条目逐条丢弃、绝不拦住启动**。
+
+| 字段 | 内容 |
+|---|---|
+| `agents[]` | **必填** `id` / `name` / `location` / `personality`;可选 `duties`(职责窗口)、`goals`、`money`、`inventory` |
+| `locations[]` | **必填** `id` / `name` / `description`;可选 `kind` / `parent` / `x` / `y` / `w` / `h`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、`stock` |
+| `relations[]` | `a` / `b` / `sentiment` / `r_type` / `r_type_back`,双向播种 |
+| `memories[]` | 创世记忆 |
+| `world_setting` | 世界观,首启写进 `world.setting` 提示词 |
+| `items[]` | 物品定义:`id` / `name` / `kind`(`consumable`/`durable`/`artwork`)/ `base_price` / `restores` |
+| `mock_narration` | Mock 叙事模板,键是动作种类(外加 `memory_suffix`),见 §7 |
+
+**物质层的创世入口**(经济与需求从首发就有机制,过去却没有创世入口):
+
+```jsonc
+{
+  "items": [ {"id": "coal", "name": "煤", "kind": "consumable", "base_price": 3.0} ],
+  "agents": [ {
+    "id": "夏",
+    "money": 120,                                              // 覆写创世安家费(默认 30;写 0 = 一分没有)
+    "inventory": [ {"item": "父亲的怀表", "note": "从不离身"} ] // qty 默认 1
+  } ],
+  "locations": [ {"id": "cafe", "stock": [ {"item": "coal", "qty": 20, "price": 3.0} ]} ]
+}
+```
+
+- **引用即存在**:只被引用、没在 `items` 里定义的 id 自动补一条定义(名字就是 id、
+  `durable`、0 价),所以 `{"item": "父亲的怀表"}` 直接可用;要精确控制名称/种类/价格
+  再写 `items`。
+- **随身物品与钱是事件**(`item_transfer` / `payment`),不是表 —— 账本仍然是事件的
+  投影,对账即重放。`note` 原样落在事件载荷里跟着世界走,但**不会自动变成一条记忆**;
+  想让角色记得这件事,`memories` 才是那个入口。
+- **种子一碰物质层,内置演示物品就整体让位**(空表才种的规矩)。一个自带怀表和过冬煤
+  的世界不该再被塞进三份演示咖啡 —— 半真半假的货架比空货架更难查。
 
 **`.cyberworld` 包** = 受严格约束的 ZIP:
 

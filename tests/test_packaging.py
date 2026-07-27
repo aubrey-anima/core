@@ -126,6 +126,207 @@ def test_snapshot_export_carries_the_live_database(tmp_path):
     assert (imported.path / "world.db").is_file()
 
 
+# ── 包格式:envelope 谁都读得懂,拒绝要说人话 ──────────────────────────────
+# 跨语言协作走文件,所以这几条同时是运维台 lib/worldPackage.js 的镜像规格。
+
+
+def _repack(source: pathlib.Path, target: pathlib.Path, mutate) -> pathlib.Path:
+    """Rebuild an archive after `mutate` edits its members, checksums included.
+
+    Checksums are recomputed, so a package built here fails for exactly the
+    reason under test and not incidentally as "checksum mismatch".
+    """
+    import hashlib
+    import zipfile
+
+    with zipfile.ZipFile(source) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    mutate(members)
+    members["checksums.json"] = (
+        json.dumps(
+            {
+                "algorithm": "sha256",
+                "files": {
+                    name: {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
+                    for name, raw in members.items()
+                    if name != "checksums.json"
+                },
+            },
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ) + "\n"
+    ).encode()
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in sorted(members):
+            archive.writestr(name, members[name])
+    return target
+
+
+def _a_template(tmp_path: pathlib.Path, name: str = "demo.cyberworld") -> pathlib.Path:
+    seed_path = tmp_path / "world_seed.json"
+    seed_path.write_text(json.dumps(_bundled_seed(), ensure_ascii=False), encoding="utf-8")
+    package = tmp_path / name
+    export_world_package(
+        seed_path=seed_path, output_path=package,
+        world_id="demo-world", name="演示世界", mode="template",
+    )
+    return package
+
+
+def _needing_engine(package: pathlib.Path, target: pathlib.Path, minimum: str, maximum: str):
+    def mutate(members):
+        manifest = json.loads(members["manifest.json"])
+        manifest["engine_compat"] = {"minimum": minimum, "maximum_exclusive": maximum}
+        members["manifest.json"] = (
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+
+    return _repack(package, target, mutate)
+
+
+def test_manifest_is_readable_by_an_engine_that_cannot_run_it(tmp_path):
+    """一个包必须能回答"我需要什么引擎",问的人恰恰是装不了那个引擎的人。
+
+    `.cyberworld` 的全部意义就是在引擎不匹配的机器之间搬运。从前
+    `from_dict` 会先跑引擎区间校验再返回,于是区间外的引擎连 world_id 都读
+    不到 —— 只能把版本号从异常的**消息文本**里正则抠出来,或者干脆自己解压
+    读 manifest,而后者会把包格式的知识复制出这个仓库。
+    """
+    from anima_world.world_package import read_package_manifest
+
+    future = _needing_engine(_a_template(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
+
+    manifest = read_package_manifest(future)
+    assert manifest.world_id == "demo-world"
+    assert manifest.name == "演示世界"
+    assert manifest.export_mode == "template"
+    assert manifest.engine_min == "2.0.0"
+    assert manifest.runs_on("2.4.1") and not manifest.runs_on("1.0.2")
+    assert manifest.compatibility()["runnable"] is False
+
+
+def test_world_inspect_answers_for_an_incompatible_package(tmp_path):
+    """`world inspect` 对跑不了的包必须**回答**,退出码 0 —— 拒绝就没意义了。"""
+    import subprocess
+    import sys
+
+    future = _needing_engine(_a_template(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
+    result = subprocess.run(
+        [sys.executable, "-m", "anima_world", "world", "inspect", str(future), "--json"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    # 第三方启动器按这组字段编码,少一个就是单方面改契约(REFERENCE §8)。
+    for field in (
+        "world_id", "name", "export_mode", "engine_min", "engine_max_exclusive",
+        "source_engine_version", "package_format_version", "current_engine_version", "runnable",
+    ):
+        assert field in payload, f"inspect --json 少了字段 {field}"
+    assert payload["runnable"] is False
+    assert payload["engine_min"] == "2.0.0"
+
+
+def test_world_inspect_still_refuses_an_unreadable_package(tmp_path):
+    """放宽的只是"这个引擎跑不跑得了",不是校验本身。"""
+    import subprocess
+    import sys
+
+    junk = tmp_path / "junk.cyberworld"
+    junk.write_text("not a zip")
+    result = subprocess.run(
+        [sys.executable, "-m", "anima_world", "world", "inspect", str(junk)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert "ZIP" in result.stderr
+
+
+def test_template_travels_within_a_major_but_a_snapshot_does_not(tmp_path):
+    """模板只装 world_seed.json —— 版本中立的作者数据,不该按 db 的规矩钉版。
+
+    快照带着盖了格式戳的 world.db,地板是导出它的那个引擎,天经地义;模板
+    盖同一个章,代价就从"存档带不走"变成"作品带不走",而后者从没有人决定过。
+    """
+    from anima_world.db import open_db
+    from anima_world.world_package import _engine_version, _version_tuple
+
+    major = _version_tuple(_engine_version())[0]
+    seed_path = tmp_path / "world_seed.json"
+    seed_path.write_text(json.dumps(_bundled_seed(), ensure_ascii=False), encoding="utf-8")
+
+    template = export_world_package(
+        seed_path=seed_path, output_path=tmp_path / "t.cyberworld",
+        world_id="t-world", name="模板", mode="template",
+    )
+    assert template.engine_min == f"{major}.0.0"
+    assert template.runs_on(f"{major}.0.0"), "同大版本的老引擎必须收得下"
+
+    db_path = tmp_path / "world.db"
+    open_db(db_path).close()
+    snapshot = export_world_package(
+        seed_path=seed_path, db_path=db_path, output_path=tmp_path / "s.cyberworld",
+        world_id="s-world", name="快照", mode="snapshot",
+    )
+    assert snapshot.engine_min == _engine_version()
+
+
+REJECTIONS = [
+    ("engine range", "engine >= 2.0.0"),
+    ("seed schema", "missing 'personality'"),
+    ("checksum", "checksum mismatch"),
+    ("not a zip", "ZIP"),
+]
+
+
+@pytest.mark.parametrize("flavour, expected", REJECTIONS)
+def test_a_rejected_package_says_which_thing_is_wrong(tmp_path, flavour, expected):
+    """拒收要说人话:校验和 / 引擎区间 / 种子 schema / 压缩炸弹防护,四类各说各的。
+
+    从前四类打印同一句 "invalid or inaccessible package data"。运维台只能原样
+    转述引擎的话,所以它的 400 报文里也没有原因,作者不知道该"换 core 重导"
+    还是"修种子",只能瞎试(平台契约 §7 挂名的已知缺口)。退出码仍是 2。
+    """
+    import subprocess
+    import sys
+
+    package = _a_template(tmp_path)
+    if flavour == "engine range":
+        target = _needing_engine(package, tmp_path / "bad.cyberworld", "2.0.0", "3.0.0")
+    elif flavour == "seed schema":
+        def drop_a_key(members):
+            seed = json.loads(members["world_seed.json"])
+            seed["agents"][0].pop("personality")
+            members["world_seed.json"] = (
+                json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+
+        target = _repack(package, tmp_path / "bad.cyberworld", drop_a_key)
+    elif flavour == "checksum":
+        # 改字节但**不**重算校验和 —— 这正是"包坏了,重传没用"那一类。
+        import zipfile
+
+        target = tmp_path / "bad.cyberworld"
+        with zipfile.ZipFile(package) as archive:
+            members = {name: archive.read(name) for name in archive.namelist()}
+        members["world_seed.json"] = members["world_seed.json"].replace(b"cafe", b"cafF", 1)
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in sorted(members):
+                archive.writestr(name, members[name])
+    else:
+        target = tmp_path / "bad.cyberworld"
+        target.write_text("not a zip at all")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "anima_world", "world", "import", str(target),
+         "--destination", str(tmp_path / "instances")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert expected in result.stderr, (
+        f"{flavour} 的拒绝理由没有透出来,作者不知道该修哪样:{result.stderr!r}"
+    )
+
+
 def test_beat_script_rejects_a_bad_script():
     """Authoring-time validation is a contract: bad beats must never reach a world."""
     with pytest.raises(BeatScriptError):

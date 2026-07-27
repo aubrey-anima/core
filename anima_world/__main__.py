@@ -118,6 +118,16 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
     doctor.add_argument("--skip-probe", action="store_true", help="不要真的调用一次 LLM")
 
+    chat = sub.add_parser("chat", help="和世界里的一个角色对话 —— 说完就落进世界的历史")
+    chat.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    chat.add_argument(
+        "--agent", default=None,
+        help="要找谁说话(角色 id);不给就列出这个世界住着谁",
+    )
+    chat.add_argument("--player-id", default="cli", help="你的身份 id —— 角色对你的印象记在它头上")
+    chat.add_argument("--name", default=None, help="你在角色眼里的称呼(默认「访客」)")
+    chat.add_argument("--list", action="store_true", dest="list_only", help="只列出角色名册就退出")
+
     run = sub.add_parser(
         "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
     )
@@ -163,6 +173,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--beats", default=None,
         help="Beat script JSON path (beat-director; invalid script fails startup)",
     )
+    simulate.add_argument(
+        "--report", default=None, metavar="PATH",
+        help="跑完写一份机器可读的运行摘要 JSON:事件密度、相遇统计、"
+             "关系曲线、每人时间分配(`-` = 写到 stdout)",
+    )
 
     world = sub.add_parser("world", help="Export or import portable world data packages")
     world_commands = world.add_subparsers(dest="world_command", required=True)
@@ -178,6 +193,14 @@ def _build_parser() -> argparse.ArgumentParser:
     world_export.add_argument("--genre", default="")
     world_export.add_argument("--setting", default="")
     world_export.add_argument("--theme", default="default")
+    world_inspect = world_commands.add_parser(
+        "inspect", help="读一个 .cyberworld 需要什么引擎 —— 跑不了也照样回答"
+    )
+    world_inspect.add_argument("package", help="Package archive path")
+    world_inspect.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="输出一行 JSON(给启动器/工具消费),而不是给人看的清单",
+    )
     world_import = world_commands.add_parser("import", help="Import a .cyberworld package")
     world_import.add_argument("package", help="Package archive path")
     world_import.add_argument(
@@ -611,9 +634,13 @@ def build_serve_scheduler(
         _seed_world_defs(location_store, bt_store, world_seed)
         # economy-v4: default items + cafe shelf, empty-table-only (authored
         # rows always win). Costless while economy.enabled stays off.
+        # #12: the seed's own material layer goes in FIRST, precisely so the
+        # demo items find a non-empty table and stand down — order is the
+        # whole mechanism here, not an accident.
         from anima_world.economy import seed_defaults as seed_economy_defaults
 
         with shared_lock:
+            _seed_material_layer(conn, world_seed)
             seed_economy_defaults(conn)
     # llm-relationship-judge: judge only exists with a config store (it needs
     # the live llm.* stack); --no-llm gives it a mock client whose garbage
@@ -659,7 +686,7 @@ def build_serve_scheduler(
     beat_agent_factory = _make_beat_agent_factory(bt_store)
     scheduler = Scheduler(
         narrative_provider=(
-            MockNarrativeProvider()
+            MockNarrativeProvider(prompt_store=prompt_store)
             if force_mock_llm or mock_narrative
             else create_narrative_provider_from_env(prompt_store, config_store)
         ),
@@ -776,6 +803,7 @@ def build_serve_scheduler(
             _seed_initial_world(event_log, scheduler, world_seed, location_store)
             _seed_capability_catalog(event_log, config_store, force_mock_llm)
             _seed_world_setting(prompt_store, world_seed)
+            _seed_mock_narration(prompt_store, world_seed)
             persisted = event_log.replay()
             # Only re-fold here: genesis events were just appended above,
             # so the projection Scheduler.__init__ built (from the
@@ -807,6 +835,47 @@ def _seed_world_setting(prompt_store: Any | None, world_seed: dict[str, Any] | N
             # crash would silently lock the world onto the bundled default
             # worldview forever — code review Round 1 #1)
             logger.warning("world_setting from seed could not be stored; keeping default", exc_info=True)
+
+
+def _seed_mock_narration(prompt_store: Any | None, world_seed: dict[str, Any] | None) -> None:
+    """种子的 `mock_narration`:让 Mock 叙事说这个世界的话(#9)。
+
+    没配 key 是**默认状态**,所以 Mock 模板是第一屏。引擎无从知道自己在跑哪个
+    世界 —— 那是种子决定的,于是模板也该由种子决定。
+
+    ```jsonc
+    "mock_narration": {
+      "walk": "{agent} walked to {location}",   // 动作种类 → 模板
+      "memory_suffix": "— still thinking about {summary}"
+    }
+    ```
+
+    与 `world.setting` 同一条规矩:**首启写一次**,之后 db 行是运行期权威
+    (`World.prompt_set` 的热改会留住)。坏模板逐条丢弃 —— 创世事件此时已经
+    提交,这里崩掉会把世界永远锁在半初始化状态。
+    """
+    if prompt_store is None or world_seed is None:
+        return
+    from anima_world.narrative import MOCK_MEMORY_SUFFIX_NAME, MOCK_TEMPLATE_PREFIX
+
+    templates = world_seed.get("mock_narration")
+    if not isinstance(templates, dict):
+        if templates is not None:
+            logger.warning("world_seed mock_narration must be an object, got %s; ignoring",
+                           type(templates).__name__)
+        return
+    for kind, template in templates.items():
+        if not isinstance(template, str) or not template.strip():
+            logger.warning("world_seed mock_narration[%r] is not a non-empty string; skipping", kind)
+            continue
+        name = (MOCK_MEMORY_SUFFIX_NAME if kind == "memory_suffix"
+                else f"{MOCK_TEMPLATE_PREFIX}{kind}")
+        try:
+            prompt_store.set(name, template.strip())
+        except Exception as exc:  # noqa: BLE001 - 见 docstring:坏模板不许拦住首启
+            # 消息里已经点名了是哪个占位符,再甩一整个 traceback 只会淹掉它。
+            logger.warning("world_seed mock_narration[%r] was rejected (%s); keeping the default",
+                           kind, exc)
 
 
 def _rebuild_memories(
@@ -933,13 +1002,18 @@ def _seed_initial_world(
         })
 
     # economy-v4: genesis stipend (安家费). Costless when economy stays off —
-    # payment events just fold into an unused ledger.
+    # payment events just fold into an unused ledger. #12: the seed may set a
+    # per-agent amount; 0 means "starts broke" and emits nothing, since the
+    # projection ignores non-positive payments anyway.
     from anima_world.economy import TOWN
 
     for aid in scheduler.agents:
+        amount = _money_for(aid, world_seed)
+        if amount <= 0:
+            continue
         event_log.append({
             "ts": 0, "who": aid, "type": "payment",
-            "payload": {"from": TOWN, "to": aid, "amount": 30.0, "reason": "genesis_stipend"},
+            "payload": {"from": TOWN, "to": aid, "amount": amount, "reason": "genesis_stipend"},
         })
 
     if world_seed is not None:
@@ -947,6 +1021,7 @@ def _seed_initial_world(
         _seed_relations(event_log, registered_ids, world_seed)
         _seed_goals(event_log, registered_ids, world_seed)
         _seed_memories(event_log, registered_ids, world_seed)
+        _seed_inventory(event_log, registered_ids, world_seed)
 
 
 def _wrap_with_needs_band(bt_root: Any) -> Any:
@@ -1005,6 +1080,155 @@ def _seed_entry_dicts(world_seed: dict[str, Any], key: str) -> list[dict[str, An
         else:
             logger.warning("world_seed %s[%d] is not an object; skipping", key, index)
     return good
+
+
+def _material_entries(entry: dict[str, Any], key: str, where: str) -> list[dict[str, Any]]:
+    """A tolerant `[{item, qty, …}]` list off one agent/location entry (#12)."""
+    raw = entry.get(key)
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list):
+        logger.warning("world_seed %s %r must be a list, got %s; skipping",
+                       where, key, type(raw).__name__)
+        return []
+    good: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict) or not isinstance(item.get("item"), str) or not item["item"]:
+            logger.warning("world_seed %s %s[%d] has no string 'item'; skipping", where, key, index)
+            continue
+        good.append(item)
+    return good
+
+
+def _material_qty(item: dict[str, Any], where: str) -> int | None:
+    try:
+        qty = int(item.get("qty", 1))
+    except (TypeError, ValueError):
+        logger.warning("world_seed %s: %r has a non-numeric qty %r; skipping",
+                       where, item.get("item"), item.get("qty"))
+        return None
+    if qty <= 0:
+        logger.warning("world_seed %s: %r has qty %d; skipping", where, item.get("item"), qty)
+        return None
+    return qty
+
+
+def _seed_material_layer(conn: Any, world_seed: dict[str, Any] | None) -> None:
+    """物质层的创世入口:物品定义与店铺货架(#12)。
+
+    economy/needs 从首发起就有机制,却是唯一一个没有创世入口的子系统 ——
+    "她把父亲的怀表一直带在身上""铺子里囤着过冬的煤"这类物质设定,创作侧
+    过去只能丢掉或降级成一句记忆文本。
+
+    三个来源都能引入物品 id:顶层 `items`(完整定义)、`agents[].inventory`、
+    `locations[].stock`。只被引用、没有定义的 id 自动补一条定义(名字就是 id、
+    durable、0 价),这样 `{"item": "父亲的怀表"}` 直接可用而不必先建表 ——
+    要精确控制名称/种类/价格再写 `items`。
+
+    随身物品与钱不在这里:它们是**事件**(item_transfer / payment),走
+    `_seed_initial_world` 的创世事件,账本仍然是事件的投影。
+    """
+    if world_seed is None:
+        return
+    from anima_world.economy import ITEM_KINDS, seed_authored
+
+    defined: dict[str, tuple[str, str, str, float, dict[str, Any]]] = {}
+    for index, entry in enumerate(_seed_entry_dicts(world_seed, "items")):
+        item_id = entry.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            logger.warning("world_seed items[%d] has no string 'id'; skipping", index)
+            continue
+        kind = entry.get("kind", "durable")
+        if kind not in ITEM_KINDS:
+            logger.warning("world_seed items[%d] (%r) has kind %r, expected one of %s; skipping",
+                           index, item_id, kind, ", ".join(ITEM_KINDS))
+            continue
+        try:
+            base_price = float(entry.get("base_price", 0.0))
+        except (TypeError, ValueError):
+            logger.warning("world_seed items[%d] (%r) has a non-numeric base_price %r; using 0",
+                           index, item_id, entry.get("base_price"))
+            base_price = 0.0
+        restores = entry.get("restores")
+        defined[item_id] = (
+            item_id, str(entry.get("name", item_id)), kind, base_price,
+            restores if isinstance(restores, dict) else {},
+        )
+
+    def _referenced(item_id: str) -> None:
+        # 引用即存在:未定义的 id 补一条 durable/0 价的定义,名字就是 id。
+        # durable 是安全的默认 —— consumable 会被 cheapest_meal 当饭吃掉。
+        defined.setdefault(item_id, (item_id, item_id, "durable", 0.0, {}))
+
+    stock: list[tuple[str, str, int, float | None]] = []
+    for entry in _seed_entry_dicts(world_seed, "locations"):
+        location_id = entry.get("id")
+        if not isinstance(location_id, str) or not location_id:
+            continue
+        for item in _material_entries(entry, "stock", f"location {location_id!r}"):
+            qty = _material_qty(item, f"location {location_id!r}")
+            if qty is None:
+                continue
+            price: float | None = None
+            if item.get("price") is not None:
+                try:
+                    price = float(item["price"])
+                except (TypeError, ValueError):
+                    logger.warning("world_seed location %r: %r has a non-numeric price %r; "
+                                   "falling back to base_price",
+                                   location_id, item["item"], item["price"])
+            _referenced(item["item"])
+            stock.append((location_id, item["item"], qty, price))
+
+    for entry in _seed_entry_dicts(world_seed, "agents"):
+        agent_id = entry.get("id")
+        for item in _material_entries(entry, "inventory", f"agent {agent_id!r}"):
+            _referenced(item["item"])
+
+    if not defined and not stock:
+        return  # 种子没碰物质层:内置演示物品照常出场
+    seed_authored(conn, list(defined.values()), stock)
+
+
+def _money_for(agent_id: str, world_seed: dict[str, Any] | None) -> float:
+    """创世安家费:种子写了就按种子,没写就是默认额度(#12)。"""
+    from anima_world.economy import GENESIS_STIPEND
+
+    if not world_seed:
+        return GENESIS_STIPEND
+    for entry in _seed_entry_dicts(world_seed, "agents"):
+        if entry.get("id") != agent_id or "money" not in entry:
+            continue
+        try:
+            return float(entry["money"])
+        except (TypeError, ValueError):
+            logger.warning("world_seed agent %r has a non-numeric money %r; using the default %.1f",
+                           agent_id, entry["money"], GENESIS_STIPEND)
+            return GENESIS_STIPEND
+    return GENESIS_STIPEND
+
+
+def _seed_inventory(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any]) -> None:
+    """随身物品的创世注入(#12):无 `from` 的 item_transfer = 无中生有。
+
+    投影里 `from` 缺省就是纯粹的凭空生成,正是创世该有的语义 —— 若写成从小镇
+    金库转出,金库的库存会被记成负数。`note`(「从不离身」这类信物说明)原样
+    落在事件载荷里跟着世界走;投影忽略它,也不会自动变成一条记忆 —— 想让角色
+    记得这件事,种子的 `memories` 才是那个入口。
+    """
+    for entry in _seed_entry_dicts(world_seed, "agents"):
+        agent_id = entry.get("id")
+        if agent_id not in registered_ids:
+            continue
+        for item in _material_entries(entry, "inventory", f"agent {agent_id!r}"):
+            qty = _material_qty(item, f"agent {agent_id!r}")
+            if qty is None:
+                continue
+            payload: dict[str, Any] = {"to": agent_id, "item_id": item["item"], "qty": qty,
+                                       "reason": "genesis_inventory"}
+            if isinstance(item.get("note"), str) and item["note"].strip():
+                payload["note"] = item["note"].strip()
+            event_log.append({"ts": 0, "who": agent_id, "type": "item_transfer", "payload": payload})
 
 
 def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any]) -> None:
@@ -1186,6 +1410,120 @@ def run_run(args: argparse.Namespace) -> int:
     _run_world_foreground(world, quiet=args.quiet)
     print("[run] 世界已停下,快照已保存。")
     return 0
+
+
+def _print_roster(world: Any, db_path: str) -> None:
+    """这个世界住着谁 —— 一个 .cyberworld 至今没有办法自报家门(#6)。"""
+    state = world.state()
+    agents = state.get("agents", {})
+    now = state.get("world_time", {})
+    print(f"\n  {onboarding.bold(db_path)}  第{now.get('day', 0)}天 "
+          f"{now.get('hour', 0):02d}:{now.get('minute', 0):02d}\n")
+    if not agents:
+        print("  这个世界还没有住人。\n")
+        return
+    for agent_id, info in agents.items():
+        where = info.get("location") or "?"
+        doing = info.get("activity") or {}
+        transit = doing.get("transit") if isinstance(doing, dict) else None
+        if transit:
+            doing_text = f"在去 {transit['to']} 的路上"
+        else:
+            doing_text = (doing.get("kind") or "") if isinstance(doing, dict) else ""
+        tail = onboarding.dim(doing_text) if doing_text else ""
+        away = onboarding.dim("(不在场)") if info.get("away") else ""
+        print(f"    {_pad(agent_id, 12)}{_pad(info.get('name', agent_id), 16)}"
+              f"{_pad('@' + str(where), 14)}{tail}{away}")
+    print(f"\n  找谁说话:{onboarding.bold(f'anima-world chat --agent {next(iter(agents))}')}"
+          f"{'' if db_path == onboarding.DEFAULT_DB_PATH else f' --db-path {db_path}'}\n")
+
+
+def run_chat(args: argparse.Namespace) -> int:
+    """和一个角色对话的 REPL(#6)。
+
+    引擎最像人的那件能力,过去只有写 Python 才够得着:`World.chat_reply` →
+    `record_chat_turn` 早就齐全,缺的只是一道门。这里就是那道门,没有新的引擎
+    能力。
+
+    **时钟不走**:对话发生在世界的此刻,退出时世界还停在原地。要让世界一边活
+    一边聊,那是宿主应用的事(`World.open` + `start_clock` + `chat`)——一个
+    CLI 不该在你打字时偷偷推进别人的世界。
+
+    转录留在这个进程里,每轮只把最近若干条传进世界(纪律:完整转录归宿主)。
+    每说完一轮就 `record_chat_turn`,于是**说完一句话那一刻 db 就是完整的**。
+    """
+    from anima_world.api import World
+
+    try:
+        world = World.open(args.db_path)
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        print(f"[chat] {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        roster = world.state().get("agents", {})
+        if args.list_only or args.agent is None:
+            _print_roster(world, args.db_path)
+            return 0
+        if args.agent not in roster:
+            print(f"[chat] 这个世界里没有 {args.agent!r}。", file=sys.stderr)
+            _print_roster(world, args.db_path)
+            return 2
+
+        agent_id = args.agent
+        info = roster[agent_id]
+        display_name = args.name or "访客"
+        # 走到对方跟前再开口:在场块(时间/地点/同地者)靠玩家所在地才成立,
+        # 会话也才知道自己发生在哪儿。地点读不出来就算了,聊天不该因此告吹。
+        if info.get("location"):
+            try:
+                world.player_move(args.player_id, info["location"])
+            except (KeyError, ValueError):
+                logger.debug("player could not be placed at %r", info.get("location"))
+
+        degraded = world.state().get("runtime", {}).get("llm", {}).get("degraded_reason")
+        print(onboarding.rule(f"{info.get('name', agent_id)} @ {info.get('location') or '?'}"))
+        if degraded:
+            print(f"  {onboarding.yellow('这个世界正跑在 Mock 上')}({degraded})——"
+                  f"回复会是模板。配一个:anima-world config set llm.api_key sk-…")
+            # 没有 LLM 时,关系判定每一轮都要抱怨一次"读不出 JSON"—— 那是上面
+            # 这句话的必然结果,不是新消息,而它会横插在对话中间。真 LLM 下的
+            # 同一句话是真信号,所以只在已降级时闭嘴。
+            logging.getLogger("anima_world.relationship_judge").setLevel(logging.ERROR)
+        print(f"  {onboarding.dim('说点什么。空行或 Ctrl-D / Ctrl-C 结束。')}\n")
+
+        history: list[dict[str, str]] = []
+        turns = 0
+        while True:
+            try:
+                line = input(f"{display_name} > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not line:
+                break
+            history.append({"role": "user", "content": line})
+            try:
+                reply = world.chat_reply(
+                    agent_id, history[-20:],
+                    player_id=args.player_id, display_name=display_name,
+                )
+            except (KeyError, ValueError) as exc:
+                print(f"[chat] {exc}", file=sys.stderr)
+                history.pop()
+                continue
+            reply = reply.strip() or "……"
+            print(f"{info.get('name', agent_id)} > {reply}\n")
+            history.append({"role": "assistant", "content": reply})
+            # 一轮一记:关系判定在这里发生,世界也在这里落盘。
+            world.record_chat_turn(agent_id, args.player_id, history[-2:])
+            turns += 1
+
+        if turns:
+            print(f"  {onboarding.dim(f'聊了 {turns} 轮,已经记进这个世界。')}\n")
+        return 0
+    finally:
+        world.close()
 
 
 def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
@@ -1545,12 +1883,93 @@ def run_simulate(args: argparse.Namespace) -> int:
                         exhausted_streak,
                     )
 
-    # A planner we declared dead must not hold the exit hostage either —
-    # its in-flight results were written off when the budget fired.
-    scheduler.stop(wait=not planner_gave_up)
+    # #11: read the log BEFORE stop() drains the pools, or the last narrative
+    # and relationship verdicts of the run are missing from the summary —
+    # exactly the tail a three-day trial cares about. Written after stop(),
+    # so a failed write cannot leave a half-drained world behind.
+    report = None
+    if args.report is not None:
+        scheduler.stop(wait=not planner_gave_up)
+        from anima_world.sim_report import build_run_report
+
+        report = build_run_report(
+            scheduler.event_log.replay() if scheduler.event_log is not None else [],
+            ticks=ticks,
+            minutes_per_tick=mpt,
+        )
+    else:
+        # A planner we declared dead must not hold the exit hostage either —
+        # its in-flight results were written off when the budget fired.
+        scheduler.stop(wait=not planner_gave_up)
 
     print(f"[simulate] done. clock={scheduler.clock}")
+    if report is not None:
+        blob = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2)
+        if args.report == "-":
+            print(blob)
+        else:
+            Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.report).write_text(blob + "\n", encoding="utf-8")
+            idle_only = [a["id"] for a in report["agents"] if a["idle_only"]]
+            print(f"[simulate] report → {args.report}"
+                  f"  ({report['events']['total']} 事件,"
+                  f"{len(report['encounters'])} 对有过相遇"
+                  + (f",{len(idle_only)} 人整场无事发生:{'、'.join(idle_only)}" if idle_only else "")
+                  + ")")
     return 0
+
+
+def _inspect_payload(manifest: Any) -> dict[str, Any]:
+    """The documented `world inspect --json` field set (REFERENCE §8).
+
+    Third-party launchers code against this, so it is a wire contract: the
+    whole manifest, flattened, plus what the running engine makes of it.
+    """
+    payload = dict(manifest.as_dict())
+    compat = payload.pop("engine_compat", {})
+    payload.update({
+        "operation": "inspect",
+        "engine_min": compat.get("minimum", manifest.engine_min),
+        "engine_max_exclusive": compat.get("maximum_exclusive", manifest.engine_max_exclusive),
+    })
+    payload.update(manifest.compatibility())
+    return payload
+
+
+def _pad(label: str, width: int = 20) -> str:
+    """Pad to a terminal-cell width — a CJK label is 1 char but 2 cells wide."""
+    import unicodedata
+
+    cells = sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in label)
+    return label + " " * max(1, width - cells)
+
+
+def _print_inspect_human(manifest: Any, payload: dict[str, Any]) -> None:
+    if payload["runnable"]:
+        verdict = f"{payload['current_engine_version']} —— {onboarding.green('能跑')}"
+    else:
+        verdict = onboarding.yellow(
+            f"{payload['current_engine_version']} —— 跑不了,装一个 "
+            f">= {payload['engine_min']} 且 < {payload['engine_max_exclusive']} 的引擎"
+        )
+    print(f"\n  {onboarding.bold(manifest.name)}  {onboarding.dim(manifest.world_id)}")
+    if manifest.summary:
+        print(f"  {onboarding.dim(manifest.summary)}")
+    print()
+    rows = [
+        ("模式", f"{manifest.export_mode}"
+                 f"{'(只有种子,没有存档)' if manifest.export_mode == 'template' else '(带 world.db 存档)'}"),
+        ("引擎区间", f"[{payload['engine_min']}, {payload['engine_max_exclusive']})"),
+        ("导出引擎", manifest.source_engine_version),
+        ("包格式", str(manifest.package_format_version)),
+        ("修订号", manifest.revision_id),
+        ("导出时间", manifest.created_at),
+        ("文件", ", ".join(f"{role}={path}" for role, path in sorted(manifest.files.items()))),
+        ("当前引擎", verdict),
+    ]
+    for label, value in rows:
+        print(f"    {_pad(label)}{value}")
+    print()
 
 
 def run_world_package(args: argparse.Namespace) -> int:
@@ -1559,9 +1978,22 @@ def run_world_package(args: argparse.Namespace) -> int:
         PackageValidationError,
         export_world_package,
         import_world_package,
+        read_package_manifest,
     )
 
     try:
+        if args.world_command == "inspect":
+            # #3: reading the envelope must not require being able to run it —
+            # the caller who most needs this answer is the launcher that does
+            # not have the right engine yet. Exit 0 for an incompatible
+            # package: it answered, which is the entire point.
+            manifest = read_package_manifest(args.package)
+            payload = _inspect_payload(manifest)
+            if args.as_json:
+                print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            else:
+                _print_inspect_human(manifest, payload)
+            return 0
         if args.world_command == "export":
             manifest = export_world_package(
                 db_path=args.db_path,
@@ -1590,8 +2022,12 @@ def run_world_package(args: argparse.Namespace) -> int:
                 "instance_id": imported.instance_id,
                 "path": str(imported.path),
             }
-    except (OSError, PackageValidationError):
-        print("[world package] operation failed: invalid or inaccessible package data", file=sys.stderr)
+    except (OSError, PackageValidationError) as exc:
+        # #10: say WHICH of checksum / engine range / seed schema / zip guard
+        # tripped. The engine knew all along; the blanket "invalid or
+        # inaccessible package data" was the only thing an author or an
+        # operator relaying a 400 ever got to see, and it names no fix.
+        print(f"[world {args.world_command}] {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
@@ -1635,6 +2071,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_config(args)
     if args.command == "doctor":
         return run_doctor(args)
+    if args.command == "chat":
+        return run_chat(args)
     if args.command == "run":
         return run_run(args)
     if args.command == "simulate":

@@ -16,6 +16,33 @@ _DEFAULT_DESCRIBE_TEMPLATE = (
     "请用中文生成一句适合作为这个 agent 的世界叙事或聊天回复。只输出正文，不要解释。"
 )
 
+# Mock 叙事的模板(#9)。**没有配 key 是默认状态** —— 它是每个人在配置任何东西
+# 之前看到的第一屏,`anima-world start` 明确支持直接回车先用 Mock 试试。所以这
+# 些模板不是降级路径上的边角料,而是第一印象。
+#
+# 它们写死在这里曾经意味着:中文的名字、中文的时间戳、中文的命令行外壳,配上
+# 英文的动词,再拼一句中文的记忆后缀 —— 一行之内三种口径。翻成中文只是把问题
+# 搬个家:一个播种英文世界的宿主会撞上完全对称的另一半,而引擎无从知道自己在
+# 跑哪个世界 —— **那是种子决定的**。
+#
+# 所以这里只是"没有别的可用时的兜底"。真正的模板住在 prompt_store(可以热改)
+# ,由种子的 `mock_narration` 在首启时写入,与 `world.setting` 同一条规矩。
+# 顺带的好处:Mock 输出因此可被创作 —— 一个世界可以自带听起来像它自己的模板。
+_MOCK_TEMPLATE_DEFAULTS: dict[str, str] = {
+    "walk": "{agent}走去了{location}",
+    "chat": "{agent}和{target}说了会儿话",
+    "work": "{agent}在{location}忙活",
+    "sleep": "{agent}睡下了",
+    "eat": "{agent}吃了点东西",
+    "idle_wander": "{agent}四处走了走",
+    "idle_social": "{agent}想找个人说说话",
+    "custom": "{agent}做了点别的",
+}
+_MOCK_MEMORY_SUFFIX = "——还记着{summary}"
+
+MOCK_TEMPLATE_PREFIX = "narrative.mock."
+MOCK_MEMORY_SUFFIX_NAME = "narrative.mock_memory_suffix"
+
 
 @runtime_checkable
 class NarrativeProvider(Protocol):
@@ -31,20 +58,24 @@ class NarrativeProvider(Protocol):
 
 
 class MockNarrativeProvider:
-    """Default offline stub: deterministic one-line summaries for each action kind."""
+    """Default offline stub: deterministic one-line summaries for each action kind.
 
-    _TEMPLATES: dict[str, str] = {
-        "walk": "{agent} walked to {location}",
-        "chat": "{agent} chatted with {target}",
-        "work": "{agent} worked at {location}",
-        "sleep": "{agent} went to sleep",
-        "idle_wander": "{agent} wandered around",
-        "idle_social": "{agent} looked for someone to talk to",
-        "custom": "{agent} did something custom",
-    }
+    `prompt_store`, when given, is where the templates actually live — read live
+    on every call, so a world's own wording (and its own language) wins over the
+    bundled fallback without a restart. See `_MOCK_TEMPLATE_DEFAULTS`.
+    """
 
-    def __init__(self, memory_store: Any | None = None) -> None:
+    def __init__(self, memory_store: Any | None = None, prompt_store: Any | None = None) -> None:
         self.memory_store = memory_store
+        self.prompt_store = prompt_store
+
+    def _template(self, name: str, fallback: str) -> str:
+        if self.prompt_store is None:
+            return fallback
+        try:
+            return self.prompt_store.get(name, fallback) or fallback
+        except Exception:  # noqa: BLE001 - narration must never take down a tick
+            return fallback
 
     def describe(
         self,
@@ -54,10 +85,16 @@ class MockNarrativeProvider:
     ) -> str:
         kind = action.get("kind", "custom")
         params = action.get("params", {})
-        template = self._TEMPLATES.get(kind, self._TEMPLATES["custom"])
+        fallback = _MOCK_TEMPLATE_DEFAULTS.get(kind, _MOCK_TEMPLATE_DEFAULTS["custom"])
+        template = self._template(f"{MOCK_TEMPLATE_PREFIX}{kind}", fallback)
         # Fill from params; fall back to "{k}" when missing
         kwargs = {k: params.get(k, "{" + k + "}") for k in ("location", "target")}
-        text = template.format(agent=agent_id, **kwargs)
+        try:
+            text = template.format(agent=agent_id, **kwargs)
+        except (KeyError, IndexError, ValueError):
+            # PromptStore.check_renders rejects unknown placeholders on save, so
+            # this only fires for a row written around it (a hand-edited db).
+            text = fallback.format(agent=agent_id, **kwargs)
         memory_suffix = self._memory_suffix(agent_id)
         return text + memory_suffix if memory_suffix else text
 
@@ -68,7 +105,11 @@ class MockNarrativeProvider:
         memories = self.memory_store.query(agent_id=agent_id)
         if not memories:
             return ""
-        return f"——还记着{memories[0]['summary']}"
+        template = self._template(MOCK_MEMORY_SUFFIX_NAME, _MOCK_MEMORY_SUFFIX)
+        try:
+            return template.format(summary=memories[0]["summary"])
+        except (KeyError, IndexError, ValueError):
+            return _MOCK_MEMORY_SUFFIX.format(summary=memories[0]["summary"])
 
 
 class OpenAICompatibleNarrativeProvider:
@@ -96,7 +137,10 @@ class OpenAICompatibleNarrativeProvider:
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
-        self.fallback = fallback or MockNarrativeProvider()
+        # #9: the fallback needs the SAME prompt store — this is the path a
+        # configured-but-failing LLM takes, so it is where an English world
+        # would silently start speaking the bundled language.
+        self.fallback = fallback or MockNarrativeProvider(prompt_store=prompt_store)
         self._post_json = post_json or _post_json
         self.memory_store = memory_store
         self.prompt_store = prompt_store
@@ -287,7 +331,7 @@ def create_narrative_provider_from_env(
     """
     settings = resolve_llm_env_settings(config_store)
     if settings is None:
-        return MockNarrativeProvider()
+        return MockNarrativeProvider(prompt_store=prompt_store)
     api_key, base_url, model, timeout = settings
     return OpenAICompatibleNarrativeProvider(
         api_key=api_key,

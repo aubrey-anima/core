@@ -28,6 +28,12 @@ from anima_world.chat_service import (
 from anima_world.chat_service import (
     _DEFAULT_WORLD_MEMORY_TEMPLATE as _CHAT_WORLD_MEMORY,
 )
+from anima_world.narrative import (
+    _MOCK_MEMORY_SUFFIX,
+    _MOCK_TEMPLATE_DEFAULTS,
+    MOCK_MEMORY_SUFFIX_NAME,
+    MOCK_TEMPLATE_PREFIX,
+)
 from anima_world.relationship_judge import _DEFAULT_PROMPT as _JUDGE_RELATIONSHIP
 from anima_world.relationship_judge import _DEFAULT_RELABEL_PROMPT as _JUDGE_RELABEL
 from anima_world.relationship_judge import _DEFAULT_USER_JUDGE_PROMPT as _JUDGE_USER
@@ -45,6 +51,13 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
     "chat.session_summary": {},
     "narrative.describe": {},
     "world.setting": {},
+    # #9: what the Mock provider actually passes — an authored template that
+    # reaches for anything else gets rejected at save time, not at tick time.
+    MOCK_MEMORY_SUFFIX_NAME: {"summary": "昨天在咖啡店和夏聊过"},
+    **{
+        f"{MOCK_TEMPLATE_PREFIX}{kind}": {"agent": "遥", "location": "cafe", "target": "夏"}
+        for kind in _MOCK_TEMPLATE_DEFAULTS
+    },
     "judge.relationship": {
         "a_name": "夏", "a_personality": "开朗", "a_goals": "把店开好", "a_memories": "（无）",
         "b_name": "遥", "b_personality": "冷静", "b_goals": "（无特别目标）", "b_memories": "（无）",
@@ -139,6 +152,19 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
         "请用中文生成一句适合作为这个 agent 的世界叙事或聊天回复。只输出正文，不要解释。",
         "LLM narrative provider 的描述指令",
     ),
+    MOCK_MEMORY_SUFFIX_NAME: (
+        _MOCK_MEMORY_SUFFIX,
+        "没有 LLM 时,叙事后面缀的那句「还记着…」（{summary}）",
+    ),
+    # #9: Mock 叙事的每一种动作各一条模板。没有配 key 是默认状态,所以这些是
+    # 第一屏的文字 —— 它们必须跟着世界走,而不是跟着引擎写死的语言走。
+    **{
+        f"{MOCK_TEMPLATE_PREFIX}{kind}": (
+            template,
+            f"没有 LLM 时,{kind} 动作的叙事模板（{{agent}}/{{location}}/{{target}}）",
+        )
+        for kind, template in _MOCK_TEMPLATE_DEFAULTS.items()
+    },
 }
 
 
@@ -149,11 +175,27 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
 _RAW_TEMPLATES = {"world.setting"}
 
 
+def _sample_for(name: str) -> dict[str, Any]:
+    """The variables a template's call site passes, for render-checking.
+
+    Mock narration templates are keyed by ACTION KIND, and a world may invent
+    kinds this engine never heard of (a beat script's custom action). Those
+    still render through `MockNarrativeProvider.describe`, which always passes
+    the same three variables — so they check against the same sample rather
+    than against an empty one, which would reject every template it saw (#9).
+    """
+    if name in _SAMPLE_VARS:
+        return _SAMPLE_VARS[name]
+    if name.startswith(MOCK_TEMPLATE_PREFIX):
+        return {"agent": "遥", "location": "cafe", "target": "夏"}
+    return {}
+
+
 def check_renders(name: str, template: str) -> None:
     """Raise `PromptRenderError` if `template` references an unknown placeholder."""
     if name in _RAW_TEMPLATES:
         return
-    sample = _SAMPLE_VARS.get(name, {})
+    sample = _sample_for(name)
     try:
         string.Formatter().vformat(template, (), sample)
     except (KeyError, IndexError, ValueError) as exc:

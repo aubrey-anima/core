@@ -55,8 +55,8 @@ $ anima-world start
   ③ 运行
      世界在本进程里运行,叙事会打印在下面;停止:Ctrl-C
 
-  [第0天 00:10] 遥:遥 wandered around
-  [第0天 00:10] 夏:夏 went to sleep
+  [第0天 00:10] 遥:遥四处走了走
+  [第0天 00:10] 夏:夏睡下了
   ^C
   世界已停下,快照已保存。下次接着跑:anima-world start
 ```
@@ -169,15 +169,25 @@ anima-world world export --seed seed.json --db-path saves/world.db \
 anima-world world import my.cyberworld --destination ./instances
 ```
 
+一个包能说出自己需要什么引擎,**而不必先能跑它** —— 会问这个问题的,恰恰是那个还
+没装上对应引擎的启动器:
+
+```bash
+anima-world world inspect my.cyberworld --json
+# {"world_id": "my-world", "engine_min": "2.0.0", …, "runnable": false}
+# 跑不了也照样回答,退出码 0 —— 在这里拒绝回答就等于废掉这个格式
+```
+
 ## 命令
 
 ```bash
 anima-world start          # 建世界 + 引导 + 运行 —— 从这里开始
 anima-world doctor         # 体检:世界文件、密钥、LLM 连通性、时钟快慢
 anima-world config         # 读写配置,密钥加密存储、打码显示
+anima-world chat           # 和一个角色说话;不给 --agent 就列出住着谁
 anima-world run            # 无引导的前台宿主(部署 / 脚本用)
-anima-world simulate       # 无头快进
-anima-world world          # 导出 / 导入 .cyberworld 数据包
+anima-world simulate       # 无头快进(--report 输出运行摘要)
+anima-world world          # 导出 / 导入 / 查看 .cyberworld 数据包
 ```
 
 `start` 是给人用的门(引导 + 演示速度);`run` 是无引导的前台宿主;

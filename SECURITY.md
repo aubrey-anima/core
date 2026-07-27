@@ -4,12 +4,20 @@
 
 | Version | Supported |
 |---|---|
-| 1.0.x | ✅ |
+| 1.1.x | ✅ current line |
+| 1.0.x | see below |
 
 The engine uses a hard-pinned version model: one release freezes (engine code, db format,
 package format) together, and hosts depend on the exact version they installed. There is
 no cross-version migration path, so security fixes are published as a new patch release
 of the current line.
+
+**How long an older line keeps getting fixes has not been decided yet.** Staying on an
+old major to keep existing worlds alive would eventually mean running an unpatched
+engine, and no one chose that — it fell out of two separately reasonable decisions. The
+open question is tracked in [#8](https://github.com/aubrey-anima/core/issues/8); until it
+is answered, treat only the current line as guaranteed. What does and does not survive a
+major boundary is documented in `docs/REFERENCE.md` §2.12.
 
 ## Reporting a vulnerability
 

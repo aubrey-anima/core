@@ -1,5 +1,11 @@
-"""物品与经济(v4.0 / db 4):账本即投影、价格漂移、吃饭买单、玩家购物。"""
+"""物品与经济(`economy.enabled`,默认关):账本即投影、价格漂移、吃饭买单、玩家购物。
+
+原路线图的 v4.0 已并入首发 1.0.0,**没有** 4.x 引擎、也没有 db format 4 ——
+物质层是随开关发的能力,db 格式仍是 1。
+"""
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -101,3 +107,98 @@ def test_ledger_survives_reopen_via_replay(tmp_path):
     with World.open(db, force_mock_llm=True) as reopened:
         assert reopened.balance("player:p1") == pytest.approx(balance), "对账 = 重放"
         assert reopened.inventory("player:p1") == {"coffee": 1}
+
+
+# ── 种子的物质层入口(#12) ─────────────────────────────────────────────────
+# 物质层从首发起就有机制,却曾是唯一一个没有创世入口的子系统:小说里"她把父亲
+# 的怀表一直带在身上"只能丢掉,或降级成一句记忆文本。
+
+
+def _seed_with_material(tmp_path) -> str:
+    from importlib import resources
+
+    seed = json.loads(
+        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
+    )
+    seed["items"] = [
+        {"id": "coal", "name": "煤", "kind": "consumable", "base_price": 3.0,
+         "restores": {"energy": 0.2}},
+    ]
+    seed["agents"][0]["inventory"] = [{"item": "父亲的怀表", "note": "从不离身"}]
+    seed["agents"][0]["money"] = 120
+    seed["agents"][1]["money"] = 0
+    for location in seed["locations"]:
+        if location["id"] == "cafe":
+            location["stock"] = [{"item": "coal", "qty": 20},
+                                 {"item": "手织围巾", "qty": 2, "price": 45}]
+    path = tmp_path / "material_seed.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_seed_can_author_money_inventory_and_shelves(tmp_path):
+    with World.open(str(tmp_path / "w.db"), seed_path=_seed_with_material(tmp_path),
+                    force_mock_llm=True) as world:
+        agents = [entry["id"] for entry in json.loads(
+            (tmp_path / "material_seed.json").read_text(encoding="utf-8"))["agents"]]
+        rich, broke, unset = agents[0], agents[1], agents[2]
+        assert world.balance(rich) == pytest.approx(120.0)
+        assert world.balance(broke) == pytest.approx(0.0), "写 0 就是一分没有,不是回落默认"
+        assert world.balance(unset) == pytest.approx(30.0), "没写 money = 今天的行为"
+        # 只被引用、没有定义的 id 自动补定义,所以信物直接可用。
+        assert world.inventory(rich) == {"父亲的怀表": 1}
+        shelf = {row["item_id"]: row for row in world.shop("cafe")}
+        assert shelf["coal"]["name"] == "煤" and shelf["coal"]["quantity"] == 20
+        assert shelf["手织围巾"]["price"] == pytest.approx(45.0)
+        assert "coffee" not in shelf, (
+            "种子一碰物质层,演示物品就该整体让位 —— 半真半假的货架比空货架更难查"
+        )
+
+
+def test_a_seed_that_ignores_the_material_layer_still_gets_the_demo_shelf(tmp_path):
+    """缺字段 = 今天的行为。这条是 #12 承诺的宽容原则的另一半。"""
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        assert {row["item_id"] for row in world.shop("cafe")} == {
+            "coffee", "sandwich", "sketchbook"
+        }
+
+
+def test_broken_material_entries_are_dropped_one_by_one_not_fatally(tmp_path):
+    """坏条目逐条丢弃、绝不拦启动 —— 种子只读进空库一次,半个世界比没世界更糟。"""
+    from importlib import resources
+
+    seed = json.loads(
+        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
+    )
+    seed["items"] = [
+        {"id": "ok", "name": "好东西", "kind": "durable"},
+        {"id": "bad_kind", "kind": "不存在的种类"},   # 违反 item_defs 的 CHECK
+        {"name": "没有 id"},
+    ]
+    seed["agents"][0]["inventory"] = [
+        {"item": "ok", "qty": 2},
+        {"item": "ok", "qty": "三"},      # qty 不可转数
+        {"item": "ok", "qty": 0},         # 非正数
+        "整个条目不是对象",
+    ]
+    seed["agents"][0]["money"] = "很多"    # money 不可转数 → 回落默认
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+
+    with World.open(str(tmp_path / "w.db"), seed_path=str(path), force_mock_llm=True) as world:
+        agent = seed["agents"][0]["id"]
+        assert world.inventory(agent) == {"ok": 2}, "好条目照常生效"
+        assert world.balance(agent) == pytest.approx(30.0)
+        assert "bad_kind" not in {row["item_id"] for row in world.shop("cafe")}
+
+
+def test_seeded_inventory_survives_reopen(tmp_path):
+    """随身物品走的是事件,不是表 —— 所以它和账本一样,对账即重放。"""
+    db = str(tmp_path / "w.db")
+    seed_path = _seed_with_material(tmp_path)
+    with World.open(db, seed_path=seed_path, force_mock_llm=True) as world:
+        owner = json.loads((tmp_path / "material_seed.json").read_text(
+            encoding="utf-8"))["agents"][0]["id"]
+        assert world.inventory(owner) == {"父亲的怀表": 1}
+    with World.open(db, force_mock_llm=True) as reopened:
+        assert reopened.inventory(owner) == {"父亲的怀表": 1}

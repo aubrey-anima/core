@@ -57,9 +57,9 @@ $ anima-world start
   ③ 运行
      世界在本进程里运行,叙事会打印在下面;停止:Ctrl-C
 
-  [第0天 00:10] 遥:遥 wandered around
-  [第0天 00:10] 夏:夏 went to sleep
-  [第0天 00:35] 遥:遥 went to sleep
+  [第0天 00:10] 遥:遥四处走了走
+  [第0天 00:10] 夏:夏睡下了
+  [第0天 00:35] 遥:遥睡下了
   ^C
   世界已停下,快照已保存。下次接着跑:anima-world start
 ```
@@ -69,10 +69,11 @@ documentation required first. Without an API key everything still works; narrati
 templated and characters have no plans. That degradation is deliberate, and it is never
 silent (`anima-world doctor` will tell you, and `World.state()` carries the reason).
 
-> **Heads up on language:** the engine speaks Chinese. CLI output, narration prompts, the
-> built-in seed world, and the reference docs are all in Chinese. The API itself is
-> English (`World.open`, `world.tick`, `world.chat`), so embedding it in an
-> English-language application works fine — you supply your own seed and prompts.
+> **Heads up on language:** the engine speaks Chinese. CLI output, the built-in seed
+> world, and the reference docs are all in Chinese. The API itself is English
+> (`World.open`, `world.tick`, `world.chat`), and every piece of text a world *says* —
+> worldview, prompts, and the no-key narration templates — comes from the seed, not from
+> the engine. So an English world is a matter of supplying an English seed.
 
 ## Install
 
@@ -178,15 +179,25 @@ anima-world world export --seed seed.json --output my.cyberworld \
 anima-world world import my.cyberworld --destination ./instances
 ```
 
+A package says what it needs without your having to be able to run it — the launcher
+managing several engine versions is exactly the caller who cannot yet:
+
+```bash
+anima-world world inspect my.cyberworld --json
+# {"world_id": "my-world", "engine_min": "2.0.0", …, "current_engine_version": "1.1.0",
+#  "runnable": false}          # answers, exit 0 — refusing here would defeat the format
+```
+
 ## Commands
 
 ```bash
 anima-world start          # create + run, with guided setup — start here
+anima-world chat           # talk to a character; no --agent lists who lives there
 anima-world doctor         # health check: files, keys, a real LLM call, clock speed
 anima-world config         # read/write settings, secrets encrypted and masked
 anima-world run            # foreground host, no onboarding (for deployment)
-anima-world simulate       # headless fast-forward
-anima-world world          # export / import .cyberworld packages
+anima-world simulate       # headless fast-forward (--report writes a run summary)
+anima-world world          # export / import / inspect .cyberworld packages
 ```
 
 ## Documentation

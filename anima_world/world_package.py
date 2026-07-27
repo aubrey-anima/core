@@ -18,7 +18,7 @@ from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from anima_world.world_seed import is_valid_world_seed
+from anima_world.world_seed import world_seed_errors
 
 PACKAGE_FORMAT_VERSION = 1
 DEFAULT_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -80,13 +80,29 @@ class WorldPackageManifest:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise PackageValidationError(f"manifest field is missing or invalid: {exc}") from exc
-        manifest.validate()
+        # Envelope-only: parsing a manifest must never depend on the running
+        # engine being able to RUN the package (#3). The engine-range check is
+        # a separate, explicitly-invoked step — see `validate_engine_range`.
+        manifest.validate_structure()
         return manifest
 
     def validate(self) -> None:
+        """Full validation: the manifest is well-formed AND this engine can run it."""
+        self.validate_structure()
+        self.validate_engine_range()
+
+    def validate_structure(self) -> None:
+        """Version-neutral checks: shape, identity, file roles, range sanity.
+
+        Everything here holds for every engine that can read the envelope at
+        all, so it is safe to run at parse time. `package_format_version` is
+        the one thing allowed to hard-fail parsing — it is the envelope's own
+        version, and an envelope we cannot parse is not a package.
+        """
         if self.package_format_version != PACKAGE_FORMAT_VERSION:
             raise PackageValidationError(
                 f"unsupported package format version: {self.package_format_version}"
+                f" (this engine reads {PACKAGE_FORMAT_VERSION})"
             )
         if not _WORLD_ID_RE.fullmatch(self.world_id):
             raise PackageValidationError("world_id must be a safe lowercase identifier")
@@ -94,7 +110,12 @@ class WorldPackageManifest:
             raise PackageValidationError("export_mode must be snapshot or template")
         if not self.name.strip() or not self.revision_id.strip() or not self.created_at.strip():
             raise PackageValidationError("manifest identity fields cannot be empty")
-        _validate_engine_range(self.engine_min, self.engine_max_exclusive)
+        # An empty interval is malformed regardless of who is reading it; which
+        # side of the interval the READER falls on is `validate_engine_range`.
+        if _version_tuple(self.engine_min) >= _version_tuple(self.engine_max_exclusive):
+            raise PackageValidationError(
+                f"engine range is empty: [{self.engine_min}, {self.engine_max_exclusive})"
+            )
         expected = {"seed": "world_seed.json"}
         if self.export_mode == "snapshot":
             expected["database"] = "world.db"
@@ -108,6 +129,40 @@ class WorldPackageManifest:
             raise PackageValidationError("template packages cannot declare a database")
         if "beats" in self.files and self.files["beats"] != "beats.json":
             raise PackageValidationError("manifest files.beats must be beats.json")
+
+    def validate_engine_range(self) -> None:
+        """Raise unless the RUNNING engine falls inside the package's interval."""
+        current = _engine_version()
+        if not self.runs_on(current):
+            raise PackageValidationError(
+                f"package requires engine >= {self.engine_min}, "
+                f"< {self.engine_max_exclusive}; current is {current}"
+            )
+
+    def runs_on(self, engine_version: str) -> bool:
+        """Whether *engine_version* falls inside the interval. Answers, never raises."""
+        try:
+            lower = _version_tuple(self.engine_min)
+            upper = _version_tuple(self.engine_max_exclusive)
+            current = _version_tuple(engine_version)
+        except PackageValidationError:
+            return False
+        return lower <= current < upper
+
+    def compatibility(self) -> dict[str, Any]:
+        """What this package needs vs what is running — as DATA, not an exception.
+
+        The whole point of the format is travelling between machines whose
+        engines do not match yet, so the caller who most needs this answer is
+        precisely the one that cannot run the package (#3).
+        """
+        current = _engine_version()
+        return {
+            "current_engine_version": current,
+            "engine_min": self.engine_min,
+            "engine_max_exclusive": self.engine_max_exclusive,
+            "runnable": self.runs_on(current),
+        }
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -154,14 +209,38 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())
 
 
-def _validate_engine_range(minimum: str, maximum_exclusive: str) -> None:
-    current = _version_tuple(_engine_version())
-    lower = _version_tuple(minimum)
-    upper = _version_tuple(maximum_exclusive)
-    if lower >= upper or not lower <= current < upper:
-        raise PackageValidationError(
-            f"package requires engine >= {minimum}, < {maximum_exclusive}; current is {_engine_version()}"
-        )
+def _engine_min_for(mode: str, engine_version: str) -> str:
+    """The lower bound a package of this mode gets stamped with (#4).
+
+    A **snapshot** ships a format-stamped `world.db`, so its floor is the exact
+    engine that wrote it — an older engine has no business opening it.
+
+    A **template** ships only `world_seed.json`: version-neutral authored data
+    whose schema is a mirrored cross-repo contract precisely so it can travel.
+    Stamping it with the exporting version applies a database rule to a JSON
+    file, and turns "you cannot carry your save forward" into "you cannot carry
+    your CONTENT forward" — a cost nobody chose. Templates get the floor of the
+    current major instead, so authored content moves freely within a major.
+    """
+    major = _version_tuple(engine_version)[0]
+    return f"{major}.0.0" if mode == "template" else engine_version
+
+
+def _seed_schema_error(seed: Any) -> str | None:
+    """The seed's schema problems as one line, or None when it is valid.
+
+    `world_seed_errors` already names the offending entry and key — the
+    package layer used to call the boolean `is_valid_world_seed` and throw
+    that away, leaving an author who cannot open the archive with nothing to
+    act on (#10).
+    """
+    errors = world_seed_errors(seed)
+    if not errors:
+        return None
+    shown = "; ".join(errors[:3])
+    if len(errors) > 3:
+        shown += f" (+{len(errors) - 3} more)"
+    return f"world_seed.json failed schema validation: {shown}"
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -226,19 +305,42 @@ def _sha256_stream(stream: Any) -> str:
     return digest.hexdigest()
 
 
-def _verify_checksums(
-    archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
+def _verify_checksum_index(
+    archive: zipfile.ZipFile,
+    infos: dict[str, zipfile.ZipInfo],
+    *,
+    only: set[str] | None = None,
 ) -> None:
+    """Check `checksums.json` describes exactly this archive, then hash members.
+
+    The index check (algorithm, one entry per member, no extras) is always
+    full — it is cheap and it is what makes a partial digest pass meaningful.
+    `only` narrows which members get hashed; `None` means all of them.
+    """
     if "checksums.json" not in infos:
         raise PackageValidationError("checksums.json is missing")
     checksums = _read_json_bytes(archive.read("checksums.json"), "checksums.json")
     entries = checksums.get("files") if isinstance(checksums, dict) else None
-    if not isinstance(entries, dict) or checksums.get("algorithm") != "sha256":
-        raise PackageValidationError("checksum manifest is invalid")
+    if not isinstance(entries, dict):
+        raise PackageValidationError("checksum manifest is invalid: 'files' must be an object")
+    if checksums.get("algorithm") != "sha256":
+        raise PackageValidationError(
+            f"checksum manifest is invalid: algorithm must be sha256, "
+            f"got {checksums.get('algorithm')!r}"
+        )
     expected_names = set(infos) - {"checksums.json"}
     if set(entries) != expected_names:
-        raise PackageValidationError("checksum file list does not match archive")
-    for name in sorted(expected_names):
+        detail = []
+        unlisted = sorted(expected_names - set(entries))
+        phantom = sorted(set(entries) - expected_names)
+        if unlisted:
+            detail.append(f"in archive but unlisted: {', '.join(unlisted)}")
+        if phantom:
+            detail.append(f"listed but not in archive: {', '.join(phantom)}")
+        raise PackageValidationError(
+            f"checksum file list does not match archive ({'; '.join(detail)})"
+        )
+    for name in sorted(expected_names if only is None else expected_names & only):
         entry = entries[name]
         if not isinstance(entry, dict) or entry.get("size") != infos[name].file_size:
             raise PackageValidationError(f"checksum size mismatch for {name}")
@@ -259,7 +361,7 @@ def _check_sqlite_file(path: Path) -> None:
         raise PackageValidationError("world.db failed SQLite integrity_check")
 
 
-def inspect_world_package(
+def read_package_manifest(
     package_path: str | Path,
     *,
     max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
@@ -267,12 +369,24 @@ def inspect_world_package(
     max_files: int = DEFAULT_MAX_FILES,
     max_compression_ratio: int = DEFAULT_MAX_COMPRESSION_RATIO,
 ) -> WorldPackageManifest:
-    """Validate a package without installing it and return its manifest."""
+    """Read the outer envelope: what does this package say it is and needs? (#3)
+
+    Deliberately weaker than `inspect_world_package`: it checks the archive is
+    safe to open, that `checksums.json` describes exactly this archive, and
+    that `manifest.json` is the one that was signed — then parses the manifest
+    structurally. It does NOT check the engine range, the seed schema, or the
+    database, because a launcher managing several engine versions has to be
+    able to ask "which engine does this need?" *before* it has that engine.
+
+    Member digests other than `manifest.json` are left to
+    `inspect_world_package`, so answering this question never costs a hash of
+    a multi-hundred-megabyte snapshot.
+    """
     package_path = Path(package_path)
     try:
         size = package_path.stat().st_size
     except OSError as exc:
-        raise PackageValidationError("package cannot be read") from exc
+        raise PackageValidationError(f"package cannot be read: {exc}") from exc
     if size > max_archive_bytes:
         raise PackageValidationError("archive compressed size exceeds limit")
     try:
@@ -284,18 +398,71 @@ def inspect_world_package(
                 max_compression_ratio=max_compression_ratio,
             )
             required = {"manifest.json", "checksums.json", "world_seed.json"}
-            if not required.issubset(infos):
-                raise PackageValidationError("archive is missing required files")
-            _verify_checksums(archive, infos)
+            missing = sorted(required - set(infos))
+            if missing:
+                raise PackageValidationError(
+                    f"archive is missing required files: {', '.join(missing)}"
+                )
+            _verify_checksum_index(archive, infos, only={"manifest.json"})
+            return WorldPackageManifest.from_dict(
+                _read_json_bytes(archive.read("manifest.json"), "manifest.json")
+            )
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise PackageValidationError(f"package is not a readable ZIP archive: {exc}") from exc
+
+
+def inspect_world_package(
+    package_path: str | Path,
+    *,
+    check_engine_range: bool = True,
+    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
+    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
+    max_files: int = DEFAULT_MAX_FILES,
+    max_compression_ratio: int = DEFAULT_MAX_COMPRESSION_RATIO,
+) -> WorldPackageManifest:
+    """Fully validate a package without installing it and return its manifest.
+
+    `check_engine_range=False` skips only the "can THIS engine run it" gate —
+    every integrity and schema check still runs. Import keeps the gate on;
+    `world inspect` turns it off so it can report the answer instead of
+    refusing to speak (#3).
+    """
+    package_path = Path(package_path)
+    try:
+        size = package_path.stat().st_size
+    except OSError as exc:
+        raise PackageValidationError(f"package cannot be read: {exc}") from exc
+    if size > max_archive_bytes:
+        raise PackageValidationError("archive compressed size exceeds limit")
+    try:
+        with zipfile.ZipFile(package_path) as archive:
+            infos = _validate_zip_members(
+                archive,
+                max_uncompressed_bytes=max_uncompressed_bytes,
+                max_files=max_files,
+                max_compression_ratio=max_compression_ratio,
+            )
+            required = {"manifest.json", "checksums.json", "world_seed.json"}
+            missing = sorted(required - set(infos))
+            if missing:
+                raise PackageValidationError(
+                    f"archive is missing required files: {', '.join(missing)}"
+                )
+            _verify_checksum_index(archive, infos)
             manifest = WorldPackageManifest.from_dict(
                 _read_json_bytes(archive.read("manifest.json"), "manifest.json")
             )
+            if check_engine_range:
+                manifest.validate_engine_range()
             seed = _read_json_bytes(archive.read("world_seed.json"), "world_seed.json")
-            if not is_valid_world_seed(seed):
-                raise PackageValidationError("world_seed.json failed schema validation")
-            declared = set(manifest.files.values())
-            if not declared.issubset(infos):
-                raise PackageValidationError("manifest references a missing file")
+            seed_error = _seed_schema_error(seed)
+            if seed_error is not None:
+                raise PackageValidationError(seed_error)
+            undeclared = sorted(set(manifest.files.values()) - set(infos))
+            if undeclared:
+                raise PackageValidationError(
+                    f"manifest references a missing file: {', '.join(undeclared)}"
+                )
             if manifest.export_mode == "snapshot" and "world.db" not in infos:
                 raise PackageValidationError("snapshot package is missing world.db")
             if manifest.export_mode == "template" and "world.db" in infos:
@@ -310,7 +477,7 @@ def inspect_world_package(
                     _check_sqlite_file(db_path)
             return manifest
     except (OSError, zipfile.BadZipFile) as exc:
-        raise PackageValidationError("package is not a readable ZIP archive") from exc
+        raise PackageValidationError(f"package is not a readable ZIP archive: {exc}") from exc
 
 
 def _snapshot_database(source_path: Path, target_path: Path) -> None:
@@ -367,9 +534,10 @@ def export_world_package(
     try:
         seed = json.loads(Path(seed_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PackageValidationError("seed file is not valid JSON") from exc
-    if not is_valid_world_seed(seed):
-        raise PackageValidationError("seed file failed schema validation")
+        raise PackageValidationError(f"seed file is not valid JSON: {exc}") from exc
+    seed_error = _seed_schema_error(seed)
+    if seed_error is not None:
+        raise PackageValidationError(seed_error.replace("world_seed.json", str(seed_path), 1))
     if mode not in {"snapshot", "template"}:
         raise PackageValidationError("mode must be snapshot or template")
     if mode == "snapshot" and db_path is None:
@@ -386,7 +554,7 @@ def export_world_package(
         files["beats"] = "beats.json"
     manifest = WorldPackageManifest(
         package_format_version=PACKAGE_FORMAT_VERSION,
-        engine_min=engine_version,
+        engine_min=_engine_min_for(mode, engine_version),
         engine_max_exclusive=f"{engine_major + 1}.0.0",
         source_engine_version=engine_version,
         world_id=world_id,
@@ -496,6 +664,6 @@ def import_world_package(
             manifest=manifest,
         )
     except (OSError, zipfile.BadZipFile) as exc:
-        raise PackageValidationError("package import failed") from exc
+        raise PackageValidationError(f"package import failed: {exc}") from exc
     finally:
         shutil.rmtree(staging, ignore_errors=True)

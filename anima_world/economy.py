@@ -28,6 +28,9 @@ DEFAULT_STOCK = [("cafe", "coffee", 12), ("cafe", "sandwich", 8), ("cafe", "sket
 RESTOCK_PER_DAY = 3
 MAX_STOCK = 20
 
+GENESIS_STIPEND = 30.0  # 创世安家费,种子可按人覆写(world_seed 的 agents[].money)
+ITEM_KINDS = ("consumable", "durable", "artwork")  # item_defs.kind 的 CHECK 约束
+
 
 def drift_price(
     base: float, price: float, sold: int, restocked: int,
@@ -61,6 +64,47 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO shop_stock (location_id, item_id, quantity, price) VALUES (?, ?, ?, ?)",
                 (location_id, item_id, quantity, float(row[0])),
+            )
+    conn.commit()
+
+
+def seed_authored(
+    conn: sqlite3.Connection,
+    items: list[tuple[str, str, str, float, dict[str, Any]]],
+    stock: list[tuple[str, str, int, float | None]],
+) -> None:
+    """种子里写下的物品定义与店铺货架,种进空表(#12)。
+
+    与 `seed_defaults` 同一条规矩:**空表才种**。作者数据先落地,内置演示物品
+    随后看到非空表就整体让位 —— 一个自带怀表和过冬煤的世界,不该再被塞进三份
+    演示咖啡。反过来说也成立:**种子一碰物质层,演示物质层就整体不出现**,
+    半真半假的货架比空货架更难查。
+
+    调用方保证条目已校验(kind 合法、qty/price 可转数)。`price` 为 None 时
+    取该物品的 base_price。
+    """
+    import json
+
+    (defined,) = conn.execute("SELECT COUNT(*) FROM item_defs").fetchone()
+    if defined == 0:
+        for item_id, name, kind, base_price, restores in items:
+            conn.execute(
+                "INSERT OR IGNORE INTO item_defs (id, name, kind, base_price, restores)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (item_id, name, kind, base_price, json.dumps(restores, ensure_ascii=False)),
+            )
+    (shelved,) = conn.execute("SELECT COUNT(*) FROM shop_stock").fetchone()
+    if shelved == 0:
+        for location_id, item_id, quantity, price in stock:
+            row = conn.execute(
+                "SELECT base_price FROM item_defs WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO shop_stock (location_id, item_id, quantity, price)"
+                " VALUES (?, ?, ?, ?)",
+                (location_id, item_id, quantity, float(row[0]) if price is None else price),
             )
     conn.commit()
 
