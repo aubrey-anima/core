@@ -75,6 +75,26 @@ back numbers, and the front door finally has a way in.
 
 ### Fixed
 
+- **Player conversations now change the world without an API key.** The chain was
+  complete on paper — `conversation` event → a 0.8-importance memory → relationship
+  verdict → band crossing → `relation_shift` memory + graph edge → gossip source +
+  planner context — but it broke at the first link: a Mock LLM cannot produce a
+  parseable verdict, so the judge returned `None` on every call. The consequence was not
+  "smaller changes", it was **no relationship data at all**, for players and NPCs alike,
+  while three-axis relations are documented as always-on. No key is the *default* state,
+  so the screen where README promises characters who remember you was exactly the screen
+  where talking to them changed nothing — announced only by one `dropping` line on
+  stderr while the character replied normally. The mock tier now gets
+  `DeterministicRelationshipJudge`, the same treatment the reflector already had:
+  `Δ = 0.04 × (1 - |current|)` — no RNG (worlds must stay replayable), asymptotic, never
+  saturating, an order below the ±0.2 verdict ceiling. It does not pretend to be
+  judgement: always positive, magnitude from headroom alone. `r_type` gets no stand-in
+  and keeps its authored text — a number has a sane mechanical substitute, authored prose
+  does not. A configured key still gets the real judge.
+- **`World.graph(agent_id)` always returned an empty list.** Edges store subjects as
+  `agent:<id>` and the parameter takes a bare id, so the lookup never matched — and it
+  failed by returning `[]`, which a host reads as "this character has no relationships"
+  rather than as a mistake. Bare and prefixed ids are both accepted now.
 - **Package rejections name which thing is wrong** (#10). Checksum mismatch, engine
   range, seed schema, and the zip guards each printed the identical
   `invalid or inaccessible package data`. The operator can only relay what the engine

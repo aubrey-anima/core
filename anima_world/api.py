@@ -648,11 +648,19 @@ class World:
         }
 
     def graph(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """关系图谱三元组;`agent_id` 只看这个角色出发的边。
+
+        边的 subject/object 带 `agent:` 前缀(图谱里也可能有别的实体),而这个
+        参数收的是**裸角色 id**。此前它把裸 id 直接当 subject 查,于是永远查不
+        到任何东西 —— 而且是返回空列表,宿主读成"这个角色没有任何关系",不是
+        报错。前缀在这里补齐;已经带前缀的照单全收。
+        """
         if self.scheduler.knowledge_graph is None:
             return []
-        if agent_id is not None:
-            return self.scheduler.knowledge_graph.query(subject=agent_id)
-        return self.scheduler.knowledge_graph.query()
+        if agent_id is None:
+            return self.scheduler.knowledge_graph.query()
+        subject = agent_id if agent_id.startswith("agent:") else f"agent:{agent_id}"
+        return self.scheduler.knowledge_graph.query(subject=subject)
 
     def cliques(self) -> list[dict[str, Any]]:
         """social-v5:小团体(friendship 连通分量,日切重算的派生缓存)。"""

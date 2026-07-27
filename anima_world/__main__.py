@@ -648,13 +648,35 @@ def build_serve_scheduler(
     # relationship data, the designed floor.
     relationship_judge = None
     if config_store is not None:
-        from anima_world.relationship_judge import RelationshipJudge
-
-        judge_client = MockLLMClient() if force_mock_llm else create_llm_client_from_config(config_store)
-        relationship_judge = RelationshipJudge(
-            llm=SyncLLM(judge_client, config_store=config_store, timeout_key="judge.timeout"),
-            prompt_store=prompt_store,
+        from anima_world.relationship_judge import (
+            DeterministicRelationshipJudge,
+            RelationshipJudge,
         )
+
+        # A Mock LLM cannot produce a parseable verdict, so the LLM-backed judge
+        # returned None on EVERY call — and "no relationship data at all" is not
+        # a smaller version of the feature, it is the feature missing: no band
+        # crossings, no relation_shift memories, no graph edges, no gossip
+        # source, nothing for the planner to read. Three-axis relations are
+        # documented as always-on, yet a no-key world produced zero relationship
+        # events, for players and NPCs alike. Same treatment the reflector below
+        # already gets: a deterministic stand-in for the mock tier.
+        if force_mock_llm or not (config_store.get("llm.api_key", default="") or ""):
+            logger.info(
+                "no usable LLM configured: relationships drift on a deterministic "
+                "stand-in instead of being judged (configure one with "
+                "`anima-world config set llm.api_key …`)"
+            )
+            relationship_judge = DeterministicRelationshipJudge()
+        else:
+            relationship_judge = RelationshipJudge(
+                llm=SyncLLM(
+                    create_llm_client_from_config(config_store),
+                    config_store=config_store,
+                    timeout_key="judge.timeout",
+                ),
+                prompt_store=prompt_store,
+            )
     # memory-2.0: the reflector proposes insights; the event log records.
     # Mock tier gets a deterministic one-liner so reflection is testable offline.
     reflector = None

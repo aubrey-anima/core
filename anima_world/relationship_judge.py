@@ -274,3 +274,88 @@ class RelationshipJudge:
             return None
         label = lines[0].strip("\"'“”‘’` ")
         return label[:_RELABEL_MAX_CHARS] or None
+
+
+class DeterministicRelationshipJudge:
+    """没有 LLM 时的判定器:让关系机制照常运转,而不是整体消失。
+
+    **为什么需要它。** 没配 key 是默认状态,而 LLM 缺席时 `RelationshipJudge`
+    每次都拿到一句无法解析的 Mock 回复、每次都返回 None。后果不是"关系变化小
+    一点",而是**关系数据一条都不产生** —— 跨不了档、不生 relation_shift 记忆、
+    不长图谱边、没有八卦源、planner 也读不到。三轴关系在 REFERENCE 里写的是
+    「常开、不受开关影响」,而默认状态下它产出零条事件。这不是降级,是功能在
+    默认状态下静默消失(见 core issue:玩家对话是否参与世界演化)。
+
+    引擎里已经有同一条先例:`__main__` 在 mock 档给反思器装了一个确定性的
+    一行式实现,好让反思离线也能跑、也能测。判定器照办。
+
+    **漂移规则:按剩余空间衰减。** `delta = STEP × (1 - |当前值|)`,所以
+    - 确定性,不掷骰子(世界的可重放性不能靠随机数);
+    - 越熟越难再进一步,渐近而永不饱和 —— 反复寒暄不会把一段关系顶到 +1.0;
+    - 与真判定同量级(远小于 ±0.2 的上限),日内重复还要再吃 0.5^(N-1) 阻尼。
+
+    它**不假装是判断**:方向恒为正(聊过的人彼此稍微熟一点),幅度只看剩余
+    空间,不看说了什么。要真正的判断,配一个 key。
+    """
+
+    STEP = 0.04
+
+    def _drift(self, current: Any) -> float:
+        try:
+            value = float(current)
+        except (TypeError, ValueError):
+            value = 0.0
+        return round(_clamp(self.STEP * (1.0 - min(1.0, abs(value)))), 4)
+
+    def _result(self, summary: str, a_to_b: Any, b_to_a: Any) -> JudgeResult:
+        forward, backward = self._drift(a_to_b), self._drift(b_to_a)
+        # 三轴跟着主轴走,量级递减:说过话最先长出的是喜爱与信任,敬重要靠别的。
+        axes = lambda d: {"trust": round(d / 2, 4), "affection": d, "respect": 0.0}  # noqa: E731
+        return JudgeResult(
+            summary=summary,
+            delta_a_to_b=forward,
+            delta_b_to_a=backward,
+            axes_a_to_b=axes(forward),
+            axes_b_to_a=axes(backward),
+        )
+
+    def judge(
+        self,
+        a: dict[str, Any],
+        b: dict[str, Any],
+        relation: dict[str, Any],
+        memories_a: list[str],
+        memories_b: list[str],
+        location: str,
+    ) -> JudgeResult:
+        a_name, b_name = a.get("name", "甲"), b.get("name", "乙")
+        where = f"在{location}" if location else ""
+        return self._result(
+            f"{a_name}和{b_name}{where}说了会儿话",
+            relation.get("a_to_b", 0.0), relation.get("b_to_a", 0.0),
+        )
+
+    def judge_user(
+        self,
+        a: dict[str, Any],
+        player_name: str,
+        relation: dict[str, Any],
+        transcript: str,
+        location: str,
+    ) -> JudgeResult:
+        a_name = a.get("name", "甲")
+        where = f"在{location}" if location else ""
+        return self._result(
+            f"{a_name}{where}和{player_name or '访客'}聊了一段",
+            relation.get("a_to_b", 0.0), relation.get("b_to_a", 0.0),
+        )
+
+    def relabel(self, *_args: Any, **_kwargs: Any) -> None:
+        """始终 None —— 旧 r_type 保持不变,这是设计好的下限。
+
+        这里**故意**不给确定性替代品,与上面的漂移相反,理由是两者性质不同:
+        好感度是一个数,机制要靠它继续走,给个小步长是合理的替身;而 r_type 是
+        作者写的自由文本(「有点好奇的新面孔」这种),用一个机械标签盖掉它是
+        **把有的东西换成更差的东西**,比让它冻住更糟。数值有像样的替身,散文没有。
+        """
+        return None
