@@ -187,18 +187,33 @@ class NeedAction(Node):
     A blackboard with no need values (needs disabled, or pre-first-tick)
     yields FAILURE — the band is inert and the tree behaves exactly as v2,
     which is what makes wrapping every tree unconditionally safe.
+
+    **迟滞**:`threshold` 是开始恢复的线,`release` 是收工的线。一旦已经在补这条
+    需求,就补到 `release` 才罢手 —— 否则跨过 `threshold` 的那一 tick 就收工,角色
+    永远卡在触发线上方抖(实测 hunger 只有两个取值),一顿饱饭都没吃过,而每次
+    抖动都发一条 agent_action + 一条 narrative。
+
+    判据不是新开一份状态,而是 `need._restoring`:scheduler 每 tick 写"当前动作在
+    补哪几条需求"。所以重启即自愈,最坏是早收工一 tick 然后重新触发。
+    `release=None` 的节点(老库里的作者树)逐 tick 保持旧行为。
     """
 
     need: str
     threshold: float
     action_id: str
+    release: float | None = None
     name: ClassVar[str] = "need_action"
 
     def tick(self, blackboard: Blackboard) -> Status:
         value = blackboard.read(f"need.{self.need}")
         if not isinstance(value, (int, float)):
             return Status.FAILURE
-        if float(value) >= self.threshold:
+        limit = self.threshold
+        if self.release is not None:
+            restoring = blackboard.read("need._restoring") or ()
+            if self.need in restoring:
+                limit = self.release
+        if float(value) >= limit:
             return Status.FAILURE
         blackboard.write("_selected_action_id", self.action_id)
         return Status.SUCCESS

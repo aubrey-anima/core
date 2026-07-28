@@ -964,9 +964,13 @@ class Scheduler:
         else:
             values = {n: bb.read(f"need.{n}") for n in needs_mod.NEEDS}
         action = self._current_action.get(agent_id)
-        settled = needs_mod.settle(values, self.tick_delta, action.kind if action else None)
+        kind = action.kind if action else None
+        settled = needs_mod.settle(values, self.tick_delta, kind)
         for key, value in settled.items():
             bb.write(f"need.{key}", value)
+        # 迟滞的判据(见 NeedAction):当前动作正在补哪几条需求。写成派生值而不是
+        # 一份新状态 —— 它就是 settle 刚用过的那个 kind,两处不可能对不上。
+        bb.write("need._restoring", tuple(sorted(needs_mod.restores(kind))))
 
     def _persist_all_needs(self) -> None:
         if not self._needs_enabled() or self.event_log is None:

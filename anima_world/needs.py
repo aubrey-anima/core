@@ -30,6 +30,25 @@ RESTORE_PER_TICK: dict[str, dict[str, float]] = {
 
 URGENT = 0.15  # 需求带的触发线:低于它,恢复动作压过 duty
 
+# 释放线:开始恢复之后,**吃到饱/睡到醒**才收工,而不是跨回触发线就走。
+#
+# 单阈值(只有 URGENT)的后果实测过:hunger 掉到 0.15 → 吃一个 tick 净回 0.045 →
+# 已经 0.195 高于触发线 → 立刻回去干活 → 十来个 tick 后再饿回来。角色永远卡在
+# 16% 的饥饿度上,一顿饱饭都没吃过;而每一次切换都发一条 agent_action + 一条
+# narrative,于是 12 世界日的事件量 19.7×、narrative 32×(配了真 key 就是 32 倍
+# LLM 账单)、耗时 7×。世界并没有变得 32 倍有趣,只是抖得厉害。
+#
+# 取值按"一次恢复动作应该持续多久"倒推,与 RESTORE_PER_TICK 的设计口径一致:
+#   hunger 0.15→0.75 ≈ 13 tick ≈ 一小时,正好是上面写的"吃一顿约 1 小时回 0.6"
+#   energy 0.15→0.85 ≈ 78 tick ≈ 6.5 小时,一个补觉的长度(整夜是 duty 的事)
+#   social 0.15→0.50 ≈ 20 tick ≈ 一个半小时的长谈
+RELEASE = {"energy": 0.85, "hunger": 0.75, "social": 0.50}
+
+
+def restores(action_kind: str | None) -> frozenset[str]:
+    """这个动作正在补哪几条需求。迟滞的判据 —— 正在补的那条才用释放线。"""
+    return frozenset(RESTORE_PER_TICK.get(action_kind or "", {}))
+
 
 def settle(
     values: dict[str, float], elapsed_ticks: int, action_kind: str | None

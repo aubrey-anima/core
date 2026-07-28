@@ -1052,12 +1052,14 @@ def _wrap_with_needs_band(bt_root: Any) -> Any:
     NeedAction is inert (FAILURE) until the scheduler settles `need.*` onto
     the blackboard, which only happens when `needs.enabled` is on, so an
     unlit world behaves tick-for-tick like before."""
-    from anima_world.needs import URGENT
+    from anima_world.needs import RELEASE, URGENT
 
+    # 触发线 → 释放线:开始恢复就恢复到饱,而不是跨过触发线就收工(见 NeedAction
+    # 与 needs.RELEASE —— 单阈值下角色永远卡在触发线上方抖)。
     return Selector(children=[
-        NeedAction("energy", URGENT, "go_sleep"),
-        NeedAction("hunger", URGENT, "eat"),
-        NeedAction("social", URGENT, "idle_social"),
+        NeedAction("energy", URGENT, "go_sleep", RELEASE["energy"]),
+        NeedAction("hunger", URGENT, "eat", RELEASE["hunger"]),
+        NeedAction("social", URGENT, "idle_social", RELEASE["social"]),
         bt_root,
     ])
 

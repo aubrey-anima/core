@@ -17,6 +17,19 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
+### Fixed
+
+- **需求带加了迟滞,角色终于能吃饱一顿。** `needs.URGENT` 是单阈值:饿到 `0.15` 吃一
+  个 tick 净回 `0.045`,已经高于触发线,立刻回去干活,十来个 tick 后再饿回来。角色
+  永远卡在 16% 的饥饿度上(实测 300 tick 内 hunger 只有**两个**取值),而每一次切换
+  都发一条 `agent_action` + 一条 `narrative` —— 12 世界日的事件量 **19.7×**、
+  `narrative` **32×**、耗时 **7×**。narrative 配了真 key 就是一次 LLM 调用,所以这是
+  **32 倍的账单**,换来的不是 32 倍有趣,只是抖得厉害。
+  新增 `needs.RELEASE`(energy `0.85` / hunger `0.75` / social `0.50`):开始恢复就恢复
+  到饱。同一场景现在是 1.7× 事件量、1.3× 耗时,饥饿度在 600 tick 里走出 528 个取值的
+  锯齿。判据是黑板上的派生值 `need._restoring`,不是第二份状态,重启即自愈;
+  作者树里没写收工线的 `need_action` 节点行为逐 tick 不变。
+
 ## [1.1.1] — 2026-07-28
 
 同 db 格式(**1**)与包格式(**1**),1.0.x 与 1.1.0 建的世界照常打开。
