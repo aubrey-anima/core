@@ -632,7 +632,10 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 `chat.system_persona`(角色人设)· `chat.memory_block` / `chat.world_memory_block` /
 `chat.presence_block` / `chat.relation_block`(四个 grounding 块)· `chat.session_summary`
-(会话摘要)· `narrative.describe`(叙事)· `planner.freetime`(自由时间规划)·
+(会话摘要)· **`chat.response_format`**(回复格式规则:动作描写用中文全角括号、
+括号内以角色名开头。**英文世界或不要动作描写的世界改这里** —— 它此前是写死在
+`chat_service` 里的一段中文规则,每次聊天都注入,作者在 `prompt_list()` 里看不见,
+于是永远关不掉)· `narrative.describe`(叙事)· `planner.freetime`(自由时间规划)·
 `judge.relationship` / `judge.user_relationship` / `judge.relabel`(关系判定三件套)·
 `world.setting`(世界观,**原样使用不做 format**,可放字面量 `{}`)。
 

@@ -204,7 +204,11 @@ class MemoryStore:
         if min_importance is not None:
             sql += " AND importance >= ?"
             params.append(min_importance)
-        sql += " ORDER BY tick DESC"
+        # 次序键补到 id 为止:tick 相同的记忆(创世注入的 memory_seed 全是 tick=0)
+        # 光靠 tick DESC 分不出先后,余下的次序就交给 SQLite 的物理布局了。
+        # `retrieve` 的打分排序是稳定排序,所以这里的次序就是同分时的最终次序 ——
+        # 不确定的次序意味着同一个世界在两台机器上召回不同的记忆,而且不报错。
+        sql += " ORDER BY tick DESC, id DESC"
         with self._lock:
             cur = self._conn.execute(sql, params)
             return self._dicts(cur)

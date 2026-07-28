@@ -710,6 +710,10 @@ class World:
             "display_name": display_name or f"player-{player_id[:8]}",
             "role": role,
         }
+        # 记住这个玩家叫什么。记忆文本里写的是名字,不是 id —— 检索 query 用得上
+        # (见 world_context)。身份即参数,所以世界只在被告知时才知道。
+        self.players.setdefault(player_id, {}).setdefault("role", role)
+        self.players[player_id]["display_name"] = interlocutor["display_name"]
         # 玩家在哪,决定角色是"看见你"还是"收到你的消息":`chat_service.respond`
         # 按这个字段在面对面/手机私聊两段身份声明里选一段。这里曾经不传,于是
         # 面对面那一支经门面永远不可达 —— CLI 明明先把你走到她跟前(player_move),
@@ -800,7 +804,9 @@ class World:
             row = self.scheduler.location_store.get(location)
             if row is None or row.get("kind", "point") != "point":
                 raise KeyError(f"没有 {location} 这个地方")
-        self.players[player_id] = {"role": role, "location": location}
+        # 更新而不是整条替换:`display_name` 是 `chat()` 记进来的,而 CLI 每聊一轮
+        # 都先调一次 player_move —— 整条替换会把名字冲掉,于是检索又退回不透明 id。
+        self.players.setdefault(player_id, {}).update({"role": role, "location": location})
 
     def player_action(
         self,
@@ -975,6 +981,27 @@ class World:
             "location": agent.location,
         }
 
+    def _recall_query(self, interlocutor_id: str) -> str:
+        """检索用的 query:对方**叫什么**,不是宿主给的不透明 id。
+
+        记忆文本里写的是名字(「阿檀说他在找一把旧伞」),而 `interlocutor_id` 常常
+        是 `p1` 或一个 uuid —— 字符二元组交集恒空,relevance 恒 0,三因子检索静默
+        退化成 recency+importance。于是角色确实记得你,却永远召回不到关于你的那几条。
+
+        NPC 之间不受影响:那边的 id 就是名字,取不到 display_name 时原样退回。
+        """
+        name = str((self.players.get(interlocutor_id) or {}).get("display_name") or "").strip()
+        if not name:
+            return interlocutor_id
+        if len(name) < 2:
+            # bigram 对单字返回 {整串},而记忆侧全是 2 字二元组,交集恒空 —— 检索
+            # 又退回 recency+importance。降级不许无声(与 llm 降级同一条纪律)。
+            logger.warning(
+                "显示名 %r 只有一个字,记忆检索匹配不到它 —— 这次召回退回"
+                "「最近 + 最重要」,与对方是谁无关", name,
+            )
+        return name
+
     def world_context(self, agent_id: str, interlocutor_id: str) -> dict[str, Any]:
         """chat-grounding:锁内一次快照角色的 lived state(只读,无 LLM 无 IO)。"""
         from anima_world.memory_triggers import BAND_NAMES, band
@@ -1000,7 +1027,7 @@ class World:
                         # about something keeps it remembered.
                         rows = store.retrieve(
                             agent_id, now_tick=scheduler.clock,
-                            query=interlocutor_id, k=int(k),
+                            query=self._recall_query(interlocutor_id), k=int(k),
                         )
                     else:
                         rows = store.query(agent_id=agent_id)

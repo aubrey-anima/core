@@ -17,8 +17,27 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added
+
+- **`chat.response_format` 成了可改的提示词。** 一段写死在 `chat_service` 里的中文
+  排版规则(动作描写用全角括号、括号内以角色名开头)每次聊天都注入系统提示,而它
+  没注册进 `prompt_store._DEFAULTS` —— 模板照样生效(读的是同一个 store),但作者在
+  `World.prompt_list()` 里看不见它存在,于是一个英文世界、或一个不想要动作描写的
+  世界,永远关不掉它。补了一条防漂移测试:`chat_service` 读到的每个提示词名字都必须
+  在作者够得到的面上。
+
 ### Fixed
 
+- **角色记得你,但检索不出你。** 聊天召回的三因子检索用 `interlocutor_id` 当 query,
+  而那是宿主给的不透明 id(`p1`、一个 uuid);记忆文本里写的是**名字**。两者字符
+  二元组交集恒空 → relevance 恒 0 → 检索静默退化成「最近 + 最重要」,与对方是谁无关。
+  现在 `World.chat` 把 `display_name` 记进 `world.players`,检索优先用它,取不到才
+  退回 id(NPC 之间不受影响,那边 id 就是名字)。显示名只有一个字时按「降级不许
+  无声」打一条 warning —— 单字的二元组匹配不到任何记忆。
+  顺带:`player_move` 改成更新而不是整条替换,否则 CLI 每轮先调它会把名字冲掉。
+- **记忆检索的次序补到 id 为止**(硬化,不是修 bug)。`ORDER BY tick DESC` 分不出
+  同 tick 的记忆,而创世注入的 `memory_seed` 全是 `tick=0`;余下的次序原本交给
+  SQLite 的物理布局,同一个世界在两台机器上可能召回不同的记忆,并且不报错。
 - **需求带加了迟滞,角色终于能吃饱一顿。** `needs.URGENT` 是单阈值:饿到 `0.15` 吃一
   个 tick 净回 `0.045`,已经高于触发线,立刻回去干活,十来个 tick 后再饿回来。角色
   永远卡在 16% 的饥饿度上(实测 300 tick 内 hunger 只有**两个**取值),而每一次切换

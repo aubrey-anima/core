@@ -26,6 +26,9 @@ from anima_world.chat_service import (
     _DEFAULT_RELATION_TEMPLATE as _CHAT_RELATION,
 )
 from anima_world.chat_service import (
+    _DEFAULT_RESPONSE_FORMAT_TEMPLATE as _CHAT_RESPONSE_FORMAT,
+)
+from anima_world.chat_service import (
     _DEFAULT_WORLD_MEMORY_TEMPLATE as _CHAT_WORLD_MEMORY,
 )
 from anima_world.narrative import (
@@ -48,6 +51,7 @@ class PromptRenderError(ValueError):
 _SAMPLE_VARS: dict[str, dict[str, Any]] = {
     "chat.system_persona": {"name": "夏", "personality": "开朗热情"},
     "chat.memory_block": {"summaries": "- 上次聊了咖啡馆的事"},
+    "chat.response_format": {"name": "夏"},
     "chat.session_summary": {},
     "narrative.describe": {},
     "world.setting": {},
@@ -119,6 +123,10 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "chat.memory_block": (
         "你和对方过去的对话回顾：\n{summaries}",
         "Chat 跨会话记忆拼接模板",
+    ),
+    "chat.response_format": (
+        _CHAT_RESPONSE_FORMAT,
+        "Chat 回复格式规则——动作描写的括号与角色名前缀（英文世界或不要动作描写的世界改这里）",
     ),
     "chat.session_summary": (
         "用一句中文概括这次对话的主要内容和情绪基调。只输出摘要，不要解释。",

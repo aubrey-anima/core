@@ -183,3 +183,77 @@ def test_graph_finds_an_agents_edges_by_bare_agent_id(tmp_path):
         assert world.graph("夏") == world.graph("agent:夏")
         assert world.graph("遥") == [], "反方向的边没写就是没有,不许瞎凑"
         assert len(world.graph()) == 1, "不带参数仍然是全量"
+
+
+# ── 她记得你,但检索不出你 ──────────────────────────────────────────────────
+#
+# world_context 用 interlocutor_id 当检索 query,而那是宿主给的不透明 id('p1'、
+# 一个 uuid)。记忆文本里写的是你的**名字**,两者字符二元组交集恒空 → relevance
+# 恒 0 → 三因子检索退化成 recency+importance。角色确实记得你(记忆写进去了),
+# 但每次聊天召回的都不是关于你的那几条。
+
+def _remember(world, agent, text, *, tick):
+    world.scheduler.memory_store.add(
+        agent_id=agent, tick=tick, kind="user_conversation",
+        summary=text, importance=0.8, anchor=False,
+    )
+
+
+def test_recall_uses_the_players_name_not_the_opaque_id(tmp_path):
+    """检索 query 必须是玩家的显示名 —— id 在记忆文本里根本不出现。"""
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        # 关于阿檀的两条是**旧**的,无关的六条是新的 —— 这样 recency 帮不上忙,
+        # 只有 relevance 能把它们捞上来。query 用不透明 id 时 relevance 恒 0。
+        _remember(world, "夏", "阿檀说他在找一把旧伞", tick=1)
+        _remember(world, "夏", "阿檀第二次来,还是在找那把伞", tick=2)
+        for i in range(6):
+            _remember(world, "夏", f"和别人聊了第{i}件无关的事", tick=100 + i)
+
+        world.chat_reply("夏", [{"role": "user", "content": "在吗"}],
+                         player_id="p1", display_name="阿檀")
+        memories = world.world_context("夏", "p1").get("memories", [])
+        assert any("阿檀" in m for m in memories), (
+            f"召回里一条关于阿檀的都没有:{memories}"
+        )
+
+
+def test_recall_order_is_deterministic_when_everything_ties(tmp_path):
+    """完全同分时的次序必须是确定的 —— 世界要可重放。
+
+    并列不是假想:创世注入的 memory_seed 全部 tick=0,importance 也常常相同,而
+    query 命中名字时 relevance 一样是 1.0。`ORDER BY tick DESC` 到此为止,余下的
+    次序就交给 SQLite 的物理布局了 —— 同一个世界在两台机器上可能召回不同的记忆,
+    而且不报错。次序键补到 id 为止。
+
+    (注:这里**不是**在修"只召回最早三条"。`query()` 已经是 tick DESC,而
+    `rows.sort` 是稳定排序,所以并列本来就解析成最新优先。)
+    """
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        for i in range(6):
+            _remember(world, "夏", f"创世记忆 {i}:阿檀", tick=0)
+        runs = [
+            [m["id"] for m in world.scheduler.memory_store.retrieve(
+                "夏", now_tick=0, query="阿檀", k=3, reinforce=False)]
+            for _ in range(3)
+        ]
+        assert runs[0] == runs[1] == runs[2], f"同一份数据召回了不同的记忆:{runs}"
+        assert runs[0] == sorted(runs[0], reverse=True), (
+            f"完全同分时应当按 id 降序(晚写的先召回),实际 {runs[0]}"
+        )
+
+
+def test_a_display_name_too_short_to_match_says_so(tmp_path, caplog):
+    """单字中文名的 bigram 与记忆文本交集恒空 —— 静默退化成今天的行为,
+    正是"降级不许无声"这条纪律要挡的。"""
+    import logging
+
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        _remember(world, "夏", "夕说她明天不来了", tick=1)
+        world.chat_reply("夏", [{"role": "user", "content": "在吗"}],
+                         player_id="p1", display_name="夕")
+        with caplog.at_level(logging.WARNING, logger="anima_world.api"):
+            world.world_context("夏", "p1")
+        assert any("夕" in r.getMessage() for r in caplog.records), (
+            f"单字名检索不出东西,至少得说一声。实际日志:{[r.getMessage() for r in caplog.records]}"
+        )
