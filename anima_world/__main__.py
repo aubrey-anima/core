@@ -2000,7 +2000,12 @@ def contract_payload() -> dict[str, Any]:
     镜像可以直接 diff 键集与 op 表。要跑不了世界也能回答,所以不碰 db、不建库。
     """
     import anima_world
-    from anima_world.beats import OP_REQUIRED_FIELDS, VALID_OPS, _VALID_PREDICATES
+    from anima_world.beats import (
+        OP_REQUIRED_FIELDS,
+        PREDICATE_REQUIRED_FIELDS,
+        VALID_OPS,
+        _VALID_PREDICATES,
+    )
     from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
     from anima_world.world_package import PACKAGE_FORMAT_VERSION
     from anima_world.world_seed import WORLD_SEED_AGENT_KEYS, WORLD_SEED_LOCATION_KEYS
@@ -2027,6 +2032,10 @@ def contract_payload() -> dict[str, Any]:
                 op: sorted(fields) for op, fields in sorted(OP_REQUIRED_FIELDS.items())
             },
             "predicates": sorted(_VALID_PREDICATES),
+            "predicate_required_fields": {
+                pred: sorted(fields)
+                for pred, fields in sorted(PREDICATE_REQUIRED_FIELDS.items())
+            },
         },
     }
 

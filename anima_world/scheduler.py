@@ -44,6 +44,26 @@ _WALL_CLOCK_FLOOR = WALL_CLOCK_FLOOR
 # Performance guardrails
 MAX_AGENTS = 100
 
+
+class _BeatWorldReader:
+    """节拍谓词读世界用的窄口子。
+
+    `beats.py` 是纯数据 + 求值,不 import 存储层;但 `need` / `memory` 两个谓词要的
+    东西不在投影里(需求在黑板上,记忆在 MemoryStore)。所以给它一个只读适配器,
+    而不是把 scheduler 整个递进去 —— 谓词能看到什么,这个类就是那份清单。
+    """
+
+    __slots__ = ("_scheduler",)
+
+    def __init__(self, scheduler: "Scheduler") -> None:
+        self._scheduler = scheduler
+
+    def need(self, agent_id: str, need: str) -> float | None:
+        return self._scheduler._beat_needs(agent_id, need)
+
+    def memories(self, agent_id: str) -> list[str]:
+        return self._scheduler._beat_memories(agent_id)
+
 # llm-relationship-judge: minimum ticks between verdicts for the same
 # (unordered) agent pair — both sides landing chats at each other within
 # one window is one conversation, not two. 6 ticks = 30 world minutes at
@@ -1014,7 +1034,10 @@ class Scheduler:
         if self.beat_director is None or not self.beat_director.has_pending():
             return
         agent_locs = self._agent_locations()
-        for beat in self.beat_director.due_beats(now, self._memory_projection, agent_locs):
+        reader = _BeatWorldReader(self)
+        for beat in self.beat_director.due_beats(
+            now, self._memory_projection, agent_locs, reader
+        ):
             self._fire_beat(beat, now)
 
     def _fire_beat(self, beat: dict[str, Any], now: WorldTime) -> None:
@@ -1053,6 +1076,25 @@ class Scheduler:
             self._record_and_deliver(ev)
         logger.info("beat %r fired (day %d, %02d:%02d): %s",
                     beat_id, now.day, now.hour, now.minute, ops_applied)
+
+    def _beat_needs(self, agent_id: str, need: str) -> float | None:
+        brain = self.agents.get(agent_id)
+        if brain is None or not self._needs_enabled():
+            return None
+        value = brain.agent.blackboard.read(f"need.{need}")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def _beat_memories(self, agent_id: str) -> list[str]:
+        if self.memory_store is None:
+            return []
+        try:
+            # 纯读:不加固。谓词每 tick 都在求值,让它顺手改遗忘曲线等于让"有没有
+            # 写这条节拍"改变角色记得什么 —— 观察不该改变被观察的东西。
+            rows = self.memory_store.query(agent_id=agent_id)
+        except Exception:  # noqa: BLE001 - 谓词读不到就是"未满足",不能掀翻世界
+            logger.warning("beat memory predicate could not read %r", agent_id, exc_info=True)
+            return []
+        return [str(row.get("summary") or "") for row in rows]
 
     def _expand_beat_op(self, op: dict[str, Any]) -> list[dict[str, Any]] | None:
         """One op → raw events (plus side effects for the two special ops).

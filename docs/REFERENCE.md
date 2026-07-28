@@ -749,6 +749,29 @@ assets/…           # 可选,扩展名白名单
 | `agent_leave` | `agent_id` | 离场(无配对 `agent_return` 只警告,不阻塞) |
 | `agent_return` | `agent_id`, `location` | 返场,**必须说明回到哪里** |
 | `location_desc` | `location`, `description` | 改地点描述 |
+| `pay` | `from`, `to`, `amount` | 转账(可选 `reason`)。持有者可以是角色、`__town__`(金库,允许负债)或 `__world__`。`amount` 必须 > 0 —— 反向转账把 `from`/`to` 调过来 |
+| `grant_item` | `agent_id`, `item_id` | 给/拿走一件东西(可选 `qty`,**负数 = 拿走**;可选 `from`,缺省 `__world__`) |
+
+后两条是**物质层**:op 曾经只能改"她怎么想",改不了"她有什么"。作者写不出"父亲的
+怀表在这一幕里丢了",只能写一条"她觉得很难过"的记忆去暗示。它们展开成账本已有的
+事件类型(`payment` / `item_transfer`),余额与库存本来就是那两者的投影 —— 不新增
+schema,不改 db 格式。
+
+**谓词清单**(`trigger.when`,全部 AND;必填字段列同样是机器校验的):
+
+| pred | 必填字段 | 读的是什么 |
+|---|---|---|
+| `sentiment` | `as`, `target`, `op`, `value` | 关系值(`op` 取 `gte`/`lte`) |
+| `co_located` | `agents` | ≥2 个角色此刻同地。**在途不算在场** |
+| `r_type` | `as`, `target`, `contains` | 关系描述里含不含某个词 |
+| `need` | `agent`, `need`, `op`, `value` | 需求值(`energy`/`hunger`/`social`);`needs.enabled` 关着时恒"未满足" |
+| `money` | `agent`, `op`, `value` | 账本投影里的余额 |
+| `has_item` | `agent`, `item` | 随身库存(可选 `min`,缺省 1) |
+| `memory` | `agent`, `contains` | 这个角色的记忆里有没有提到某件事。**纯读,不加固记忆** |
+
+⚠️ **读不到的东西一律读作"未满足"**,不是"满足"。宁可晚触发不可错触发,而且下个
+tick 还会再试。`co_located` 用的是活黑板而**不是**投影 —— 理由不是投影不追落地
+(1.1.1 起它追了),是投影不知道"在途":两个正在赶路的人按投影算会成了同处一室。
 
 **不建世界就检查**:
 

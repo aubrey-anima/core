@@ -30,10 +30,41 @@ logger = logging.getLogger(__name__)
 # Ops whose expansion is pure event construction (`expand_event_op`).
 # `agent_join` and `location_desc` need scheduler side effects and are
 # handled there (Scheduler._expand_beat_op).
-EVENT_OPS = {"memory", "broadcast_memory", "sentiment_delta", "r_type", "persona_update"}
+EVENT_OPS = {
+    "memory", "broadcast_memory", "sentiment_delta", "r_type", "persona_update",
+    # 物质层:op 曾经只能改"她怎么想",改不了"她有什么"。一个作者写不出"父亲的
+    # 怀表在这一幕里被弄丢了"——只能写一条"她觉得很难过"的记忆去暗示。这两条
+    # 展开成账本已有的事件类型(payment / item_transfer),余额与库存本来就是它们
+    # 的投影,所以不新增 schema、不改 db 格式。
+    "pay", "grant_item",
+}
 VALID_OPS = EVENT_OPS | {"agent_join", "location_desc", "agent_leave", "agent_return"}
 
-_VALID_PREDICATES = {"sentiment", "co_located"}
+# 物质 op 里 `from`/`to` 允许写的非角色持有者。金库允许负债(economy.TOWN),
+# 世界是凭空来源 —— 一件道具"本来就在她口袋里"不需要有人先失去它。
+BEAT_WORLD_HOLDER = "__world__"
+_TOWN_HOLDER = "__town__"  # economy.TOWN,这里不 import 存储层
+
+# 导演能观察到的世界。谓词曾经只有两个(关系值、同地),于是节拍脚本对世界的绝大
+# 部分状态是瞎的 —— 需求、钱、物品、关系描述、记忆一律看不见,剧情只能靠"到点了"
+# 和"两个人碰上了"来推。这些都是投影/黑板里已经有的量,不进事件日志、不改 db。
+_VALID_PREDICATES = {
+    "sentiment", "co_located", "r_type", "need", "money", "has_item", "memory",
+}
+
+NEED_NAMES = ("energy", "hunger", "social")
+
+# 谓词的必填字段 —— 与 `OP_REQUIRED_FIELDS` 同一个用途:作者照文档写就该能过,
+# 而镜像端照这份表写自己的校验。`anima-world contract` 报它。
+PREDICATE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "sentiment": ("as", "target", "op", "value"),
+    "co_located": ("agents",),
+    "r_type": ("as", "target", "contains"),
+    "need": ("agent", "need", "op", "value"),
+    "money": ("agent", "op", "value"),
+    "has_item": ("agent", "item"),
+    "memory": ("agent", "contains"),
+}
 _AGENT_BUNDLE_KEYS = {"id", "name", "location", "personality"}  # world_seed agent entry shape
 
 
@@ -124,6 +155,11 @@ def _validate_trigger(trigger: Any, label: str) -> list[str]:
     return errors
 
 
+def _needs_fields(kind: str) -> tuple[str, ...]:
+    """每个谓词的必填字段 —— 与 op 表同一个用途,`contract` 也报它。"""
+    return PREDICATE_REQUIRED_FIELDS.get(kind, ())
+
+
 def _validate_predicate(pred: Any, label: str) -> list[str]:
     if not isinstance(pred, dict):
         return [f"{label}: predicate is not an object"]
@@ -131,15 +167,22 @@ def _validate_predicate(pred: Any, label: str) -> list[str]:
     if kind not in _VALID_PREDICATES:
         return [f"{label}: unknown predicate {kind!r} (supported: {sorted(_VALID_PREDICATES)})"]
     errors: list[str] = []
-    if kind == "sentiment":
-        for key in ("as", "target"):
-            if not isinstance(pred.get(key), str) or not pred[key]:
-                errors.append(f"{label}: sentiment predicate needs a non-empty {key!r}")
-        if pred.get("op") not in ("gte", "lte"):
-            errors.append(f"{label}: sentiment predicate op must be 'gte' or 'lte'")
-        if not isinstance(pred.get("value"), (int, float)):
-            errors.append(f"{label}: sentiment predicate needs a numeric 'value'")
-    elif kind == "co_located":
+    for field in _needs_fields(kind):
+        if field not in pred:
+            errors.append(f"{label}: {kind} predicate needs {field!r}")
+    for field in ("as", "target", "agent", "need", "item"):
+        if field in _needs_fields(kind) and field in pred:
+            if not isinstance(pred.get(field), str) or not pred[field]:
+                errors.append(f"{label}: {kind} predicate needs a non-empty {field!r}")
+    if "op" in _needs_fields(kind) and pred.get("op") not in ("gte", "lte"):
+        errors.append(f"{label}: {kind} predicate op must be 'gte' or 'lte'")
+    if "value" in _needs_fields(kind) and not isinstance(pred.get("value"), (int, float)):
+        errors.append(f"{label}: {kind} predicate needs a numeric 'value'")
+    if kind == "need" and pred.get("need") not in (None, *NEED_NAMES):
+        errors.append(
+            f"{label}: unknown need {pred.get('need')!r} (supported: {sorted(NEED_NAMES)})"
+        )
+    if kind == "co_located":
         agents = pred.get("agents")
         if (
             not isinstance(agents, list)
@@ -147,6 +190,8 @@ def _validate_predicate(pred: Any, label: str) -> list[str]:
             or not all(isinstance(a, str) and a for a in agents)
         ):
             errors.append(f"{label}: co_located predicate needs a list of >= 2 agent ids")
+    if kind in ("r_type", "memory") and not isinstance(pred.get("contains"), str):
+        errors.append(f"{label}: {kind} predicate needs a string 'contains'")
     return errors
 
 
@@ -159,6 +204,8 @@ _OP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "location_desc": ("location", "description"),
     "agent_leave": ("agent_id",),
     "agent_return": ("agent_id", "location"),
+    "pay": ("from", "to", "amount"),
+    "grant_item": ("agent_id", "item_id"),
 }
 
 
@@ -369,6 +416,7 @@ def trigger_ready(
     fired: set[str],
     projection: Projection,
     agent_locs: dict[str, str],
+    reader: Any | None = None,
 ) -> bool:
     """All trigger conditions ANDed. `at` means "no earlier than" — the tick
     granularity (5 world minutes by default) would miss an equality match.
@@ -385,7 +433,7 @@ def trigger_ready(
         return False
     for pred in trigger.get("when") or []:
         try:
-            if not _eval_predicate(pred, projection, agent_locs):
+            if not _eval_predicate(pred, projection, agent_locs, reader):
                 return False
         except Exception:  # noqa: BLE001 - a broken predicate must not stop the world
             logger.warning(
@@ -396,20 +444,28 @@ def trigger_ready(
     return True
 
 
+def _compare(value: float, pred: dict[str, Any]) -> bool:
+    threshold = float(pred["value"])
+    return value >= threshold if pred.get("op") == "gte" else value <= threshold
+
+
 def _eval_predicate(
-    pred: dict[str, Any], projection: Projection, agent_locs: dict[str, str]
+    pred: dict[str, Any],
+    projection: Projection,
+    agent_locs: dict[str, str],
+    reader: Any | None = None,
 ) -> bool:
+    """一个谓词的求值。读不到的东西一律读作"未满足" —— 与运行期降级同一条规矩:
+    宁可晚触发,不可错触发,而且下个 tick 还会再试。"""
     kind = pred.get("pred")
     if kind == "sentiment":
         rel = projection.relations.get((pred["as"], pred["target"]))
-        value = rel.sentiment if rel is not None else 0.0
-        threshold = float(pred["value"])
-        return value >= threshold if pred.get("op") == "gte" else value <= threshold
+        return _compare(rel.sentiment if rel is not None else 0.0, pred)
     if kind == "co_located":
-        # Live blackboard locations, NOT the projection: the projection does
-        # not track walk arrivals (its `location_join` handler only registers
-        # places), and an in-transit agent is nowhere (same rule as
-        # Scheduler._is_colocated).
+        # 用活黑板的位置,不用投影。**理由不是"投影不追落地"**(1.1.1 起它追了)——
+        # 是投影不知道"在途":transit 是纯内存态,重启即丢。两个正在赶路的人若按
+        # 投影算就成了还在起点同处一室,节拍照常触发、还写进记忆。
+        # 与 `Scheduler._is_colocated` 同一条规矩:在途即不在场。
         locs = set()
         for agent_id in pred["agents"]:
             loc = agent_locs.get(agent_id)
@@ -417,6 +473,24 @@ def _eval_predicate(
                 return False
             locs.add(loc)
         return len(locs) == 1
+    if kind == "r_type":
+        rel = projection.relations.get((pred["as"], pred["target"]))
+        return bool(rel is not None and str(pred["contains"]) in (rel.r_type or ""))
+    if kind == "money":
+        return _compare(float(projection.balances.get(pred["agent"], 0.0)), pred)
+    if kind == "has_item":
+        held = projection.inventories.get(pred["agent"], {})
+        return int(held.get(pred["item"], 0)) >= int(pred.get("min", 1))
+    if kind == "need":
+        if reader is None:
+            return False
+        value = reader.need(str(pred["agent"]), str(pred["need"]))
+        return False if value is None else _compare(float(value), pred)
+    if kind == "memory":
+        if reader is None:
+            return False
+        needle = str(pred["contains"])
+        return any(needle in text for text in reader.memories(str(pred["agent"])))
     return False
 
 
@@ -514,6 +588,49 @@ def expand_event_op(
             return []
         return [memory_seed_event(aid, op) for aid in witnesses]
 
+    if kind == "pay":
+        src, dst = str(op.get("from") or ""), str(op.get("to") or "")
+        try:
+            amount = float(op.get("amount"))
+        except (TypeError, ValueError):
+            logger.warning("beat pay op has a non-numeric amount %r — skipping", op.get("amount"))
+            return []
+        for holder in (src, dst):
+            if holder not in known_agents and holder not in (_TOWN_HOLDER, BEAT_WORLD_HOLDER):
+                logger.warning("beat pay references unknown holder %r — skipping", holder)
+                return []
+        if amount <= 0:
+            # 投影对 amount<=0 是 no-op(payment 只加不减),所以负数不是"反向转账",
+            # 是一条什么也不做的事件。作者以为钱转了,其实没有 —— 明说。
+            logger.warning("beat pay amount must be > 0 (got %r) — skipping;反向转账请把 from/to 调过来", amount)
+            return []
+        return [{
+            "type": "payment", "who": dst,
+            "payload": {"from": src, "to": dst, "amount": amount,
+                        "reason": str(op.get("reason") or "beat")},
+        }]
+
+    if kind == "grant_item":
+        agent_id = str(op.get("agent_id") or "")
+        if agent_id not in known_agents:
+            logger.warning("beat grant_item references unknown agent %r — skipping", agent_id)
+            return []
+        try:
+            qty = int(op.get("qty", 1))
+        except (TypeError, ValueError):
+            qty = 0
+        if qty == 0:
+            logger.warning("beat grant_item qty must be non-zero — skipping")
+            return []
+        source = str(op.get("from") or BEAT_WORLD_HOLDER)
+        # qty 为负 = 拿走。投影只认正数,所以调换两端而不是发一条 no-op。
+        holder_from, holder_to = (source, agent_id) if qty > 0 else (agent_id, source)
+        return [{
+            "type": "item_transfer", "who": agent_id,
+            "payload": {"from": holder_from, "to": holder_to,
+                        "item_id": str(op.get("item_id")), "qty": abs(qty)},
+        }]
+
     if kind == "sentiment_delta":
         as_id, target = op.get("as"), op.get("target")
         for aid in (as_id, target):
@@ -580,7 +697,8 @@ class BeatDirector:
         self._pending: set[str] = {b["id"] for b in script.beats} - self.fired
 
     def due_beats(
-        self, now: WorldTime, projection: Projection, agent_locs: dict[str, str]
+        self, now: WorldTime, projection: Projection, agent_locs: dict[str, str],
+        reader: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Beats whose trigger is satisfied this tick. Computed against the
         fired-set as of NOW: a beat whose `after` prerequisite fires this same
@@ -589,7 +707,7 @@ class BeatDirector:
             beat
             for beat in self.script.beats
             if beat["id"] not in self.fired
-            and trigger_ready(beat, now, self.fired, projection, agent_locs)
+            and trigger_ready(beat, now, self.fired, projection, agent_locs, reader)
         ]
 
     def mark_fired(self, beat_id: str) -> None:
