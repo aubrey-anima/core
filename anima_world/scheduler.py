@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -194,6 +195,8 @@ class Scheduler:
         self._present_players: Any | None = None
         # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
         self._hailed: dict[tuple[str, str], int] = {}
+        # 本世界日各人上了多久班(tick)。日切结算工资时清空。
+        self._worked_ticks: dict[str, int] = {}
         # economy-v4: per-day sales counter feeding the price drift. Memory
         # only — prices in shop_stock are the durable part.
         self._shop_sales: dict[tuple[str, str], int] = {}
@@ -332,6 +335,8 @@ class Scheduler:
         # genesis) — folded directly, bypassing TriggerEngine, with the same
         # branch _rebuild_memories' closure uses. Live path and rebuild path
         # are symmetric from here on (rich-injection only covered rebuild).
+        if event.get("type") == "item_consume":
+            self._apply_item_restores(event)
         if event.get("type") == "memory_seed" and self.memory_store is not None:
             payload = event.get("payload") or {}
             agent_id = payload.get("agent_id")
@@ -865,6 +870,12 @@ class Scheduler:
                 bb.write("time.minute_of_day", now.minute_of_day)
                 if needs_enabled:
                     self._settle_agent_needs(brain)
+                # 工资按真的上过多久班发(见日切结算)。这里只数,不判断。
+                current = self._current_action.get(brain.agent.id)
+                if current is not None and current.kind == "work":
+                    self._worked_ticks[brain.agent.id] = (
+                        self._worked_ticks.get(brain.agent.id, 0) + 1
+                    )
 
                 mailbox = bb.read("mailbox") or []
                 if mailbox:
@@ -958,11 +969,22 @@ class Scheduler:
         if self.config_store is not None:
             wage = float(self.config_store.get("economy.daily_wage", default=wage))
         if wage > 0:
+            # 工资按**真的上过多久班**发,不是每天无条件一份。此前一个整天睡觉的人
+            # 和一个开了十小时店的人到手一样多 —— 那"经济"就只是个每天加数的计数器
+            # (ARCHITECTURE:324 说的"行为树会去打工"欠的正是这一半)。
+            full_day = max(1, 1440 // self._minutes_per_tick())
             for agent_id in list(self.agents):
+                worked = self._worked_ticks.pop(agent_id, 0)
+                if worked <= 0:
+                    continue
+                earned = round(wage * min(1.0, worked / full_day), 2)
+                if earned <= 0:
+                    continue
                 self._record_event({
                     "type": "payment", "who": agent_id,
                     "payload": {"from": economy.TOWN, "to": agent_id,
-                                "amount": wage, "reason": "daily_wage"},
+                                "amount": earned, "reason": "daily_wage",
+                                "worked_ticks": worked},
                 })
         try:
             economy.daily_price_pass(self.event_log.conn, self._shop_sales)
@@ -1156,6 +1178,47 @@ class Scheduler:
             self._record_and_deliver(ev)
         logger.info("beat %r fired (day %d, %02d:%02d): %s",
                     beat_id, now.day, now.hour, now.minute, ops_applied)
+
+    def _apply_item_restores(self, event: dict[str, Any]) -> None:
+        """吃下去的东西按 `item_defs.restores` 补需求。
+
+        这一列 schema 里有、创世时写进去,而**从来没有人读过** —— `RESTORE_PER_TICK`
+        里的 `eat` 是个跟吃什么无关的常数,于是作者认真写的"这碗面很顶饱"在世界里
+        没有任何差别。经济和需求各有机制,中间一直缺这个闭环。
+
+        需求没点亮时整条路惰性(与每个开关的既有承诺一致);查不到定义、解析不出
+        JSON 都当作"不回血",绝不掀翻 tick。
+        """
+        if not self._needs_enabled() or self.event_log is None:
+            return
+        payload = event.get("payload") or {}
+        who = payload.get("who") or event.get("who")
+        item_id = payload.get("item_id")
+        brain = self.agents.get(who) if who else None
+        if brain is None or not item_id:
+            return
+        try:
+            row = self.event_log.conn.execute(
+                "SELECT restores FROM item_defs WHERE id = ?", (item_id,)
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - 一顿饭不值一次崩溃
+            logger.warning("could not read item_defs for %r", item_id, exc_info=True)
+            return
+        if row is None or not row[0]:
+            return
+        try:
+            restores = json.loads(row[0])
+        except (TypeError, ValueError):
+            logger.warning("item %r has unparseable restores %r", item_id, row[0])
+            return
+        if not isinstance(restores, dict):
+            return
+        bb = brain.agent.blackboard
+        for need, amount in restores.items():
+            current = bb.read(f"need.{need}")
+            if not isinstance(current, (int, float)) or not isinstance(amount, (int, float)):
+                continue
+            bb.write(f"need.{need}", max(0.0, min(1.0, float(current) + float(amount))))
 
     def _beat_needs(self, agent_id: str, need: str) -> float | None:
         brain = self.agents.get(agent_id)

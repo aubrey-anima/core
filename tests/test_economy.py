@@ -76,8 +76,11 @@ def test_day_rollover_pays_wages_and_drifts_prices(world):
     coffee_before = next(r for r in world.shop("cafe") if r["item_id"] == "coffee")
     balance_before = world.balance("遥")
     world.scheduler.clock = 287  # 日界前一 tick
+    # 工资按真的上过多久班发(此前是每天无条件一份,于是整天睡觉的人和开了十小时
+    # 店的人到手一样多)。这里直接把"上满一天"记上,单独验满勤 = 全额。
+    world.scheduler._worked_ticks["遥"] = 288
     world.tick(1)
-    assert world.balance("遥") == pytest.approx(balance_before + 20.0), "日切发工资"
+    assert world.balance("遥") == pytest.approx(balance_before + 20.0), "满勤拿全额"
     coffee_after = next(r for r in world.shop("cafe") if r["item_id"] == "coffee")
     assert coffee_after["quantity"] > coffee_before["quantity"], "日切补货"
     assert coffee_after["price"] < coffee_before["price"], "没人买,价格该跌"

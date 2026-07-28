@@ -180,6 +180,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "关系曲线、每人时间分配(`-` = 写到 stdout)",
     )
 
+    report_cmd = sub.add_parser(
+        "report", help="对着一个 world.db 出运行摘要 —— 只读,不跑世界"
+    )
+    report_cmd.add_argument("--db-path", default="world.db")
+    report_cmd.add_argument("--json", action="store_true", help="机器可读输出")
+    report_cmd.add_argument("--output", help="写到文件(缺省打到 stdout)")
+
     validate = sub.add_parser(
         "validate", help="不建世界就检查一份种子或一份节拍脚本"
     )
@@ -2032,6 +2039,100 @@ def _report_validation(
     return 2 if errors else 0
 
 
+def run_report(args: argparse.Namespace) -> int:
+    """对着一个已经存在的 world.db 出摘要。**只读,不跑世界,不建任何东西。**
+
+    `simulate --report` 只在你自己跑这一趟时给得出摘要;一个已经存在的世界(玩家跑
+    出来的、别人给你的、从 `.cyberworld` 导进来的)此前只能自己写 Python。而事件
+    日志是唯一真相、`sim_report` 是纯函数 —— 这本来就该是一条只读命令。
+
+    ⚠️ 刻意**不用 `open_db`**:路径打错会当场建一个空 world.db,然后喜气洋洋地报告
+    "0 事件、世界健康"。也刻意不碰 `load_or_create_key`(它会顺手在旁边生成一把
+    `.key`)。所以这里直接开 `mode=ro` 的 URI 连接。
+
+    ⚠️ 对着一个**正在跑**的世界读到的是某个瞬间的快照,而且尾巴可能缺(叙事与判定
+    在线程池上)。摘要里会写明这一点。
+    """
+    from anima_world.events import Event
+    from anima_world.sim_report import build_run_report
+    from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[report] 没有这个世界:{db_path}", file=sys.stderr)
+        return 2
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        print(f"[report] 打不开:{exc}", file=sys.stderr)
+        return 2
+
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT seq, ts, type, who, loc, payload FROM events ORDER BY seq ASC"
+            ).fetchall()
+            clock_row = conn.execute(
+                "SELECT value FROM db_meta WHERE key = 'clock'"
+            ).fetchone()
+            mpt_row = conn.execute(
+                "SELECT value FROM config WHERE key = 'world.minutes_per_tick'"
+            ).fetchone()
+            owner = _live_owner(db_path)
+        except sqlite3.Error as exc:
+            print(f"[report] 这不像一个 anima 世界:{exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    events = [Event.from_row(row) for row in rows]
+    try:
+        mpt = int(float(mpt_row[0])) if mpt_row else DEFAULT_MINUTES_PER_TICK
+    except (TypeError, ValueError):
+        mpt = DEFAULT_MINUTES_PER_TICK
+    try:
+        clock = int(clock_row[0]) if clock_row else 0
+    except (TypeError, ValueError):
+        clock = 0
+
+    report = build_run_report(events, ticks=clock, minutes_per_tick=mpt)
+    if owner is not None:
+        report["snapshot_of_a_running_world"] = True
+
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[report] 已写入 {args.output}")
+        return 0
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
+    world = report["world"]
+    print(onboarding.rule(f"{db_path} —— 跑了 {world['days']} 个世界日"))
+    if owner is not None:
+        print(f"  {onboarding.yellow('注意')}:这个世界正被 pid {owner[0]} 跑着,"
+              f"下面是某个瞬间的快照,尾巴可能还没落盘。")
+    print(f"  事件 {report['events']['total']} 条"
+          f"(其中墙钟 {report['events']['wall_clock_events']} 条)"
+          f",{len(world['agents'])} 个角色")
+    for agent in report["agents"]:
+        share = agent["share_by_activity"]
+        busiest = max(share, key=lambda k: share[k]) if share else "?"
+        flag = onboarding.yellow("  ← 整场没发生什么") if agent["idle_only"] else ""
+        print(f"    {_pad(agent['id'], 10)}{agent['events']:>5} 件事"
+              f"   多数时间在{busiest}{flag}")
+    for pair in report["encounters"]:
+        print(f"    {pair['a']} × {pair['b']}:相遇 {pair['meetings']} 次,"
+              f"共 {pair['minutes']} 分钟")
+    for curve in report["relationships"]:
+        print(f"    {curve['as']} → {curve['target']}:"
+              f"{curve['start']} → {curve['end']}({curve['turning_points']} 个拐点)")
+    return 0
+
+
 def run_validate(args: argparse.Namespace) -> int:
     """不建世界就检查一份种子 / 一份节拍脚本。
 
@@ -2485,6 +2586,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_run(args)
     if args.command == "simulate":
         return run_simulate(args)
+    if args.command == "report":
+        return run_report(args)
     if args.command == "validate":
         return run_validate(args)
     if args.command == "play":
