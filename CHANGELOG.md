@@ -17,6 +17,18 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-28
+
+同 db 格式(**1**)与包格式(**1**),1.0.x / 1.1.x 建的世界照常打开。
+主题:**把"有机制"变成"兑现"** —— 这一版里几乎每一条修的都是同一件事:某个能力
+声明过、schema 里有位置、文档里写着,而实际路径上没有人真的读它。
+
+⚠️ 三处行为变更(都在同一条原则上:让默认状态说真话)
+
+- **工资按上班时长发**,不再是每天无条件一份。整天睡觉的人当天不发。
+- **玩家余额以账本为准**。已经有过购买记录的老存档,账本上此前是负数,现在那是权威值。
+- **`report_format_version` 已在 1.1.1 升到 2**;`by_day` 稀疏且只覆盖世界 tick 事件。
+
 ### Added
 
 - **`World.history()` —— 全量事件历史的门,分页。** `World.events()` 背后是
@@ -62,6 +74,17 @@ on the spot rather than silently written to.
   `amount<=0` 与 `qty==0` 会被拒绝并说明原因,因为投影对它们是 no-op —— 作者以为
   钱转了,其实没有。`qty` 为负表示拿走(调换两端,而不是发一条什么也不做的事件)。
 - **§9 的谓词表也变成机器校验的**,和 op 表同一条纪律;`contract --json` 一并报出。
+- **`anima-world events export` —— 事件流的格式中立导出(issue #8)。** JSONL,一行
+  一个事件,不依赖 db 格式。**只做导出这一半**:`replayable` 恒为 `false`,而 header
+  里逐条写明它带不走什么(图谱边、记忆强度与反思水位、静默尾部的时钟、聊天转录)。
+  一份不说明自己缺什么的导出比没有更危险 —— 拿到的人会以为那就是整个世界。
+  刻意不做重放端:事件日志今天还不完备,在它补齐之前把这份东西固化成第四条跨仓库
+  线格式,等于把一个已知缺陷刻进契约。
+- **`anima-world report` —— 对着一个已经存在的 `world.db` 出摘要,只读。**
+  `simulate --report` 只在你自己跑这一趟时给得出摘要。刻意不用 `open_db`(路径打错
+  会当场建一个空世界然后报告"0 事件、世界健康"),也不碰 `load_or_create_key`。
+- **`World.player_leave()` / `World.who_is_present()` / `World.inbox()`** —— 见下面
+  「角色会来找你」。
 - **`anima-world validate seed|beats` —— 不建世界就检查作者写的东西。** CLAUDE.md
   一直写着"创作台经 CLI 委托校验",而这个入口不存在:作者唯一的检查办法是真开一次
   世界,而**种子只读进空库一次**,试错的代价是重建世界。硬错误退出码 2;引用完整性
@@ -79,6 +102,42 @@ on the spot rather than silently written to.
 
 ### Fixed
 
+- **角色会来找你了(issue #13,按访客模型)。** 关系此前是单向发起的:玩家能影响世界
+  (记忆、关系、图谱边、八卦),角色却不会决定"今天去找阿檀聊聊"。选访客模型而不是
+  居民模型:居民要新表 = db 格式变更 = 下一个主版本,而访客模型在 1.x 内就交付得了
+  "角色会来找你"本身。**离场语义是前置条件,不是配套改进** —— `world.players` 此前
+  只有写没有删,而 CLI 每聊一轮都调一次 `player_move`,长跑宿主会攒一屋子幽灵访客;
+  一旦让角色看得见在场玩家,那就变成 NPC 走去敲一个断线三小时的人的门。所以先有
+  `player_leave`(幂等)+ TTL 兜底 + `who_is_present`,再有 `agent_hail` 与
+  `World.inbox()`。TTL **不是心跳契约**:任何一次交互都算"我还在"。
+  ⚠️ **敲门不是对话**:`agent_hail` 不产生记忆、不动关系、不开会话 —— 否则你会看到
+  "她来找过我",转头问她却毫无印象。
+- **演示世界里终于有人开口。** 柔 每天 15:00 走到咖啡店、15:30–17:30 待在那儿,而
+  夏 08:00–18:30 一直在店里 —— 两个人每天同处一室两小时。但柔那段是 `idle_social`,
+  它**不指名道姓**,所以只传八卦、不触发关系判定。于是七天跑下来 NPC 之间一条关系都
+  没有、`cliques()` 恒为 `[]`,看起来像"社交机制没用",实际是"没有人真的开口"。
+  种子里那一行改成带对象的 `chat`。刻意**不做掷骰式相遇**:世界要可重放。
+- **规划器看得见世界了**:prompt 里带此刻的处境 —— 她在哪、需求水平、钱包、别人这会儿
+  在哪在忙什么。此前它只知道"我是谁、有哪些空窗、能做什么、记得什么",于是排出来的
+  一天依据比世界实际拥有的信息少得多:让一个在家的人"继续在咖啡店待着"。
+- **工资按真的上过多久班发。** 此前日切时每人无条件一份,金库允许无限负债 —— 整天
+  睡觉的人和开了十小时店的人到手一样多,那"经济"就只是个每天加数的计数器。
+- **`item_defs.restores` 终于有人读了。** schema 里一直有这一列、创世时也写进去,而
+  `RESTORE_PER_TICK["eat"]` 是个跟吃什么无关的常数 —— 作者写的"这碗面很顶饱"在世界里
+  没有任何差别。
+- **玩家的钱收敛到账本。** `player_topup` 此前只改内存、不发事件,而 `player_buy` 拿
+  那个内存数做门禁、却把花费发成 `payment`。于是同一个玩家有两个余额:内存里是
+  "充值 − 花费",账本里是"**负的花费**",而 `World.balance()` 读后者 —— 实测充 50
+  买一杯 6 块的东西,一个说 44,一个说 −6。
+- **降级会在世界里留下痕迹。** 叙事/规划/关系判定三处上报成败,计数进
+  `state().runtime.subsystems`,档位切换落一条 `subsystem_health` 事件。此前降级只在
+  stderr 刷一行 warning,而日志会滚掉 —— 一个整整三天没有 planner 的世界,和一个角色
+  确实无所事事的世界,产物看起来一模一样。**只在切换时发**,不是每次都发。
+- **一个正在跑的世界现在会自报。** 开世界盖 `owner_pid`/`owner_host`,关世界撤掉;
+  `config set` 与 `doctor` 撞见活库时出声。最尖的一处是 `config set`:它开自己的连接
+  写库、打印"已保存",而运行中那个世界的 `ConfigStore` 缓存不会重读 —— 你以为改了,
+  其实要等下次重启。**只提示不拒绝**:进程崩掉标记就陈旧,拿陈旧标记去拒绝操作,
+  等于在真出事那天把人挡在门外。
 - **一行合法的 SQL 就能让整棵作者树静默塌掉。** `bt_nodes` 的 CHECK 放行
   `need_action`,而 `BTStore._build_node` 不认它:构造器抛 ValueError,调用方兜成
   一行 warning,**整棵作者树退回 `default_bt()`** —— 一个只会 idle_wander 的根选择器。
@@ -410,7 +469,8 @@ so there is nothing to migrate.
   versions at once.
 - The `story` subcommand, an M2-era leftover that no documentation mentioned.
 
-[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/aubrey-anima/core/releases/tag/v1.2.0
 [1.1.1]: https://github.com/aubrey-anima/core/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aubrey-anima/core/releases/tag/v1.1.0
 [1.0.2]: https://github.com/aubrey-anima/core/releases/tag/v1.0.2

@@ -180,6 +180,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "关系曲线、每人时间分配(`-` = 写到 stdout)",
     )
 
+    events_cmd = sub.add_parser(
+        "events", help="事件流的格式中立导出(只导出,不重放,不承诺)"
+    )
+    events_commands = events_cmd.add_subparsers(dest="events_command", required=True)
+    events_export = events_commands.add_parser("export", help="导出成 JSONL")
+    events_export.add_argument("--db-path", default="world.db")
+    events_export.add_argument("--output", required=True, help="写到文件;`-` = stdout")
+
     report_cmd = sub.add_parser(
         "report", help="对着一个 world.db 出运行摘要 —— 只读,不跑世界"
     )
@@ -2039,6 +2047,83 @@ def _report_validation(
     return 2 if errors else 0
 
 
+# 事件流带不走什么。**写进制品的 header,不是写进某份没人会读的文档** —— 一份不说明
+# 自己缺什么的导出,比没有导出更危险:拿到的人会以为那就是整个世界。
+_EVENTS_NOT_INCLUDED = (
+    "图谱边(edges 表)——关系结构不在事件流里,重放不出来",
+    "记忆强度与反思水位——派生态,重放后归零(记得什么还在,记得多牢不在)",
+    "静默尾部的世界时钟——最后一段没有事件的时间在 db_meta 里,不在事件里",
+    "聊天转录——世界侧只有会话摘要,完整对话按设计留在宿主应用",
+)
+
+
+def run_events(args: argparse.Namespace) -> int:
+    """把事件日志导成 JSONL:一行一个事件,不依赖 db 格式。
+
+    issue #8 的连续性通路,**只做导出这一半**。刻意不做重放端:事件日志今天还不完备
+    (见 header 里那四项),在它补齐之前把这份东西固化成第四条跨仓库线格式,等于把
+    一个已知缺陷刻进契约。所以 `replayable` 恒为 false —— 不承诺,承诺了就得兑现。
+
+    只读:`mode=ro`,文件不存在退 2,不建库、不生成密钥(同 `report`)。
+    """
+    import anima_world
+
+    db_path = Path(args.db_path)
+    if not db_path.exists():
+        print(f"[events] 没有这个世界:{db_path}", file=sys.stderr)
+        return 2
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        print(f"[events] 打不开:{exc}", file=sys.stderr)
+        return 2
+
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT seq, ts, type, who, loc, payload FROM events ORDER BY seq ASC"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            print(f"[events] 这不像一个 anima 世界:{exc}", file=sys.stderr)
+            return 2
+    finally:
+        conn.close()
+
+    header = {
+        "kind": "anima-events",
+        "stream_format_version": 1,
+        "engine_version": anima_world.__version__,
+        "db_format_version": DB_FORMAT_VERSION,
+        "events": len(rows),
+        # 这两条是这份制品最重要的内容。
+        "replayable": False,
+        "not_included": list(_EVENTS_NOT_INCLUDED),
+    }
+
+    def _emit(handle: Any) -> None:
+        handle.write(json.dumps(header, ensure_ascii=False) + "\n")
+        for seq, ts, type_, who, loc, payload in rows:
+            try:
+                parsed = json.loads(payload) if payload else {}
+            except (TypeError, ValueError):
+                parsed = {"_unparseable": payload}
+            handle.write(json.dumps({
+                "seq": seq, "ts": ts, "type": type_,
+                "who": who, "loc": loc, "payload": parsed,
+            }, ensure_ascii=False) + "\n")
+
+    if args.output == "-":
+        _emit(sys.stdout)
+        return 0
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as handle:
+        _emit(handle)
+    print(f"[events] {len(rows)} 条事件 → {out}")
+    print(f"  {onboarding.dim('这不是一份可重放的世界 —— header 里写着它带不走什么。')}")
+    return 0
+
+
 def run_report(args: argparse.Namespace) -> int:
     """对着一个已经存在的 world.db 出摘要。**只读,不跑世界,不建任何东西。**
 
@@ -2586,6 +2671,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_run(args)
     if args.command == "simulate":
         return run_simulate(args)
+    if args.command == "events":
+        return run_events(args)
     if args.command == "report":
         return run_report(args)
     if args.command == "validate":
