@@ -91,6 +91,8 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         # here so an admin-saved template referencing {goals} passes
         # check_renders instead of being rejected.
         "goals": "你当前的目标：\n- 示例目标\n\n",
+        # 同上:处境也是一个整块,列在这里让引用 {situation} 的模板能过渲染检查。
+        "situation": "你此刻的处境：\n- 你现在在咖啡店\n\n",
     },
 }
 

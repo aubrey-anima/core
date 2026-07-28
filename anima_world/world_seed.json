@@ -112,8 +112,10 @@
           "name": "linger",
           "start": "15:30",
           "end": "17:30",
-          "kind": "idle_social",
-          "params": {}
+          "kind": "chat",
+          "params": {
+            "target": "夏"
+          }
         },
         {
           "name": "walk_home",

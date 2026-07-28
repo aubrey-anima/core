@@ -39,9 +39,13 @@ logger = logging.getLogger(__name__)
 # job it is already contractually doing (`work` is what the duty branch emits).
 _DUTY_ONLY_KINDS = {"work", "sleep"}
 
+# 需求键 → 给 LLM 看的说法。规划器读的是"她这会儿什么状态",不是内部变量名。
+_NEED_LABELS = {"energy": "精力", "hunger": "饱腹", "social": "社交"}
+
 _DEFAULT_PROMPT = (
     "你是{name}。{personality}\n\n"
     "{goals}"
+    "{situation}"
     "现在是第 {day} 天。你的固定日程之外，还有这些空闲时段（24 小时制）：\n"
     "{free_windows}\n\n"
     "你在空闲时段能做的事：\n{action_space}\n\n"
@@ -282,6 +286,7 @@ class Planner:
         duty_windows: Callable[[str], list[tuple[int, int]]],
         prompt_store: Any | None = None,
         memory_store: Any | None = None,
+        situation_provider: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self._llm = llm
         self._bt_store = bt_store
@@ -291,6 +296,11 @@ class Planner:
         self._duty_windows = duty_windows
         self._prompt_store = prompt_store
         self._memory_store = memory_store
+        # 规划器此前只看得见"我是谁、我有哪些空窗、能做什么、记得什么"。
+        # 它看不见自己站在哪、饿不饿、有没有钱、别人这会儿在忙什么 —— 于是它排出
+        # 来的一天,依据比世界实际拥有的信息少得多:让一个在家的人去"继续在咖啡店
+        # 待着",让一个身无分文的人去买东西,让两个人各自计划去找对方。
+        self._situation_provider = situation_provider
 
     def make_plan(self, agent_id: str, day: int) -> Plan | None:
         """Ask the LLM for a day of free time. `None` on any failure — the
@@ -315,6 +325,39 @@ class Planner:
             logger.warning("planner produced no usable steps for %s; leaving it planless", agent_id)
             return None
         return Plan(agent_id=agent_id, day=day, steps=steps)
+
+    def _situation_block(self, agent_id: str) -> str:
+        """此刻的处境:在哪、需求、钱包、别人在做什么。
+
+        与 `goals` 同一个套路 —— 渲染成一个自洽的块(没内容就是空串),所以模板不必
+        写 if 分支;而老模板没有这个占位符也照样能渲染(`str.format` 忽略多余 kwarg)。
+        """
+        if self._situation_provider is None:
+            return ""
+        try:
+            ctx = self._situation_provider(agent_id) or {}
+        except Exception:  # noqa: BLE001 - 规划永远不该死于一次世界读
+            logger.warning("situation provider failed for %s; planning blind", agent_id, exc_info=True)
+            return ""
+        lines: list[str] = []
+        if ctx.get("location"):
+            lines.append(f"- 你现在在{ctx['location']}")
+        needs = ctx.get("needs") or {}
+        if needs:
+            readable = "、".join(
+                f"{_NEED_LABELS.get(k, k)} {v:.0%}" for k, v in sorted(needs.items())
+                if isinstance(v, (int, float))
+            )
+            if readable:
+                lines.append(f"- 你的状态:{readable}")
+        if ctx.get("money") is not None:
+            lines.append(f"- 你身上有 {ctx['money']:.0f} 块钱")
+        others = ctx.get("others") or []
+        if others:
+            lines.append("- 这会儿别人在做什么:" + ";".join(others))
+        if not lines:
+            return ""
+        return "你此刻的处境：\n" + "\n".join(lines) + "\n\n"
 
     def _build_messages(
         self,
@@ -344,6 +387,7 @@ class Planner:
             "action_space": _format_space(space),
             "memories": self._memory_block(agent_id),
             "goals": goals_block,
+            "situation": self._situation_block(agent_id),
         }
         try:
             prompt = template.format(**variables)

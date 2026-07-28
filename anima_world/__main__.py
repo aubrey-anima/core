@@ -491,7 +491,62 @@ def _build_planner(
         duty_windows=bt_store.duty_windows,
         prompt_store=prompt_store,
         memory_store=memory_store,
+        situation_provider=lambda aid: _planner_situation(scheduler, aid),
     )
+
+
+# 别人这会儿在干什么 —— 给 LLM 看的说法,不是内部 kind。
+_ACTION_LABELS = {
+    "work": "上班", "sleep": "睡觉", "eat": "吃东西", "chat": "跟人说话",
+    "walk": "赶路", "idle_wander": "闲着", "idle_social": "闲着",
+    None: "闲着",
+}
+
+
+def _planner_situation(scheduler: Any, agent_id: str) -> dict[str, Any]:
+    """规划器排一天之前,先看一眼此刻的世界。
+
+    此前它只知道"我是谁、有哪些空窗、能做什么、记得什么" —— 看不见自己站在哪、
+    饿不饿、有没有钱、别人这会儿在忙什么。于是它排出来的一天依据比世界实际拥有的
+    信息少得多:让一个在家的人"继续在咖啡店待着",让身无分文的人去买东西。
+
+    纯读,拿锁,不碰 LLM。任何一块读不出来就少一行,规划不该死于一次世界读。
+    """
+    ctx: dict[str, Any] = {}
+    with scheduler._lock:
+        brain = scheduler.agents.get(agent_id)
+        if brain is None:
+            return ctx
+        loc_id = brain.agent.blackboard.read("loc") or brain.agent.location or ""
+        if loc_id and scheduler.location_store is not None:
+            row = scheduler.location_store.get(loc_id)
+            ctx["location"] = (row or {}).get("name") or loc_id
+        elif loc_id:
+            ctx["location"] = loc_id
+
+        if scheduler._needs_enabled():
+            values = {
+                need: brain.agent.blackboard.read(f"need.{need}")
+                for need in ("energy", "hunger", "social")
+            }
+            ctx["needs"] = {k: v for k, v in values.items() if isinstance(v, (int, float))}
+
+        if scheduler.config_store is not None and scheduler.config_store.get(
+            "economy.enabled", default=False
+        ):
+            ctx["money"] = float(scheduler._memory_projection.balances.get(agent_id, 0.0))
+
+        others = []
+        for other_id, other in scheduler.agents.items():
+            if other_id == agent_id:
+                continue
+            action = scheduler._current_action.get(other_id)
+            where = other.agent.blackboard.read("loc") or other.agent.location or "?"
+            label = _ACTION_LABELS.get(action.kind if action else None, "闲着")
+            others.append(f"{other.agent.name}在{where}{label}")
+        if others:
+            ctx["others"] = others
+    return ctx
 
 
 def _warn_if_llm_degraded(config_store: ConfigStore, db_path: str | Path) -> None:
