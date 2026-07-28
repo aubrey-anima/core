@@ -348,6 +348,11 @@ class _WorldView:
             "db": db_status,
             "events": events_status,
             "llm": llm_status,
+            # `llm.degraded_reason` 说的是"现在";这里说的是"一路上怎么样"。
+            # 一个整整三天没有 planner 的世界,和一个角色确实无所事事的世界,产物
+            # 看起来一模一样 —— 只有计数能把它们分开。档位切换还会落一条
+            # `subsystem_health` 事件,所以它同时也是可查的历史,不是一行会滚掉的日志。
+            "subsystems": self.scheduler.subsystem_health(),
         }
 
 
@@ -403,6 +408,12 @@ class World:
         # 世界独占 db,所以此刻还 open 的行只能是上次崩溃的遗留。消息早已
         # 逐条落盘,补上总结与那一个 conversation 事件即可 —— 崩溃从
         # "丢总结"降级为"总结晚到"。
+        # 盖一个"这个世界正被我跑着"的戳。CLAUDE.md 的第一条不变量此前没有任何
+        # 标记去支撑 —— 谁也看不出一个 db 正被人跑着,而第二个写它的进程会让两边
+        # 立刻分叉。是提示不是锁:进程崩掉标记就陈旧,拿陈旧标记拒绝操作,等于在
+        # 真出事那天把人挡在门外。
+        self.scheduler.claim_ownership()
+
         try:
             orphans = _run_coro_blocking(self.session_manager.reap_orphans())
             if orphans:
@@ -444,6 +455,7 @@ class World:
             return
         self._closed = True
         self.stop_clock()
+        self.scheduler.release_ownership()   # 撤戳要在 stop 之前:stop 之后连接可能已经关了
         self.scheduler.stop(wait=wait)
 
     def __enter__(self) -> "World":

@@ -98,6 +98,7 @@
 | `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)或 `reflection`(反思) |
 | `conversation` | `agent_id`, `conversation_id`, `summary`, `message_count`, `started_at`, `closed_at`, `participants`, `location` | 整场会话只发这一条,在关闭时 |
 | `capability_registered` | `id`, `kind`, `description`, `params_schema` | 首启生成的能力目录 |
+| `subsystem_health` | `subsystem`, `status`, `reason`, `previous` | 子系统档位**切换**(ok↔degraded)。只在切换时发,不是每次降级都发 |
 | `player_action` | `player_id`, `role`, `action`, `details` | 同样的四个字段**也**在事件顶层(实时流的既有形状,不变)。⚠️ payload 里有值这件事**只对 1.1.1 之后产生的事件成立** —— 更早的世界里这里是 `{}`,不补也不迁移,读历史时要当它可能缺席 |
 
 **稳定性**:字段**只加不改**,与 `World` 门面同一条纪律 —— 已有类型不会删字段或改语义。

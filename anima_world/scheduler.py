@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import socket
 import threading
 import time
 import zlib
@@ -186,6 +188,8 @@ class Scheduler:
         # truth. A restart drops journeys: the agent is simply still where it
         # set out from, and the BT sends it on its way again next tick.
         self._transit: dict[str, dict[str, Any]] = {}
+        # 子系统档位:name -> {ok, degraded, status, reason}。切换时发 subsystem_health 事件。
+        self._subsystem_health: dict[str, dict[str, Any]] = {}
         # economy-v4: per-day sales counter feeding the price drift. Memory
         # only — prices in shop_stock are the durable part.
         self._shop_sales: dict[tuple[str, str], int] = {}
@@ -375,6 +379,37 @@ class Scheduler:
 
     REFLECTION_KIND = "reflection"
 
+    def note_subsystem(self, subsystem: str, ok: bool, reason: str = "") -> None:
+        """记一次子系统的成功/降级,并在**档位切换的那一刻**发一个事件。
+
+        今天降级只在 stderr 刷一行 warning。日志会滚掉,而"这个世界当时跑在什么档位
+        上"是解释它为什么长成这样的关键 —— 一个整整三天没有 planner 的世界,和一个
+        角色确实无所事事的世界,产物看起来一模一样。
+
+        只在**切换**时发事件,不是每次都发:一个持续降级的子系统会每 tick 触发一次,
+        那样事件日志会被自己的健康报告淹掉(needs 那个教训)。计数照常累加。
+        """
+        health = self._subsystem_health.setdefault(
+            subsystem, {"ok": 0, "degraded": 0, "status": None, "reason": ""}
+        )
+        health["ok" if ok else "degraded"] += 1
+        status = "ok" if ok else "degraded"
+        if health["status"] == status:
+            return
+        previous, health["status"], health["reason"] = health["status"], status, reason
+        if previous is None and ok:
+            return  # 开机第一次成功不值一个事件
+        self._record_event({
+            "type": "subsystem_health",
+            "who": None,
+            "payload": {"subsystem": subsystem, "status": status,
+                        "reason": reason, "previous": previous},
+        })
+
+    def subsystem_health(self) -> dict[str, dict[str, Any]]:
+        """各子系统的当前档位与累计计数(给 `World.state()` 用)。"""
+        return {name: dict(data) for name, data in self._subsystem_health.items()}
+
     def _note_memory_written(self, agent_id: str, importance: float, kind: str) -> None:
         """Accumulate importance toward the reflection threshold (lock held).
 
@@ -449,6 +484,47 @@ class Scheduler:
             conn.commit()
         except Exception:  # noqa: BLE001 - a clock checkpoint is never fatal
             logger.warning("world clock checkpoint failed", exc_info=True)
+
+    def claim_ownership(self) -> None:
+        """在 db 上盖一个"这个世界正被我跑着"的戳。
+
+        CLAUDE.md 的第一条不变量是"一个运行中的世界独占它的 world.db",但这条纪律
+        此前没有任何标记去支撑 —— 谁也看不出一个 db 正被人跑着。最尖的一处是
+        `config set`:它开自己的连接写 config 表、打印"已保存",而运行中那个世界的
+        `ConfigStore` 缓存不会重读。你以为改了,其实没改,直到下次重启才突然生效。
+
+        **这是给人看的提示,不是锁。** 进程崩掉标记就会陈旧,而拿陈旧标记去拒绝
+        操作,等于在真出事那天把人挡在门外。
+        """
+        self._write_meta("owner_pid", str(os.getpid()))
+        self._write_meta("owner_host", socket.gethostname())
+
+    def release_ownership(self) -> None:
+        """撤掉占用标记。正常关闭必须撤,否则每个关过的世界都变成"有人在跑"。"""
+        if self.event_log is None:
+            return
+        try:
+            with self._lock:
+                self.event_log.conn.execute(
+                    "DELETE FROM db_meta WHERE key IN ('owner_pid', 'owner_host')"
+                )
+                self.event_log.conn.commit()
+        except Exception:  # noqa: BLE001 - 撤不掉标记不该拦住关停
+            logger.warning("could not release the world ownership marker", exc_info=True)
+
+    def _write_meta(self, key: str, value: str) -> None:
+        if self.event_log is None:
+            return
+        try:
+            with self._lock:
+                self.event_log.conn.execute(
+                    "INSERT INTO db_meta (key, value) VALUES (?, ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+                self.event_log.conn.commit()
+        except Exception:  # noqa: BLE001 - 一个提示标记永远不该是致命的
+            logger.warning("could not write db_meta %r", key, exc_info=True)
 
     def _restore_clock(self) -> None:
         """Adopt the checkpointed clock if it is ahead of the replayed events.
@@ -1422,9 +1498,13 @@ class Scheduler:
         """
         try:
             plan = self.planner.make_plan(agent_id, day)
-        except Exception:  # noqa: BLE001 - a dead planner must not stop the world
+        except Exception as exc:  # noqa: BLE001 - a dead planner must not stop the world
             logger.warning("planner failed for %s", agent_id, exc_info=True)
             plan = None
+            self.note_subsystem("planner", False, f"{type(exc).__name__}: {exc}")
+        else:
+            self.note_subsystem("planner", plan is not None,
+                                "" if plan is not None else "planner returned no plan")
         # Discard + install under ONE lock acquisition (sim-ff-usability code
         # review): a gap between them let planning_in_flight() report False
         # while the plan wasn't in _plans yet — a fast-forward poller could
@@ -1627,9 +1707,12 @@ class Scheduler:
             return
         try:
             result = judge.judge(**context)
-        except Exception:  # noqa: BLE001 - a dead judge must not stop the world
+        except Exception as exc:  # noqa: BLE001 - a dead judge must not stop the world
             logger.warning("relationship judge failed for %s↔%s", a_id, b_id, exc_info=True)
+            self.note_subsystem("relationship_judge", False, f"{type(exc).__name__}: {exc}")
             return
+        self.note_subsystem("relationship_judge", result is not None,
+                            "" if result is not None else "judge produced no usable verdict")
         if result is None:
             return
         importance = min(0.9, 0.5 + max(abs(result.delta_a_to_b), abs(result.delta_b_to_a)))
@@ -1812,9 +1895,11 @@ class Scheduler:
             return
         try:
             text = provider.describe(action=action, agent_id=agent_id, blackboard=blackboard)
-        except Exception:  # noqa: BLE001 - flavor text is never worth a crash
+        except Exception as exc:  # noqa: BLE001 - flavor text is never worth a crash
             logger.warning("narrative provider failed for %s", agent_id, exc_info=True)
+            self.note_subsystem("narrative", False, f"{type(exc).__name__}: {exc}")
             return
+        self.note_subsystem("narrative", True)
         with self._lock:
             if self._stopped or self.narrative_history is None:
                 return

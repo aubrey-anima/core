@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 import time
 import threading
@@ -1711,6 +1712,46 @@ def run_play(args: argparse.Namespace) -> int:
         world.close()
 
 
+def _live_owner(db_path: str | Path) -> tuple[str, str] | None:
+    """这个 db 上有没有"正被谁跑着"的戳。读不出来就当没有 —— 这是提示不是锁。"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = dict(conn.execute(
+            "SELECT key, value FROM db_meta WHERE key IN ('owner_pid', 'owner_host')"
+        ).fetchall())
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    pid, host = rows.get("owner_pid"), rows.get("owner_host")
+    return (pid, host or "?") if pid else None
+
+
+def _warn_if_live(db_path: str | Path) -> None:
+    """对一个正在跑的世界动手之前,说一声。
+
+    `config set` 会开自己的连接写 config 表并打印"已保存",而运行中那个世界的
+    `ConfigStore` 缓存不会重读 —— **你以为改了,其实没改**,直到下次重启才突然生效,
+    那时你早忘了自己改过什么。
+
+    只提示不拒绝:进程崩掉标记就陈旧,拿陈旧标记去拒绝操作,等于在真出事那天把人
+    挡在门外。
+    """
+    owner = _live_owner(db_path)
+    if owner is None:
+        return
+    pid, host = owner
+    print(
+        f"  {onboarding.yellow('这个世界正被 pid ' + str(pid) + ' @ ' + str(host) + ' 跑着')}"
+        f" —— 写进去的东西那个进程不会重读,要下次重启才生效;"
+        f"两个进程同时写同一个 world.db 会让两边分叉。",
+        file=sys.stderr,
+    )
+
+
 def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
     """Open a world's config, creating the database if it isn't there yet.
 
@@ -1827,6 +1868,8 @@ def run_config(args: argparse.Namespace) -> int:
         print(f"[config] 还没有这个世界:{args.db_path}\n"
               f"         先跑一次 anima-world start 创建它。", file=sys.stderr)
         return 2
+    if args.config_command == "set":
+        _warn_if_live(args.db_path)
     conn, store = _open_config_store(args.db_path)
     try:
         if args.config_command == "list":
@@ -2064,6 +2107,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     db_path = Path(args.db_path)
     print(onboarding.rule("体检"))
     problems = 0
+    _warn_if_live(db_path)
 
     if not db_path.exists():
         print(f"  {onboarding.red(onboarding.BAD)} 没有世界文件:{db_path}")
