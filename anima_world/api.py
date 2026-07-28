@@ -36,7 +36,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Iterator
 
 from anima_world.chat_service import ChatService
 from anima_world.chat_session import ChatSessionManager
@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 
 # The idle reaper scans for stale conversations this often (wall seconds).
 _REAP_INTERVAL = 30.0
+
+# `history()` 一页的硬上限。存在的理由不是"省内存",是**不让一次调用把整个世界的
+# 历史拉进一个 list 里同时还在锁内** —— 事件日志只增不减,一个跑了一年的世界那样
+# 做会把宿主卡死。要全量就分页,分页是可见的。
+_HISTORY_MAX_PAGE = 5000
 
 # Map row fields exposed in state(); consumers assemble the tree from them.
 _LOCATION_KEYS = ("id", "name", "description", "kind", "parent", "x", "y", "w", "h")
@@ -399,7 +404,7 @@ class World:
         # 逐条落盘,补上总结与那一个 conversation 事件即可 —— 崩溃从
         # "丢总结"降级为"总结晚到"。
         try:
-            orphans = asyncio.run(self.session_manager.reap_orphans())
+            orphans = _run_coro_blocking(self.session_manager.reap_orphans())
             if orphans:
                 logger.info("closed %d orphaned conversation(s) from a previous run", len(orphans))
         except Exception:  # noqa: BLE001 - recovery must never block open
@@ -521,6 +526,49 @@ class World:
                 self._view.on_tick()
         return self.scheduler.clock
 
+    def fast_forward(self, ticks: int, *, plan_wait_cap: float | None = None) -> dict[str, Any]:
+        """无头快进,并在每个世界日等在途的规划落地。
+
+        与 `tick(n)` 的区别只有"等规划"这一条:快进会在一次 LLM 调用的时间里烧掉
+        几千个 tick,不等的话第 D 天要的计划装回来时第 D 天早过去了。
+
+        返回 `{"ticks", "clock", "planner_gave_up", "exhausted_days"}` 而不是一个 int
+        —— **`planner_gave_up` 才是宿主真正需要的那个字**:一个安静的世界和一个规划
+        全程没跟上的世界,产物看起来一模一样。`plan_wait_cap<=0` 是"不等",不是判死。
+
+        这条路径与 `anima-world simulate` 共用同一份实现。
+        """
+        with self._tick_lock:
+            outcome = self.scheduler.fast_forward(ticks, plan_wait_cap=plan_wait_cap)
+            self._view.on_tick()
+        return outcome
+
+    def report(self, *, ticks: int | None = None) -> dict[str, Any]:
+        """把这个世界跑出来的历史读成一份运行摘要(与 `simulate --report` 同一口径)。
+
+        纯读:事件日志是唯一输入,`sim_report` 是纯函数。`ticks` 缺省用当前时钟。
+
+        ⚠️ 叙事与关系判定跑在线程池上,**没排干之前尾部是缺的** —— 一份刚跑完就取的
+        摘要会少掉最后几条叙事与判定,而那正是"三日试炼"最关心的尾巴。要一份完整的,
+        先 `close()` 再离线算,或者先 `wait_planning_idle()`。
+        """
+        from anima_world.sim_report import build_run_report
+        from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
+
+        mpt = DEFAULT_MINUTES_PER_TICK
+        if self.scheduler.config_store is not None:
+            mpt = self.scheduler.config_store.get("world.minutes_per_tick", default=mpt)
+        with self.scheduler._lock:
+            events = (
+                self.scheduler.event_log.replay()
+                if self.scheduler.event_log is not None else []
+            )
+        return build_run_report(
+            events,
+            ticks=self.scheduler.clock if ticks is None else int(ticks),
+            minutes_per_tick=int(mpt),
+        )
+
     def start_clock(self, fallback_tick_rate: float = 1.0) -> None:
         """后台线程按 `scheduler.tick_rate` 走时钟(热更新生效),并启动
         会话收割线程。已在走则 no-op。"""
@@ -562,7 +610,7 @@ class World:
                 if not self._clock_running or self.scheduler._stopped:
                     return
                 try:
-                    asyncio.run(self.session_manager.reap_idle())
+                    _run_coro_blocking(self.session_manager.reap_idle())
                 except Exception:  # reaper is best-effort
                     pass
 
@@ -672,8 +720,85 @@ class World:
             return load_cliques(self.scheduler.event_log.conn)
 
     def events(self, since_seq: int | None = None) -> list[dict[str, Any]]:
-        """内存事件缓冲(近期);全量历史请离线读 events 表。"""
+        """内存事件缓冲(**近期 200 条的窗口,不是历史**);全量历史用 `history()`。
+
+        窗口滑过 `since_seq` 时会打一条 warning —— 那正是调用方即将拿到一段有洞的
+        历史、却以为自己追上了的时刻。返回值是个普通 list,看不出中间少了什么。
+        """
+        if since_seq is not None:
+            with self.scheduler._lock:
+                window = self.scheduler.recent_events
+                oldest = int(window[0].get("seq", 0) or 0) if window else 0
+            if oldest and int(since_seq) < oldest - 1:
+                logger.warning(
+                    "events(since_seq=%s):内存窗口只剩 seq >= %s,中间 %s 条已经滑出去了 "
+                    "—— 这次返回的是一段有洞的历史。要全量请用 World.history()。",
+                    since_seq, oldest, oldest - 1 - int(since_seq),
+                )
         return self._view.catchup_events(since_seq)
+
+    def history(
+        self,
+        *,
+        since_seq: int = 0,
+        limit: int = 1000,
+        who: str | None = None,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        """全量事件历史,**分页**。事件形状与 `events()` 完全一致。
+
+        `{"events": [...], "next_seq": int | None, "total": int}` —— `next_seq` 不是
+        None 就代表后面还有,把它当 `since_seq` 再要一页。
+
+        为什么是分页而不是"给你前 N 条":一份少了一截的历史看起来和完整的一模一样,
+        宿主拿它做统计不会有任何报错。截断必须结构性地可见。`total` 是**满足过滤条件
+        的全部条数**(不受 `since_seq` 影响),让调用方一眼看出这趟要拉多少。
+
+        `who` / `kind` 是可选过滤。注意 `events` 表今天只有 `ts` / `type` 索引,
+        按 `who` 过滤是全表扫 —— 分页上限就是它的护栏。
+
+        ⚠️ **活着的世界是移动目标**:叙事跑在线程池上,分页期间还会有新事件落库。
+        分页保证 seq 有序不重不漏,但"开始分页时的 total"和"读完时的条数"本就可能
+        对不上。要一份静止的历史,先 `close()`。
+        """
+        from anima_world.events import Event
+
+        limit = max(1, min(int(limit), _HISTORY_MAX_PAGE))
+        filters: list[str] = []
+        filter_params: list[Any] = []
+        if who:
+            filters.append("who = ?")
+            filter_params.append(who)
+        if kind:
+            filters.append("type = ?")
+            filter_params.append(kind)
+        filter_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
+        page_clause = " WHERE " + " AND ".join(["seq > ?", *filters])
+
+        conn = self.scheduler.event_log.conn
+        with self.scheduler._lock:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM events{filter_clause}", filter_params
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT seq, ts, type, who, loc, payload FROM events"
+                f"{page_clause} ORDER BY seq ASC LIMIT ?",
+                (int(since_seq), *filter_params, limit + 1),  # +1 = "还有没有下一页"
+            ).fetchall()
+
+        page = [Event.from_row(row) for row in rows[:limit]]
+        events = [
+            self.scheduler._stream_event({
+                "seq": e.seq, "ts": e.ts, "type": e.type,
+                "who": e.who, "loc": e.loc, "payload": e.payload,
+            })
+            for e in page
+        ]
+        return {
+            "events": events,
+            "next_seq": events[-1]["seq"] if len(rows) > limit and events else None,
+            "total": int(total),
+        }
 
     def subscribe(self) -> "queue.Queue[dict[str, Any]]":
         """订阅事件推送(线程安全队列,批量帧 {type:'batch', events:[…]})。"""
@@ -702,6 +827,45 @@ class World:
         `messages` 是调用方持有的近期对话(≤20 条,末条须 user);世界不落
         完整转录 —— 完整历史归宿主应用管。身份即参数(纪律 3)。
         """
+        yield from _iterate_sync(
+            self._chat_agen(agent_id, messages, player_id=player_id,
+                            display_name=display_name, role=role)
+        )
+
+    async def achat(
+        self,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        *,
+        player_id: str,
+        display_name: str | None = None,
+        role: str = "player",
+    ) -> AsyncIterator[str]:
+        """`chat()` 的原生 async 版本 —— 直接跑在宿主自己的事件循环上。
+
+        同步的 `chat()` 在 async 宿主里也能用(桥会换个线程跑),但流式转发本来就是
+        async 的形状,包一层再拆开只是白绕。参数与 `chat()` 逐字相同。
+
+        注意别把它当成"整个门面都有 async 版":`record_chat_turn` 等要抢
+        scheduler 那把系统唯一的 RLock,把等锁搬上宿主的事件循环会在 tick 持锁期间
+        卡死整个宿主。要非阻塞就用 `asyncio.to_thread(world.record_chat_turn, …)`。
+        """
+        async for token in self._chat_agen(
+            agent_id, messages, player_id=player_id,
+            display_name=display_name, role=role,
+        ):
+            yield token
+
+    def _chat_agen(
+        self,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        *,
+        player_id: str,
+        display_name: str | None,
+        role: str,
+    ) -> AsyncIterator[str]:
+        """`chat` / `achat` 共用的那一份:校验、身份、在场,然后交给 chat_service。"""
         if agent_id not in self.scheduler.agents:
             raise KeyError(f"agent {agent_id} not found")
         if not messages or messages[-1].get("role") != "user":
@@ -723,13 +887,12 @@ class World:
         if where:
             interlocutor["location"] = where
             interlocutor["location_name"] = self._location_display_name(where)
-        agen = self.chat_service.respond(
+        return self.chat_service.respond(
             agent_id,
             messages[-20:],
             interlocutor_id=player_id,
             interlocutor=interlocutor,
         )
-        yield from _iterate_sync(agen)
 
     def _location_display_name(self, location_id: str) -> str:
         """地点 id → 给角色看的名字。查不到就用 id,聊天不该因此告吹。"""
@@ -778,7 +941,7 @@ class World:
             self.chat_store.add_message(
                 conversation_id, message["role"], content, int(time.time())
             )
-        asyncio.run(self.session_manager.close_conversation(conversation_id))
+        _run_coro_blocking(self.session_manager.close_conversation(conversation_id))
         # 交互即检查点:说完这句话的瞬间,db 就是完整的(可打包、可崩)。
         self.scheduler.checkpoint()
         return conversation_id
@@ -791,7 +954,7 @@ class World:
 
     def close_conversation(self, conversation_id: int) -> bool:
         """手动关闭会话(摘要 + 事件 + 判定);返回是否发了世界事件。"""
-        emitted = asyncio.run(self.session_manager.close_conversation(conversation_id))
+        emitted = _run_coro_blocking(self.session_manager.close_conversation(conversation_id))
         self.scheduler.checkpoint()  # 交互即检查点
         return emitted
 
@@ -1071,9 +1234,45 @@ class World:
             return ctx
 
 
-def _iterate_sync(agen: Any) -> Iterator[str]:
-    """把 async 生成器桥成同步迭代器(库门面是同步世界,聊天流式在
-    调用方线程上消费;私有事件循环,不与宿主的 asyncio 纠缠)。"""
+def _host_loop_is_running() -> bool:
+    """调用线程上已经有一个在跑的事件循环吗?
+
+    "同步门面"不等于"只能从非 async 代码里调用" —— FastAPI / aiohttp 的处理函数
+    就是 `async def`,而 README 把"嵌入到应用里"写成主要用法。在有 running loop 的
+    线程上,`asyncio.run()` 与 `loop.run_until_complete()` 都会当场 RuntimeError,
+    并且漏一个 never-awaited coroutine。检测到就换个线程跑:调用方照样阻塞到结果
+    出来,语义逐字不变,世界照样不知道有 asyncio 这回事。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _run_coro_blocking(coro: Any) -> Any:
+    """跑一个协程并阻塞到它跑完 —— 宿主线程上有没有 running loop 都行。"""
+    if not _host_loop_is_running():
+        return asyncio.run(coro)
+
+    box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            box["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 - 原样抬回调用线程
+            box["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True, name="anima-sync-bridge")
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _drive_agen_here(agen: Any) -> Iterator[str]:
+    """私有事件循环里驱动 async 生成器(调用线程上没有别的循环时)。"""
     loop = asyncio.new_event_loop()
     try:
         while True:
@@ -1087,3 +1286,47 @@ def _iterate_sync(agen: Any) -> Iterator[str]:
         except Exception:  # noqa: BLE001 - closing an exhausted generator is best-effort
             pass
         loop.close()
+
+
+def _drive_agen_on_thread(agen: Any) -> Iterator[str]:
+    """在独立线程上驱动,token 经队列交回调用线程 —— 流式不退化成"等全部"。"""
+    import queue as _queue
+
+    box: _queue.Queue[tuple[str, Any]] = _queue.Queue(maxsize=64)
+
+    def _runner() -> None:
+        async def _pump() -> None:
+            try:
+                async for token in agen:
+                    box.put(("token", token))
+            except BaseException as exc:  # noqa: BLE001
+                box.put(("error", exc))
+                return
+            box.put(("done", None))
+
+        try:
+            asyncio.run(_pump())
+        except BaseException as exc:  # noqa: BLE001 - 连 run 都起不来
+            box.put(("error", exc))
+
+    thread = threading.Thread(target=_runner, daemon=True, name="anima-chat-bridge")
+    thread.start()
+    try:
+        while True:
+            kind, value = box.get()
+            if kind == "token":
+                yield value
+            elif kind == "error":
+                raise value
+            else:
+                return
+    finally:
+        thread.join(timeout=5.0)
+
+
+def _iterate_sync(agen: Any) -> Iterator[str]:
+    """把 async 生成器桥成同步迭代器(库门面是同步世界,聊天流式在
+    调用方线程上消费;不与宿主的 asyncio 纠缠)。"""
+    if _host_loop_is_running():
+        return _drive_agen_on_thread(agen)
+    return _drive_agen_here(agen)

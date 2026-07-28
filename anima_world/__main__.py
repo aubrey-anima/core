@@ -179,6 +179,22 @@ def _build_parser() -> argparse.ArgumentParser:
              "关系曲线、每人时间分配(`-` = 写到 stdout)",
     )
 
+    play = sub.add_parser(
+        "play", help="在活着的世界里说话 —— 时钟一边走,你一边聊"
+    )
+    play.add_argument("--db-path", default="world.db")
+    play.add_argument("--agent", help="先跟谁说话(缺省是名册里第一个)")
+    play.add_argument("--name", help="你在这个世界里叫什么(缺省「访客」)")
+    play.add_argument("--player-id", default="p1")
+    play.add_argument("--seed", help="Seed file for a brand-new world")
+    play.add_argument("--beats", help="Beat script")
+    play.add_argument("--agents", type=int, help="Roster size for a brand-new world")
+
+    contract = sub.add_parser(
+        "contract", help="引擎自报它的线格式版本与 schema 形状 —— 给持有镜像的仓库对齐用"
+    )
+    contract.add_argument("--json", action="store_true", help="机器可读输出")
+
     world = sub.add_parser("world", help="Export or import portable world data packages")
     world_commands = world.add_subparsers(dest="world_command", required=True)
     world_export = world_commands.add_parser("export", help="Export a .cyberworld package")
@@ -1550,6 +1566,113 @@ def run_chat(args: argparse.Namespace) -> int:
         world.close()
 
 
+_PLAY_HELP = """  /who            这会儿谁在哪、在做什么
+  /at <角色 id>   换一个人说话
+  /quit           离开(世界会停下并存档)
+  其它任何一行     说给当前这个人听"""
+
+
+def run_play(args: argparse.Namespace) -> int:
+    """在**活着**的世界里说话。
+
+    `chat` 说话但时钟不走,`run` 时钟走但说不了话 —— 于是"跟一个正在过日子的角色
+    对话"这件事,在命令行上一直做不到。它恰好是这个引擎最想让人看到的那一件事:
+    你上一句话说完到下一句之间,她可能已经走去了别的地方。
+
+    与 `chat` 的另一处不同:每说一句之前先把玩家挪到对方所在地,所以判定是面对面
+    还是手机私聊会**随她走动而变**。
+    """
+    from anima_world.api import World
+
+    try:
+        world = World.open(
+            args.db_path, seed_path=args.seed, beats_path=args.beats, agents=args.agents
+        )
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        print(f"[play] {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        roster = world.state().get("agents", {})
+        if not roster:
+            print("[play] 这个世界还没有住人。", file=sys.stderr)
+            return 2
+        agent_id = args.agent or next(iter(roster))
+        if agent_id not in roster:
+            print(f"[play] 没有 {agent_id} 这个人。这里住着:{', '.join(roster)}",
+                  file=sys.stderr)
+            return 2
+
+        display_name = args.name or "访客"
+        world.start_clock()
+        degraded = world.state().get("runtime", {}).get("llm", {}).get("degraded_reason")
+        print(onboarding.rule(f"{args.db_path} —— 时钟在走"))
+        if degraded:
+            print(f"  {onboarding.yellow('这个世界正跑在 Mock 上')}({degraded})——回复会是模板。")
+            logging.getLogger("anima_world.relationship_judge").setLevel(logging.ERROR)
+        print(_PLAY_HELP)
+        print()
+
+        history: dict[str, list[dict[str, str]]] = {}
+        turns = 0
+        while True:
+            here = world.state().get("agents", {}).get(agent_id, {})
+            try:
+                line = input(f"{display_name} → {here.get('name', agent_id)} > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not line:
+                continue
+            if line in ("/quit", "/q", "/exit"):
+                break
+            if line == "/who":
+                _print_roster(world, args.db_path)
+                continue
+            if line.startswith("/at "):
+                target = line[4:].strip()
+                if target in world.state().get("agents", {}):
+                    agent_id = target
+                else:
+                    print(f"  没有 {target} 这个人。", file=sys.stderr)
+                continue
+            if line.startswith("/"):
+                print(_PLAY_HELP)
+                continue
+
+            # 走到她跟前再开口 —— 她这会儿在哪是会变的,所以每轮都问一次。
+            where = (world.state().get("agents", {}).get(agent_id) or {}).get("location")
+            if where:
+                try:
+                    world.player_move(args.player_id, where)
+                except (KeyError, ValueError):
+                    logger.debug("player could not be placed at %r", where)
+
+            turn = history.setdefault(agent_id, [])
+            turn.append({"role": "user", "content": line})
+            try:
+                reply = world.chat_reply(
+                    agent_id, turn[-20:],
+                    player_id=args.player_id, display_name=display_name,
+                )
+            except (KeyError, ValueError) as exc:
+                print(f"[play] {exc}", file=sys.stderr)
+                turn.pop()
+                continue
+            reply = reply.strip() or "……"
+            print(f"{here.get('name', agent_id)} > {reply}\n")
+            turn.append({"role": "assistant", "content": reply})
+            world.record_chat_turn(agent_id, args.player_id, turn[-2:])
+            turns += 1
+
+        now = world.state().get("world_time", {})
+        stamp = f"第 {now.get('day', 0)} 天 {now.get('hour', 0):02d}:{now.get('minute', 0):02d}"
+        print(f"  {onboarding.dim(f'聊了 {turns} 轮;世界走到{stamp}。')}")
+        return 0
+    finally:
+        world.close()
+
+
 def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
     """Open a world's config, creating the database if it isn't there yet.
 
@@ -1731,6 +1854,67 @@ def _coerce_config_value(raw: str, value_type: str) -> Any:
     return raw
 
 
+def contract_payload() -> dict[str, Any]:
+    """这个引擎的对外线格式,一份机器可读的自述。
+
+    本仓库是跨语言契约的权威,别人持有镜像(运维台的 `lib/worldPackage.js` /
+    `lib/worldSeed.js`)。镜像端要知道"我对齐的是哪一版",今天只有读 Python 源码
+    一条路 —— 于是镜像会悄悄落后,而**落后的镜像不报错,它只是对新格式给出旧答案**。
+
+    种子 schema 与节拍脚本没有版本号(它们随主版本走),所以这里报**形状**:
+    镜像可以直接 diff 键集与 op 表。要跑不了世界也能回答,所以不碰 db、不建库。
+    """
+    import anima_world
+    from anima_world.beats import OP_REQUIRED_FIELDS, VALID_OPS, _VALID_PREDICATES
+    from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
+    from anima_world.world_package import PACKAGE_FORMAT_VERSION
+    from anima_world.world_seed import WORLD_SEED_AGENT_KEYS, WORLD_SEED_LOCATION_KEYS
+
+    return {
+        "operation": "contract",
+        "engine_version": anima_world.__version__,
+        # 主版本 = db 格式。两者相等即"硬不兼容",挂错卷当场拒绝。
+        "db": {
+            "format_version": DB_FORMAT_VERSION,
+            "min_supported": MIN_SUPPORTED_DB_FORMAT,
+        },
+        "package": {"format_version": PACKAGE_FORMAT_VERSION},
+        "report": {"format_version": REPORT_FORMAT_VERSION, "buckets": list(BUCKETS)},
+        "seed": {
+            "schema_version": None,  # 无版本号:随主版本走
+            "agent_keys": sorted(WORLD_SEED_AGENT_KEYS),
+            "location_keys": sorted(WORLD_SEED_LOCATION_KEYS),
+        },
+        "beats": {
+            "schema_version": None,
+            "ops": sorted(VALID_OPS),
+            "op_required_fields": {
+                op: sorted(fields) for op, fields in sorted(OP_REQUIRED_FIELDS.items())
+            },
+            "predicates": sorted(_VALID_PREDICATES),
+        },
+    }
+
+
+def run_contract(args: argparse.Namespace) -> int:
+    payload = contract_payload()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    print(onboarding.rule(f"anima-world {payload['engine_version']} 的对外契约"))
+    print(f"  db 格式        {payload['db']['format_version']}"
+          f"(支持到 {payload['db']['min_supported']};主版本号 = db 格式)")
+    print(f"  包格式         {payload['package']['format_version']}   .cyberworld")
+    print(f"  报表口径       {payload['report']['format_version']}   simulate --report")
+    print(f"  种子 schema    agents{payload['seed']['agent_keys']} "
+          f"locations{payload['seed']['location_keys']}")
+    print(f"  节拍 op        {', '.join(payload['beats']['ops'])}")
+    print(f"  节拍谓词       {', '.join(payload['beats']['predicates'])}")
+    print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
+    return 0
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     """Check the things that fail quietly. Non-zero exit when one of them has."""
     db_path = Path(args.db_path)
@@ -1858,54 +2042,11 @@ def run_simulate(args: argparse.Namespace) -> int:
     # per-world-day budget; two consecutive exhausted days declare the
     # planner dead and stop all further waiting, so the worst case is
     # 2×wait_cap of dead time, never a hung run.
-    wait_cap = args.plan_wait_cap
-    if wait_cap is None:
-        planner_timeout = 30.0
-        if scheduler.config_store is not None:
-            planner_timeout = scheduler.config_store.get("planner.timeout", default=planner_timeout)
-        # The per-day budget must scale with the roster: N agents drain
-        # through a 2-worker pool, so a full day's planning takes up to
-        # ceil(N/2) serialized LLM calls — a flat 2× timeout declared a
-        # merely-SLOW planner dead on the first 15-agent benchmark run
-        # (Round-3 smoke: days 0-1 exhausted, day 2 got zero plans).
-        batches = max(2, -(-len(scheduler.agents) // 2))  # ceil(N/2), floor 2
-        wait_cap = float(planner_timeout) * batches
-    no_wait = wait_cap <= 0  # explicit "never wait" mode, not a dead planner
-
+    # 快进的等规划纪律住在 `Scheduler.fast_forward` —— CLI 与 `World.fast_forward`
+    # 共用同一份实现,免得两条快进路径慢慢长出不同的行为。
     print(f"[simulate] fast-forwarding {ticks} tick(s) ...")
-    current_day: int | None = None
-    day_budget = wait_cap
-    day_exhausted = False
-    exhausted_streak = 0
-    planner_gave_up = False
-    for _ in range(ticks):
-        scheduler.tick()
-        if no_wait or planner_gave_up:
-            continue
-        day = scheduler.world_time().day
-        if day != current_day:
-            current_day = day
-            if not day_exhausted:
-                exhausted_streak = 0
-            day_budget = wait_cap
-            day_exhausted = False
-        if day_budget > 0:
-            started = time.monotonic()
-            idle = scheduler.wait_planning_idle(timeout=day_budget)
-            day_budget -= time.monotonic() - started
-            if not idle and not day_exhausted:
-                day_exhausted = True
-                exhausted_streak += 1
-                logger.warning(
-                    "[simulate] plan wait budget (%.1fs) exhausted on day %d; continuing planless",
-                    wait_cap, day,
-                )
-                if exhausted_streak >= 2:
-                    planner_gave_up = True
-                    logger.warning(
-                        "[simulate] planner declared dead after %d exhausted days; no further waits",
-                        exhausted_streak,
-                    )
+    outcome = scheduler.fast_forward(ticks, plan_wait_cap=args.plan_wait_cap)
+    planner_gave_up = outcome["planner_gave_up"]
 
     # #11: read the log BEFORE stop() drains the pools, or the last narrative
     # and relationship verdicts of the run are missing from the summary —
@@ -2101,6 +2242,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_run(args)
     if args.command == "simulate":
         return run_simulate(args)
+    if args.command == "play":
+        return run_play(args)
+    if args.command == "contract":
+        return run_contract(args)
     if args.command == "world":
         return run_world_package(args)
     return _print_welcome()

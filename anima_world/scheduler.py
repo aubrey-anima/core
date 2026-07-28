@@ -1279,6 +1279,79 @@ class Scheduler:
         with self._lock:
             return bool(self._planning)
 
+    def default_plan_wait_cap(self) -> float:
+        """一个世界日肯为规划等多久。
+
+        N 个角色排在 2 个 worker 上,一天的规划最坏是 ceil(N/2) 次串行 LLM 调用 ——
+        固定 2× 超时会把一个"只是慢"的 planner 在 15 人世界的第一天就判死。
+        """
+        planner_timeout = 30.0
+        if self.config_store is not None:
+            planner_timeout = self.config_store.get("planner.timeout", default=planner_timeout)
+        batches = max(2, -(-len(self.agents) // 2))  # ceil(N/2),下限 2
+        return float(planner_timeout) * batches
+
+    def fast_forward(self, ticks: int, *, plan_wait_cap: float | None = None) -> dict[str, Any]:
+        """无头快进 `ticks` 个 tick,并在每个世界日等在途的规划落地。
+
+        与裸的 `tick()` 循环的区别只有一条:**等规划**。快进会在一次 LLM 调用的
+        时间里烧掉几千个 tick,于是第 D 天要的计划装回来时第 D 天早过去了(实测
+        28 份计划全是 day=0,一份都没被消费)。所以每天给规划一份等待预算;
+        连续两天用光就判定 planner 已死、此后不再等 —— 最坏是 2×cap 的死时间,
+        永远不会挂住。
+
+        返回 `{"ticks", "clock", "planner_gave_up", "exhausted_days"}`。
+        **`planner_gave_up` 是这个返回值存在的理由**:一趟快进跑完只给一个 int,
+        调用方没有任何办法区分"世界安静"和"规划全程没跟上",而两者的产物看起来
+        一模一样。`plan_wait_cap<=0` 是显式的"不等",不是判死。
+        """
+        cap = self.default_plan_wait_cap() if plan_wait_cap is None else float(plan_wait_cap)
+        no_wait = cap <= 0
+
+        current_day: int | None = None
+        day_budget = cap
+        day_exhausted = False
+        exhausted_streak = 0
+        exhausted_days = 0
+        planner_gave_up = False
+
+        for _ in range(max(0, int(ticks))):
+            self.tick()
+            if no_wait or planner_gave_up:
+                continue
+            day = self.world_time().day
+            if day != current_day:
+                current_day = day
+                if not day_exhausted:
+                    exhausted_streak = 0
+                day_budget = cap
+                day_exhausted = False
+            if day_budget > 0:
+                started = time.monotonic()
+                idle = self.wait_planning_idle(timeout=day_budget)
+                day_budget -= time.monotonic() - started
+                if not idle and not day_exhausted:
+                    day_exhausted = True
+                    exhausted_streak += 1
+                    exhausted_days += 1
+                    logger.warning(
+                        "plan wait budget (%.1fs) exhausted on day %d; continuing planless",
+                        cap, day,
+                    )
+                    if exhausted_streak >= 2:
+                        planner_gave_up = True
+                        logger.warning(
+                            "planner declared dead after %d exhausted days; no further waits",
+                            exhausted_streak,
+                        )
+
+        return {
+            "ticks": int(ticks),
+            "clock": self.clock,
+            "planner_gave_up": planner_gave_up,
+            "exhausted_days": exhausted_days,
+        }
+
     def wait_planning_idle(self, timeout: float) -> bool:
         """Block until no replan is in flight; True=idle, False=timed out.
 

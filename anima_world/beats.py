@@ -162,6 +162,16 @@ _OP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+# 对外自述(`anima-world contract`)用的完整表。`agent_join` 的必填是一个 agent
+# 对象(形状 = 种子里的 agent 条目),它走 `_validate_agent_bundle` 而不是通用的
+# 必填字段循环 —— 但契约面上不该因为实现分了两条路就缺一格,镜像端会照着这份
+# 表去写自己的校验。`VALID_OPS` 与它必须逐项对齐(test_contract_command.py 守着)。
+OP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    **_OP_REQUIRED_FIELDS,
+    "agent_join": ("agent",),
+}
+
+
 def _validate_payload(payload: Any, label: str) -> list[str]:
     if not isinstance(payload, list) or not payload:
         return [f"{label}: 'payload' must be a non-empty list of ops"]

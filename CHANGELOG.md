@@ -19,6 +19,37 @@ on the spot rather than silently written to.
 
 ### Added
 
+- **`World.history()` —— 全量事件历史的门,分页。** `World.events()` 背后是
+  `deque(maxlen=200)`:一个内存窗口,不是历史,而返回值本身不带任何标记。宿主拿到
+  一个 200 元素的列表,起始 seq 是 242,看不出前面还有 241 条,照它做统计不会有任何
+  报错(1.1.1 验证报表时就是这么被坑的)。`history()` 返回
+  `{"events", "next_seq", "total"}` —— 截断做成分页,结构性地没法忽略;支持
+  `who` / `kind` 过滤。同时 `events(since_seq=…)` 在窗口已经滑过 `since_seq` 时打一条
+  warning:那正是调用方即将拿到一段有洞的历史却以为自己追上了的时刻。
+- **`World.fast_forward()` / `World.report()` —— 宿主自己也能快进和出摘要。**
+  快进的等规划纪律(每个世界日一份等待预算,连续两天用光判定 planner 已死)从
+  `simulate` 的命令体里提到 `Scheduler.fast_forward`,CLI 与门面共用一份实现。
+  返回的不是一个 int 而是 `{"ticks", "clock", "planner_gave_up", "exhausted_days"}`
+  —— **一个安静的世界和一个规划全程没跟上的世界,产物看起来一模一样**,只有
+  `planner_gave_up` 能把它们分开。
+- **`World.achat()` —— 原生 async 的聊天流**,以及同步三扇门在 async 宿主里不再炸。
+  门面是同步的(这是设计),但"同步门面"不等于"只能从非 async 代码里调用":
+  FastAPI / aiohttp 的处理函数就是 `async def`,而 README 把"嵌入到应用里"写成主要
+  用法。`asyncio.run()` 与新建事件循环在**已有 running loop 的线程**上都会当场
+  RuntimeError 并漏一个 never-awaited coroutine,于是 `chat` / `record_chat_turn` /
+  `close_conversation` 全炸,连**开机补完孤儿会话**都会静默失败(只留一行 warning)。
+  现在检测到就换个线程跑,语义逐字不变。流式经队列转发,不退化成"等全部"。
+- **`anima-world play` —— 在活着的世界里说话。** `chat` 说话但时钟不走,`run` 时钟走
+  但说不了话,于是"跟一个正在过日子的角色对话"在命令行上一直做不到。`play` 一边走
+  时钟一边聊,`/who` 看这会儿谁在哪、`/at` 换人。每轮说话前重新定位玩家,所以判定
+  是面对面还是手机私聊**会随她走动而变**。
+- **`anima-world contract [--json]` —— 引擎自报它的线格式。** 本仓库是跨语言契约的
+  权威,别人持有镜像;今天镜像端要知道"我对齐的是哪一版"只有读 Python 源码一条路,
+  于是镜像悄悄落后 —— 而**落后的镜像不报错,它只是对新格式给出旧答案**。这条命令
+  报 db / 包 / 报表三个格式版本,以及种子 schema 与节拍 op 表的形状(那两者没有
+  版本号,随主版本走)。跑不了世界也能回答,不碰 db。
+  顺带补了 `beats.OP_REQUIRED_FIELDS`:`agent_join` 走单独的校验器,契约面上不该
+  因此缺一格。
 - **`chat.response_format` 成了可改的提示词。** 一段写死在 `chat_service` 里的中文
   排版规则(动作描写用全角括号、括号内以角色名开头)每次聊天都注入系统提示,而它
   没注册进 `prompt_store._DEFAULTS` —— 模板照样生效(读的是同一个 store),但作者在
