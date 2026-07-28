@@ -190,6 +190,10 @@ class Scheduler:
         self._transit: dict[str, dict[str, Any]] = {}
         # 子系统档位:name -> {ok, degraded, status, reason}。切换时发 subsystem_health 事件。
         self._subsystem_health: dict[str, dict[str, Any]] = {}
+        # 在场玩家名单的来源(World 注入)。scheduler 不认识 World,只认识这个回调。
+        self._present_players: Any | None = None
+        # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
+        self._hailed: dict[tuple[str, str], int] = {}
         # economy-v4: per-day sales counter feeding the price drift. Memory
         # only — prices in shop_stock are the durable part.
         self._shop_sales: dict[tuple[str, str], int] = {}
@@ -1651,7 +1655,56 @@ class Scheduler:
                 # params), so passing action.params here meant the listener was
                 # always None and this whole branch never fired.
                 self._maybe_gossip(agent, self._colocated_agents(agent))
+            if action.kind in ("idle_social", "idle_wander"):
+                # 「闲着 + 旁边站着一个人」正是一个人会开口打招呼的时刻。挂在闲置
+                # 动作上而不是只挂 idle_social:一个世界完全可能一条 idle_social
+                # 作息都没有(演示世界现在就是),那样这条路就永远走不到。
+                self._maybe_hail_player(agent)
             return True
+
+    def _maybe_hail_player(self, agent: Agent) -> None:
+        """「想找个人说说话」时,同地的在场玩家也算一个人(issue #13,访客模型)。
+
+        这是"角色主动来找你"的最小形态,而且刻意挂在 `idle_social` 上而不是 planner
+        的动作空间上:**没有 key 就没有 planner**,而没有 key 是默认状态 —— README
+        承诺的那一屏必须在默认状态下成立。
+
+        **敲门不是对话。** 这里不产生记忆、不动关系、不写会话:玩家还没回话,什么也
+        没发生。否则你会看到"她来找过我",转头问她却毫无印象 —— 照跑,但给错东西。
+        真正的对话仍然由玩家发起 `World.chat`,走原来那条完整的链。
+
+        在场以 TTL 为准(`World.who_is_present`),所以不会去敲一个断线三小时的人的门。
+        """
+        if self._present_players is None:
+            return
+        here = agent.blackboard.read("loc") or agent.location
+        if not here or agent.id in self._transit:
+            return  # 在途不算在场,与 _colocated_agents 同一条规矩
+        try:
+            candidates = [
+                (pid, info) for pid, info in self._present_players().items()
+                if (info or {}).get("location") == here
+            ]
+        except Exception:  # noqa: BLE001 - 读不到在场名单就当没人,绝不掀翻 tick
+            logger.warning("could not read present players", exc_info=True)
+            return
+        day = self.world_time().day
+        for player_id, info in candidates:
+            # 一天一次。招呼是招呼,不是每 tick 都要拍一下肩膀 —— needs 抖动那一课。
+            if self._hailed.get((agent.id, player_id)) == day:
+                continue
+            self._hailed[(agent.id, player_id)] = day
+            self._record_event({
+                "type": "agent_hail",
+                "who": agent.id,
+                "loc": here,
+                "payload": {
+                    "agent_id": agent.id,
+                    "player_id": player_id,
+                    "player_name": info.get("display_name") or player_id,
+                    "location": here,
+                },
+            })
 
     def _submit_chat_judgment(self, agent: Agent, target_id: str | None) -> None:
         """Snapshot both sides' context under the lock, then hand it to the

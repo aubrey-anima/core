@@ -60,6 +60,11 @@ _REAP_INTERVAL = 30.0
 # 做会把宿主卡死。要全量就分页,分页是可见的。
 _HISTORY_MAX_PAGE = 5000
 
+# 一个玩家多久没动静就当他走了(墙钟秒)。**不是心跳契约**:任何一次交互都算
+# "我还在",宿主什么也不用维护。它只是那道兜底闸 —— 宿主忘了调 `player_leave`
+# 时,世界不该留下一个永久站在咖啡店里的幽灵。
+_PLAYER_TTL_SECONDS = 15 * 60
+
 # Map row fields exposed in state(); consumers assemble the tree from them.
 _LOCATION_KEYS = ("id", "name", "description", "kind", "parent", "x", "y", "w", "h")
 
@@ -403,6 +408,12 @@ class World:
         )
         # 在场玩家(刻意内存态:重启即新访;持久的部分——会话/记忆/关系——在 db 里)
         self.players: dict[str, dict[str, Any]] = {}
+        self.player_ttl_seconds: float = _PLAYER_TTL_SECONDS
+        # 让世界看得见在场的玩家(issue #13,访客模型)。scheduler 不认识 World,
+        # 只认识这个回调;回调按 TTL 过滤,所以角色不会去敲断线三小时的人的门。
+        self.scheduler._present_players = lambda: {
+            pid: self.players[pid] for pid in self.who_is_present()
+        }
 
         # 开机补完:会话只在 record_chat_turn 一次调用内开与关,且运行中的
         # 世界独占 db,所以此刻还 open 的行只能是上次崩溃的遗留。消息早已
@@ -888,8 +899,8 @@ class World:
         }
         # 记住这个玩家叫什么。记忆文本里写的是名字,不是 id —— 检索 query 用得上
         # (见 world_context)。身份即参数,所以世界只在被告知时才知道。
-        self.players.setdefault(player_id, {}).setdefault("role", role)
-        self.players[player_id]["display_name"] = interlocutor["display_name"]
+        self._touch_player(player_id, display_name=interlocutor["display_name"])
+        self.players[player_id].setdefault("role", role)
         # 玩家在哪,决定角色是"看见你"还是"收到你的消息":`chat_service.respond`
         # 按这个字段在面对面/手机私聊两段身份声明里选一段。这里曾经不传,于是
         # 面对面那一支经门面永远不可达 —— CLI 明明先把你走到她跟前(player_move),
@@ -981,7 +992,53 @@ class World:
                 raise KeyError(f"没有 {location} 这个地方")
         # 更新而不是整条替换:`display_name` 是 `chat()` 记进来的,而 CLI 每聊一轮
         # 都先调一次 player_move —— 整条替换会把名字冲掉,于是检索又退回不透明 id。
-        self.players.setdefault(player_id, {}).update({"role": role, "location": location})
+        self._touch_player(player_id, role=role, location=location)
+
+    def player_leave(self, player_id: str) -> None:
+        """玩家离场。幂等 —— 宿主的断线回调可能重入。
+
+        访客模型的另一半。`world.players` 此前**只有写、没有删**,而 CLI 每聊一轮都
+        调一次 `player_move`;长跑的宿主里会攒下一屋子早就下线的幽灵访客。今天这还
+        无所谓(没人读那份名单),但一旦让角色看得见在场的玩家,它就变成可见的错:
+        NPC 会走去找一个断线三小时的人,并把一场没有人在的对话写进事件日志。
+
+        他造成的**后果**(记忆、关系、图谱边、账本)留在世界里 —— 走的只是在场。
+        """
+        self.players.pop(player_id, None)
+
+    def inbox(self, player_id: str, *, since_seq: int = 0, limit: int = 50) -> list[dict[str, Any]]:
+        """有谁来找过你 —— 角色主动搭话的收件箱(issue #13)。
+
+        **敲门不是对话**:一条 `agent_hail` 不产生记忆、不动关系、不开会话。玩家还没
+        回话,世界里什么也没发生;真正的对话仍然由 `World.chat` 发起,走原来那条完整
+        的链。这条边界是有意的 —— 否则你会看到"她来找过我",转头问她却毫无印象。
+
+        返回按 seq 升序;拿最后一条的 `seq` 当下次的 `since_seq` 就是增量拉取。
+        """
+        page = self.history(since_seq=since_seq, limit=limit, kind="agent_hail")
+        return [
+            event for event in page["events"]
+            if (event.get("payload") or {}).get("player_id") == player_id
+        ]
+
+    def who_is_present(self) -> list[str]:
+        """此刻真的在场的玩家 id(已过 TTL 的当作走了)。
+
+        `player_ttl_seconds` 是那道兜底闸:不要求宿主维护心跳(那会把契约面弄脏),
+        任何一次交互都算"我还在"。宿主没有显式 `player_leave` 也不会留下永久幽灵。
+        """
+        cutoff = time.time() - self.player_ttl_seconds
+        return sorted(
+            pid for pid, info in self.players.items()
+            if float(info.get("last_seen", 0.0)) >= cutoff
+        )
+
+    def _touch_player(self, player_id: str, **fields: Any) -> dict[str, Any]:
+        """记一次"这个玩家还在",顺便更新几个字段。所有玩家入口都过这里。"""
+        info = self.players.setdefault(player_id, {"role": "player", "location": None})
+        info.update(fields)
+        info["last_seen"] = time.time()
+        return info
 
     def player_action(
         self,
@@ -995,7 +1052,7 @@ class World:
         action = action.strip()
         if not action:
             raise ValueError("action is required")
-        player = self.players.get(player_id, {})
+        player = self._touch_player(player_id, role=role)
         with self.scheduler._lock:
             self._record_and_fan({
                 "type": "player_action",
@@ -1053,7 +1110,7 @@ class World:
         if self.scheduler.event_log is None:
             raise ValueError("economy needs a persistent world")
         holder = f"player:{player_id}"
-        self.players.setdefault(player_id, {"role": "player", "location": None})
+        self._touch_player(player_id)
         with self.scheduler._lock:
             self._record_and_fan({
                 "type": "payment", "who": holder,
