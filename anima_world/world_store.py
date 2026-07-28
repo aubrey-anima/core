@@ -24,9 +24,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from anima_world.actions import ActionDescriptor, ActionTable
+from anima_world.db import BT_NODE_TYPES
 from anima_world.bt_nodes import (
     Action,
     Condition,
+    NeedAction,
     Node,
     PlanAction,
     Selector,
@@ -334,8 +336,14 @@ class BTStore:
                 children.setdefault(r["parent"], []).append(r)
         try:
             return self._build_node(roots[0], children)
-        except ValueError:
-            logger.warning("BT tree %r has an unknown node type — falling back to default_bt()", tree)
+        except ValueError as exc:
+            # 名字要说出来。塌回默认树 = 整个世界的行为被换掉,而"unknown node
+            # type"这五个字不告诉作者去改哪一行。
+            logger.warning(
+                "BT tree %r 用不了(%s)—— 整棵树已回退到 default_bt(),"
+                "这个世界的角色现在只会 idle_wander",
+                tree, exc,
+            )
             return default_bt()
 
     def _tree_rows(self, tree: str) -> list[dict[str, Any]]:
@@ -363,6 +371,19 @@ class BTStore:
             return TimeWindow(int(p.get("start", 0)), int(p.get("end", 0)))
         if node_type == "plan":
             return PlanAction()
+        if node_type == "need_action":
+            # `bt_nodes` 的 CHECK 一直放行这个类型,而这里一直不认它 —— 于是作者
+            # 写一行完全合法的 SQL,`_build_node` 抛 ValueError,调用方兜成一行
+            # warning,**整棵作者树塌回 default_bt()**(只会 idle_wander)。
+            # 世界照跑,角色什么也不干。
+            p = row["params"]
+            release = p.get("release")
+            return NeedAction(
+                str(p.get("need", "")),
+                float(p.get("threshold", 0.0)),
+                str(p.get("action_id", "")),
+                None if release is None else float(release),
+            )
         kids = [self._build_node(c, children) for c in children.get(row["node_id"], [])]
         if node_type == "selector":
             return Selector(kids)
@@ -393,6 +414,47 @@ class BTStore:
             if not count:
                 self.add_node("default", "root", "selector", parent=None, sort=0)
                 self.add_node("default", "idle_wander", "action", parent="root", sort=0)
+
+    def seed_tree(self, agent_id: str, nodes: list[dict[str, Any]]) -> bool:
+        """用种子里写死的节点表播一棵树(`agents[].behavior_tree`)。
+
+        `duties` 只能表达"时间窗 → 动作"这一种形状 —— 作者要写条件分支、需求带、
+        嵌套选择器,就够不着了。这条路把 `bt_nodes` 的表达力整个交出去。
+
+        规矩与其它播种一致:**空表才播**(手改过的树是用户数据),**坏条目跳过并
+        警告、绝不阻塞开机**(坏种子让世界少一个分支,不该让世界开不了机)。
+        返回是否真的播了 —— 调用方据此决定要不要退回 `duties`。
+        """
+        if not nodes:
+            return False
+        with self._lock:
+            (count,) = self._conn.execute(
+                "SELECT COUNT(*) FROM bt_nodes WHERE tree = ?", (agent_id,)
+            ).fetchone()
+            if count:
+                return True  # 已有树:视作"种子这条路走过了",别再叠 duties 上去
+
+            planted = 0
+            for index, node in enumerate(nodes):
+                try:
+                    node_type = str(node["type"])
+                    if node_type not in BT_NODE_TYPES:
+                        raise ValueError(f"unknown node type {node_type!r}")
+                    self.add_node(
+                        agent_id,
+                        str(node["node_id"]),
+                        node_type,
+                        parent=node.get("parent"),
+                        sort=int(node.get("sort", index)),
+                        params=dict(node.get("params") or {}),
+                    )
+                    planted += 1
+                except (KeyError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+                    logger.warning(
+                        "agent %r 的 behavior_tree[%d] 写坏了(%s)—— 跳过这个节点",
+                        agent_id, index, exc,
+                    )
+            return planted > 0
 
     def seed_duties(self, agent_id: str, duties: list[dict[str, Any]]) -> None:
         """Seed one agent's tree from its seed-file `duties` (bt-duties D6).

@@ -179,6 +179,20 @@ def _build_parser() -> argparse.ArgumentParser:
              "关系曲线、每人时间分配(`-` = 写到 stdout)",
     )
 
+    validate = sub.add_parser(
+        "validate", help="不建世界就检查一份种子或一份节拍脚本"
+    )
+    validate_commands = validate.add_subparsers(dest="validate_command", required=True)
+    validate_seed = validate_commands.add_parser("seed", help="检查 world_seed.json")
+    validate_seed.add_argument("path", help="种子文件")
+    validate_seed.add_argument("--json", action="store_true", help="机器可读输出")
+    validate_beats = validate_commands.add_parser("beats", help="检查节拍脚本")
+    validate_beats.add_argument("path", help="节拍脚本文件")
+    validate_beats.add_argument(
+        "--seed", help="配套的种子 —— 有它才能查角色/地点的引用是否存在"
+    )
+    validate_beats.add_argument("--json", action="store_true", help="机器可读输出")
+
     play = sub.add_parser(
         "play", help="在活着的世界里说话 —— 时钟一边走,你一边聊"
     )
@@ -376,6 +390,30 @@ def _goals_for(agent_id: str, seed: dict[str, Any] | None) -> list[Any]:
         if entry.get("id") == agent_id:
             return _coerce_goals(entry.get("goals"))
     return []
+
+
+def _behavior_tree_for(agent_id: str, seed: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """作者直接写死的行为树节点(`agents[].behavior_tree`)。
+
+    `duties` 只表达得了"时间窗 → 动作";要写条件分支、需求带、嵌套选择器就够不着。
+    这个键在场时**取代** `duties`(两者都写等于给同一棵树两个说法),缺席时行为逐
+    tick 不变 —— 与种子里每一个可选字段同一条宽容规矩。
+    """
+    if not seed:
+        return []
+    for entry in seed.get("agents", []):
+        if entry.get("id") == agent_id:
+            nodes = entry.get("behavior_tree")
+            return [n for n in nodes if isinstance(n, dict)] if isinstance(nodes, list) else []
+    return []
+
+
+def _seed_agent_tree(bt_store: Any, agent_id: str, seed: dict[str, Any] | None,
+                     duties: list[dict[str, Any]] | None = None) -> None:
+    """按种子给一个角色播树:先看 `behavior_tree`,没有再退回 `duties`。"""
+    if bt_store.seed_tree(agent_id, _behavior_tree_for(agent_id, seed)):
+        return
+    bt_store.seed_duties(agent_id, list(duties if duties is not None else _duties_for(agent_id, seed)))
 
 
 def _duties_for(agent_id: str, seed: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -782,7 +820,7 @@ def build_serve_scheduler(
         # with no tree of its own falls back to the shared "default" tree, and
         # a no-DB run to the built-in default_bt() — never brainless.
         if bt_store is not None:
-            bt_store.seed_duties(entry["id"], _duties_for(entry["id"], world_seed))
+            _seed_agent_tree(bt_store, entry["id"], world_seed)
             bt_store.ensure_plan_node(entry["id"])  # trees seeded before the planner existed
             _ensure_need_actions(bt_store)
             bt_root = bt_store.build_tree(entry["id"])
@@ -1854,6 +1892,103 @@ def _coerce_config_value(raw: str, value_type: str) -> Any:
     return raw
 
 
+def _load_json_file(path: str) -> tuple[Any, str | None]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle), None
+    except FileNotFoundError:
+        return None, f"文件不存在:{path}"
+    except json.JSONDecodeError as exc:
+        return None, f"不是合法的 JSON({path}):{exc}"
+    except OSError as exc:
+        return None, f"读不出来({path}):{exc}"
+
+
+def _report_validation(
+    label: str, path: str, errors: list[str], warnings: list[str], as_json: bool
+) -> int:
+    """错误 → 退出码 2;只有提醒 → 退出码 0。
+
+    **提醒不算失败**是这两条命令的核心语义:引擎没有"合法值全集"这种东西,把引用
+    完整性做成拒绝,会让设计正确的世界在一次小版本升级后开不了机。
+    """
+    if as_json:
+        print(json.dumps({
+            "operation": f"validate {label}", "path": path,
+            "valid": not errors, "errors": errors, "warnings": warnings,
+        }, ensure_ascii=False, indent=2))
+        return 2 if errors else 0
+
+    if errors:
+        print(onboarding.rule(f"{path} —— 不能用"))
+        for line in errors:
+            print(f"  ✗ {line}")
+    else:
+        print(onboarding.rule(f"{path} —— 可以用"))
+    for line in warnings:
+        print(f"  {onboarding.yellow('!')} {line}")
+    if not errors and not warnings:
+        print("  没有发现问题。")
+    elif not errors and warnings:
+        print(f"\n  {onboarding.dim('上面这些是提醒,不阻止世界启动 —— 引擎不假装知道什么是合法值全集。')}")
+    return 2 if errors else 0
+
+
+def run_validate(args: argparse.Namespace) -> int:
+    """不建世界就检查一份种子 / 一份节拍脚本。
+
+    CLAUDE.md 写着"创作台经 CLI 委托校验",而这个入口一直不存在 —— 于是作者唯一
+    的检查办法是真开一次世界,而种子只读进空库一次,试错的代价是重建世界。
+    """
+    from anima_world.beats import beat_script_warnings
+    from anima_world.world_seed import world_seed_errors, world_seed_warnings
+
+    data, read_error = _load_json_file(args.path)
+    if read_error is not None:
+        return _report_validation(
+            args.validate_command, args.path, [read_error], [], args.json
+        )
+
+    if args.validate_command == "seed":
+        return _report_validation(
+            "seed", args.path,
+            world_seed_errors(data), world_seed_warnings(data), args.json,
+        )
+
+    # beats:硬错误走既有的严格校验器(与加载期逐字同一份),引用完整性只提醒。
+    errors: list[str] = []
+    try:
+        BeatScript.from_data(data)
+    except BeatScriptError as exc:
+        errors = list(getattr(exc, "errors", None) or [str(exc)])
+
+    known_agents: list[str] = []
+    known_locations: list[str] = []
+    if args.seed:
+        seed_data, seed_error = _load_json_file(args.seed)
+        if seed_error is not None:
+            errors.append(f"--seed {seed_error}")
+        elif isinstance(seed_data, dict):
+            known_agents = [
+                str(a.get("id")) for a in seed_data.get("agents") or []
+                if isinstance(a, dict) and a.get("id")
+            ]
+            known_locations = [
+                str(loc.get("id")) for loc in seed_data.get("locations") or []
+                if isinstance(loc, dict) and loc.get("id")
+            ]
+
+    warnings = beat_script_warnings(
+        data, known_agents=known_agents, known_locations=known_locations
+    )
+    if not args.seed:
+        warnings.append(
+            "没给 --seed,所以没检查角色/地点是不是真的存在 —— 引用错一个 id,"
+            "那个 beat 会静默作废并被永久标记已触发"
+        )
+    return _report_validation("beats", args.path, errors, warnings, args.json)
+
+
 def contract_payload() -> dict[str, Any]:
     """这个引擎的对外线格式,一份机器可读的自述。
 
@@ -2242,6 +2377,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_run(args)
     if args.command == "simulate":
         return run_simulate(args)
+    if args.command == "validate":
+        return run_validate(args)
     if args.command == "play":
         return run_play(args)
     if args.command == "contract":

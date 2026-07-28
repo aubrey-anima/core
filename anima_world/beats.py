@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from anima_world.types import Projection
 from anima_world.world_time import MINUTES_PER_DAY, WorldTime
@@ -249,6 +249,70 @@ def _validate_agent_bundle(bundle: Any, label: str) -> list[str]:
                 else:
                     errors.extend(_validate_memory_fields(mem, mem_label))
     return errors
+
+
+_OP_AGENT_FIELDS = ("agent_id", "as", "target")
+
+
+def beat_script_warnings(
+    data: Any,
+    *,
+    known_agents: Iterable[str] = (),
+    known_locations: Iterable[str] = (),
+) -> list[str]:
+    """脚本引用了世界里不存在的东西 —— 一行一条,**只警告不拒绝**。
+
+    为什么不能拒绝:一个 beat 完全可以先 `agent_join` 一个新角色,后面的 beat 再对
+    他做事;那时 `known_agents` 里当然没有他。同理,节拍可以指向种子之外的地点。
+    把这类检查升级成加载期错误,会让设计正确的脚本在升级后开不了机。
+
+    但沉默也不行:引用错一个 id,那个 beat 会**静默作废并且被永久标记已触发**
+    (`beat_fired` 是历史,重启不重放)—— 剧情就这么没了,而且不可挽回。
+    """
+    if not isinstance(data, dict):
+        return []
+    beats = data.get("beats")
+    if not isinstance(beats, list):
+        return []
+
+    agents = set(known_agents)
+    # 脚本自己引进来的角色也算数,否则"先入场再使用"会被误报。
+    for beat in beats:
+        for op in (beat.get("payload") or []) if isinstance(beat, dict) else []:
+            if isinstance(op, dict) and op.get("op") == "agent_join":
+                bundle = op.get("agent")
+                if isinstance(bundle, dict) and bundle.get("id"):
+                    agents.add(str(bundle["id"]))
+    locations = set(known_locations)
+
+    warnings: list[str] = []
+
+    def _check(kind: str, value: Any, pool: set[str], label: str) -> None:
+        name = str(value or "")
+        if not pool or not name or name in pool:
+            return
+        warnings.append(f"{label}: {kind} {name!r} 不在这个世界里(已知:{sorted(pool)})")
+
+    for index, beat in enumerate(beats):
+        if not isinstance(beat, dict):
+            continue
+        label = f"beats[{index}] ({beat.get('id', '?')})"
+        for pred in (beat.get("trigger") or {}).get("when") or []:
+            if not isinstance(pred, dict):
+                continue
+            for key in ("as", "target"):
+                _check("角色", pred.get(key), agents, f"{label}.trigger")
+            for who in pred.get("agents") or []:
+                _check("角色", who, agents, f"{label}.trigger")
+        for j, op in enumerate(beat.get("payload") or []):
+            if not isinstance(op, dict):
+                continue
+            op_label = f"{label}.payload[{j}] {op.get('op', '?')}"
+            if op.get("op") != "agent_join":
+                for key in _OP_AGENT_FIELDS:
+                    _check("角色", op.get(key), agents, op_label)
+            _check("地点", op.get("location"), locations, op_label)
+    return warnings
 
 
 def _validate_after_graph(beats: list[Any], ids: set[str]) -> list[str]:

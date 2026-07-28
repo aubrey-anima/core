@@ -735,16 +735,34 @@ assets/…           # 可选,扩展名白名单
 
 **Op 清单**(载荷动作):
 
+**必填字段列是机器校验的**(`tests/test_beats_doc_contract.py` 逐字比对
+`beats.OP_REQUIRED_FIELDS`)—— 加载期严格只有在"照文档写就能过"的前提下才说得通。
+
 | op | 必填字段 | 作用 |
 |---|---|---|
-| `memory` | agent, summary | 给一个角色种记忆(可选 kind/importance/anchor) |
-| `broadcast_memory` | agents, summary | 给多个角色种同一记忆 |
-| `sentiment_delta` | as, target, delta | 推关系值(累加) |
-| `r_type` | as, target, r_type | 改关系描述 |
-| `persona_update` | agent, spec(object) | 改人设 |
-| `agent_join` | agent(完整 bundle) | 新角色入场(bundle 里的 relations/memories/goals 同样严格校验) |
-| `agent_leave` / `agent_return` | agent | 离场/返场(leave 无配对 return 只警告不阻塞) |
-| `location_desc` | location, description | 改地点描述 |
+| `memory` | `agent_id`, `summary` | 给一个角色种记忆(可选 kind/importance/anchor) |
+| `broadcast_memory` | `location`, `summary` | 给**在这个地点的所有人**种同一条记忆 |
+| `sentiment_delta` | `as`, `target`, `delta` | 推关系值(累加) |
+| `r_type` | `as`, `target` | 改关系描述;还需 `r_type` 与 `r_type_back` 至少给一个 |
+| `persona_update` | `agent_id`, `spec` | 改人设(`spec` 必须是 object) |
+| `agent_join` | `agent` | 新角色入场;`agent` 是完整 bundle(形状同种子里的 agent 条目),里面的 relations/memories/goals 同样严格校验 |
+| `agent_leave` | `agent_id` | 离场(无配对 `agent_return` 只警告,不阻塞) |
+| `agent_return` | `agent_id`, `location` | 返场,**必须说明回到哪里** |
+| `location_desc` | `location`, `description` | 改地点描述 |
+
+**不建世界就检查**:
+
+```bash
+anima-world validate seed  world_seed.json  [--json]
+anima-world validate beats beats.json --seed world_seed.json  [--json]
+```
+
+**错误退出码 2,提醒退出码 0** —— 这个区分是有意的。引用完整性(角色/地点存不存在)
+只能是**提醒**:一个 beat 完全可以先 `agent_join` 一个新角色、后面的 beat 再对他做事,
+那时种子里当然没有他。把它升级成拒绝,等于让设计正确的脚本在一次小版本升级之后
+开不了机 —— 把"照跑但给错东西"换成"本来能跑却不让跑",后者更糟。
+但沉默也不行:引用错一个 id,那个 beat 会**静默作废并被永久标记已触发**
+(`beat_fired` 是历史,重启不重放),剧情就这么没了,而且不可挽回。
 
 **校验语义**:加载期一次列出**全部**错误(id 重复、未知 op/谓词、缺字段、类型错、after
 成环…),坏脚本拒绝启动;运行期单个谓词求值失败读作"未满足"(下 tick 重试),坏 op

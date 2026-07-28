@@ -50,6 +50,14 @@ on the spot rather than silently written to.
   版本号,随主版本走)。跑不了世界也能回答,不碰 db。
   顺带补了 `beats.OP_REQUIRED_FIELDS`:`agent_join` 走单独的校验器,契约面上不该
   因此缺一格。
+- **`anima-world validate seed|beats` —— 不建世界就检查作者写的东西。** CLAUDE.md
+  一直写着"创作台经 CLI 委托校验",而这个入口不存在:作者唯一的检查办法是真开一次
+  世界,而**种子只读进空库一次**,试错的代价是重建世界。硬错误退出码 2;引用完整性
+  (角色/地点存不存在)只**提醒**、退出码 0 —— 一个 beat 完全可以先 `agent_join`
+  再使用,把 advisory 升成拒绝会让设计正确的脚本在小版本升级后开不了机。
+- **种子能直接写行为树**(`agents[].behavior_tree`)。`duties` 只表达得了"时间窗 →
+  动作",要写条件分支、需求带、嵌套选择器就够不着,只能去手改 db。缺席时行为逐 tick
+  不变;坏节点跳过并警告,绝不阻塞开机。
 - **`chat.response_format` 成了可改的提示词。** 一段写死在 `chat_service` 里的中文
   排版规则(动作描写用全角括号、括号内以角色名开头)每次聊天都注入系统提示,而它
   没注册进 `prompt_store._DEFAULTS` —— 模板照样生效(读的是同一个 store),但作者在
@@ -59,6 +67,18 @@ on the spot rather than silently written to.
 
 ### Fixed
 
+- **一行合法的 SQL 就能让整棵作者树静默塌掉。** `bt_nodes` 的 CHECK 放行
+  `need_action`,而 `BTStore._build_node` 不认它:构造器抛 ValueError,调用方兜成
+  一行 warning,**整棵作者树退回 `default_bt()`** —— 一个只会 idle_wander 的根选择器。
+  世界照跑,角色什么也不干,而那行 warning 甚至不说是哪个节点惹的祸。现在
+  `need_action` 能构造(带作者写的收工线),回退时的 warning 也会指名道姓。
+  加了一条测试逐个类型验证:schema 放行的每一种,构造器都必须造得出来。
+- **REFERENCE §9 的节拍 op 表是错的** —— 照它写的脚本开不了世界。`memory` 的必填
+  是 `agent_id` 不是 `agent`,`broadcast_memory` 是 `location` 不是 `agents`,
+  `persona_update`/`agent_leave` 同样是 `agent_id`,而 `agent_return` 还必须给
+  `location`(文档整个漏了)。加载期严格只有在"照文档写就能过"的前提下才说得通,
+  所以这张表现在是**机器校验的**:`tests/test_beats_doc_contract.py` 解析它,逐字
+  比对 `beats.OP_REQUIRED_FIELDS`。
 - **角色记得你,但检索不出你。** 聊天召回的三因子检索用 `interlocutor_id` 当 query,
   而那是宿主给的不透明 id(`p1`、一个 uuid);记忆文本里写的是**名字**。两者字符
   二元组交集恒空 → relevance 恒 0 → 检索静默退化成「最近 + 最重要」,与对方是谁无关。
