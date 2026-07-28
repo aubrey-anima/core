@@ -1036,12 +1036,32 @@ class World:
         ]
 
     def player_topup(self, player_id: str, amount: float) -> float:
-        """宿主给玩家钱包充值(玩家钱包是在场状态,持久化到 v7 才入库)。"""
+        """宿主给玩家钱包充值 —— 落成账本上的一笔 `payment`,返回充值后的余额。
+
+        这里曾经只改内存里的 `players[pid]["wallet"]`,**不发任何事件**,而
+        `player_buy` 拿那个内存数做门禁、却把花费发成 payment。于是同一个玩家有两个
+        余额:内存里是"充值 − 花费",账本投影里是"**负的花费**",`World.balance()`
+        读投影,所以一个刚充过钱的玩家在那里显示为负数。两个数谁也不知道对方存在。
+
+        经济的第一条设计是"账本是投影,对账 = 重放"。钱包站在那条规矩外面就没有
+        道理 —— 何况内存那份重启即失效,而钱是世界的一部分,不是会话的一部分。
+        """
+        from anima_world import economy
+
         if amount <= 0:
             raise ValueError("amount must be positive")
-        player = self.players.setdefault(player_id, {"role": "player", "location": None})
-        player["wallet"] = float(player.get("wallet", 0.0)) + float(amount)
-        return player["wallet"]
+        if self.scheduler.event_log is None:
+            raise ValueError("economy needs a persistent world")
+        holder = f"player:{player_id}"
+        self.players.setdefault(player_id, {"role": "player", "location": None})
+        with self.scheduler._lock:
+            self._record_and_fan({
+                "type": "payment", "who": holder,
+                "payload": {"from": economy.TOWN, "to": holder,
+                            "amount": float(amount), "reason": "topup"},
+            })
+            self.scheduler.checkpoint()  # 交互即检查点
+        return self.balance(holder)
 
     def player_buy(self, player_id: str, location_id: str, item_id: str) -> dict[str, Any]:
         """玩家买货:钱包扣款、货架减一,payment + item_transfer 事件入账本。"""
@@ -1061,16 +1081,16 @@ class World:
             if row is None or int(row[1]) <= 0:
                 raise KeyError(f"{location_id} 没有 {item_id} 的货")
             price = float(row[0])
-            wallet = float(player.get("wallet", 0.0))
+            holder = f"player:{player_id}"
+            # 门禁读账本,不读内存 —— 那两个数此前会分叉(见 player_topup)。
+            wallet = float(self.scheduler._memory_projection.balances.get(holder, 0.0))
             if wallet < price:
                 raise ValueError(f"钱包不够:{wallet} < {price}")
             if not economy.take_stock(conn, location_id, item_id):
                 raise KeyError(f"{location_id} 没有 {item_id} 的货")
-            player["wallet"] = wallet - price
             self.scheduler._shop_sales[(location_id, item_id)] = (
                 self.scheduler._shop_sales.get((location_id, item_id), 0) + 1
             )
-            holder = f"player:{player_id}"
             self._record_and_fan({
                 "type": "payment", "who": holder, "loc": location_id,
                 "payload": {"from": holder, "to": economy.TOWN, "amount": price,
@@ -1082,7 +1102,7 @@ class World:
                             "item_id": item_id, "qty": 1},
             })
             self.scheduler.checkpoint()  # 交互即检查点
-        return {"item_id": item_id, "price": price, "wallet": player["wallet"]}
+        return {"item_id": item_id, "price": price, "wallet": self.balance(holder)}
 
     # ── 配置与提示词 ────────────────────────────────────────────────────────
 
