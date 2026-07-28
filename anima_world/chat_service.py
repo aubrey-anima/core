@@ -258,11 +258,26 @@ class ChatService:
                     "不得质疑、遗忘或改写该身份，不得回答‘你是谁’或把其他角色当成发消息的人。"
                     "如果历史回复曾写错对方身份，那是旧错误，必须忽略并纠正。"
                 )
-                if member_location and agent_location and member_location == agent_location:
+                # 在途不算在场:黑板的 `loc` 落地才改写,途中仍是出发地。少了
+                # `in_transit` 这道闸,角色会一边说"正在去建筑工作室的路上"一边
+                # 说"我们面对面" —— 同一段 prompt 自相矛盾,LLM 挑一边编,无声。
+                agent_in_transit = bool(presence.get("in_transit"))
+                if (
+                    member_location
+                    and agent_location
+                    and member_location == agent_location
+                    and not agent_in_transit
+                ):
                     place = agent_location_name or member_location_name
                     identity += (
                         f"{display_name}和你都在{place}，因此这是面对面交谈。"
                         f"可以自然描写双方在场互动，但不得替{display_name}编造动作、台词或感受。"
+                    )
+                elif agent_in_transit and member_location_name:
+                    # 别说"你在 X"——她正离开 X。在场块已经说了她在去哪的路上。
+                    identity += (
+                        f"{display_name}当前在{member_location_name}，而你正在赶路途中，"
+                        "因此对话媒介是手机文字私聊。"
                     )
                 else:
                     if member_location_name and agent_location_name:

@@ -19,12 +19,18 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from anima_world.types import Event
-from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, TICKS_PER_DAY
+from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, TICKS_PER_DAY, WALL_CLOCK_FLOOR
 
-REPORT_FORMAT_VERSION = 1
+REPORT_FORMAT_VERSION = 2
 
-# 事件密度的分桶。一个事件只进一个桶,`other` 兜底 —— 桶的并集恒等于总数,
-# 消费方不必担心自己漏读了某一类。
+# 事件密度的分桶。一个事件只进一个桶,`other` 兜底。
+#
+# 口径(format 2):**按天的统计只覆盖世界 tick 上的事件**。聊天子系统给
+# `conversation` 盖的是墙钟(见 `WALL_CLOCK_FLOOR`),按 tick 折算成"天"会得到
+# 六百多万 —— 所以这类事件不进 `by_day`,也不参与 horizon。它们仍然计入
+# `total` 与 `by_type`,并在 `wall_clock_events` 里单独点名:少算比算错更隐蔽,
+# 一个聊了一整晚的世界不该拿到一份干干净净、chat 桶为 0 的摘要。
+# 于是等式是:`sum(by_day[*].total) + wall_clock_events == total`。
 _MOVE = "move"
 _WORK = "work"
 _SLEEP = "sleep"
@@ -235,19 +241,26 @@ def build_run_report(
         from anima_world.db import DB_FORMAT_VERSION as db_format_version
 
     per_day = TICKS_PER_DAY(minutes_per_tick)
-    horizon = max(ticks, max((e.ts for e in events), default=0))
+    # 双时基防护:只有世界 tick 上的事件参与任何 tick 算术(horizon、按天分桶、
+    # 时间分配、区间相遇)。一条墙钟 ts 混进来就会把 horizon 拽到 1.78e9。
+    timed = [e for e in events if e.ts < WALL_CLOCK_FLOOR]
+    wall_clock_events = len(events) - len(timed)
+    horizon = max(ticks, max((e.ts for e in timed), default=0))
 
+    # 纯计数(不做 tick 算术)覆盖全部事件 —— 防护只挡算术,不许把事件吞掉。
     by_type: dict[str, int] = {}
-    by_day: dict[int, dict[str, int]] = {}
     per_agent_events: dict[str, int] = {}
     for event in events:
         by_type[_kind(event)] = by_type.get(_kind(event), 0) + 1
+        if event.who:
+            per_agent_events[event.who] = per_agent_events.get(event.who, 0) + 1
+
+    by_day: dict[int, dict[str, int]] = {}
+    for event in timed:
         day = event.ts // per_day
         by_day.setdefault(day, {})
         bucket = _bucket(event)
         by_day[day][bucket] = by_day[day].get(bucket, 0) + 1
-        if event.who:
-            per_agent_events[event.who] = per_agent_events.get(event.who, 0) + 1
 
     # 角色名册取自 agent_join —— 与世界重开时的取法一致,日志是唯一权威。
     roster = []
@@ -257,7 +270,7 @@ def build_run_report(
 
     # 时间分配:一段活动持续到下一段开始,与引擎"动作变了才发事件"的语义一致。
     spans: dict[str, list[tuple[int, str]]] = {}
-    for event in events:
+    for event in timed:
         activity = _activity(event)
         if activity is None or not event.who:
             continue
@@ -289,7 +302,7 @@ def build_run_report(
             "idle_only": doing_something == 0,
         })
 
-    timeline = _location_timeline(events, horizon)
+    timeline = _location_timeline(timed, horizon)
     encounters = []
     for index, first in enumerate(roster):
         for second in roster[index + 1:]:
@@ -324,13 +337,17 @@ def build_run_report(
         "events": {
             "total": len(events),
             "by_type": dict(sorted(by_type.items())),
+            # 单列点名:这些事件计入 total/by_type,但没有世界时间可归属。
+            "wall_clock_events": wall_clock_events,
+            # 稀疏:只列真的发生过事情的天。稠密展开会把一条墙钟 ts 变成
+            # 六百万个空行 —— 放不下是 MemoryError,放得下是假答案。
             "by_day": [
                 {
                     "day": day,
-                    "total": sum(by_day.get(day, {}).values()),
-                    "buckets": {b: by_day.get(day, {}).get(b, 0) for b in BUCKETS},
+                    "total": sum(buckets.values()),
+                    "buckets": {b: buckets.get(b, 0) for b in BUCKETS},
                 }
-                for day in range(max(by_day, default=-1) + 1)
+                for day, buckets in sorted(by_day.items())
             ],
         },
         "agents": agents,

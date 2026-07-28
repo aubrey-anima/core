@@ -17,6 +17,52 @@ on the spot rather than silently written to.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-07-28
+
+同 db 格式(**1**)与包格式(**1**),1.0.x 与 1.1.0 建的世界照常打开。
+主题:**引擎不再对自己说谎** —— 派生视图曾经
+对同一段历史给出两个答案,而世界照跑、没有任何报错。这一批全是那一类:测试看得见
+的东西没坏,拿到手的东西是错的。
+
+### Fixed
+
+- **重开世界不再把所有人传送回出生地。** 角色走路发的是 `state_change` +
+  `kind=location_join`,而投影拿这条事件去*注册地点*,从不写 `agents[who].location`。
+  开机名册读的正是 `projected.location`(那一侧本来就是对的),于是每次重开,世界对
+  "谁在哪"的记忆就退回创世那一刻。运行中同样分叉:活黑板说柔在咖啡店、投影说她在家。
+  还有一个必要条件容易漏 —— `_record_event` 里的折叠发生在 `_stream_event` **之后**,
+  而后者把位移事件改写成 `agent_action{action:"walk"}`,所以折进投影的根本不是那条
+  位移。两处一起改,否则"位置对不对"取决于你有没有重启过,比统一错更难查。
+  老库重放即自愈,无迁移。
+- **玩家动作的内容不再存成一个空对象。** `player_action` 的
+  `player_id`/`role`/`action`/`details` 全在事件顶层,而只有 `payload` 落库 —— 玩家在
+  世界里做过的每一件事,重放之后一个字都不剩。四个字段**复制**(不是搬走)进 payload,
+  顶层形状不变;重放侧同样回填四个键,实时流与重放形状一致。
+  ⚠️ 只对此后产生的事件成立,老库里的 `{}` 不补也不迁移。
+- **`simulate --report` 不再被一次聊天撑爆。** `events.ts` 跑着两种时基:引擎盖世界
+  tick,聊天子系统给 `conversation` 盖墙钟。报表把 Unix 时间戳当 tick 折算成"天",
+  于是 `by_day` 按 `range(max_day + 1)` 稠密展开成六百多万行 —— 放不下是 MemoryError,
+  放得下是 `days=6198680` 的假答案外加被 horizon 稀释成 `other≈1.0` 的时间分配。
+  引擎早就知道这条界线(时钟恢复一直在过闸),只是报表没用上。
+- **同处一室不再被当成手机私聊。** `chat_service` 按玩家位置在"面对面交谈"和
+  "手机文字私聊,对方不在你当前场景中"两段身份声明里选一段,后者还禁止角色描写看见你
+  —— 而 `World.chat` 组 `interlocutor` 时从不传位置,面对面那一支经门面**从来不可达**。
+  `anima-world chat` 明明先替你走到对方跟前,角色照样只能演"在手机上收到"。
+  现在读 `world.players` 里的位置;宿主没调过 `player_move` 就维持手机私聊,引擎不猜。
+
+### Changed
+
+- **`report_format_version` → 2**(与引擎版本分开,消费方不必升引擎)。
+  `events.by_day` 改为**稀疏**(只列真的发生过事情的天),并且**只覆盖世界 tick 上的
+  事件**;墙钟事件仍计入 `total` 与 `by_type`,另在新字段 `events.wall_clock_events`
+  里单独点名。等式随之变成
+  `sum(by_day[*].total) + wall_clock_events == total`。
+  把这些事件整个剔掉会得到一份"聊了一整晚但 chat 桶为 0"的干净摘要 —— 比撑爆更坏,
+  因为没人看得出自己少读了东西。
+- **`World.world_context()` 的 `presence` 新增 `in_transit`**。在途不算在场:黑板的
+  `loc` 要落地才改写,只比地点会让一个正在赶路的角色被判成和你面对面,同一段 prompt
+  里既说"正在去建筑工作室的路上"又说"我们面对面"。
+
 ## [1.1.0] — 2026-07-27
 
 Same db format (**1**) and package format (**1**) as the whole 1.0.x line. Worlds built
@@ -269,7 +315,8 @@ so there is nothing to migrate.
   versions at once.
 - The `story` subcommand, an M2-era leftover that no documentation mentioned.
 
-[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/aubrey-anima/core/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aubrey-anima/core/releases/tag/v1.1.0
 [1.0.2]: https://github.com/aubrey-anima/core/releases/tag/v1.0.2
 [1.0.1]: https://github.com/aubrey-anima/core/releases/tag/v1.0.1

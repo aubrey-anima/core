@@ -210,6 +210,19 @@ def _apply_state_change(proj: Projection, e: Event) -> None:
         agent.updated_at = e.ts
 
     elif kind == "location_join":
+        # 角色走进一个地点(actions.py 的 walk 发的就是这条)。**这是"谁在哪"
+        # 的唯一持续来源** —— agent_join 只说得出出生地。位置必须落进投影:
+        # 开机 roster 读的正是 `projected.location`(__main__.py:334),投影不
+        # 更新就等于每次重开把所有人传送回出生地,而世界照跑、没有任何报错。
+        location = payload.get("location")
+        if location:
+            agent = proj.agents.get(e.who) if e.who else None
+            if agent is not None:  # 未知角色不造占位:名册的权威是 agent_join
+                agent.location = location
+                agent.updated_at = e.ts
+            return
+        # 老分支:没有 location 的 location_join 是"注册一个地点"。地点表的
+        # 权威是 `locations` 表,这里只兜底任何历史里已有的这类事件。
         loc_id = payload.get("id")
         if loc_id is None:
             return

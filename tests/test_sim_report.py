@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -185,7 +186,67 @@ def test_event_density_is_bucketed_per_world_day_and_the_buckets_are_exhaustive(
         assert sum(row["buckets"].values()) == row["total"], (
             "一个事件只进一个桶,桶的并集必须恒等于总数"
         )
-    assert sum(row["total"] for row in report["events"]["by_day"]) == report["events"]["total"]
+    # 口径(format 2):按天统计只覆盖世界 tick 上的事件,墙钟事件单列。
+    assert (
+        sum(row["total"] for row in report["events"]["by_day"])
+        + report["events"]["wall_clock_events"]
+        == report["events"]["total"]
+    )
+
+
+# ── 双时基:聊天事件打的是墙钟,不是世界 tick ────────────────────────────────
+
+def _conversation(seq, who, target, *, ts=None):
+    """`conversation` 的 ts 是**墙钟**(chat_session.py:48 的 clock 是 time.time()),
+    而其余事件的 ts 是世界 tick。一条就够把按天统计撑到 620 万天。"""
+    return _ev(seq, int(time.time()) if ts is None else ts, "conversation", who,
+               {"with": target, "summary": "聊了两句"})
+
+
+def test_a_wall_clock_event_does_not_stretch_the_report_across_millions_of_days():
+    """聊过一次天的世界,报表不该变成一个 620 万项的列表。
+
+    `horizon = max(ticks, max(e.ts))` 把一个 Unix 时间戳当成了 tick,`by_day`
+    再按 `range(max_day + 1)` 稠密展开 —— 放不下就是 MemoryError,放得下就是
+    `days=6198680` 的假答案,以及被 horizon 稀释成 `other≈1.0` 的时间分配。
+    引擎自己早就知道这条界线(scheduler.py 的 `_WALL_CLOCK_FLOOR`),只是报表没用上。
+    """
+    events = [
+        _join(1, "夏", "cafe"),
+        _status(2, 10, "夏", "working"),
+        _conversation(3, "夏", "p1"),
+    ]
+    report = build_run_report(events, ticks=100)
+
+    assert report["world"]["days"] == 1, f"days={report['world']['days']}"
+    assert len(report["events"]["by_day"]) == 1
+    share = report["agents"][0]["share_by_activity"]
+    assert share["work"] > 0.9, f"墙钟 horizon 会把在岗时间稀释成 ~0:{share}"
+
+
+def test_a_wall_clock_event_is_still_counted_just_not_placed_in_a_day():
+    """防护不许把事件**吞掉** —— 那比撑爆更坏,因为测试会照绿。
+
+    聊了一整晚的世界如果得到一份 `chat 桶 0`、total 少一截的干净摘要,消费方
+    没有任何办法发现自己少读了东西。
+    """
+    events = [
+        _join(1, "夏", "cafe"),
+        _conversation(2, "夏", "p1"),
+        _conversation(3, "夏", "p1"),
+    ]
+    report = build_run_report(events, ticks=100)
+
+    assert report["events"]["total"] == 3, "墙钟事件必须仍计入总数"
+    assert report["events"]["by_type"]["conversation"] == 2, "也必须仍计入 by_type"
+    assert report["events"]["wall_clock_events"] == 2, "并且单列点名,不是静默丢弃"
+
+
+def test_by_day_only_lists_days_that_actually_happened():
+    """稀疏:第 0 天和第 5 天之间没有事件,就不该凭空造出四个空行。"""
+    events = [_join(1, "夏", "cafe"), _action(2, 5 * TICKS_PER_DAY, "夏", "work")]
+    report = build_run_report(events, ticks=5 * TICKS_PER_DAY)
+    assert [row["day"] for row in report["events"]["by_day"]] == [0, 5]
 
 
 def test_simulate_writes_a_report_a_tool_can_read(tmp_path):

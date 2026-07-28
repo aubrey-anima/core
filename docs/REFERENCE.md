@@ -58,8 +58,13 @@
 事件类型(投影器处理的全集):`agent_join` / `agent_move` / `agent_action` / `agent_idle` /
 `agent_leave` / `agent_return` / `location_join` / `narrative` / `user_message` /
 `capability_registered` / `state_change`(按 `payload.kind` 二级分发:`sentiment`、
-`sentiment_delta`、`r_type`、`agent_state`、`persona_update` 等)。未知类型静默忽略 ——
-废弃旧事件天然向后兼容。
+`sentiment_delta`、`r_type`、`agent_state`、`persona_update`、`location_join` 等)。
+未知类型静默忽略 —— 废弃旧事件天然向后兼容。
+
+**"谁在哪"的持续来源是 `state_change` + `kind=location_join`**(角色走进一个地点时发,
+`payload.location` 是目的地);顶层的 `agent_join` 只说得出出生地。投影把它折成
+`agents[who].location`,而重开世界时的名册正是读这个值 —— 于是"谁在哪"和其余状态
+一样,是事件流的投影,不是内存里的第二份真相。
 
 关系值有两条写入路径:`sentiment`(绝对赋值,只用于创世注入)和 `sentiment_delta`
 (累加并 clamp 到 [-1,1],运行期一律用它)—— 保证一次闲聊不会覆盖种子设定的宿怨。
@@ -69,9 +74,16 @@
 
 #### 事件的 payload 字段
 
-`events` 表每行有 `seq` / `ts`(世界 tick)/ `type` / `who` / `loc` / `payload`(JSON)。
-宿主要自己搭时间线或做统计,直接读这张表即可(世界关闭后)。下表是各类型 `payload`
-里的字段:
+`events` 表每行有 `seq` / `ts` / `type` / `who` / `loc` / `payload`(JSON)。
+宿主要自己搭时间线或做统计,直接读这张表即可(世界关闭后)。
+
+⚠️ **`ts` 一列跑着两种时基**。引擎盖的是世界时钟(从 0 开始的 tick 数),而聊天子系统
+给 `conversation` 盖的是**墙钟**(Unix 秒)。tick 数不可能长到那个量级,所以
+`ts >= 1_000_000_000` 就是墙钟。**任何按 tick 做的算术都必须先过这道闸** —— 少了它,
+一条聊天记录就能把"第几天"算成六百多万。引擎自己的两处(时钟恢复、`sim_report`)都
+过闸,见 `world_time.WALL_CLOCK_FLOOR`。拆成两列属于 db 格式变更,留给下一个主版本。
+
+下表是各类型 `payload` 里的字段:
 
 | 类型 | payload 字段 | 说明 |
 |---|---|---|
@@ -86,7 +98,7 @@
 | `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)或 `reflection`(反思) |
 | `conversation` | `agent_id`, `conversation_id`, `summary`, `message_count`, `started_at`, `closed_at`, `participants`, `location` | 整场会话只发这一条,在关闭时 |
 | `capability_registered` | `id`, `kind`, `description`, `params_schema` | 首启生成的能力目录 |
-| `player_action` | (空) | 字段在事件顶层:`player_id` / `role` / `action` / `details` |
+| `player_action` | `player_id`, `role`, `action`, `details` | 同样的四个字段**也**在事件顶层(实时流的既有形状,不变)。⚠️ payload 里有值这件事**只对 1.1.1 之后产生的事件成立** —— 更早的世界里这里是 `{}`,不补也不迁移,读历史时要当它可能缺席 |
 
 **稳定性**:字段**只加不改**,与 `World` 门面同一条纪律 —— 已有类型不会删字段或改语义。
 未知类型投影器静默忽略,所以将来新增类型不会让旧宿主的读取逻辑崩掉。
@@ -224,11 +236,18 @@
 **玩家不是特例**:`player_id` 只是关系对的另一个端点,走的是和 NPC 完全相同的档位、
 阻尼、图谱与八卦机制。
 
-两条边界值得先知道:
+三条边界值得先知道:
 
 - **关系是单向发起的。** 玩家不在 `scheduler.agents`、不在投影、不在 planner 的动作
   空间里,所以角色**不会主动来找你** —— 它可以对你产生好感、记得你、把你当八卦讲给
   别人,但"今天去找阿檀聊聊"不在它的选项里。你影响世界,世界不会主动来影响你。
+- **玩家的在场是宿主说了算,而且不落库。** `World.player_move()` 写的是进程内的
+  `world.players`,重启即失效 —— 这是有意的:玩家是访客,世界侧只留下他造成的**后果**
+  (记忆、关系、图谱边),不留他的位置。它今天只有一个消费者:对话的**媒介判定**。
+  调过 `player_move` 且与角色同地(且角色不在途)时,身份块告诉角色这是**面对面交谈**,
+  她可以描写看见你;否则是**手机文字私聊**,并禁止她臆造你在场。
+  **没调过 `player_move` 就是没告诉世界你在哪,一律按手机私聊处理** —— 引擎不猜。
+  (`anima-world chat` 会替你先走到对方跟前。)
 - **NPC 之间的关系需要 LLM,不是因为判定,是因为动作。** 判定有替身(见 §2.4),但
   NPC↔NPC 的判定只由带明确对象的 `chat` 动作触发,而选中 `chat_with_<某人>` 是
   planner 的决定 —— 没有 key 就没有 planner。`idle_social`(「想找个人说说话」)不指名
@@ -470,19 +489,32 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 | 字段 | 内容 |
 |---|---|
 | `world` | `ticks` / `days` / `minutes_per_tick` / `ticks_per_day` / `agents`(名册取自 `agent_join`) |
-| `events.total` / `events.by_type` | 总数与按细分类型计数(`state_change` 按 `payload.kind` 细分) |
-| `events.by_day[]` | `day` / `total` / `buckets` —— 桶:`move` `work` `sleep` `chat` `idle` `plan` `narrative` `relation` `economy` `memory` `genesis` `other`。**一个事件只进一个桶,桶的并集恒等于 total** |
+| `events.total` / `events.by_type` | 总数与按细分类型计数(`state_change` 按 `payload.kind` 细分)。覆盖**全部**事件 |
+| `events.wall_clock_events` | (format 2 新增)其中打的是墙钟 ts、因而没有世界时间可归属的事件数 |
+| `events.by_day[]` | `day` / `total` / `buckets` —— 桶:`move` `work` `sleep` `chat` `idle` `plan` `narrative` `relation` `economy` `memory` `genesis` `other`。**一个事件只进一个桶**。**稀疏**:只列真的发生过事情的天 |
 | `agents[]` | `id` / `events` / `ticks_by_activity` / `share_by_activity` / **`idle_only`** |
 | `encounters[]` | `a` / `b` / `meetings`(相遇次数)/ `ticks` / `minutes` / `by_location` |
 | `relationships[]` | `as` / `target` / `start` / `end` / `min` / `max` / `changes` / `turning_points` |
 
-两条口径值得写明:
+三条口径值得写明:
 
 - **在途不算在场**。出发即离场,到达才算到 —— 否则"作息设计的相遇窗口兑现没有"永远
   答"兑现了"。
 - **一段活动持续到下一段开始**,与引擎"动作变了才发事件"的语义一致;叙事事件与关系
   判定事件不打断活动(它们是对刚才那个动作的描写与事后结算)。
   `idle_only` = 整场只有闲逛/睡觉/赶路,没有一件"发生了什么"。
+- **按天的统计只覆盖世界 tick 上的事件**(format 2 起)。`events.ts` 这一列跑着两种
+  时基:引擎盖的是世界时钟(从 0 开始的 tick),聊天子系统给 `conversation` 盖的是
+  墙钟。把一个 Unix 时间戳当 tick 折算成"天"会得到六百多万,所以墙钟事件不进
+  `by_day`、不参与 horizon 与时间分配。它们仍计入 `total` 与 `by_type`,并在
+  `wall_clock_events` 里单独点名 —— 少算比算错更隐蔽。于是等式是:
+
+  ```
+  sum(by_day[*].total) + wall_clock_events == total
+  ```
+
+  format 1 的 `by_day` 是稠密的、且不做时基区分:一条聊天记录就能把它撑成六百万行
+  (放不下即 MemoryError,放得下则是 `days=6198680` 的假答案)。升到 2 修的就是这个。
 
 ### 4.7 anima-world world export / import / inspect —— 打包
 

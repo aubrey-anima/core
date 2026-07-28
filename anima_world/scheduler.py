@@ -26,20 +26,20 @@ from anima_world.events import EventLog
 from anima_world.narrative import NarrativeProvider
 from anima_world.projection import project_events
 from anima_world.types import Event
-from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, WorldTime, world_time
+from anima_world.world_time import (
+    DEFAULT_MINUTES_PER_TICK,
+    WALL_CLOCK_FLOOR,
+    WorldTime,
+    world_time,
+)
 
 
 logger = logging.getLogger(__name__)
 
-# The `events.ts` column carries two different time bases. The simulation
-# stamps its events with the world clock (a tick count starting at 0), but the
-# chat subsystem (M3.5) stamps its `conversation` events with the wall clock —
-# and `clock` used to be restored as max(ts) over ALL of them, which dragged the
-# world clock up to ~1.78e9 and made the derived calendar read "day 6194323".
-# A tick count will not plausibly reach a Unix timestamp (1e9 ticks is 30+ years
-# at one per second), so a ts at or above this floor is wall-clock and is not a
-# world time. Restoring skips those.
-_WALL_CLOCK_FLOOR = 1_000_000_000
+# The `events.ts` column carries two different time bases — see
+# `world_time.WALL_CLOCK_FLOOR` for the full statement of the rule. Restoring
+# the clock skips wall-clock stamps; so does the run report (`sim_report`).
+_WALL_CLOCK_FLOOR = WALL_CLOCK_FLOOR
 
 # Performance guardrails
 MAX_AGENTS = 100
@@ -277,14 +277,19 @@ class Scheduler:
             if self.event_log is not None and "seq" not in event:
                 persisted = self.event_log.append(self._event_log_payload(event))
                 event["seq"] = persisted.seq
-            event = self._stream_event(event)
             if "seq" not in event:
                 event["seq"] = self._next_event_seq
                 self._next_event_seq += 1
             else:
                 self._next_event_seq = max(self._next_event_seq, int(event["seq"]) + 1)
+            # 折叠必须发生在 `_stream_event` **之前**。`_stream_event` 把
+            # `state_change/location_join` 改写成 `agent_action{action:"walk"}`;
+            # 折叠改写后的副本 = 位移永远进不了投影,而重放路径折的是原始事件。
+            # 于是"谁在哪"取决于你有没有重启过 —— 比统一错更难查。
+            # 触发器不受影响:它只认 conversation 与 state_change 的三种 kind,
+            # 位移事件改写后本来就被它丢掉(memory_triggers.py:65-76)。
             self._apply_memory_trigger(event)
-            self.recent_events.append(event)
+            self.recent_events.append(self._stream_event(event))
             self._event_signal.set()
             self._event_signal.clear()
 
@@ -644,6 +649,14 @@ class Scheduler:
         payload = dict(event.get("payload", {}) or {})
         if event.get("type") == "narrative" and "text" in event and "text" not in payload:
             payload["text"] = event["text"]
+        elif event.get("type") == "player_action":
+            # 玩家动作的内容全在事件顶层(api.py:801-808),而只有 `payload` 落库
+            # —— 于是玩家在世界里做过的每一件事都存成了 `{}`。**复制而不是搬走**:
+            # 顶层形状是实时流的既有契约(REFERENCE §2.1 / test_api.py),动它等于
+            # 破坏宿主。老库里的 `{}` 不补也不迁移,只对此后的事件成立。
+            for key in ("player_id", "role", "action", "details"):
+                if key in event and key not in payload:
+                    payload[key] = event[key]
         return {
             "ts": int(event.get("ts", 0) or 0),
             "type": str(event.get("type", "")),
@@ -696,6 +709,14 @@ class Scheduler:
                 stream["speaker"] = payload["speaker"]
         elif stream.get("type") == "agent_action":
             stream.setdefault("action", payload.get("action"))
+        elif stream.get("type") == "player_action":
+            # 重放要还原实时流的顶层形状。**四个键都要**:只回填 `action` 就是
+            # 把"内容没落盘"这个 bug 换个地方犯,而现有断言(只查 player_id)照绿。
+            # 老库里的 player_action payload 是 `{}`,回填不出东西 —— 那些事件的
+            # 顶层字段本来就没存过,不无中生有。
+            for key in ("player_id", "role", "action", "details"):
+                if key in payload:
+                    stream.setdefault(key, payload[key])
 
         return stream
 

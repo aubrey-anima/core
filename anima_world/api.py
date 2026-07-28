@@ -706,16 +706,34 @@ class World:
             raise KeyError(f"agent {agent_id} not found")
         if not messages or messages[-1].get("role") != "user":
             raise ValueError("messages must end with a user turn")
+        interlocutor: dict[str, str] = {
+            "display_name": display_name or f"player-{player_id[:8]}",
+            "role": role,
+        }
+        # 玩家在哪,决定角色是"看见你"还是"收到你的消息":`chat_service.respond`
+        # 按这个字段在面对面/手机私聊两段身份声明里选一段。这里曾经不传,于是
+        # 面对面那一支经门面永远不可达 —— CLI 明明先把你走到她跟前(player_move),
+        # 提示词照样告诉她你不在场,并禁止她描写看见你。
+        # 宿主没调过 `player_move` 就是没告诉世界你在哪:不猜,维持手机私聊。
+        where = str((self.players.get(player_id) or {}).get("location") or "").strip()
+        if where:
+            interlocutor["location"] = where
+            interlocutor["location_name"] = self._location_display_name(where)
         agen = self.chat_service.respond(
             agent_id,
             messages[-20:],
             interlocutor_id=player_id,
-            interlocutor={
-                "display_name": display_name or f"player-{player_id[:8]}",
-                "role": role,
-            },
+            interlocutor=interlocutor,
         )
         yield from _iterate_sync(agen)
+
+    def _location_display_name(self, location_id: str) -> str:
+        """地点 id → 给角色看的名字。查不到就用 id,聊天不该因此告吹。"""
+        store = self.scheduler.location_store
+        if store is None or not location_id:
+            return location_id
+        row = store.get(location_id)
+        return (row or {}).get("name") or location_id
 
     def chat_reply(self, *args: Any, **kwargs: Any) -> str:
         """chat() 的非流式便捷版,直接返回整段回复。"""
@@ -1012,6 +1030,10 @@ class World:
                 "day": now.day, "hh": f"{now.hour:02d}", "mm": f"{now.minute:02d}",
                 "location_id": loc_id, "location": loc_name, "activity": label,
                 "others": "、".join(others),
+                # 在途不算在场。黑板的 `loc` 要落地才改写,途中读出来仍是出发地
+                # —— `_agent_locations()` 跳过 `_transit` 就是在补这个洞,只比
+                # 地点的话,一个正在赶路的人会被判成和你面对面。
+                "in_transit": agent_id in scheduler._transit,
             }
             rel = scheduler._memory_projection.relations.get((agent_id, interlocutor_id))
             if rel is not None:
