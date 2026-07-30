@@ -54,7 +54,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 370 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 452 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
@@ -62,6 +62,11 @@ python -m twine upload dist/*         # 发布
 anima-world start                     # 引导配 LLM → 建世界 → 前台运行;新世界用演示速度
 anima-world doctor                    # 体检:密钥文件、db 格式、真调一次 LLM、时钟翻译成人话
 anima-world config set llm.api_key sk-…   # 改配置不用写代码(按声明类型强转后再写)
+
+# 给改提示词的人用的(run_prompt / World.debug_prompt)
+anima-world prompt --db-path w.db --agent 夏   # 她收到的提示词,逐块带来源 + 少了哪块为什么
+# 提示词是这套东西最不可见又最容易出错的一层(1.3 四个 bug 有三个在这儿)。
+# 它和真聊天共用 `ChatService.prompt_blocks` —— **调试视图另写一遍拼装就会撒谎**。
 
 # 给部署/脚本用的
 anima-world run --db-path saves/world.db               # 前台宿主,Ctrl-C 停
@@ -107,19 +112,31 @@ anima-world world import my.cyberworld --destination ./instances
   - `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
   - **主版本号 = db 格式 = 可挂载性**:让老引擎**读不了**世界文件的改动(改列义/拆表/
     换单位)才升第一位;第二位加能力,第三位纯修 bug
-  - **加法修订 `SCHEMA_REVISION`(1.3.0 起 = 2)**:纯加法的 schema 变化(新表、新的可空列)
+  - **加法修订 `SCHEMA_REVISION`(1.3.0 = 3)**:纯加法的 schema 变化(新表、新的可空列)
     不改可挂载性,跟着**次版本号**走,戳在 `db_meta.schema_revision`,**只增不减**。
     1.3.0 破的是"schema 一变就升主版本"那条 —— 那会把已有的世界为一批加法全作废;守的
     是"版本号能告诉你两个文件互不互通"这条,后者才是联锁真正在保护的东西。
     加表时问自己一句:**老引擎打开这个文件还能跑吗?** 能 → 加法修订 + 次版本;
     不能 → 那是 db 格式变更,升主版本。`tests/test_version_contract.py` 里
     "更高修订的世界仍然能挂"那条测试就是这道闸。
+    1.3.0 内部走过 2 → 3(第一批 chat-agent,第二批 world-rules 与认知层)——
+    一个版本号对应两个修订只因为这一版从没发布过,别当成先例。**闸在
+    `SCHEMA_TABLES_AT_REVISION_3`**:表集合被钉住,加一张表就必须动那一行,
+    于是"顺手加表却忘了升戳"不可能再悄悄发生(它就这么发生过一次,全量测试没红)。
   - 这个戳存在的唯一理由是**让降级看得见**(1.3 的世界跑在 1.2 引擎上照跑,但 stance /
     静音 / 拒谈话题整套缺席);`contract --json` 与 `doctor` 都报它,**运维台镜像要同步读**
   - `db.py` 的 `DB_FORMAT_VERSION` / `MIN_SUPPORTED_DB_FORMAT` 是运行期安全联锁:两者相等即
     "硬不兼容",挂错卷会当场拒绝而不是静默写坏(见 `tests/test_db_format.py`)
 - `world_seed.json` 是本包**唯一的 package data**,随 wheel 分发
   (`tests/test_packaging.py` 盯着,漏了会让宿主环境里少文件)。
+- **内置种子是橱窗,不是毛坯**(1.3.0):它用 `"config": {...}` 替这个世界点亮了
+  needs/economy/social/stance/tools/intent/autonomy,并播了关系、创世记忆、钱、
+  物品、货架、目标。理由是**做了却开箱看不见等于没做** —— 新用户装上包看到的第一屏
+  就是这个引擎的全部说服力。加了新特性要顺手问一句:**橱窗里展示它了吗?**
+  (`tests/test_flagship_seed.py` 盯着。)
+  但**引擎默认值仍然全关** —— 分工是"引擎默认值 = 没人说话时的样子,内置种子 =
+  这个世界的作者的意见"。所以验"开关默认关"的测试必须用 `conftest.py` 的
+  `bare_seed`(把橱窗剥回毛坯),拿橱窗去验默认值等于在验橱窗的布置。
 - **本包无 HTTP、无 HTML、无创作代码**。曾经的 FastAPI web 层(`anima_world/world/`,
   三组 REST API + membership claim 鉴权)已在纯库化改造中整体移除 —— 需要网络暴露的话,
   由宿主应用自己包一层,不归引擎管。`anima_world/author/` 也已删除,
@@ -128,7 +145,7 @@ anima-world world import my.cyberworld --destination ./instances
 
 ## 当前状态
 
-**1.3.0(db 格式 1,schema 加法修订 2)。** PyPI 上已发布到 1.1.1;1.2.0 与 1.3.0 尚未
+**1.3.0(db 格式 1,schema 加法修订 3)。** PyPI 上已发布到 1.1.1;1.2.0 与 1.3.0 尚未
 推 tag。版本规则由 `tests/test_version_contract.py` 机器强制。原路线图(docs/ROADMAP.md)的
 2.0–5.0 四大机制已并入首发,全部带默认关闭的开关:
 
@@ -144,6 +161,23 @@ anima-world world import my.cyberworld --destination ./instances
 - `chat.tools.enabled` 聊天里的能力(`anima_world/tools/`:静音/走开/等会儿/拒谈/广播)
 - `chat.intent.enabled` 意图分派(对话 / 导演场景 / 改对话规则 + `persona_overrides`)
 - `chat.loop.enabled` 连续输出(`World.chat_burst`,预算 f(性格,关系,心情,时间))
+
+**认知层**(perception,1.3.0):世界的量里她感知得到哪些,四档
+`self`/`here`/`public`/`hidden`,**没声明 = 感知不到**(反过来的错不可挽回:一个"暗中的
+恨意"若默认公开,角色下一句就说出来)。声明本身就是开关,没有 `perception.enabled`。
+感知同时进聊天 grounding **与定时轮次的决定上下文** —— 后者是关键,不接上的话模拟层和
+角色层就是两套跑在一个进程里的系统。加了新的量要顺手问:**她该不该知道它?**
+
+**世界的规律也是数据了**(world-rules,1.3.0):`stocks` 表存量 + `world_rules` 表规律,
+设计者写 `{every, for_each, when, set, emit}`,`set` 里是受限算术表达式。它补的是
+"引擎替所有世界写死了物理法则"这个洞 —— needs/economy 的曲线通用,而"树怎么长"不通用。
+三条硬纪律:**绝不 `eval`**(AST 白名单 + 自写解释器,`expressions.py`)、
+**连续变化不发事件**(只有 `emit` 的门槛跨过去才发,且边沿触发)、
+**双缓冲**(同一轮读上一轮的值,规律之间与顺序无关)。跑在 tick 线程上 —— 纯算术。
+
+外加一个第五个开关,补上"没人跟她说话时她也能主动"这一半:`autonomy.enabled`
+(调度器 tick 上每隔 `autonomy.interval_ticks` 问一次她要不要做点什么,决定与执行
+在世界自己那条循环上跑——时钟永不等网络;`World.autonomy_stats()` 报这条链通没通)。
 
 HTTP 层于 2026-07 移除:网站/运维台若要对接,走 import(Python)或 CLI + `.cyberworld`
 (非 Python);旧的 `/internal/v1` 协议与 membership claim 实现在 git 历史里

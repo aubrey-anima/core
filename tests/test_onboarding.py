@@ -171,6 +171,34 @@ def test_doctor_flags_a_degraded_world_without_calling_out(world, capsys):
     assert "与现实 1:1" in out  # the clock is reported in words, always
 
 
+def test_doctor_names_the_cheap_work_running_on_the_expensive_model(world, capsys):
+    """背景槽空着不是坏配置,是白花的钱 —— 而产物上一点看不出来。
+
+    意图分类走的是背景槽,而空的背景槽退回主模型。它每轮跑一次、**串在回复前面**,
+    所以玩家等的是两次生成而不是一次。她照样回话,所以这条永远不会自己暴露。
+    """
+    db, store, conn = world
+    store.set("chat.intent.enabled", True)
+    conn.close()
+
+    main(["doctor", "--db-path", str(db), "--skip-probe"])
+    out = capsys.readouterr().out
+    assert "背景槽没配" in out
+    assert "意图分类" in out
+    assert "llm.background.model" in out
+
+
+def test_doctor_stays_quiet_when_nothing_cheap_is_running(world, capsys):
+    """开关都关着就别唠叨 —— 一个没人会读的建议和没有建议一样。"""
+    db, store, conn = world
+    for key in ("chat.intent.enabled", "autonomy.enabled", "chat.loop.enabled"):
+        store.set(key, False)
+    conn.close()
+
+    main(["doctor", "--db-path", str(db), "--skip-probe"])
+    assert "背景槽没配" not in capsys.readouterr().out
+
+
 # ── guided setup ─────────────────────────────────────────────────────────────
 
 

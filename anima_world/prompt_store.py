@@ -47,6 +47,10 @@ from anima_world.chat_service import (
     _DEFAULT_TOOLS_BLOCK_TEMPLATE as _CHAT_TOOLS,
 )
 from anima_world.intent import DEFAULT_CLASSIFIER_PROMPT as _INTENT_CLASSIFIER
+from anima_world.autonomy import DEFAULT_DECIDE_PROMPT as _AUTONOMY_DECIDE
+from anima_world.perception import (
+    DEFAULT_PERCEPTION_BLOCK_TEMPLATE as _CHAT_PERCEPTION,
+)
 from anima_world.stance import DEFAULT_STANCE_BLOCK_TEMPLATE as _CHAT_STANCE
 from anima_world.narrative import (
     _MOCK_MEMORY_SUFFIX,
@@ -95,6 +99,7 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         "others": "罗本",
     },
     "chat.relation_block": {"r_type": "有点好奇的新面孔", "band": "熟识"},
+    "chat.perception_block": {"lines": "- 你自己:功力 120"},
     # chat-agent(1.3.0):四块新提示词的实参。作者改坏了要在**保存时**报错,
     # 而不是在她该选 stance 那一刻静默丢块。
     "chat.stance_block": {
@@ -106,6 +111,13 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
     "chat.intent_classifier": {"present": "林素", "recent": "user: 冷不冷?"},
     "chat.loop_continue": {"emitted": 2, "left": 3},
     "chat.loop_interrupt": {"text": "等等,我不是这个意思"},
+    "autonomy.decide": {
+        "name": "苏晚夏", "personality": "开朗热情", "day": 3, "hh": "20", "mm": "15",
+        "location": "咖啡店", "activity": "闲着",
+        "present_block": "这会儿在你身边的人:阿檀(p1)。\n",
+        "state_block": "- 你此刻的心气儿:0.62(0~1)\n",
+        "tool_menu": "- reach_out:主动去找一个此刻在场的人开口 参数:player_id, text",
+    },
     "judge.user_relationship": {
         "a_name": "夏", "a_personality": "开朗", "player_name": "阿檀",
         "a_to_b": 0.1, "b_to_a": 0.0, "r_type": "初次见面的访客",
@@ -173,6 +185,14 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "chat.relation_block": (
         _CHAT_RELATION,
         "Chat 关系块——对来访者的 r_type 与档位（chat-grounding）",
+    ),
+    "autonomy.decide": (
+        _AUTONOMY_DECIDE,
+        "定时轮次的 prompt——没人跟她说话时问她要不要自己做点什么（autonomy.enabled）",
+    ),
+    "chat.perception_block": (
+        _CHAT_PERCEPTION,
+        "她感知到的世界的量（perception；声明了可见性才有内容，见 §2.9.4）",
     ),
     "chat.stance_block": (
         _CHAT_STANCE,

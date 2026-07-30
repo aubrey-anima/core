@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -41,8 +42,9 @@ def test_price_drifts_up_when_demand_outruns_restock():
 
 
 @pytest.fixture
-def world(tmp_path):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+def world(tmp_path, bare_seed):
+    # 素配:验的是创世安家费与默认货架,不是橱窗里作者写的那些(见 conftest)
+    w = World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
     w.config_set("economy.enabled", "true")
     yield w
     w.close()
@@ -117,12 +119,10 @@ def test_ledger_survives_reopen_via_replay(tmp_path):
 # 的怀表一直带在身上"只能丢掉,或降级成一句记忆文本。
 
 
-def _seed_with_material(tmp_path) -> str:
-    from importlib import resources
-
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+def _seed_with_material(tmp_path, bare_seed) -> str:
+    # 建在素配种子上:这条验的是"作者写了就按作者的、没写的回落默认",而内置
+    # 橱窗给每个角色都写了钱,第三个角色就再也测不到那个默认值(见 conftest)。
+    seed = json.loads(pathlib.Path(bare_seed).read_text(encoding="utf-8"))
     seed["items"] = [
         {"id": "coal", "name": "煤", "kind": "consumable", "base_price": 3.0,
          "restores": {"energy": 0.2}},
@@ -139,8 +139,8 @@ def _seed_with_material(tmp_path) -> str:
     return str(path)
 
 
-def test_seed_can_author_money_inventory_and_shelves(tmp_path):
-    with World.open(str(tmp_path / "w.db"), seed_path=_seed_with_material(tmp_path),
+def test_seed_can_author_money_inventory_and_shelves(tmp_path, bare_seed):
+    with World.open(str(tmp_path / "w.db"), seed_path=_seed_with_material(tmp_path, bare_seed),
                     force_mock_llm=True) as world:
         agents = [entry["id"] for entry in json.loads(
             (tmp_path / "material_seed.json").read_text(encoding="utf-8"))["agents"]]
@@ -158,9 +158,12 @@ def test_seed_can_author_money_inventory_and_shelves(tmp_path):
         )
 
 
-def test_a_seed_that_ignores_the_material_layer_still_gets_the_demo_shelf(tmp_path):
-    """缺字段 = 今天的行为。这条是 #12 承诺的宽容原则的另一半。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+def test_a_seed_that_ignores_the_material_layer_still_gets_the_demo_shelf(tmp_path, bare_seed):
+    """缺字段 = 今天的行为。这条是 #12 承诺的宽容原则的另一半。
+
+    必须用素配种子:内置橱窗**自己写了**货架,拿它来验"没写 stock 会怎样"是自相矛盾。
+    """
+    with World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
         assert {row["item_id"] for row in world.shop("cafe")} == {
             "coffee", "sandwich", "sketchbook"
         }
@@ -195,10 +198,10 @@ def test_broken_material_entries_are_dropped_one_by_one_not_fatally(tmp_path):
         assert "bad_kind" not in {row["item_id"] for row in world.shop("cafe")}
 
 
-def test_seeded_inventory_survives_reopen(tmp_path):
+def test_seeded_inventory_survives_reopen(tmp_path, bare_seed):
     """随身物品走的是事件,不是表 —— 所以它和账本一样,对账即重放。"""
     db = str(tmp_path / "w.db")
-    seed_path = _seed_with_material(tmp_path)
+    seed_path = _seed_with_material(tmp_path, bare_seed)
     with World.open(db, seed_path=seed_path, force_mock_llm=True) as world:
         owner = json.loads((tmp_path / "material_seed.json").read_text(
             encoding="utf-8"))["agents"][0]["id"]

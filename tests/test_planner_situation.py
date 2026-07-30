@@ -71,11 +71,14 @@ def test_an_old_template_without_the_placeholder_still_renders():
     assert "夏" in rendered
 
 
-def test_a_live_world_fills_the_block_in(tmp_path):
-    """接线检查:真世界里位置、需求、别人在忙什么都得读得出来。"""
+def test_a_live_world_fills_the_block_in(tmp_path, bare_seed):
+    """接线检查:真世界里位置、需求、别人在忙什么都得读得出来。
+
+    素配种子:这条里还有一句"经济没点亮就不该谈钱",而内置橱窗是点亮了经济的。
+    """
     from anima_world.__main__ import _planner_situation
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
         world.config_set("needs.enabled", "true")
         world.tick(200)
         ctx = _planner_situation(world.scheduler, "夏")

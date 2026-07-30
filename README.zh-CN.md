@@ -222,6 +222,7 @@ anima-world start          # 建世界 + 引导 + 运行 —— 从这里开始
 anima-world doctor         # 体检:世界文件、密钥、LLM 连通性、时钟快慢
 anima-world config         # 读写配置,密钥加密存储、打码显示
 anima-world chat           # 和一个角色说话;不给 --agent 就列出住着谁
+anima-world prompt         # 看一眼她收到的提示词:逐块带来源,并说明少了哪块、为什么
 anima-world run            # 无引导的前台宿主(部署 / 脚本用)
 anima-world simulate       # 无头快进(--report 输出运行摘要)
 anima-world world          # 导出 / 导入 / 查看 .cyberworld 数据包
@@ -273,7 +274,7 @@ anima_world/
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest                 # 370 项:db 格式闸门 + 打包契约 + api 门面 + 四大机制 + chat-agent
+python -m pytest                 # 435 项:db 格式闸门 + 打包契约 + api 门面 + 四大机制 + chat-agent
 python -m build                  # → dist/*.whl + dist/*.tar.gz
 ```
 

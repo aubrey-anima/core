@@ -104,9 +104,12 @@ def test_an_item_with_no_restores_changes_nothing(tmp_path):
         assert brain.agent.blackboard.read("need.hunger") == pytest.approx(0.3)
 
 
-def test_eating_does_nothing_when_needs_are_off(tmp_path):
-    """开关关着时行为逐 tick 不变 —— 这是每个开关的既有承诺。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+def test_eating_does_nothing_when_needs_are_off(tmp_path, bare_seed):
+    """开关关着时行为逐 tick 不变 —— 这是每个开关的既有承诺。
+
+    素配种子:内置橱窗**替这个世界点亮了** needs,拿它来验"关着会怎样"是自相矛盾。
+    """
+    with World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
         world.tick(1)
         world.scheduler._record_event({
             "type": "item_consume", "who": "夏",

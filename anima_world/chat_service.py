@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Sequence
 
 from anima_world import intent as intent_mod
@@ -38,6 +39,9 @@ from anima_world import stance as stance_mod
 from anima_world import tools as tools_mod
 from anima_world.chat_store import ChatStore
 from anima_world.directives import DirectiveParser
+from anima_world.perception import (
+    DEFAULT_PERCEPTION_BLOCK_TEMPLATE as _DEFAULT_PERCEPTION_BLOCK,
+)
 from anima_world.llm_client import LLMClientProtocol, Message
 
 logger = logging.getLogger(__name__)
@@ -121,6 +125,49 @@ _DEFAULT_RELATION_TEMPLATE = "对方在你眼中：{r_type}（你们的关系处
 # 一段独白里间或有个问号不算让位,最后那句才算。
 _YIELD_MARKS = ("?", "？")
 _YIELD_PHRASES = ("你觉得呢", "你说呢", "你怎么想", "对吧", "好吗", "行吗", "要不要")
+
+
+@dataclass(frozen=True)
+class PromptBlock:
+    """提示词里的一块,**带来源标签**。
+
+    标签存在的理由:提示词是这套系统里最不可见、又最容易出错的一层。这个 session
+    里四个 bug 有三个在这儿(stance 声明率 2/6、能力一次没用、autonomy 18 轮 0 动作),
+    而每一个的诊断都需要同一件事 —— **她到底收到了什么**。没有标签的话,拿到的是
+    一坨几千字的文本,看不出哪块是谁加的、为什么在那个位置。
+    """
+
+    label: str
+    text: str
+
+
+# 提示词的块顺序。**这是一处显式的决定,不是追加顺序的副产物。**
+#
+# 位置就是权重:长提示词里模型对开头与结尾最敏感,中间最容易被忽略。这不是推测,
+# 是 2026-07-29 实测出来的 —— stance 与能力菜单夹在中间时,真模型六轮只声明了两轮
+# stance、能力一次没用;两块移到末尾之后是 5/6、被逼到难听话时 4/4 轮动用能力。
+#
+# 于是三段分工:
+#   开头  她是谁          世界观、人设、回复格式 —— 稳定不变的底
+#   中间  她此刻的处境    记忆、在场、关系、感知 —— 是**事实**,不需要抢注意力
+#   末尾  她要照做的      玩家教的规则、身份声明、stance、能力 —— 要被**执行**的
+#
+# ⚠️ 末尾只有一个,抢的人多了就不值钱。所以往这儿加块之前先问:它是"事实"还是
+# "要照做的"?认知层(perception)就留在中间 —— 实测她在那个位置照样读得到
+# (把 `树高 9.4` 说成"目测九米多快十米"),不需要占末尾。
+PROMPT_BLOCK_ORDER = (
+    "world.setting",      # 世界观(整段原样,可能自带多段)
+    "persona",            # 人设 + 回复格式规则
+    "memories",           # 她最近记得的事
+    "presence",           # 此时此地在做什么、旁边有谁
+    "relation",           # 对方在她眼里是什么关系
+    "perception",         # 她感知到的世界的量(§2.9.4)
+    "overrides",          # 这位玩家教过她的对话规则
+    "identity",           # 认证对话身份(最高优先级事实)
+    "extra",              # 本轮临时插入(拒谈话题、loop 的续说/插话提示)
+    "stance",             # 关系性意图
+    "tools",              # 她可以做的事
+)
 
 
 def _looks_like_a_question(text: str) -> bool:
@@ -412,23 +459,23 @@ class ChatService:
             logger.warning("chat.refused_topic_block 渲染失败")
             return None
 
-    def _world_blocks(self, agent_id: str, interlocutor_id: str) -> list[str]:
-        """Render the grounding blocks (memories / presence / relation) from a
-        world_provider snapshot. Any failure or missing key skips only that
-        block — the floor is the pre-grounding prompt (design D1)."""
-        if self._world_provider is None:
-            return []
-        try:
-            ctx = self._world_provider(agent_id, interlocutor_id) or {}
-        except Exception:  # noqa: BLE001 - a chat must never die of a world read
-            logger.warning("world_provider failed for %s; chatting ungrounded", agent_id, exc_info=True)
-            return []
-        blocks: list[str] = []
+    def _world_blocks(self, ctx: dict[str, Any]) -> list[PromptBlock]:
+        """Render the grounding blocks (memories / presence / relation / perception)
+        from a world_provider snapshot. Any failure or missing key skips only that
+        block — the floor is the pre-grounding prompt (design D1).
+
+        块带来源标签(`PromptBlock`),`World.debug_prompt()` 靠它说清"这段是谁加的"。
+        快照由调用方传进来 —— **一段提示词只读一次世界**(见 `_world_snapshot`)。
+        """
+        blocks: list[PromptBlock] = []
+        if not ctx:
+            return blocks
         memories = ctx.get("memories")
         if memories:
             template = self._template("chat.world_memory_block", _DEFAULT_WORLD_MEMORY_TEMPLATE)
             try:
-                blocks.append(template.format(memories="\n".join(f"- {m}" for m in memories)))
+                blocks.append(PromptBlock("memories", template.format(
+                    memories="\n".join(f"- {m}" for m in memories))))
             except (KeyError, IndexError, ValueError):
                 logger.warning("chat.world_memory_block failed to render; skipping the block")
         presence = ctx.get("presence")
@@ -443,16 +490,26 @@ class ChatService:
                 "others": presence.get("others") or "没有别人",
             }
             try:
-                blocks.append(template.format(**variables))
+                blocks.append(PromptBlock("presence", template.format(**variables)))
             except (KeyError, IndexError, ValueError):
                 logger.warning("chat.presence_block failed to render; skipping the block")
+        perception = ctx.get("perception")
+        if perception is not None:
+            # perception:她感知到的世界的量。渲染在 perception 自己身上 —— 这一层
+            # 的规矩(哪些看得见、怎么说人话)不该散到 chat_service 里。
+            template = self._template(
+                "chat.perception_block", _DEFAULT_PERCEPTION_BLOCK
+            )
+            block = perception.render(template)
+            if block:
+                blocks.append(PromptBlock("perception", block))
         relation = ctx.get("relation")
         if relation and relation.get("r_type"):
             template = self._template("chat.relation_block", _DEFAULT_RELATION_TEMPLATE)
             try:
-                blocks.append(template.format(
+                blocks.append(PromptBlock("relation", template.format(
                     r_type=relation.get("r_type", ""), band=relation.get("band", "")
-                ))
+                )))
             except (KeyError, IndexError, ValueError):
                 logger.warning("chat.relation_block failed to render; skipping the block")
         return blocks
@@ -480,9 +537,43 @@ class ChatService:
             messages.append({"role": m["role"], "content": m["content"]})
         return messages
 
+    def _world_snapshot(self, agent_id: str, interlocutor_id: str) -> dict[str, Any]:
+        """读一次世界。**一段提示词只读一次**,读到的那一份贯穿全部块。
+
+        原来在场块和身份声明各读一次,而两次读之间时钟线程可能推进 —— 于是同一段
+        提示词里会同时出现"你在咖啡店,同在这里的还有:没有别人"和"你当前在建筑
+        工作室,因此对话媒介是手机私聊",还顺手禁止她描写站在面前的玩家。
+        LLM 会挑一边编,而且**无声**。`in_transit` 那道闸修的是同一种病的另一扇门。
+
+        读失败不是错误:降级成"没有 grounding 的提示词"照旧能聊(design D1)——
+        一次聊天不该死于一次世界读。
+        """
+        if self._world_provider is None:
+            return {}
+        try:
+            return self._world_provider(agent_id, interlocutor_id) or {}
+        except Exception:  # noqa: BLE001 - a chat must never die of a world read
+            logger.warning(
+                "world_provider failed for %s; chatting ungrounded", agent_id, exc_info=True
+            )
+            return {}
+
     def _build_system_messages(
         self, agent_id: str, interlocutor_id: str = "user"
     ) -> list[Message]:
+        """`send()` 那条路要的形状:每块一条 system 消息,不含身份声明与选择块
+        (那条路自己插)。内容由 `_base_blocks` 派生 —— 两条路不许各写一遍拼装。"""
+        return [
+            {"role": "system", "content": block.text}
+            for block in self._base_blocks(
+                agent_id, interlocutor_id, self._world_snapshot(agent_id, interlocutor_id)
+            )
+        ]
+
+    def _base_blocks(
+        self, agent_id: str, interlocutor_id: str, ctx: dict[str, Any]
+    ) -> list[PromptBlock]:
+        """开头(她是谁)+ 中间(她此刻的处境)—— 见 `PROMPT_BLOCK_ORDER`。"""
         persona = self._persona_provider(agent_id) or {}
         name = persona.get("name") or agent_id
         personality = persona.get("personality") or ""
@@ -496,25 +587,23 @@ class ChatService:
             "chat.response_format", _DEFAULT_RESPONSE_FORMAT_TEMPLATE
         ).format(name=name)
         system = f"{system}\n\n{response_format.strip()}"
-        messages: list[Message] = []
+        blocks: list[PromptBlock] = []
         world = (
             self._prompt_store.get("world.setting", default="").strip()
             if self._prompt_store is not None
             else ""
         )
         if world:
-            messages.append({"role": "system", "content": world})
-        messages.append({"role": "system", "content": system})
-        for block in self._world_blocks(agent_id, interlocutor_id):
-            messages.append({"role": "system", "content": block})
+            blocks.append(PromptBlock("world.setting", world))
+        blocks.append(PromptBlock("persona", system))
+        blocks.extend(self._world_blocks(ctx))
         # 玩家教过的规则约束的是"怎么说",和人设/格式同一类,所以留在这儿。
         overrides = self._overrides_block(agent_id, interlocutor_id)
         if overrides:
-            messages.append({"role": "system", "content": overrides})
+            blocks.append(PromptBlock("overrides", overrides))
+        return blocks
 
-        return messages
-
-    def _choice_blocks(self, agent_id: str, interlocutor_id: str) -> list[str]:
+    def _choice_blocks(self, agent_id: str, interlocutor_id: str) -> list[PromptBlock]:
         """stance 与能力菜单 —— **拼在整段 system prompt 的最后**。
 
         位置是踩过坑改的:它们原来夹在中间,后面紧跟着全篇最响的一段(身份声明,
@@ -523,32 +612,36 @@ class ChatService:
         长提示词里位置就是权重,这两块定的是"她要不要做点什么",必须是她最后读到的。
         """
         return [
-            block for block in (
-                self._stance_block(agent_id, interlocutor_id),
-                self._tools_block(agent_id),
-            ) if block
+            PromptBlock(label, block)
+            for label, block in (
+                ("stance", self._stance_block(agent_id, interlocutor_id)),
+                ("tools", self._tools_block(agent_id)),
+            )
+            if block
         ]
 
-    def _prompt_for(
+    def prompt_blocks(
         self,
         agent_id: str,
-        history: Sequence[Message],
         *,
         interlocutor_id: str,
         interlocutor: dict[str, str] | None = None,
         extra_system: Sequence[str] | None = None,
-    ) -> list[Message]:
-        """把一轮的提示词拼出来(身份声明 + grounding + chat-agent 三块 + 历史)。"""
-        messages = self._build_system_messages(agent_id, interlocutor_id)
+    ) -> list[PromptBlock]:
+        """一轮提示词的**全部**块,按 `PROMPT_BLOCK_ORDER` 的顺序,每块带来源标签。
+
+        这是**唯一的拼装点**:真提示词(`_prompt_for`)和调试视图
+        (`World.debug_prompt()`)都从这里派生。两条路各写一遍就会分叉,而一个
+        "撒谎的调试视图"比没有调试视图更坏 —— 你会照着它去改一个不存在的问题。
+        """
+        ctx = self._world_snapshot(agent_id, interlocutor_id)
+        blocks = self._base_blocks(agent_id, interlocutor_id, ctx)
         if interlocutor:
             display_name = str(interlocutor.get("display_name") or "").strip()
             role = str(interlocutor.get("role") or "").strip()
             if display_name:
-                try:
-                    context = self._world_provider(agent_id, interlocutor_id) if self._world_provider else {}
-                except Exception:  # noqa: BLE001 - identity remains authoritative without presence
-                    context = {}
-                presence = (context or {}).get("presence", {})
+                # 和在场块**同一份快照** —— 各读一次会让这两块互相打脸(见 `_world_snapshot`)
+                presence = ctx.get("presence") or {}
                 agent_location = str(presence.get("location_id") or "").strip()
                 agent_location_name = str(presence.get("location") or agent_location).strip()
                 member_location = str(interlocutor.get("location") or "").strip()
@@ -599,17 +692,33 @@ class ChatService:
                 others = str(presence.get("others") or "").strip()
                 if others:
                     identity += f"{others}只是同场角色，不是正在和你说话的人。"
-                messages.append({"role": "system", "content": identity})
+                blocks.append(PromptBlock("identity", identity))
         for block in extra_system or ():
             if block:
-                messages.append({"role": "system", "content": block})
+                blocks.append(PromptBlock("extra", block))
         # 最后才是"你要不要做点什么"(见 `_choice_blocks` 的位置说明)。
-        for block in self._choice_blocks(agent_id, interlocutor_id):
-            messages.append({"role": "system", "content": block})
-        system_prompt = "\n\n".join(
-            message["content"] for message in messages if message["role"] == "system"
+        blocks.extend(self._choice_blocks(agent_id, interlocutor_id))
+        return blocks
+
+    def _prompt_for(
+        self,
+        agent_id: str,
+        history: Sequence[Message],
+        *,
+        interlocutor_id: str,
+        interlocutor: dict[str, str] | None = None,
+        extra_system: Sequence[str] | None = None,
+    ) -> list[Message]:
+        """把一轮的提示词拼出来:全部块并成一条 system 消息 + 最近 20 条历史。"""
+        blocks = self.prompt_blocks(
+            agent_id,
+            interlocutor_id=interlocutor_id,
+            interlocutor=interlocutor,
+            extra_system=extra_system,
         )
-        prompt: list[Message] = [{"role": "system", "content": system_prompt}]
+        prompt: list[Message] = [
+            {"role": "system", "content": "\n\n".join(block.text for block in blocks)}
+        ]
         prompt.extend(history[-20:])
         return prompt
 

@@ -231,6 +231,7 @@ anima-world world inspect my.cyberworld --json
 ```bash
 anima-world start          # create + run, with guided setup — start here
 anima-world chat           # talk to a character; no --agent lists who lives there
+anima-world prompt         # see the prompt a character receives, block by block
 anima-world doctor         # health check: files, keys, a real LLM call, clock speed
 anima-world config         # read/write settings, secrets encrypted and masked
 anima-world run            # foreground host, no onboarding (for deployment)

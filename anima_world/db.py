@@ -134,6 +134,56 @@ CREATE TABLE IF NOT EXISTS agent_mutes (
 );
 """
 
+# world-rules:存量与规律。**量 = (owner, key, value)**,owner 前缀即种类
+# (`tree:oak_01` / `agent:夏` / `world`)—— 不发明新的实体系统,和账本的 holder
+# 完全同构。`updated_tick` 是 lazy 结算的支点:`dt = now - updated_tick`,所以
+# 一万棵树不必每 tick 都算(和 `agent_needs` 同一个形状)。
+#
+# 规律本身也是数据(`world_rules`):今天 needs 的衰减曲线、economy 的价格漂移都
+# 写死在 Python 里,而"树怎么长""矿怎么枯"因世界而异,不该由引擎替所有世界决定。
+STOCKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stocks (
+  owner        TEXT NOT NULL,
+  key          TEXT NOT NULL,
+  value        REAL NOT NULL DEFAULT 0,
+  updated_tick INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (owner, key)
+);
+"""
+
+WORLD_RULES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS world_rules (
+  id         TEXT PRIMARY KEY,
+  definition TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+"""
+
+# perception:哪些量角色感知得到。**默认一律感知不到**(没声明 = hidden)——
+# 反过来(默认公开)的错是不可挽回的:作者加一个"暗中的恨意"或"真实身份"的量,
+# 角色下一句就说出来了。默认不可见最坏只是"她没注意到",而那是看得见的。
+#
+# 按 (owner 种类, 量名) 声明,`*` 是通配。`stocks` 的值是 REAL 存不了地点,
+# 所以"在场可见"要靠 stock_places 知道一个东西在哪(一棵树在咖啡店)。
+STOCK_VISIBILITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stock_visibility (
+  owner_kind TEXT NOT NULL,
+  key        TEXT NOT NULL,
+  visibility TEXT NOT NULL CHECK (visibility IN ('self','here','public','hidden')),
+  label      TEXT,
+  PRIMARY KEY (owner_kind, key)
+);
+"""
+
+STOCK_PLACES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stock_places (
+  owner    TEXT PRIMARY KEY,
+  location TEXT NOT NULL,
+  label    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stock_places_location ON stock_places(location);
+"""
+
 AGENT_REFUSED_TOPICS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS agent_refused_topics (
   agent_id   TEXT NOT NULL,
@@ -313,13 +363,20 @@ MIN_SUPPORTED_DB_FORMAT = 1
 # 跟着**次版本号**走,不再逼一次主版本号跳跃(那会把已有的世界全作废)。
 #
 #   1 = 1.0.0 ~ 1.2.x
-#   2 = 1.3.0:chat-agent 的六张表 + messages 的四个新列
+#   2 = 1.3.0 的第一批:chat-agent 的六张表 + messages 的四个新列
+#   3 = 1.3.0 的第二批:world-rules 的 stocks / world_rules,以及认知层的
+#       stock_visibility / stock_places
+#
+# 2 和 3 同属 1.3.0 —— 这一版没发布过(没打 tag、没上 PyPI),所以"一个版本号对应
+# 两个修订"只在本机的历史里成立,不会有人被坑。**但戳还是得升**:第二批那四张表
+# 是真的加法,而戳的全部作用就是让人当场分辨两个世界文件互相缺什么。为了让版本号
+# 好看而不升戳,等于把这个机制关掉。
 #
 # 这个戳存在的唯一理由是**让降级看得见**:一个 1.3 的世界跑在 1.2 引擎上照样跑,
 # 但 stance / 静音 / 拒谈话题一概不生效 —— 那正是"照跑但给错东西"。戳让工具能
-# 当场说出"这个文件是修订 2 写的,你这个引擎只到 1"。只增不减:低修订的引擎开过
+# 当场说出"这个文件是修订 3 写的,你这个引擎只到 1"。只增不减:低修订的引擎开过
 # 高修订的库,不许把戳改小。
-SCHEMA_REVISION = 2
+SCHEMA_REVISION = 3
 
 
 class DBFormatError(RuntimeError):
@@ -440,6 +497,10 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(ITEM_DEFS_SCHEMA)
     conn.executescript(SHOP_STOCK_SCHEMA)
     conn.executescript(CLIQUES_SCHEMA)
+    conn.executescript(STOCKS_SCHEMA)
+    conn.executescript(WORLD_RULES_SCHEMA)
+    conn.executescript(STOCK_VISIBILITY_SCHEMA)
+    conn.executescript(STOCK_PLACES_SCHEMA)
     conn.executescript(AGENT_STANCE_SCHEMA)
     conn.executescript(AGENT_MUTES_SCHEMA)
     conn.executescript(AGENT_REFUSED_TOPICS_SCHEMA)

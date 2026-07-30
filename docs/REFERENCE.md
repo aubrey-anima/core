@@ -323,13 +323,19 @@ Mock 上,而本地 ollama 与若干 OpenAI 兼容端点的 function calling 支�
 | `delay_reply` | 等会儿再说 | 排一条 `agent_followups`;**到点她真的回来敲门**(`agent_hail`,`reason=delayed_reply`) |
 | `walk_away` | 话说到一半走人 | **面对面**时走 BT 那条路真的起程(`travel` / `location_join`);隔着手机时降级成**挂断**(`detail.degraded_to`)—— 对一个不在你面前的人"走开"是个空动作 |
 | `refuse_topic` | 以后不谈这个 | 写 `agent_refused_topics`;对方再提时提示词里加一段"岔开话题" |
-| `broadcast` | 说一句公开的话 | 一条 `agent_broadcast` 事件(`World.broadcasts()`) |
+| `broadcast` | 当众说一句话 | 一条 `agent_broadcast` 事件(`World.broadcasts()`,payload 带 `heard_by`)**外加**给每个在场角色一条 `memory_seed` —— 他们真的记住了。听众是**同一个地方**的人,不是全世界 |
 | `wait_for_user` | 我说完了,轮到你 | 连续输出的正常出口(#17) |
 
 **软静音**:玩家还能发,世界当场拒 —— `World.chat` 抛 `AgentUnavailable`
 (带 `kind` / `seconds_left` / `reason`),而不是回一句空话(空回复在宿主那边和
 "LLM 挂了"长得一模一样)。硬静音(锁输入框)由宿主按 `mute_started` 事件自己决定。
 `World.is_muted()` 可以先探一下,`World.unmute()` 是作者/运维的手动解除。
+
+**广播为什么落到记忆上**:`agent_broadcast` 事件原来没有任何角色消费 —— 她"当众宣布"
+的后果是一行日志,世界里谁也不知道,而菜单还告诉她"世界里的人都能看到"。这违反了
+**她的选择必须在世界里兑现**那条硬不变量。兑现走现成的 `memory_seed` 路,不新造广播
+收件箱:记忆本来就是这个引擎里"角色知道一件事"的表示。玩家侧不落记忆 —— 宿主自己读
+`World.broadcasts()`,引擎不替 UI 做主。
 
 **意图分派(#16)** 走**背景槽**(`llm.background.model`,空则用主模型)一次分类:
 
@@ -383,6 +389,181 @@ tool_call 落在**消息行**上(`messages` 表的四个新列,运维台照样�
 一模一样,而没有 key 的世界里全是后者。`World.stance()` 仍然记着那个兜底值,因为那是
 她此刻的状态。`chat_burst` 那条路上分类结果作为一个 `intent` 步骤交出去(含 `reason`)
 —— 判过了就得让宿主看得见。
+
+#### 2.9.2 没人跟她说话时:定时轮次(`autonomy.enabled`,默认关)
+
+#2.9.1 的能力全是**响应式**的——只在玩家先开口之后才有机会被选中。这条开关补的是
+另一半:世界自己转的时候,她也能自己决定要不要做点什么。
+
+**触发在调度器的 tick 上,不是另一个 loop。** 每隔 `autonomy.interval_ticks`
+(默认 72 tick = 5 分钟/tick 时是 6 世界小时)问一次每个不在途中的角色。**时钟永不
+等网络**:调度器只喊一声就立刻返回,快照(位置、活动、心情、在场的人、对他们的
+关系)在锁内取,决定(问 LLM)与执行(调能力)丢到世界自己那条事件循环上跑。一个
+角色的调用挂了只影响她自己,而且**不许无声**——异常经 `future.add_done_callback`
+喂回 `World.autonomy_stats()`。
+
+**能力面是分开的。** `reach_out` 只在这一轮上出现:她主动走到一个此刻**同地**在场
+的玩家跟前搭话(在场判定和 #13 的 `_maybe_hail_player` 同一条规矩——不同地就不算,
+不然一个在工作室的角色能"主动走过去"找一个在咖啡店的玩家)。走的还是 `agent_hail`
+那条边界:**敲门不是对话**,不产生记忆、不动关系、不开会话。`mute` / `refuse_topic`
+/ `broadcast` 两边都能用;`walk_away` / `end_conversation` / `delay_reply` /
+`wait_for_user` 只在聊天里有意义(自主轮次里没有"对方"这个人,给了只会写出一堆
+关掉空会话的动作)。她**只能挑能力,不产出散文**(`reach_out` 的 `text` 参数除外)
+——没有人在听的时候一段独白没有去处。
+
+**默认就是什么都不做,而且这是常态。** 提示词把"不做"列成第一个选项;什么都不做
+**不发事件**(一条"她想了想,没做"的事件每六小时一条,只会把日志灌满而不带信息)。
+`autonomy.max_per_day`(默认 2)防止话痨角色刷屏——但**"被问"不算"用掉额度"**,
+只有真的选中一个能力才计数,否则安静的角色会被自己的沉默饿死配额。
+
+⚠️ **提示词的措辞决定这一层活不活**(2026-07-30 实测)。第一版把"什么都不做"写了
+三遍,结果真模型 **18 轮 0 次动作** —— 机制在,永远不触发。要紧的教训是:**别用提示词
+做限流**,那是 `autonomy.max_per_day` 的活;提示词该写"什么时候值得主动"。改完
+0/18 → 1/15。这个比例在默认节奏下约等于每三四天主动一次,偏稀 —— `autonomy.decide`
+是热改模板,嫌少就自己调。
+
+`World.autonomy_stats()` 返回 `{asked, acted, quiet, failed, last}`。存在的理由是
+这条链最容易的坏法是**看着都对、其实一次没触发**(开关点了、时钟在走,她却一次都
+没主动)——那可能是"她确实没什么想做的"(正常),也可能是 hook 没挂上、LLM 一直
+失败、或者额度早就用完了。这五个数把这些情况分开,`last` 是最近一次发生了什么
+(哪怕是"什么都没做")。
+
+### 2.9.3 世界的规律(world-rules):树会长、矿会枯、修炼会涨功力
+
+前面所有机制(needs 的衰减、economy 的价格漂移)的**规律都写死在 Python 里**,因为
+"人会饿"是通用的。但"树怎么长""矿怎么再生""修炼一小时涨多少功力"**因世界而异** ——
+不该由引擎替所有世界决定。这一层把规律本身变成数据,和提示词进 `prompt_templates`、
+行为树进 `bt_nodes`、剧情进 `beats.json` 是同一条线上的最后一段。
+
+**量 = (owner, key, value)**,owner 是任意字符串,**前缀即种类**:
+
+| owner | 是什么 |
+|---|---|
+| `world` | 季节、天气这类全局的量 |
+| `tree:oak_01` | 一棵树的 `size` / `growth_rate` / `max_size` |
+| `agent:夏` | 挂在角色身上的量(功力、修为) |
+| `location:cafe` | 一个地方自己的量 |
+
+不发明新的实体系统是有意的:和账本的 holder(角色 id / `player:x` / `__town__`)完全
+同构。**一个"实体"就是共用一个 owner 的一组量。**
+
+一条规律:
+
+```jsonc
+{ "id": "tree_growth",
+  "every": {"ticks": 12},                  // 多久算一次(节流)
+  "for_each": {"kind": "tree"},            // 谁参与
+  "when": ["world_season != 3"],           // 可选:条件,不满足整条不算
+  "set": {"size": "min(size + growth_rate * dt, max_size)"},
+  "emit": [{"when": "size >= max_size", "type": "tree_matured"}] }
+```
+
+**选择器**三种:`{"kind": "tree"}`(某一类的全部)、`{"owner": "world"}`(指定一个)、
+`{"action": "work"}`(**此刻正在做这个动作的角色** —— 修炼、采矿、耕种都是这一类:
+投入的是时间,速率由行为者自己的量决定)。
+
+**表达式**能用的东西刻意很少:四则、比较、与或非、三元(`a if 条件 else b`),以及
+`min` / `max` / `abs` / `round` / `clamp` / `floor` / `ceil`。变量先在这个 owner 自己的
+量里找,再找 `world_<key>`(全局),外加恒有的 `dt` 与 `now`。
+**绝不 `eval`** —— 表达式解析成 AST、逐节点过白名单,再由引擎自己的解释器求值;
+属性访问、下标、lambda、推导式一律在**解析时**被拒。
+
+六条要知道的性质:
+
+| | |
+|---|---|
+| **`dt` 不漂** | `every` 只是节流,`dt` 带真实流逝。算得稀**不会让结果偏掉**,只是**滞后**最多一个 `every`(下次求值一次补回) |
+| **规模(实测)** | 一万棵树跑一个世界日(24 次求值)约 1.4 秒,4.8ms 每 tick。依据是按类批量查 + 整轮一次 commit —— 早期版本逐个 owner 提交,2000 棵就到 72ms/tick |
+| **新量不暴涨** | `dt` 从量自己的 `updated_tick` 算,不是世界年龄 —— 在跑了半年的世界里种一棵树,它不会一次性长成参天大树 |
+| **连续变化不发事件** | 一万棵树每天 24 万次变化,逐条发事件会把日志淹掉(needs 有过 19.7 倍事件量的教训)。只有 `emit` 的门槛跨过去才发一条 |
+| **门槛是边沿触发** | 算之前不满足、算之后满足才发。否则长满的树会每 12 tick 喊一次"我长成了" |
+| **双缓冲** | 同一轮读到的都是这一轮**开始前**的值,规律之间与顺序无关(代价:连锁反应等下一轮)。两条规律抢同一个量会打警告 |
+| **跑在 tick 线程上** | 纯算术 + SQL,没有 LLM —— 和 needs/economy 同类。(autonomy 正相反,那条要打网络) |
+
+**加载时严格、运行期降级**,和节拍脚本同一条纪律:公式写错、选择器不认识、`every`
+写反 —— 全部在世界启动前抛 `RuleError`(**整体拒绝,不逐条丢弃**:规律是这个世界的
+物理法则,少一条不是少一点内容,是从此算错)。而运行期读到一个不存在的量、除零,
+只跳过那一条并计进 `World.rule_stats()`,不掀翻 tick。
+
+种子里写 `"stocks": [{"owner": …, "values": {…}}]` 与 `"rules": [...]`(创世一次,
+之后 `stocks` / `world_rules` 表说了算)。API:`World.stock/stocks/set_stock/
+set_stocks/stock_owners/rules/rule_stats`。
+
+#### 2.9.4 认知层(perception):世界的量里,她感知得到哪些
+
+§2.9.3 给了世界一堆客观的量,但**客观存在 ≠ 她知道**。这两层混成一层就会得到一个
+**无所不知的角色**:她随口说出矿的确切储量、别人暗中的恨意、隔着半个地图那棵树的
+高度。那比"她什么都不知道"糟得多 —— 不知道最坏是她没注意到(玩家看得见),而知道
+太多是**当场破戏,且不可挽回**。
+
+所以默认值定死:**没声明 = 感知不到。** 作者要哪个量被看见,显式声明它是哪一档:
+
+| 档 | 意思 | 例子 |
+|---|---|---|
+| `self` | 只有主人自己知道 | 她自己的功力 |
+| `here` | 得在同一个地方 | 这棵树多高(要 `stock_places` 说它在哪) |
+| `public` | 人人皆知 | 季节、粮价、战争 |
+| `hidden` | 谁也不知道(**默认**) | 矿的真实储量、暗中的恨意 |
+
+声明按 `(owner 种类, 量名)` 走,`*` 通配 —— 可见性是"这类量什么性质"的属性,不是每个
+实例的属性:所有树的 `树高` 不必一棵棵写。**逐个量算**:一棵树的 `树高` 可见,不代表
+作者后来加的 `内部编号` 也可见。
+
+**声明本身就是开关。** 没有 `perception.enabled` 这种配置项:一个没声明过任何可见性的
+世界,这一层是空的、不进提示词、不花一个 token。要点亮就去声明,粒度天然比全局开关细。
+
+感知同时进**两处**,这是有意的:
+- **聊天的 grounding**(`chat.perception_block`,可热改)—— 她说话时知道
+- **定时轮次的决定上下文**(§2.9.2)—— 她**做决定**时也知道,否则"矿富了所以我去挖"
+  这种事永远不会发生
+
+`World.perception(agent_id)` 报她此刻感知到什么(不是世界有什么)。存在的理由是可查:
+可见性是声明出来的,而"我以为她知道/其实她不知道"是这一层最容易的错。
+
+种子里写 `"stock_visibility": [{"kind": "tree", "key": "树高", "visible": "here"}]` 与
+`"stock_places": [{"owner": "tree:x", "location": "cafe", "label": "门口那棵老橡树"}]`
+(`label` 是给角色看的名字 —— 提示词里"这里的老橡树"比"这里的 tree:x"像人话)。
+API:`World.declare_visibility` / `place_stock` / `visibility_rules` / `perception`。
+
+⚠️ **还没接的一条**:八卦。`hidden` 档的量目前**没有任何途径**让角色知道 —— 真实的
+形状应该是"有人告诉她"(接 §2.8 那条八卦链)。现在 `hidden` 就是绝对不可知。
+
+#### 2.9.5 看一眼她收到了什么(`debug_prompt` / `anima-world prompt`)
+
+提示词是这套系统里**最不可见、又最容易出错**的一层。1.3 开发期四个 bug 有三个在这儿
+(stance 声明率 2/6、能力一次没用、定时轮次 18 轮 0 动作),而每一个的诊断都需要同一
+件事:**她到底收到了什么**。当时唯一的办法是写 Python 往 `ChatService` 的私有属性上塞
+一个假 LLM 去偷看 —— 而改模板的世界作者一点办法没有。
+
+```bash
+anima-world prompt --db-path w.db --agent 夏 --name 阿檀     # 摘要:块名、字数、占比、首行
+anima-world prompt --db-path w.db --agent 夏 --full          # 连正文
+anima-world prompt --db-path w.db --agent 夏 --json          # 给脚本
+```
+```python
+seen = world.debug_prompt("夏", player_id="p1", display_name="阿檀", message="在吗")
+seen["blocks"]        # [{"label","chars","text"}, …] 按真实顺序
+seen["absent"]        # {块名: 为什么没出现} —— 照着这句话就能让它出现
+seen["system"]        # 并起来的整段,和真聊天送进 LLM 的逐字相同
+```
+
+三条设计,每条都有代价换来的理由:
+
+1. **它不撒谎。** 块来自 `ChatService.prompt_blocks` —— 和真聊天**同一个函数**。
+   调试视图另写一遍拼装迟早会分叉,那时你会照着它去改一个不存在的问题。
+   `tests/test_debug_prompt.py` 拿真聊天的 prompt 逐字比对盯着这一条。
+2. **它解释缺席。** 少一块几乎总比多一块难查:世界照跑、她照说话,只是从来没提过那
+   棵树,而你不知道该去改可见性声明、开关、还是模板。所以 `absent` 报的是**原因**,
+   不是一句 "missing"。反过来,永远不可能缺席的块**不许**在这里写理由 —— 那是一段
+   假装解释的死代码,比没有更坏。
+3. **看,但不碰。** 不推时钟、不进 LLM、不写 `players.last_seen`,**静音中的角色也照样
+   交出提示词**(而 `chat()` 这时会抛 `AgentUnavailable`)。她不理人的时候恰恰是你最想
+   知道她收到了什么的时候,调试入口跟着一起拒就等于没有。
+
+块顺序钉在 `chat_service.PROMPT_BLOCK_ORDER` 上,有测试盯着实际顺序是它的子序列 ——
+**位置就是权重**(实测:stance 与能力菜单从中间移到末尾,声明率 2/6 → 5/6)。所以往
+末尾加块之前先问它是"事实"还是"要照做的":末尾只有一个,抢的人多了就不值钱。认知层
+就留在中间,实测她在那儿照样读得到(把 `树高 9.4` 说成"目测九米多快十米")。
 
 ### 2.10 剧情节拍(beat director)
 
@@ -535,6 +716,23 @@ from anima_world.api import World
 | `world.persona_overrides(agent_id, player_id)` | 这个玩家教给她的对话规则 |
 | `world.set_persona_override(agent_id, player_id, kind, value)` / `world.clear_persona_override(...)` | 直接写/删一条规则(宿主自己做 UI 时用,不必经过分类器)。kind 是白名单 |
 | `world.broadcasts(*, since_seq=0, limit=50)` | 她公开说过的话(`agent_broadcast` 事件) |
+| `world.autonomy_stats()` | 定时轮次(§2.9.2)到底跑没跑:`{asked, acted, quiet, failed, last}` |
+
+### 世界的规律与存量(1.3.0,见 §2.9.3)
+
+| 函数 | 说明 |
+|---|---|
+| `world.stock(owner, key, default=0.0)` | 读一个量 |
+| `world.stocks(owner)` | 这个 owner 身上所有的量 |
+| `world.set_stock(owner, key, value)` / `world.set_stocks(owner, values)` | 写(种一棵树、埋一个矿)。`updated_tick` 记的是**此刻**,所以新量不会按世界年龄暴涨 |
+| `world.stock_owners(kind=None)` | 有哪些量的主人;给了 kind 只看那一类 |
+| `world.rules()` | 这个世界的规律(编译过的只读视图,含每条读了哪些量) |
+| `world.rule_stats()` | 规律引擎跑得怎么样:`{evaluated, written, emitted, skipped, last_error}` |
+| `world.perception(agent_id)` | 她此刻**感知到**什么(不是世界有什么),分 `own`/`here`/`public` 三档(§2.9.4) |
+| `world.debug_prompt(agent_id, *, player_id="p1", message="在吗", display_name=None, role="player", history=None)` | 她这一刻**会收到的提示词**,逐块带来源标签(§2.9.5)。`blocks` / `order` / `absent`(哪块没出现**以及为什么**)/ `system`(并起来的整段,和真聊天逐字相同)。**看,但不碰**:不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来 |
+| `world.declare_visibility(kind, key, visibility, label=None)` | 声明某类量的可见档:`self`/`here`/`public`/`hidden` |
+| `world.place_stock(owner, location, label=None)` | 这个东西在哪(`here` 档要用) |
+| `world.visibility_rules()` | 现有的可见性声明 |
 
 ### 经济(`economy.enabled` 点亮后才有意义)
 
@@ -607,6 +805,28 @@ anima-world chat --db-path saves/world.db --agent 夏 --name 阿檀
 宿主应用的事(`World.open` + `start_clock` + `World.chat`)—— 一个 CLI 不该趁你
 打字偷偷推进别人的世界。转录留在这个进程里,每轮只把最近 20 条传进世界。
 
+### 4.2.1 anima-world prompt —— 看一眼她收到了什么
+
+```bash
+anima-world prompt --db-path w.db --agent 夏 --name 阿檀     # 摘要:块名、字数、占比、首行
+anima-world prompt --db-path w.db --agent 夏 --full          # 连正文一起
+anima-world prompt --db-path w.db --agent 夏 --json          # 给脚本
+anima-world prompt --db-path w.db                            # 不给 --agent:列名册
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--agent` | - | 看谁的;不给就列名册(和 `chat` 一个规矩:不猜她是谁) |
+| `--player-id` / `--name` | `cli` / `访客` | 以谁的身份、什么称呼 |
+| `--message` | `在吗` | 假设这一刻你说的是哪句话(会影响"拒谈话题"那块) |
+| `--full` / `--json` | - | 连正文 / JSON |
+
+改 `prompt_templates` 的人一般不写 Python,而"改完她到底收到了什么"过去只有写 Python
+塞假 LLM 才看得见。语义与 `World.debug_prompt` 完全相同(§2.9.5):**看,但不碰** ——
+不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来。
+
+摘要里的占比一列值得看:它会立刻告诉你**提示词的字数花在哪儿了**。
+
 ### 4.3 anima-world run —— 无引导的前台宿主
 
 不引导、不改时钟,打开世界让时钟跑,Ctrl-C 停。给部署和脚本;程序里嵌入请直接用
@@ -633,6 +853,11 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 检查:世界文件、`world.db.key` 是否在(不在则警告旧密钥永久读不出)、db 格式版本、
 事件/角色计数、LLM 四态(没建库/读不出来/没配/正常)+ **真调一次 LLM**(`--skip-probe`
 跳过)、时钟快慢翻译成人话。有问题退出码 1。
+
+还报一条**不算问题但白花钱**的:`chat.intent.enabled` / `autonomy.enabled` /
+`chat.loop.enabled` 开着而 `llm.background.model` 空着时,这些便宜活会退回主模型。
+意图分类每轮跑一次而且**串在回复前面**,所以玩家等的是两次生成而不是一次 —— 而她
+照样回话,这条永远不会自己暴露。开关全关就不唠叨(没人会读的建议等于没有建议)。
 
 ### 4.6 anima-world simulate —— 无头快进
 
@@ -790,6 +1015,9 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 | `chat.loop.enabled` | bool | false | `chat_burst` 连着说到她自己想停 |
 | `chat.loop.max_messages` | int | 8 | 一次连续输出的消息硬上限 |
 | `chat.loop.max_tool_calls` | int | 15 | 一次连续输出的工具调用硬上限 |
+| `autonomy.enabled` | bool | false | 没人跟她说话时,定时问她要不要自己做点什么(§2.9.2) |
+| `autonomy.interval_ticks` | int | 72 | 隔多少 tick 问一次(默认 5 分钟/tick 下是 6 世界小时) |
+| `autonomy.max_per_day` | int | 2 | 一个角色一天最多主动几次(只算真的选中能力的次数,不算被问的次数) |
 | `memory.capacity` | int | 50 | 每角色记忆容量(anchor 不占淘汰),超出按 strength 最弱优先 |
 | `memory.sentiment_threshold` | float | 0.3 | 关系变动触发记忆的阈值 |
 | `memory.half_life_days` | float | 3.0 | 检索时近因子的半衰期(世界日) |
@@ -838,6 +1066,16 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 | `world_seed.json` | 种子,字段见下表。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空库一次,静默降级不可挽回 |
 | `beats.json` | 可选节拍脚本(见 §9) |
 
+**内置种子是橱窗,不是毛坯。** 它替这个世界点亮了 needs / economy / social /
+stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身物品、货架与目标
+—— 因为**一个展示不了自己特性的内置世界没人会用**:装上包、`anima-world start`,
+第一屏就该看见这个引擎能干什么,而不是一个只会走路说话的空壳。`chat.loop.enabled`
+是唯一没点亮的(它把每轮的 LLM 调用乘 2~5 倍,不该替用户做一个持续烧钱的决定)。
+
+**引擎默认值仍然全关**(`config_store._DEFAULTS`)。两者的分工是:引擎默认值 =
+"没人说话时的样子",内置种子 = "这个世界的作者的意见"。自己写种子的人从素配起步,
+要什么点什么;`tests/conftest.py` 的 `bare_seed` 夹具就是把橱窗剥回毛坯的那份。
+
 **种子字段**。只有 `agents` 与 `locations` 的必填键进**校验**(那是运维台
 `lib/worldSeed.js` 镜像的最小契约);其余全是可选,遵守同一条宽容原则:
 **缺字段 = 今天的行为,坏条目逐条丢弃、绝不拦住启动**。
@@ -851,6 +1089,31 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 | `world_setting` | 世界观,首启写进 `world.setting` 提示词 |
 | `items[]` | 物品定义:`id` / `name` / `kind`(`consumable`/`durable`/`artwork`)/ `base_price` / `restores` |
 | `mock_narration` | Mock 叙事模板,键是动作种类(外加 `memory_suffix`),见 §7 |
+| `config` | **这个世界开箱点亮哪些开关**(1.3.0),见下 |
+| `stocks[]` | 初始存量:`{"owner": "tree:oak_01", "values": {"size": 0.5, …}}`(§2.9.3) |
+| `rules[]` | **这个世界的规律**(§2.9.3)。坏规律**整体拒绝**,不逐条丢弃 |
+| `stock_visibility[]` | 哪些量角色感知得到:`{"kind","key","visible"}`(§2.9.4)。**没声明 = 感知不到** |
+| `stock_places[]` | 东西在哪:`{"owner","location","label"}` —— `here` 档靠它成立 |
+
+#### `config`:种子替它的世界做的开关决定
+
+```jsonc
+{"config": {"needs.enabled": true, "economy.enabled": true, "autonomy.interval_ticks": 48}}
+```
+
+**创世时一次,空库才认** —— 和其它 seed_defaults 同一条契约。已有的世界不认:那些
+开关此时是**运行数据**(作者可能早就 `config set` 改过),拿今天的种子回头覆盖它们,
+等于让一次重启悄悄改掉一个跑了半年的世界的行为。
+
+值按**声明类型**强转(和 `World.config_set` 共用同一份规则),所以 JSON 里写
+`"true"` / `"48"` 这种字符串也认。三类会被跳过,而且**逐条 warning 点名**(作者
+以为点亮了、实际没点亮,是这个仓库最在意的那类错):
+
+| 跳过 | 为什么 |
+|---|---|
+| 这个引擎版本没有的键 | 种子会比引擎活得久 —— 一个 1.4 的种子写了 1.3 没有的开关,正确的行为是开机并少点亮一项,而不是让整个世界打不开 |
+| **密文键(`llm.api_key`)** | 种子是**分发物**(`.cyberworld` 里就带着它)。能携带密钥的种子等于把作者的钥匙寄给每一个拿到这个世界的人 |
+| 值转不成声明类型 | 作者把值写错了 |
 
 **物质层的创世入口**(经济与需求从首发就有机制,过去却没有创世入口):
 

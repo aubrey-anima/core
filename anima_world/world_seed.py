@@ -1,4 +1,10 @@
-"""Shared validation for authored world seed data."""
+"""Shared validation for authored world seed data.
+
+**镜像契约只有一件事**:`is_valid_world_seed` 的裁决(运维台 `lib/worldSeed.js` 镜像
+了它)。裁决只看 `agents` / `locations` 的必填键 —— 未知顶层字段一律忽略,所以往
+种子里加可选字段(`relations` / `memories` / `items` / `config` …)**不改跨仓库契约**,
+不需要同步改镜像端。这条是有意的:世界的丰富度会一直长,而裁决面必须稳。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,11 @@ from typing import Any
 
 WORLD_SEED_AGENT_KEYS = frozenset({"id", "name", "location", "personality"})
 WORLD_SEED_LOCATION_KEYS = frozenset({"id", "name", "description"})
+
+# 种子可以在创世时点亮的开关(`"config": {...}`)。**密文键一律不许**:种子是要
+# 分发的东西(`.cyberworld` 里就带着它),一个能携带 `llm.api_key` 的种子等于把
+# 作者的钥匙寄给了每一个拿到这个世界的人。密钥永远只在本机的 `world.db.key` 里。
+WORLD_SEED_CONFIG_FORBIDS_SECRETS = True
 
 
 class WorldSeedError(ValueError):
@@ -111,3 +122,52 @@ def world_seed_warnings(data: Any) -> list[str]:
                     "(如果他由节拍脚本中途入场,忽略这条)"
                 )
     return warnings
+
+
+def apply_seed_config(config_store: Any, world_seed: dict[str, Any] | None) -> dict[str, Any]:
+    """把种子的 `"config": {...}` 写进这个新世界(**创世时一次**,调用方保证空库)。
+
+    这是"出厂内置世界能展示自己"的那一半:开关此前只能建完世界再一条条
+    `config set`,于是**一个内置的演示世界无法点亮自己的任何特性** —— 装上包、
+    `anima-world start`,看到的是毛坯,而这个引擎大半的能力开箱不可见。
+
+    宽容方向是**跳过而不是拒绝**,但绝不无声(返回值就是给调用方点名用的):
+
+    - **未知键跳过。** 种子会比引擎活得久:一个 1.4 的种子写了 1.3 没有的开关,
+      正确的行为是开机并少点亮一项,而不是让整个世界打不开。
+    - **密文键拒绝。** 种子是分发物,不许携带 `llm.api_key`(见
+      `WORLD_SEED_CONFIG_FORBIDS_SECRETS`)。
+    - **类型转不过去的跳过。** 按声明类型强转(和 `World.config_set` 共用同一份规则),
+      转不了就是作者把值写错了。
+
+    返回 `{"applied": {...}, "skipped": [(键, 原因), …]}`。
+    """
+    from anima_world.config_store import coerce_to_declared_type
+
+    report: dict[str, Any] = {"applied": {}, "skipped": []}
+    if not world_seed:
+        return report
+    raw = world_seed.get("config")
+    if raw is None:
+        return report
+    if not isinstance(raw, dict):
+        report["skipped"].append(("config", f"必须是一个对象,收到 {type(raw).__name__}"))
+        return report
+
+    for key, value in raw.items():
+        key = str(key)
+        if not config_store.has(key):
+            report["skipped"].append((key, "这个引擎版本没有这个配置键"))
+            continue
+        meta = config_store.meta(key)
+        if meta.get("is_secret"):
+            report["skipped"].append((key, "密文键不许写在种子里 —— 种子是要分发的"))
+            continue
+        try:
+            coerced = coerce_to_declared_type(value, meta.get("value_type", "str"))
+        except (TypeError, ValueError) as exc:
+            report["skipped"].append((key, f"值转不成 {meta.get('value_type')}:{exc}"))
+            continue
+        config_store.set(key, coerced)
+        report["applied"][key] = coerced
+    return report

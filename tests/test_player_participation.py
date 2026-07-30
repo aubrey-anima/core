@@ -68,13 +68,21 @@ def test_a_regular_visitor_eventually_crosses_a_band_and_grows_an_edge(tmp_path)
     """
     with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.player_move("p1", "cafe")
+        # 判据必须**限定到 p1**:夏 和别的角色也会跨档(内置世界就给她播了两段
+        # 关系,创世当场各生一条 relation_shift),拿"她有没有任何一条跨档记忆"
+        # 当作"玩家跨档了"会在第 1 天就误判成功 —— 测试假绿,而且世界越丰富越假。
+        def _player_shift():
+            return next(
+                (m for m in world.memories("夏")
+                 if m["kind"] == "relation_shift" and "p1" in m["summary"]),
+                None,
+            )
+
         crossed_on = None
         for day in range(1, 13):
             _say(world, f"第{day}天,又来了")
             _await(lambda: world.state()["relations"].get("夏|p1", {}).get("sentiment"))
-            if crossed_on is None and any(
-                m["kind"] == "relation_shift" for m in world.memories("夏")
-            ):
+            if crossed_on is None and _player_shift() is not None:
                 crossed_on = day
             world.scheduler.clock += A_DAY
 
@@ -82,7 +90,7 @@ def test_a_regular_visitor_eventually_crosses_a_band_and_grows_an_edge(tmp_path)
         assert 3 <= crossed_on <= 10, (
             f"第 {crossed_on} 天跨档 —— 太快像儿戏,太慢等于没有(按剩余空间衰减的步长)"
         )
-        shift = next(m for m in world.memories("夏") if m["kind"] == "relation_shift")
+        shift = _player_shift()
         assert "熟识" in shift["summary"]
         edges = world.graph("夏")
         assert any(e["predicate"] == "friendship" and e["object"] == "agent:p1" for e in edges), (

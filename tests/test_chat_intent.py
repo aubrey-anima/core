@@ -289,8 +289,10 @@ def test_the_burst_path_reports_the_classification_even_when_it_changes_nothing(
         assert [s["text"] for s in steps if s["kind"] == "message"], "对话那条路照旧要生成"
 
 
-def test_with_the_flag_off_the_classifier_is_never_called(tmp_path):
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+def test_with_the_flag_off_the_classifier_is_never_called(tmp_path, bare_seed):
+    # 素配种子:验的是**引擎默认值**是关的。内置橱窗替世界点亮了 intent
+    # (那是产品决定),拿它来验"默认关不关"是在验橱窗的布置(见 conftest)。
+    world = World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
     chat = ScriptedLLM("（夏抬头。）嗯。")
     classifier = ScriptedLLM(_classification("style_adjust", 0.99, kind="address_form", value="霜霜"))
     world.chat_service._llm = chat

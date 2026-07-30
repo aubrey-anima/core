@@ -148,8 +148,9 @@ def test_hysteresis_cuts_the_event_churn(tmp_path):
 
 
 @pytest.fixture
-def world(tmp_path):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+def world(tmp_path, bare_seed):
+    # 素配:这些测试验的是"开关不点亮时的引擎默认行为"(见 conftest)
+    w = World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
     yield w
     w.close()
 

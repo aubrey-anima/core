@@ -40,6 +40,17 @@
           "kind": "sleep",
           "params": {}
         }
+      ],
+      "money": 180,
+      "inventory": [
+        {
+          "item": "old_watch",
+          "note": "从不离身"
+        }
+      ],
+      "goals": [
+        "把店撑过这个雨季",
+        "让每个进门的人都愿意多坐一会儿"
       ]
     },
     {
@@ -82,6 +93,16 @@
           "kind": "sleep",
           "params": {}
         }
+      ],
+      "money": 240,
+      "inventory": [
+        {
+          "item": "sketchbook"
+        }
+      ],
+      "goals": [
+        "接到一个真正想做的项目",
+        "少说废话,把图画好"
       ]
     },
     {
@@ -133,6 +154,16 @@
           "kind": "sleep",
           "params": {}
         }
+      ],
+      "money": 60,
+      "inventory": [
+        {
+          "item": "paint_set"
+        }
+      ],
+      "goals": [
+        "画完手上这幅",
+        "攒够下个月的颜料钱"
       ]
     }
   ],
@@ -166,7 +197,24 @@
       "kind": "point",
       "parent": "harbor_st",
       "x": 0.3,
-      "y": 0.45
+      "y": 0.45,
+      "stock": [
+        {
+          "item": "coffee",
+          "qty": 12,
+          "price": 6.0
+        },
+        {
+          "item": "sandwich",
+          "qty": 8,
+          "price": 12.0
+        },
+        {
+          "item": "sketchbook",
+          "qty": 3,
+          "price": 25.0
+        }
+      ]
     },
     {
       "id": "workshop",
@@ -185,6 +233,195 @@
       "parent": "oldport",
       "x": 0.78,
       "y": 0.8
+    }
+  ],
+  "config": {
+    "needs.enabled": true,
+    "economy.enabled": true,
+    "social.enabled": true,
+    "chat.stance.enabled": true,
+    "chat.tools.enabled": true,
+    "chat.intent.enabled": true,
+    "autonomy.enabled": true,
+    "chat.loop.enabled": false
+  },
+  "relations": [
+    {
+      "a": "夏",
+      "b": "遥",
+      "sentiment": 0.35,
+      "r_type": "常来店里的老客人",
+      "r_type_back": "话多但让人放松的店员"
+    },
+    {
+      "a": "夏",
+      "b": "柔",
+      "sentiment": 0.55,
+      "r_type": "住得近的朋友",
+      "r_type_back": "总记得我口味的人"
+    },
+    {
+      "a": "遥",
+      "b": "柔",
+      "sentiment": 0.15,
+      "r_type": "点头之交",
+      "r_type_back": "在咖啡店见过几次的人"
+    }
+  ],
+  "memories": [
+    {
+      "agent_id": "夏",
+      "kind": "seed",
+      "importance": 0.7,
+      "anchor": true,
+      "summary": "这家咖啡店是我盘下来的,第一天只卖出去三杯,雨下了一整天。"
+    },
+    {
+      "agent_id": "夏",
+      "kind": "seed",
+      "importance": 0.5,
+      "summary": "陆知遥每次来都坐靠窗那个位置,点美式,不加糖。"
+    },
+    {
+      "agent_id": "遥",
+      "kind": "seed",
+      "importance": 0.7,
+      "anchor": true,
+      "summary": "我辞掉了大所的工作,自己开了这间工作室,到现在还没接到第二个像样的活。"
+    },
+    {
+      "agent_id": "遥",
+      "kind": "seed",
+      "importance": 0.5,
+      "summary": "港街拐角那家咖啡店的手冲不错,店员话有点多。"
+    },
+    {
+      "agent_id": "柔",
+      "kind": "seed",
+      "importance": 0.7,
+      "anchor": true,
+      "summary": "画了三年还是卖不掉,但停下来更难受。"
+    },
+    {
+      "agent_id": "柔",
+      "kind": "seed",
+      "importance": 0.5,
+      "summary": "苏晚夏总说我脸色差,给我多加一份糖。"
+    }
+  ],
+  "items": [
+    {
+      "id": "coffee",
+      "name": "咖啡",
+      "kind": "consumable",
+      "base_price": 6.0,
+      "restores": {
+        "hunger": 0.15,
+        "energy": 0.1
+      }
+    },
+    {
+      "id": "sandwich",
+      "name": "三明治",
+      "kind": "consumable",
+      "base_price": 12.0,
+      "restores": {
+        "hunger": 0.5
+      }
+    },
+    {
+      "id": "sketchbook",
+      "name": "速写本",
+      "kind": "durable",
+      "base_price": 25.0
+    },
+    {
+      "id": "paint_set",
+      "name": "一盒颜料",
+      "kind": "durable",
+      "base_price": 40.0
+    },
+    {
+      "id": "old_watch",
+      "name": "父亲的旧怀表",
+      "kind": "durable",
+      "base_price": 0.0
+    }
+  ],
+  "stocks": [
+    {
+      "owner": "world",
+      "values": {
+        "季节": 2,
+        "雨天数": 0
+      }
+    },
+    {
+      "owner": "tree:harbor_oak",
+      "values": {
+        "树高": 3.2,
+        "生长速度": 0.004,
+        "最大树高": 12
+      }
+    }
+  ],
+  "rules": [
+    {
+      "id": "tree_growth",
+      "every": {
+        "days": 1
+      },
+      "for_each": {
+        "kind": "tree"
+      },
+      "when": [
+        "world_季节 != 4"
+      ],
+      "set": {
+        "树高": "min(树高 + 生长速度 * dt, 最大树高)"
+      },
+      "emit": [
+        {
+          "when": "树高 >= 最大树高",
+          "type": "tree_matured"
+        }
+      ]
+    },
+    {
+      "id": "rainy_days",
+      "every": {
+        "days": 1
+      },
+      "for_each": {
+        "owner": "world"
+      },
+      "set": {
+        "雨天数": "雨天数 + 1"
+      }
+    }
+  ],
+  "stock_visibility": [
+    {
+      "kind": "tree",
+      "key": "树高",
+      "visible": "here"
+    },
+    {
+      "kind": "world",
+      "key": "季节",
+      "visible": "public"
+    },
+    {
+      "kind": "world",
+      "key": "雨天数",
+      "visible": "public"
+    }
+  ],
+  "stock_places": [
+    {
+      "owner": "tree:harbor_oak",
+      "location": "cafe",
+      "label": "门口那棵老橡树"
     }
   ]
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 import logging
 import sqlite3
 import sys
@@ -47,7 +48,8 @@ from anima_world.prompt_store import seed_defaults as seed_prompt_defaults
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
 from anima_world.world_store import BTStore, LocationStore
-from anima_world.world_seed import WorldSeedError
+from anima_world.rules import parse_rules
+from anima_world.world_seed import WorldSeedError, apply_seed_config
 from anima_world.world_seed import world_seed_errors as _world_seed_errors
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
@@ -131,6 +133,20 @@ def _build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--player-id", default="cli", help="你的身份 id —— 角色对你的印象记在它头上")
     chat.add_argument("--name", default=None, help="你在角色眼里的称呼(默认「访客」)")
     chat.add_argument("--list", action="store_true", dest="list_only", help="只列出角色名册就退出")
+
+    prompt = sub.add_parser(
+        "prompt", help="看一眼某个角色此刻收到的提示词 —— 逐块带来源,并说明少了哪块、为什么",
+    )
+    prompt.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    prompt.add_argument("--agent", default=None, help="看谁的(角色 id);不给就列出名册")
+    prompt.add_argument("--player-id", default="cli", help="以谁的身份跟她说话")
+    prompt.add_argument("--name", default=None, help="你在她眼里的称呼")
+    prompt.add_argument("--message", default="在吗", help="假设这一刻你说的是哪句话")
+    prompt.add_argument(
+        "--full", action="store_true",
+        help="连每块的正文一起打(默认只打摘要:块名、字数、首行)",
+    )
+    prompt.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
     run = sub.add_parser(
         "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
@@ -676,6 +692,34 @@ def _store_genesis_seed(conn: Any, world_seed: dict[str, Any] | None) -> None:
     conn.commit()
 
 
+def _apply_seed_config_at_genesis(
+    conn: Any, config_store: Any, world_seed: dict[str, Any] | None
+) -> None:
+    """种子的 `config` 块 —— **只对空库生效**,和其它 seed_defaults 同一条契约。
+
+    已有的世界不认:那些开关此时是**运行数据**(作者可能早就 `config set` 改过),
+    拿今天的种子回头覆盖它们,等于让一次重启悄悄改掉一个跑了半年的世界的行为。
+
+    跳过的键会逐条 warning 点名 —— 作者以为点亮了、实际没点亮,正是这个仓库最
+    在意的那类错。
+    """
+    if world_seed is None:
+        return
+    (events,) = conn.execute("SELECT COUNT(*) FROM events").fetchone()
+    (locations,) = conn.execute("SELECT COUNT(*) FROM locations").fetchone()
+    if events or locations:
+        return
+    report = apply_seed_config(config_store, world_seed)
+    for key, reason in report["skipped"]:
+        logger.warning("种子里的 config.%s 没有生效:%s", key, reason)
+    if report["applied"]:
+        logger.info(
+            "种子点亮了 %d 个开关:%s",
+            len(report["applied"]),
+            ", ".join(f"{k}={v}" for k, v in sorted(report["applied"].items())),
+        )
+
+
 def build_serve_scheduler(
     n_agents: int | None = None,
     db_path: str | Path | None = None,
@@ -741,6 +785,9 @@ def build_serve_scheduler(
         # idempotent (no-op past the first boot).
         config_store = ConfigStore(conn, fernet_key=load_or_create_key(db_path), lock=shared_lock)
         seed_config_defaults(config_store)
+        # 种子自己带的开关(创世时一次,空库才认)。**必须在默认值之后**:种子是
+        # 作者对这个世界的意见,默认值只是"没人说话时的样子"。
+        _apply_seed_config_at_genesis(conn, config_store, world_seed)
         # An explicitly-mocked run is not "degraded", and `start` reports the
         # same thing far better in its own banner (llm_warning=False).
         if llm_warning and not force_mock_llm:
@@ -854,6 +901,22 @@ def build_serve_scheduler(
         beat_script=beat_script,
         beat_agent_factory=beat_agent_factory,
     )
+    # world-rules:存量的持久层 + 世界的规律。规律从种子播进 `world_rules` 表
+    # (空库一次,之后表里的行说了算——和地图/行为树同一条契约),坏规律在这里
+    # 就当场抛 RuleError,不流到运行期。
+    if conn is not None:
+        from anima_world.perception import VisibilityStore
+        from anima_world.stocks import StockStore
+
+        scheduler.stock_store = StockStore(conn, lock=shared_lock)
+        scheduler.visibility_store = VisibilityStore(conn, lock=shared_lock)
+        with shared_lock:
+            _seed_stocks(conn, world_seed, scheduler.stock_store)
+            _seed_world_rules(conn, world_seed)
+            _seed_stock_visibility(conn, world_seed, scheduler.visibility_store)
+            _seed_stock_places(conn, world_seed, scheduler.visibility_store)
+            scheduler.world_rules = _load_world_rules(conn)
+            _warn_unresolved_rule_names(conn, scheduler.world_rules)
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -1077,6 +1140,156 @@ def _rebuild_memories(
         return descriptor
 
     memory_store.rebuild(persisted, trigger=_trigger)
+
+
+
+def _seed_stocks(conn: Any, world_seed: dict[str, Any] | None, store: Any) -> None:
+    """种子里的初始存量(`"stocks": [{"owner": …, "values": {…}}]`)。空库一次。
+
+    坏条目逐条丢弃 —— 和种子里其它可选字段同一条宽容原则(规律本身不是这样:
+    那是世界的物理法则,坏一条就整体拒绝,见 `_seed_world_rules`)。
+    """
+    if world_seed is None:
+        return
+    (existing,) = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()
+    if existing:
+        return
+    for index, entry in enumerate(_seed_entry_dicts(world_seed, "stocks")):
+        owner = str(entry.get("owner") or "").strip()
+        values = entry.get("values")
+        if not owner or not isinstance(values, dict):
+            logger.warning("world_seed stocks[%s] 缺 owner 或 values;跳过", index)
+            continue
+        clean: dict[str, float] = {}
+        for key, raw in values.items():
+            try:
+                clean[str(key)] = float(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "world_seed stocks[%s] 的 %s 不是数(%r);跳过这一项", index, key, raw
+                )
+        if clean:
+            store.set_many(owner, clean, tick=0)
+
+
+def _seed_world_rules(conn: Any, world_seed: dict[str, Any] | None) -> None:
+    """种子里的规律 → `world_rules` 表。空库一次,之后表里的行说了算。
+
+    **坏规律整体拒绝**(`RuleError`),不逐条丢弃:规律是这个世界的物理法则,
+    少一条不是"少一点内容",是这个世界从此算错。宁可开不了机。
+    """
+    if world_seed is None:
+        return
+    (existing,) = conn.execute("SELECT COUNT(*) FROM world_rules").fetchone()
+    if existing:
+        return
+    entries = world_seed.get("rules")
+    if not entries:
+        return
+    parse_rules(entries)   # 校验在这里,坏了当场抛
+    stamp = datetime.now(timezone.utc).isoformat()
+    for entry in entries:
+        conn.execute(
+            "INSERT INTO world_rules (id, definition, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(id) DO NOTHING",
+            (str(entry.get("id")), json.dumps(entry, ensure_ascii=False), stamp),
+        )
+    conn.commit()
+
+
+def _load_world_rules(conn: Any) -> list[Any]:
+    """从表里读出规律并编译。表被人手改坏了也当场报错,不带着坏规律开机。"""
+    rows = conn.execute("SELECT definition FROM world_rules ORDER BY id").fetchall()
+    if not rows:
+        return []
+    return parse_rules([json.loads(row[0]) for row in rows])
+
+
+
+def _warn_unresolved_rule_names(conn: Any, rules: list[Any]) -> None:
+    """规律读了一个它**够不着**的量 —— 开机时点名。
+
+    只警告不拒绝:量可以在世界跑起来之后才被创建(种一棵树),所以这不能是错误。
+    但必须说出来 —— 这条的由来是一次真实事故:内置橱窗的规律把 `world_季节` 写成了
+    `季节`,于是那条规律每次求值都被静默跳过,树永远不长。
+
+    "够不着"要**按选择器逐条算**,不能把所有 owner 的量名混成一个集合:world 自己
+    有个 `季节`,不代表一条作用在树上的规律能裸着读到它(那正是上面那个事故 ——
+    第一版 helper 就是这么写的,于是它对那个 bug 视而不见)。
+    """
+    from anima_world.rules import BUILTIN_NAMES, WORLD_PREFIX, missing_names
+    from anima_world.stocks import owner_kind
+
+    rows = conn.execute("SELECT owner, key FROM stocks").fetchall()
+    by_owner: dict[str, set[str]] = {}
+    by_kind: dict[str, set[str]] = {}
+    for owner, key in rows:
+        by_owner.setdefault(owner, set()).add(key)
+        by_kind.setdefault(owner_kind(owner), set()).add(key)
+
+    # 世界的量只能带前缀读到 —— 这正是那个事故的要害。
+    globals_ = {f"{WORLD_PREFIX}{key}" for key in by_kind.get("world", set())}
+    always = globals_ | set(BUILTIN_NAMES)
+
+    for rule in rules:
+        if rule.selector_kind == "kind":
+            reachable = by_kind.get(rule.selector_value, set())
+        elif rule.selector_kind == "owner":
+            reachable = by_owner.get(rule.selector_value, set())
+        else:                                   # action:作用在角色身上
+            reachable = by_kind.get("agent", set())
+        unresolved = missing_names(rule, reachable | always)
+        if unresolved:
+            logger.warning(
+                "规律 %s 读了它够不着的量 %s —— 写错名字了吗?"
+                "(世界的量要写成 `%s季节` 这样,带前缀)",
+                rule.id, unresolved, WORLD_PREFIX,
+            )
+
+
+def _seed_stock_places(conn: Any, world_seed: dict[str, Any] | None, store: Any) -> None:
+    """种子里"这个东西在哪"(`"stock_places": [...]`)。空表一次。
+
+    `here` 档的可见性靠它才成立 —— 没有它,一棵树永远不在任何地方,于是"在场可见"
+    等于"永远看不见"。
+    """
+    if world_seed is None:
+        return
+    (existing,) = conn.execute("SELECT COUNT(*) FROM stock_places").fetchone()
+    if existing:
+        return
+    for index, entry in enumerate(_seed_entry_dicts(world_seed, "stock_places")):
+        owner = str(entry.get("owner") or "").strip()
+        location = str(entry.get("location") or "").strip()
+        if not owner or not location:
+            logger.warning("world_seed stock_places[%s] 缺 owner 或 location;跳过", index)
+            continue
+        store.place(owner, location, entry.get("label"))
+
+
+def _seed_stock_visibility(conn: Any, world_seed: dict[str, Any] | None, store: Any) -> None:
+    """种子里的可见性声明(`"stock_visibility": [...]`)。空表一次。
+
+    **声明本身就是这一层的开关** —— 没声明过任何东西的世界,角色感知不到任何量,
+    这一层不进提示词、不花 token。坏条目逐条丢弃并点名(可见性写错的后果是
+    "她本该知道却不知道",不该拦住启动)。
+    """
+    if world_seed is None:
+        return
+    (existing,) = conn.execute("SELECT COUNT(*) FROM stock_visibility").fetchone()
+    if existing:
+        return
+    for index, entry in enumerate(_seed_entry_dicts(world_seed, "stock_visibility")):
+        kind = str(entry.get("kind") or "").strip()
+        key = str(entry.get("key") or "").strip()
+        visibility = str(entry.get("visible") or entry.get("visibility") or "").strip()
+        if not kind or not key:
+            logger.warning("world_seed stock_visibility[%s] 缺 kind 或 key;跳过", index)
+            continue
+        try:
+            store.declare(kind, key, visibility, entry.get("label"))
+        except ValueError as exc:
+            logger.warning("world_seed stock_visibility[%s] 没生效:%s", index, exc)
 
 
 def _seed_world_defs(
@@ -1595,6 +1808,63 @@ def _print_roster(world: Any, db_path: str) -> None:
           f"{'' if db_path == onboarding.DEFAULT_DB_PATH else f' --db-path {db_path}'}\n")
 
 
+def run_prompt(args: argparse.Namespace) -> int:
+    """`anima-world prompt` —— 她此刻收到的提示词,逐块摊开。
+
+    为什么它值得一道命令:提示词是这套东西**最不可见又最容易出错**的一层。1.3
+    开发期四个 bug 有三个在这儿,而当时唯一的诊断办法是写 Python 往私有属性上塞
+    一个假 LLM 去偷看 —— 世界作者(改的是 `prompt_templates` 里的模板)一点办法没有。
+
+    **看,但不碰**:不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来。
+    """
+    from anima_world.api import World
+
+    try:
+        world = World.open(args.db_path)
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        print(f"[prompt] {exc}", file=sys.stderr)
+        return 2
+    try:
+        roster = world.state().get("agents", {})
+        if args.agent is None:
+            _print_roster(world, args.db_path)
+            return 0
+        if args.agent not in roster:
+            print(f"[prompt] 这个世界里没有 {args.agent!r}。", file=sys.stderr)
+            _print_roster(world, args.db_path)
+            return 2
+        seen = world.debug_prompt(
+            args.agent,
+            player_id=args.player_id,
+            display_name=args.name or "访客",
+            message=args.message,
+        )
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(seen, ensure_ascii=False, indent=2))
+        return 0
+
+    name = roster[args.agent].get("name") or args.agent
+    print(f"{name} 此刻收到的提示词:{len(seen['blocks'])} 块 / {seen['system_chars']} 字")
+    print(f"(假设你说的是「{args.message}」)\n")
+    for block in seen["blocks"]:
+        head = (block["text"].splitlines() or [""])[0]
+        share = block["chars"] * 100 // max(1, seen["system_chars"])
+        print(f"  {block['label']:<14} {block['chars']:>5} 字 {share:>3}%  {head[:44]}")
+        if args.full:
+            for line in block["text"].splitlines():
+                print(f"      │ {line}")
+            print()
+    if seen["absent"]:
+        # 缺席比多余难查得多:世界照跑、她照说话,只是从来没提那棵树。
+        print("\n没出现的块,以及为什么:")
+        for label, why in seen["absent"].items():
+            print(f"  {label:<14} {why}")
+    return 0
+
+
 def run_chat(args: argparse.Namespace) -> int:
     """和一个角色对话的 REPL(#6)。
 
@@ -1791,10 +2061,30 @@ def run_play(args: argparse.Namespace) -> int:
         print(_PLAY_HELP)
         print()
 
+        # 落座:在第一句话之前就把玩家放到她跟前,而不是等第一条消息才注册在场。
+        # 不这样做的话,「她自己主动来找你」(issue #13 的闲置搭话 / autonomy 的
+        # reach_out)在会话的头几个 tick 里必然啥都等不到——世界还不知道玩家在哪。
+        start_here = (world.state().get("agents", {}).get(agent_id) or {}).get("location")
+        if start_here:
+            try:
+                world.player_move(args.player_id, start_here)
+            except (KeyError, ValueError):
+                logger.debug("player could not be placed at %r", start_here)
+        last_hail_seq = 0
+
         history: dict[str, list[dict[str, str]]] = {}
         turns = 0
         while True:
             here = world.state().get("agents", {}).get(agent_id, {})
+            hails = world.inbox(args.player_id, since_seq=last_hail_seq)
+            for hail in hails:
+                last_hail_seq = max(last_hail_seq, int(hail.get("seq", 0)))
+                payload = hail.get("payload") or {}
+                who = payload.get("agent_id", "?")
+                text = str(payload.get("text") or "").strip()
+                # #13 的闲置搭话没带话(text 是空的),autonomy 的 reach_out 带一句。
+                note = f"{who} 主动来找你了" + (f":{text}" if text else "(她过来打了个招呼)")
+                print(f"  {onboarding.dim('· ' + note)}")
             try:
                 line = input(f"{display_name} → {here.get('name', agent_id)} > ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -2503,6 +2793,27 @@ def run_doctor(args: argparse.Namespace) -> int:
                     print(f"  {onboarding.red(onboarding.BAD)} LLM 调不通:{error}")
                     print(f"      {onboarding.dim('检查 llm.base_url / llm.model:anima-world config list --category llm')}")
 
+        # 背景槽:意图分类与自主决策是**便宜活**,而空着的背景槽会退回主模型。
+        # 这不是坏配置,是个白花的钱 —— 而且分类那次往返**串在回复前面**,玩家等的
+        # 是两次生成而不是一次。产物上看不出来(她照样回话),所以这里得点一句。
+        background = str(store.get("llm.background.model", default="") or "").strip()
+        cheap_users = [
+            (key, label) for key, label in (
+                ("chat.intent.enabled", "意图分类(每轮一次,串在回复前面)"),
+                ("autonomy.enabled", "定时轮次的决定"),
+                ("chat.loop.enabled", "连说的每一步"),
+            ) if store.get(key, default=False)
+        ]
+        main_model = str(store.get("llm.model", default="") or "").strip() or "(未设置)"
+        if background:
+            print(f"  {onboarding.green(onboarding.OK)} 背景槽用 {background}(便宜活不走主模型)")
+        elif cheap_users:
+            print(f"  {onboarding.yellow(onboarding.WARN)} 背景槽没配 —— "
+                  f"这些在用主模型 {main_model}:")
+            for _, label in cheap_users:
+                print(f"      {onboarding.dim('· ' + label)}")
+            print(f"      {onboarding.dim('anima-world config set llm.background.model <一个便宜快的模型>')}")
+
         rate = store.get("scheduler.tick_rate", default=1.0)
         mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
         print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
@@ -2772,6 +3083,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_config(args)
     if args.command == "doctor":
         return run_doctor(args)
+    if args.command == "prompt":
+        return run_prompt(args)
     if args.command == "chat":
         return run_chat(args)
     if args.command == "run":

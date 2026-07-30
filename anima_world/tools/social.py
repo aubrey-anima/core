@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from anima_world.tools.base import ToolCallError, ToolContext, ToolResult, tool
+from anima_world.tools.base import AUTONOMY, CHAT, ToolCallError, ToolContext, ToolResult, tool
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ def _minutes(params: dict, key: str, default: float, ctx: ToolContext, cap_key: 
         "minutes": {"type": "number", "description": "屏蔽多少分钟", "required": True},
         "reason": {"type": "string", "description": "为什么(只有作者与运维看得到)"},
     },
+    surfaces=(CHAT, AUTONOMY),
 )
 def mute(ctx: ToolContext, params: dict) -> ToolResult:
     minutes = _minutes(params, "minutes", _DEFAULT_MUTE_MINUTES, ctx, "chat.tools.max_mute_minutes")
@@ -114,7 +115,7 @@ def delay_reply(ctx: ToolContext, params: dict) -> ToolResult:
 @tool(
     id="walk_away",
     kind="walk_away",
-    description="话说到一半就走人:离开这里,对话随之结束(面对面时才有意义)",
+    description="话说到一半就走人:面对面就真的离开这里,隔着手机就是挂断",
     params={"to_location": {"type": "string", "description": "去哪儿(不填就随便走开)"}},
 )
 def walk_away(ctx: ToolContext, params: dict) -> ToolResult:
@@ -153,6 +154,7 @@ def walk_away(ctx: ToolContext, params: dict) -> ToolResult:
         "keyword": {"type": "string", "description": "不谈什么", "required": True},
         "minutes": {"type": "number", "description": "多久之后可以再谈(不填就一直)"},
     },
+    surfaces=(CHAT, AUTONOMY),
 )
 def refuse_topic(ctx: ToolContext, params: dict) -> ToolResult:
     keyword = str(params.get("keyword") or "").strip()
@@ -168,20 +170,57 @@ def refuse_topic(ctx: ToolContext, params: dict) -> ToolResult:
 @tool(
     id="broadcast",
     kind="broadcast",
-    description="说一句公开的话,世界里的人都能看到",
+    description="当众说一句话,这会儿在你身边的人都听得见,而且会记住",
     params={"text": {"type": "string", "description": "说什么", "required": True}},
+    surfaces=(CHAT, AUTONOMY),
 )
 def broadcast(ctx: ToolContext, params: dict) -> ToolResult:
+    """当众说一句 —— **在场的人真的会记住它**。
+
+    原来这条只发一个 `agent_broadcast` 事件就完了:没有任何角色消费它,于是她"当众
+    宣布"的后果是一行日志,世界里谁也不知道。而菜单还告诉她"世界里的人都能看到"——
+    她照着一句假话做了决定。这是 CLAUDE.md 那条硬不变量的漏洞:**她的选择必须在世界
+    里兑现**(`walk_away` 真起程、`delay_reply` 真回来敲门、`narrative_direction` 真挪人)。
+
+    兑现走现成的路:给每个在场的角色发一条 `memory_seed`,调度器会折进他们的记忆 ——
+    于是下次跟他们说话时,这句话在**他们的**提示词里。不新造广播收件箱:记忆本来就是
+    这个引擎里"角色知道一件事"的表示。
+
+    听众是**此刻同一个地方的人**,不是全世界:一句喊话传遍地图是那种"客观存在 = 人人
+    皆知"的错(§2.9.4 认知层立的就是这条规矩)。要传更远,那是八卦的活。
+    玩家侧不落记忆 —— 宿主自己读 `World.broadcasts()`,引擎不替 UI 做主。
+    """
     text = str(params.get("text") or "").strip()
     if not text:
         raise ToolCallError("广播内容是空的")
+    here = ctx.runtime.agent_location(ctx.agent_id) or None
+    speaker = ctx.runtime.agent_names().get(ctx.agent_id) or ctx.agent_id
+    heard_by = [
+        agent_id for agent_id in ctx.runtime.agent_ids()
+        if agent_id != ctx.agent_id and here and ctx.runtime.agent_location(agent_id) == here
+    ]
     ctx.runtime.emit({
         "type": "agent_broadcast",
         "who": ctx.agent_id,
-        "loc": ctx.runtime.agent_location(ctx.agent_id) or None,
-        "payload": {"agent_id": ctx.agent_id, "text": text, "audience": "world"},
+        "loc": here,
+        "payload": {
+            "agent_id": ctx.agent_id, "text": text,
+            "audience": "here", "heard_by": heard_by,
+        },
     })
-    return ToolResult(detail={"text": text})
+    for listener in heard_by:
+        ctx.runtime.emit({
+            "type": "memory_seed",
+            "who": listener,
+            "loc": here,
+            "payload": {
+                "agent_id": listener,
+                "kind": "observation",
+                "summary": f"{speaker}当众说:{text}",
+                "importance": 0.45,
+            },
+        })
+    return ToolResult(detail={"text": text, "heard_by": heard_by})
 
 
 @tool(
@@ -193,3 +232,51 @@ def broadcast(ctx: ToolContext, params: dict) -> ToolResult:
 def wait_for_user(ctx: ToolContext, params: dict) -> ToolResult:
     """#17 的显式让位。它不是"什么也没做":它是 loop 唯一的正常出口。"""
     return ToolResult(stop_loop=True, detail={"reason": "explicit_yield"})
+
+
+@tool(
+    id="reach_out",
+    kind="hail",
+    description="主动去找一个此刻在场的人开口(只有定时轮次里用得上)",
+    params={
+        "player_id": {"type": "string", "description": "找谁(在场名单里的那个 id)"},
+        "text": {"type": "string", "description": "开口第一句说什么"},
+    },
+    surfaces=(AUTONOMY,),
+)
+def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
+    """她自己决定来找你(定时轮次的主力能力)。
+
+    走 issue #13 那条 `agent_hail`,并守住那条边界:**敲门不是对话** —— 不产生记忆、
+    不动关系、不开会话。玩家还没回话,世界里什么也没发生;真正的对话仍然由
+    `World.chat` 发起,走原来那条完整的链。这里比 #13 多的只有一句:她带着话来的,
+    而不是一条空白的"有人找过你"。
+
+    在场以 TTL 为准(`World.who_is_present`)**并且要同地**:找一个不在场、或者在场
+    但不在她这儿的人都是空动作(隔着半个地图"走过来跟你说话"没有意义)——
+    那正是这个仓库最在意的"给不在的人写事件",所以当场拒绝而不是照发。
+    """
+    target = str(params.get("player_id") or "").strip()
+    present = ctx.runtime.present_player_ids(ctx.agent_id)
+    if not present:
+        raise ToolCallError("这会儿她身边没有人")
+    if not target:
+        target = present[0]
+    if target not in present:
+        raise ToolCallError(f"{target} 不在她身边 —— 给不在场的人发一条搭话是空动作")
+    text = str(params.get("text") or "").strip()
+    here = ctx.runtime.agent_location(ctx.agent_id)
+    ctx.runtime.emit({
+        "type": "agent_hail",
+        "who": ctx.agent_id,
+        "loc": here or None,
+        "payload": {
+            "agent_id": ctx.agent_id,
+            "player_id": target,
+            "player_name": ctx.runtime.player_name(target),
+            "location": here,
+            "reason": "initiative",   # 不是"闲着想找人",是她自己决定的
+            "text": text,
+        },
+    })
+    return ToolResult(detail={"player_id": target, "text": text})

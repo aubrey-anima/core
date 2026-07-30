@@ -196,6 +196,20 @@ class Scheduler:
         # chat-agent:聊天的当前值存储(World 注入)。只为一件事:到点把
         # "等会儿再说"兑现成一次敲门。没有它世界照跑,那条约就永远不到期。
         self.chat_state: Any | None = None
+        # autonomy:定时轮次的回调(World 注入)。`hook(agent_ids, world_time)`,
+        # 必须立刻返回 —— 决定与执行都在世界自己那条事件循环上跑。
+        self._autonomy_hook: Any | None = None
+        self._autonomy_interval: int = 0   # 0 = 关着
+        # world-rules:世界的规律(数据)与它们作用的存量。规律是纯算术,跑在 tick 上。
+        self.stock_store: Any | None = None
+        self.visibility_store: Any | None = None   # 可见性声明 + 东西在哪(perception)
+        self.world_rules: list[Any] = []
+        # 规律上次算是什么时候 —— 只决定"要不要现在算",不影响结果(结果由 dt 定),
+        # 所以是内存态:重启清空最多多算一次,值不会错。
+        self._rule_last_run: dict[str, int] = {}
+        self._rule_stats: dict[str, Any] = {
+            "evaluated": 0, "written": 0, "emitted": 0, "skipped": 0, "last_error": None,
+        }
         # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
         self._hailed: dict[tuple[str, str], int] = {}
         # 本世界日各人上了多久班(tick)。日切结算工资时清空。
@@ -862,6 +876,14 @@ class Scheduler:
 
             # 3.5 到点的"等会儿再说":她真的回来敲一次门(chat-agent)。
             self._fire_due_followups()
+
+            # 3.6 世界的规律:树在长、矿在枯(world-rules)。**跑在 tick 线程上**
+            #     —— 它是纯算术 + SQL,没有 LLM,和 needs/economy 同一类。
+            #     (autonomy 正相反:那条要打网络,必须丢到别的线程去。)
+            self._evaluate_world_rules()
+
+            # 3.7 定时轮次:问问她此刻要不要自己做点什么(autonomy)。
+            self._maybe_run_autonomy(now)
 
             # 4. World clock → every agent's blackboard, then run its BT.
             #    bt-duties D1: the tree is driven by TIME, not by boredom. The
@@ -1730,6 +1752,75 @@ class Scheduler:
                 # 作息都没有(演示世界现在就是),那样这条路就永远走不到。
                 self._maybe_hail_player(agent)
             return True
+
+    def _evaluate_world_rules(self) -> None:
+        """把到点的规律跑一遍(world-rules)。
+
+        没有规律的世界这里是一次字典判空,所以常开也不花钱。任何一条规律算不出来
+        只跳过它自己并留下警告 —— 一个手滑的公式不该让整个世界停摆(和节拍脚本
+        同一条运行期降级纪律)。
+        """
+        if not self.world_rules or self.stock_store is None:
+            return
+        from anima_world.stocks import evaluate_due
+
+        try:
+            report = evaluate_due(
+                self.stock_store,
+                self.world_rules,
+                self.clock,
+                last_run=self._rule_last_run,
+                action_owners=self._agents_doing,
+                emit=self._record_and_deliver,
+            )
+        except Exception:  # noqa: BLE001 - 规律引擎自己挂了也不许掀翻 tick
+            logger.warning("world-rules evaluation failed", exc_info=True)
+            return
+        self._rule_stats["evaluated"] += report["evaluated"]
+        self._rule_stats["written"] += report["written"]
+        self._rule_stats["emitted"] += report["emitted"]
+        if report["skipped"]:
+            self._rule_stats["skipped"] += len(report["skipped"])
+            self._rule_stats["last_error"] = report["skipped"][-1]
+
+    def _agents_doing(self, action_kind: str) -> list[str]:
+        """此刻正在做某个动作的角色,按 `agent:<id>` 返回 —— 供 `for_each.action` 用。
+
+        修炼、采矿、耕种都是这一类:投入的是**时间**(每 tick 一份),而速率由
+        行为者自己的量决定。
+        """
+        owners: list[str] = []
+        for agent_id, action in self._current_action.items():
+            if action is not None and action.kind == action_kind:
+                owners.append(f"agent:{agent_id}")
+        return owners
+
+    def _maybe_run_autonomy(self, now: WorldTime) -> None:
+        """到点了就喊一声"该问问她们了",然后**立刻返回**(autonomy)。
+
+        调度器不认识 LLM,也不认识能力注册表 —— 它只认识 `World` 注进来的这个回调,
+        和 `_present_players` / `chat_state` 同一个模式。回调必须自己把活丢到别的
+        线程去:**时钟永远不等网络**,这是这个引擎最老的一条不变量。
+
+        节流在这里而不是在回调里:一个漏了节流的回调会变成每 tick 一次 LLM 调用,
+        而那在演示速度下是每秒一次。
+        """
+        hook = self._autonomy_hook
+        if hook is None:
+            return
+        interval = max(1, int(self._autonomy_interval))
+        if self.clock % interval:
+            return
+        due = [
+            brain.agent.id for brain in self.agents.values()
+            if brain.agent.id not in self._transit   # 在赶路的人不做别的事
+        ]
+        if not due:
+            return
+        try:
+            hook(due, now)
+        except Exception:  # noqa: BLE001 - 自主轮次挂了绝不掀翻 tick
+            logger.warning("autonomy hook failed", exc_info=True)
 
     def _fire_due_followups(self) -> None:
         """她说的"等会儿再说"到点了 —— 真的回来敲一次门(chat-agent,#15)。

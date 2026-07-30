@@ -112,3 +112,55 @@ def test_schema_revision_advances_only_forward(tmp_path):
     init_schema(raw)  # 相当于本引擎又开了一次
     assert read_schema_revision(raw) == 99
     raw.close()
+
+
+# 一个世界文件里有哪些表 —— **钉住它**,不是为了防止加表,是为了让加表变成一个
+# 需要动手改这一行的**显式动作**。
+#
+# 这条测试是踩过坑补的:1.3.0 提交之后又加了 stocks / world_rules /
+# stock_visibility / stock_places 四张表,而 `SCHEMA_REVISION` 停在原值 ——
+# **451 项测试一条都没红**。戳的全部作用是让人分辨两个世界文件互相缺什么,而
+# 一个不跟着表变的戳就是在撒谎,偏偏没有任何东西看得见它。
+#
+# 加表时:把表名加进来,**同一次改动里把 SCHEMA_REVISION 也升一格**,并回答
+# CLAUDE.md 那句 —— 老引擎打开这个文件还能跑吗?能 → 加法修订 + 次版本;
+# 不能 → 那是 db 格式变更,升主版本(`DB_FORMAT_VERSION`)。
+SCHEMA_TABLES_AT_REVISION_3 = {
+    # 1.0 ~ 1.2 的底
+    "agent_needs", "bt_actions", "bt_nodes", "cliques", "config", "conversations",
+    "db_meta", "edges", "events", "item_defs", "locations", "memories", "messages",
+    "prompt_templates", "reflection_state", "shop_stock",
+    # 修订 2:chat-agent(1.3.0 第一批)
+    "agent_followups", "agent_mutes", "agent_refused_topics", "agent_stance",
+    "persona_overrides",
+    # 修订 3:world-rules 与认知层(1.3.0 第二批)
+    "stocks", "world_rules", "stock_visibility", "stock_places",
+}
+
+
+def test_the_table_set_is_pinned_to_the_revision(tmp_path):
+    """加了表就必须改这里,于是"顺手加张表"不可能再悄悄发生。"""
+    from anima_world.db import SCHEMA_REVISION, open_db
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        actual = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master"
+                " WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    finally:
+        conn.close()
+
+    added = actual - SCHEMA_TABLES_AT_REVISION_3
+    removed = SCHEMA_TABLES_AT_REVISION_3 - actual
+    assert not added, (
+        f"新增了表 {sorted(added)} —— 把它们加进 SCHEMA_TABLES_AT_REVISION_3,"
+        f"并在同一次改动里把 SCHEMA_REVISION(现在是 {SCHEMA_REVISION})升一格。"
+        "戳不跟着表走,就等于把'让降级看得见'这个机制关掉了。"
+    )
+    assert not removed, (
+        f"少了表 {sorted(removed)} —— 删表**不是加法**:老引擎打开这个文件会怎样?"
+        "如果读不了,那是 db 格式变更(DB_FORMAT_VERSION),要升主版本。"
+    )

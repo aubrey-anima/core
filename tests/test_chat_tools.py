@@ -189,12 +189,74 @@ def test_a_refused_topic_comes_back_as_pressure_not_as_silence(tmp_path):
         assert "岔开话题" in llm.system_prompts[1]
 
 
-def test_a_broadcast_is_visible_to_the_whole_world(tmp_path):
+def test_a_broadcast_is_actually_heard_by_the_people_standing_there(tmp_path):
+    """当众说一句话,**在场的人真的会记住** —— 而不只是日志里多一行。
+
+    这条测试原来只断言 `world.broadcasts()` 里有这条(名字还叫"whole world 可见"),
+    而那正是没被兑现的那一半:`agent_broadcast` 事件当时**没有任何角色消费**,于是她
+    "当众宣布"的后果是世界里谁也不知道,菜单却告诉她"世界里的人都能看到"。
+    CLAUDE.md 的硬不变量是**她的选择必须在世界里兑现**,这条补上了它。
+    """
     world, _ = _world(tmp_path, "〔tool:broadcast {\"text\": \"店里今天不开门\"}〕")
     with world:
+        speaker = "夏"
+        here = world._tool_runtime.agent_location(speaker)
+        listener = next(
+            a for a in sorted(world.scheduler.agents) if a != speaker
+        )
+        world._tool_runtime.move_agent(listener, here)
+        for _ in range(60):  # move_agent 是起程,不是瞬移:在途的人不在任何地方
+            world.tick(1)
+            if world._tool_runtime.agent_location(listener) == here:
+                break
+        assert world._tool_runtime.agent_location(listener) == here, "没走到,这条测试没在验它想验的"
+        before = {m.get("summary") for m in world.memories(listener)}
+
         _say(world, "今天营业吗")
+
         published = world.broadcasts()
         assert published and published[0]["payload"]["text"] == "店里今天不开门"
+        assert published[0]["payload"]["heard_by"] == [listener]
+
+        heard = [
+            m.get("summary") for m in world.memories(listener)
+            if m.get("summary") not in before
+        ]
+        assert any("店里今天不开门" in (s or "") for s in heard), (
+            f"在场的人没记住这句话 —— 广播又变成一行没人读的日志:{heard}"
+        )
+        # 而且是**能被检索到的**记忆,不是只躺在库里的一行。
+        # 不断言它必然出现在下一句提示词里:检索是三因子竞争的 top-K,一条
+        # importance 0.45 的见闻在无关话题上挤不进去 —— 那是记忆系统该有的样子。
+        recalled = world.retrieve_memories(listener, query="店里 开门")
+        assert any("店里今天不开门" in (m.get("summary") or "") for m in recalled), (
+            f"存进去了却检索不到,等于没进他的脑子:{[m.get('summary') for m in recalled]}"
+        )
+
+
+def test_a_broadcast_does_not_reach_people_somewhere_else(tmp_path):
+    """一句喊话不传遍地图 —— "客观存在 = 人人皆知"正是 §2.9.4 立规矩要防的错。"""
+    world, _ = _world(tmp_path, "〔tool:broadcast {\"text\": \"店里今天不开门\"}〕")
+    with world:
+        here = world._tool_runtime.agent_location("夏")
+        elsewhere = [
+            a for a in sorted(world.scheduler.agents)
+            if a != "夏" and world._tool_runtime.agent_location(a) != here
+        ]
+        assert elsewhere, "所有人都在同一个地方,这条测试验不到"
+        before = {a: {m.get("summary") for m in world.memories(a)} for a in elsewhere}
+
+        _say(world, "今天营业吗")
+
+        assert world.broadcasts()[0]["payload"]["heard_by"] == []
+        for agent_id in elsewhere:
+            fresh = [
+                m.get("summary") for m in world.memories(agent_id)
+                if m.get("summary") not in before[agent_id]
+            ]
+            assert not any("店里今天不开门" in (s or "") for s in fresh), (
+                f"{agent_id} 不在场却听见了"
+            )
 
 
 def test_end_conversation_closes_the_session_but_does_not_mute(tmp_path):

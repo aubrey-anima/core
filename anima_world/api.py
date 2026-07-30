@@ -38,13 +38,14 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
+from anima_world import autonomy
 from anima_world import tools as tools_mod
 from anima_world.actions import ActionDescriptor
 from anima_world.chat_service import ChatService
 from anima_world.chat_session import ChatSessionManager
 from anima_world.chat_state import ChatStateStore
 from anima_world.chat_store import ChatStore
-from anima_world.config_store import mask_secret
+from anima_world.config_store import coerce_to_declared_type, mask_secret
 from anima_world.intent import Director
 from anima_world.llm_client import (
     create_background_llm_client_from_config,
@@ -499,6 +500,27 @@ class _ToolRuntime:
     def agent_ids(self) -> list[str]:
         return list(self._world.scheduler.agents)
 
+    def present_player_ids(self, agent_id: str | None = None) -> list[str]:
+        """在场的玩家(按 TTL)—— `reach_out` 的在场闸。
+
+        给了 `agent_id` 就**按同地过滤**,和 issue #13 那条 `_maybe_hail_player`
+        同一条规矩:不然一个在工作室的角色能"主动去找"一个在咖啡店的玩家,
+        隔着半个地图打招呼,而 `reach_out` 的整个意义就是"她走过来跟你说话"。
+        不给 `agent_id`(旧调用点)时退回世界范围的在场名单。
+        """
+        present = self._world.who_is_present()
+        if agent_id is None:
+            return present
+        here = self.agent_location(agent_id)
+        return [
+            pid for pid in present
+            if str((self._world.players.get(pid) or {}).get("location") or "") == here
+        ]
+
+    def player_name(self, player_id: str) -> str:
+        info = self._world.players.get(player_id) or {}
+        return str(info.get("display_name") or player_id)
+
     def agent_names(self) -> dict[str, str]:
         return {
             aid: brain.agent.name or aid
@@ -626,6 +648,12 @@ class World:
             judge_hook=lambda info: scheduler.submit_user_chat_judgment(**info),
             meta_provider=self.chat_state.conversation_meta,
         )
+        # autonomy:(角色, 世界日) -> 今天主动过几次;以及那四个"通没通"的计数。
+        # 都是内存态:重启即清 —— 上限是"别把玩家的收件箱刷满",不是需要审计的账。
+        self._autonomy_done: dict[tuple[str, int], int] = {}
+        self._autonomy_stats: dict[str, Any] = {
+            "asked": 0, "acted": 0, "quiet": 0, "failed": 0, "last": None,
+        }
         # 在场玩家(刻意内存态:重启即新访;持久的部分——会话/记忆/关系——在 db 里)
         self.players: dict[str, dict[str, Any]] = {}
         self.player_ttl_seconds: float = _PLAYER_TTL_SECONDS
@@ -644,6 +672,7 @@ class World:
         # 立刻分叉。是提示不是锁:进程崩掉标记就陈旧,拿陈旧标记拒绝操作,等于在
         # 真出事那天把人挡在门外。
         self.scheduler.claim_ownership()
+        self._install_autonomy()   # 定时轮次挂到时钟上(开关关着时 hook 自己会退出)
 
         try:
             orphans = self._bridge.run(self.session_manager.reap_orphans())
@@ -1452,6 +1481,377 @@ class World:
         self.scheduler.checkpoint()  # 交互即检查点
         return emitted
 
+    # ── world-rules:世界的规律与存量 ───────────────────────────────────────
+
+    def stock(self, owner: str, key: str, default: float = 0.0) -> float:
+        """读一个量。owner 是任意字符串,前缀即种类(`tree:oak_01` / `world`)。"""
+        store = self.scheduler.stock_store
+        return default if store is None else store.get(owner, key, default)
+
+    def stocks(self, owner: str) -> dict[str, float]:
+        """这个 owner 身上所有的量 —— 一个"实体"就是共用一个 owner 的一组量。"""
+        store = self.scheduler.stock_store
+        return {} if store is None else store.of(owner)
+
+    def set_stock(self, owner: str, key: str, value: float) -> None:
+        """写一个量(种一棵树、埋一个矿、给谁加点功力)。
+
+        写进来的 `updated_tick` 是**此刻** —— 所以刚种下的树不会按世界年龄
+        一次性长成参天大树。
+        """
+        store = self.scheduler.stock_store
+        if store is None:
+            raise ValueError("world-rules needs a persistent world")
+        store.set(owner, key, float(value), tick=self.scheduler.clock)
+
+    def set_stocks(self, owner: str, values: dict[str, float]) -> None:
+        store = self.scheduler.stock_store
+        if store is None:
+            raise ValueError("world-rules needs a persistent world")
+        store.set_many(owner, {k: float(v) for k, v in values.items()},
+                       tick=self.scheduler.clock)
+
+    def stock_owners(self, kind: str | None = None) -> list[str]:
+        """世界里有哪些量的主人;给了 kind 就只看那一类(`tree` / `agent` / …)。"""
+        store = self.scheduler.stock_store
+        return [] if store is None else store.owners(kind)
+
+    def place_stock(self, owner: str, location: str, label: str | None = None) -> None:
+        """这个东西在哪(一棵树在咖啡店)。`here` 档的可见性靠它才成立。
+
+        `label` 是给角色看的名字 —— 提示词里"这里的老橡树"比"这里的 tree:oak_01"
+        像人话。
+        """
+        store = self.scheduler.visibility_store
+        if store is None:
+            raise ValueError("world-rules needs a persistent world")
+        store.place(owner, location, label)
+
+    def declare_visibility(self, owner_kind: str, key: str, visibility: str,
+                           label: str | None = None) -> None:
+        """声明某类量角色感知得到哪一档:`self` / `here` / `public` / `hidden`。
+
+        **没声明就是感知不到**(默认 `hidden`)—— 反过来的错不可挽回:一个"暗中的
+        恨意"的量若默认公开,角色下一句就说出来了。声明本身就是这一层的开关。
+        """
+        store = self.scheduler.visibility_store
+        if store is None:
+            raise ValueError("world-rules needs a persistent world")
+        store.declare(owner_kind, key, visibility, label)
+
+    def visibility_rules(self) -> list[dict[str, Any]]:
+        store = self.scheduler.visibility_store
+        return [] if store is None else store.declarations()
+
+    # ---- 看一眼她收到了什么 ----------------------------------------------
+
+    def debug_prompt(
+        self,
+        agent_id: str,
+        *,
+        player_id: str = "p1",
+        message: str = "在吗",
+        display_name: str | None = None,
+        role: str = "player",
+        history: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """把这一刻这个角色**会收到的提示词**原样交出来,逐块带来源标签。
+
+        为什么要有这个:提示词是这套系统里最不可见、又最容易出错的一层。1.3 开发期
+        四个 bug 有三个在这儿(stance 声明率 2/6、能力一次没用、定时轮次 18 轮 0 动作),
+        每一个的诊断都需要同一件事 —— **她到底收到了什么**;而当时唯一的办法是往
+        `chat_service` 的私有属性上塞一个假 LLM 去偷看。宿主和世界作者一个都没有。
+
+        三件事按重要性排:
+
+        1. **它不会撒谎。** 块从 `ChatService.prompt_blocks` 来 —— 和真聊天**同一个
+           函数**。调试视图另写一遍拼装,迟早和真提示词分叉,那时你会照着它去改一个
+           不存在的问题。
+        2. **它解释缺席**(`absent`)。少一块几乎总比多一块难查:世界照跑、她照说话,
+           只是从来没提过那棵树。所以"哪块没出现、为什么"和"哪块出现了"一样是答案。
+        3. **它不留副作用。** 不写 `players.last_seen`、不触发意图分类、不进 LLM、
+           静音中的角色也照样交出提示词(而 `chat()` 会当场拒)。看,但不碰。
+
+        返回 `{"blocks": [{"label","chars","text"}], "order", "absent",
+        "system", "system_chars", "history"}`。
+        """
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        turns = list(history or []) + [{"role": "user", "content": message}]
+        known = self.players.get(player_id) or {}
+        interlocutor: dict[str, str] = {
+            "display_name": display_name or known.get("display_name")
+            or f"player-{player_id[:8]}",
+            "role": role or str(known.get("role") or "player"),
+        }
+        where = str(known.get("location") or "").strip()
+        if where:
+            interlocutor["location"] = where
+            interlocutor["location_name"] = self._location_display_name(where)
+        extra = self.chat_service.refused_topic_block(agent_id, message)
+        blocks = self.chat_service.prompt_blocks(
+            agent_id,
+            interlocutor_id=player_id,
+            interlocutor=interlocutor,
+            extra_system=[extra] if extra else None,
+        )
+        system = "\n\n".join(block.text for block in blocks)
+        return {
+            "agent_id": agent_id,
+            "player_id": player_id,
+            "blocks": [
+                {"label": block.label, "chars": len(block.text), "text": block.text}
+                for block in blocks
+            ],
+            "order": [block.label for block in blocks],
+            "absent": self._absent_prompt_blocks(agent_id, player_id, blocks),
+            "system": system,
+            "system_chars": len(system),
+            "history": turns[-20:],
+        }
+
+    def _absent_prompt_blocks(
+        self, agent_id: str, player_id: str, blocks: list[Any]
+    ) -> dict[str, str]:
+        """哪些块没出现,以及**为什么** —— 一句人话,照着它就能让那块出现。
+
+        缺席比多余难查得多:世界照跑、她照说话,只是从来没提那棵树,而你不知道该去
+        改可见性声明、开关、还是模板。所以这里报的是原因,不是一句"missing"。
+        """
+        present = {block.label for block in blocks}
+        why: dict[str, str] = {}
+
+        def check(label: str, reason: str) -> None:
+            if label not in present:
+                why[label] = reason
+
+        check("world.setting", "prompt_templates 里的 world.setting 是空的")
+        check("memories", "这一刻检索不到记忆(世界刚开,或这个角色还没记住什么)")
+        check("presence", "world_provider 没给出在场快照 —— 通常是世界没在跑")
+        check("relation", "她和这个玩家之间还没有关系行(说过话之后才有)")
+        if "perception" not in present:
+            store = self.scheduler.visibility_store
+            declared = [] if store is None else store.declarations()
+            if not declared:
+                why["perception"] = (
+                    "没有任何量声明过可见性 —— 用 declare_visibility() 声明,"
+                    "否则默认 hidden(谁都感知不到)"
+                )
+            else:
+                why["perception"] = (
+                    f"已声明 {len(declared)} 条可见性,但这一刻这个角色一个都感知不到:"
+                    "要么对应的量还没有值,要么都是 self/here 而她身边没有那些东西"
+                )
+        check("overrides", "这个玩家还没教过她对话规则(set_persona_override)")
+        # identity 不在这儿:没传 display_name 时**真聊天也会兜底**成 `player-xxxx`,
+        # 所以它永远在场。给它写一条"缺席理由"就是一段假装解释的死代码 —— 而调试
+        # 视图里的死代码最坏:你会照着一句永远不会出现的话去找原因。
+        check("extra", "本轮没有临时插入的块(拒谈话题/loop 提示)")
+        for label, key in (("stance", "chat.stance.enabled"), ("tools", "chat.tools.enabled")):
+            if label in present:
+                continue
+            why[label] = (
+                f"{key} 是关着的"
+                if not self.config_get(key)
+                else f"{key} 开着但这一刻渲染出来是空的(模板被改空了?)"
+            )
+        return why
+
+    def rules(self) -> list[dict[str, Any]]:
+        """这个世界的规律(编译过的,只读视图)。"""
+        return [
+            {
+                "id": rule.id,
+                "every_ticks": rule.interval_ticks,
+                "for_each": {rule.selector_kind: rule.selector_value},
+                "set": {key: str(expression) for key, expression in rule.outputs.items()},
+                "when": [str(condition) for condition in rule.conditions],
+                "emit": [{"when": str(e.when), "type": e.type} for e in rule.emits],
+                "reads": sorted(rule.reads()),
+            }
+            for rule in self.scheduler.world_rules
+        ]
+
+    def rule_stats(self) -> dict[str, Any]:
+        """规律引擎跑得怎么样:算了几次、写了几个量、发了几条门槛事件、跳过几次。
+
+        和 `autonomy_stats()` 同一个理由:这条链最容易的坏法是"看着都对、其实
+        一次没算" —— 而一个手滑的公式会被逐条跳过并只留一条日志。
+
+        ⚠️ **本次运行内的计数,不是历史**:内存态,重开世界即清零(它是诊断,不是
+        账)。刚打开一个世界就看到全零是正常的,那不代表规律没跑过 —— 存量的
+        `updated_tick` 才是"这条规律确实算过"的凭据。
+        """
+        return dict(self.scheduler._rule_stats)
+
+    # ── autonomy:没人跟她说话时的定时轮次 ──────────────────────────────────
+
+    def _autonomy_enabled(self) -> bool:
+        return bool(self.config_get("autonomy.enabled", False)) and bool(
+            self.config_get("chat.tools.enabled", False)
+        )
+
+    def _install_autonomy(self) -> None:
+        """把定时轮次挂到时钟上(每次读配置,所以热改开关立即生效)。"""
+        interval = int(self.config_get("autonomy.interval_ticks", autonomy.DEFAULT_INTERVAL_TICKS) or 0)
+        self.scheduler._autonomy_interval = max(1, interval)
+        self.scheduler._autonomy_hook = self._on_autonomy_due
+
+    def _on_autonomy_due(self, agent_ids: list[str], now: Any) -> None:
+        """时钟喊到点了。**在这里只做快照与投递,然后立刻返回。**
+
+        调用它的是 tick 线程,而这一轮要打 LLM —— 引擎最老的一条不变量是"时钟永远
+        不等网络"。快照在锁内取(调用方已经持锁),决定与执行丢到世界自己那条事件
+        循环上跑。
+        """
+        if not self._autonomy_enabled() or self._closed:
+            return
+        day = int(getattr(now, "day", 0))
+        contexts = []
+        for agent_id in agent_ids:
+            if self._autonomy_done.get((agent_id, day), 0) >= self._autonomy_cap():
+                continue   # 今天她已经主动过够多次了
+            snapshot = self._autonomy_context(agent_id, now)
+            if snapshot is not None:
+                contexts.append(snapshot)
+        if not contexts:
+            return
+        for ctx in contexts:
+            self._autonomy_done[(ctx.agent_id, day)] = (
+                self._autonomy_done.get((ctx.agent_id, day), 0) + 1
+            )
+        # fire-and-forget,但**不是丢了不管**:`run_coroutine_threadsafe` 返回一个
+        # concurrent.futures.Future,没人读它的话一次异常就无声无息地消失
+        # (最多是 GC 时一句 "exception was never retrieved",没人会去翻日志找它)。
+        # 这个包最忌讳的就是"照跑但给错东西"——所以挂一个回调,把异常喂回
+        # `autonomy_stats()`,让"这条链是不是通的"始终有据可查。
+        future = asyncio.run_coroutine_threadsafe(
+            self._autonomy_round(contexts, day), self._bridge._loop
+        )
+        future.add_done_callback(self._on_autonomy_round_done)
+
+    def _on_autonomy_round_done(self, future: Any) -> None:
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001 - 记录下来,不许无声
+            logger.warning("autonomy round crashed", exc_info=True)
+            self._autonomy_stats["last"] = f"自主轮次崩溃({type(exc).__name__}:{exc})"
+
+    def _autonomy_cap(self) -> int:
+        return max(0, int(self.config_get("autonomy.max_per_day", autonomy.DEFAULT_MAX_PER_DAY) or 0))
+
+    def _autonomy_context(self, agent_id: str, now: Any) -> Any:
+        """锁内一次快照(只读、无 LLM、无 IO)。worker 之后只碰这个对象。"""
+        brain = self.scheduler.agents.get(agent_id)
+        if brain is None:
+            return None
+        agent = brain.agent
+        here = str(agent.blackboard.read("loc") or agent.location or "")
+        activity = self._view._agent_activity(agent_id)
+        label = _ACTIVITY_LABELS.get(activity.get("kind"), "闲着")
+        present = [
+            {"id": pid, "name": str((self.players.get(pid) or {}).get("display_name") or pid)}
+            for pid in self.who_is_present()
+            if str((self.players.get(pid) or {}).get("location") or "") == here
+        ]
+        notes: list[str] = []
+        mood = agent.blackboard.read("need.mood")
+        if mood is not None:
+            notes.append(f"你此刻的心气儿:{float(mood):.2f}(0~1)")
+        for person in present:
+            rel = self.scheduler._memory_projection.relations.get((agent_id, person["id"]))
+            if rel is not None:
+                notes.append(f"{person['name']} 在你眼中:{rel.r_type}")
+        # 她**感知到**的世界的量也进决定 —— 否则"矿富了所以我去挖"这种事永远不会
+        # 发生:她做决定时看不见世界的任何量,而那正是模拟层和角色层脱节的地方。
+        perceived = self._perceive(agent_id, here)
+        if perceived is not None and not perceived.is_empty():
+            if perceived.own:
+                notes.append("你自己:" + "、".join(
+                    f"{key} {value:g}" for key, value in sorted(perceived.own.items())))
+            for owner, values in sorted(perceived.here.items()):
+                name = perceived.labels.get(owner) or owner
+                notes.append(f"这里的{name}:" + "、".join(
+                    f"{key} {value:g}" for key, value in sorted(values.items())))
+            if perceived.public:
+                notes.append("人人都知道:" + "、".join(
+                    f"{key} {value:g}" for key, value in sorted(perceived.public.items())))
+        return autonomy.AutonomyContext(
+            agent_id=agent_id,
+            name=agent.name or agent_id,
+            personality=str(agent.blackboard.read("personality") or ""),
+            day=int(getattr(now, "day", 0)),
+            hour=int(getattr(now, "hour", 0)),
+            minute=int(getattr(now, "minute", 0)),
+            location=self._location_display_name(here),
+            activity=label,
+            present=present,
+            notes=notes,
+        )
+
+    async def _autonomy_round(self, contexts: list[Any], day: int) -> None:
+        """一轮:问每个角色要不要做点什么,把她挑的那一个执行掉。
+
+        跑在世界自己那条事件循环上(不是 tick 线程)。任何一个角色出错只影响她自己。
+        """
+        specs = tools_mod.tools_for("*", surface=tools_mod.AUTONOMY)
+        menu = "\n".join(spec.prompt_line() for spec in specs)
+        allowed = [spec.id for spec in specs]
+        template = (
+            self.scheduler.prompt_store.get("autonomy.decide", default=autonomy.DEFAULT_DECIDE_PROMPT)
+            if self.scheduler.prompt_store is not None
+            else autonomy.DEFAULT_DECIDE_PROMPT
+        )
+        for ctx in contexts:
+            self._autonomy_stats["asked"] += 1
+            try:
+                messages = autonomy.build_messages(template, ctx, menu)
+            except (KeyError, IndexError, ValueError):
+                logger.warning("autonomy.decide 渲染失败,这轮跳过")
+                self._autonomy_stats["last"] = "提示词渲染失败"
+                continue
+            try:
+                reply = await self.chat_service._background_llm.complete(messages)
+            except Exception as exc:  # noqa: BLE001 - 一次调用失败不该影响别人
+                logger.warning("自主轮次的 LLM 调用失败:%s", exc)
+                self._autonomy_stats["last"] = f"LLM 调用失败({type(exc).__name__})"
+                continue
+            decision = autonomy.parse_decision(reply, allowed)
+            if not decision.get("acted"):
+                # 什么都不做是常态,所以**不发事件**:一条"她想了想,没做"的事件
+                # 每六小时一条,会把日志灌满而不带一点信息。
+                self._autonomy_stats["quiet"] += 1
+                self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision.get('reason', '')}"
+                # 没做就把额度退回去 —— 上限是"主动几次",不是"被问几次"。
+                self._autonomy_done[(ctx.agent_id, day)] = max(
+                    0, self._autonomy_done.get((ctx.agent_id, day), 1) - 1
+                )
+                continue
+            target = str((decision.get("params") or {}).get("player_id") or "")
+            result = tools_mod.call(
+                tools_mod.ToolContext(
+                    agent_id=ctx.agent_id, player_id=target,
+                    runtime=self._tool_runtime, agent_name=ctx.name,
+                ),
+                decision["tool"], decision.get("params") or {},
+            )
+            if result.ok:
+                self._autonomy_stats["acted"] += 1
+                self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']}"
+                logger.info("%s 自己决定了:%s %s", ctx.agent_id, decision["tool"], result.detail)
+            else:
+                self._autonomy_stats["failed"] += 1
+                self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
+
+    def autonomy_stats(self) -> dict[str, Any]:
+        """定时轮次到底跑没跑、做没做。
+
+        存在的理由是这条路**最容易静默地不工作**:开关点亮了、时钟在走,而她一次也
+        没主动过 —— 那可能是"她确实没什么想做的"(正常),也可能是 hook 没挂上、
+        LLM 一直失败、或者额度早就用完了。这四个数把它们分开。
+        """
+        return dict(self._autonomy_stats)
+
     # ── chat-agent(1.3.0):stance / 能力 / 玩家教的规则 ─────────────────────
 
     def tools(self) -> list[dict[str, Any]]:
@@ -1718,20 +2118,7 @@ class World:
         meta = store.meta(key)
         if meta["is_secret"] and value == "":
             raise ValueError("secret value cannot be set to empty")
-        value_type = meta["value_type"]
-        if value_type == "int":
-            value = int(value)
-        elif value_type == "float":
-            value = float(value)
-        elif value_type == "bool":
-            if isinstance(value, str):
-                if value.lower() not in ("true", "false", "1", "0"):
-                    raise ValueError(f"invalid bool value: {value}")
-                value = value.lower() in ("true", "1")
-            else:
-                value = bool(value)
-        else:
-            value = str(value)
+        value = coerce_to_declared_type(value, meta["value_type"])
         if key == "scheduler.tick_rate" and not (0 < float(value) <= MAX_TICKS_PER_SECOND):
             raise ValueError(f"'{key}' must be > 0 and <= {MAX_TICKS_PER_SECOND}")
         store.set(key, value)
@@ -1856,7 +2243,36 @@ class World:
             mood = brain.agent.blackboard.read("need.mood")
             if mood is not None:
                 ctx["mood"] = float(mood)
+            # perception:世界的量里她感知得到的那些(没声明过可见性 = 什么也没有,
+            # 这一层就不进提示词)。客观存在 ≠ 她知道 —— 混成一层就是无所不知的角色。
+            perceived = self._perceive(agent_id, loc_id)
+            if perceived is not None and not perceived.is_empty():
+                ctx["perception"] = perceived
             return ctx
+
+    def _perceive(self, agent_id: str, here: str) -> Any:
+        """她此刻感知到的量。没有存量/没有声明就返回 None。"""
+        store = self.scheduler.stock_store
+        visibility = self.scheduler.visibility_store
+        if store is None or visibility is None:
+            return None
+        from anima_world.perception import perceive
+
+        try:
+            return perceive(agent_id=agent_id, here=here, stock_store=store,
+                            visibility=visibility)
+        except Exception:  # noqa: BLE001 - 读不到感知不该让聊天告吹
+            logger.warning("读 perception 失败", exc_info=True)
+            return None
+
+    def perception(self, agent_id: str) -> dict[str, Any]:
+        """这个角色此刻**感知到**什么(不是世界有什么)。
+
+        存在的理由是可查:可见性是声明出来的,而"我以为她知道/其实她不知道"是这一层
+        最容易的错。这个函数就是那个对照面。
+        """
+        perceived = self._perceive(agent_id, self._tool_runtime.agent_location(agent_id))
+        return {} if perceived is None else perceived.to_dict()
 
 
 def _intent_step(meta: dict[str, Any]) -> dict[str, Any]:

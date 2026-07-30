@@ -78,6 +78,12 @@ class ToolRuntime(Protocol):
 
     def agent_ids(self) -> list[str]: ...
 
+    def agent_names(self) -> dict[str, str]: ...
+
+    def present_player_ids(self, agent_id: str | None = None) -> list[str]: ...
+
+    def player_name(self, player_id: str) -> str: ...
+
     def agent_location(self, agent_id: str) -> str: ...
 
     def face_to_face(self, agent_id: str, player_id: str) -> bool: ...
@@ -106,6 +112,14 @@ class ToolContext:
 ToolHandler = Callable[[ToolContext, dict[str, Any]], ToolResult]
 
 
+# 能力露在哪个面上。**不是装饰**:自主轮次里没有"对方"这个人,`walk_away` /
+# `end_conversation` / `delay_reply` / `wait_for_user` 在那儿一律没有意义 —— 一个
+# 在无人对话时也能被选中的 `end_conversation` 只会写出一堆关掉空会话的动作。
+CHAT = "chat"            # 玩家跟她说话的那一轮
+AUTONOMY = "autonomy"    # 定时轮次:没人跟她说话,她自己决定要不要做点什么
+SURFACES = (CHAT, AUTONOMY)
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """一个能力的声明 + 实现。形状对齐 OpenAI function calling 的 tool 定义。"""
@@ -115,6 +129,7 @@ class ToolSpec:
     description: str
     params_schema: dict[str, Any]
     handler: ToolHandler
+    surfaces: tuple[str, ...] = (CHAT,)
 
     def prompt_line(self) -> str:
         params = ", ".join(
@@ -132,15 +147,20 @@ _REGISTRY: dict[str, ToolSpec] = {}
 def tool(
     *, id: str, kind: str, description: str,  # noqa: A002 - id 是这份契约里的字段名
     params: dict[str, Any] | None = None,
+    surfaces: tuple[str, ...] = (CHAT,),
 ) -> Callable[[ToolHandler], ToolHandler]:
     """把一个函数登记成能力。重复登记同一个 id 是错,不是覆盖。"""
 
     def decorate(handler: ToolHandler) -> ToolHandler:
         if id in _REGISTRY:
             raise ToolCallError(f"tool {id!r} 已经登记过了")
+        unknown = [surface for surface in surfaces if surface not in SURFACES]
+        if unknown:
+            raise ToolCallError(f"tool {id!r} 声明了不存在的面:{unknown}")
         _REGISTRY[id] = ToolSpec(
             id=id, kind=kind, description=description,
             params_schema=dict(params or {}), handler=handler,
+            surfaces=tuple(surfaces),
         )
         return handler
 
@@ -154,9 +174,16 @@ def get(tool_id: str) -> ToolSpec:
     return spec
 
 
-def tools_for(agent_id: str) -> list[ToolSpec]:
-    """这个角色此刻能用的能力。v1:所有人同一套(按性格分工是 v2)。"""
-    return [_REGISTRY[key] for key in sorted(_REGISTRY)]
+def tools_for(agent_id: str, surface: str | None = None) -> list[ToolSpec]:
+    """这个角色在某个面上能用的能力。
+
+    v1 所有角色同一套(按性格分工是 v2),但**面是分的**:`surface=None` 给全部
+    (目录、`contract`、`World.tools()` 用),给了面就只给那个面上的。
+    """
+    specs = [_REGISTRY[key] for key in sorted(_REGISTRY)]
+    if surface is None:
+        return specs
+    return [spec for spec in specs if surface in spec.surfaces]
 
 
 def capability_payloads() -> list[dict[str, Any]]:
@@ -167,7 +194,7 @@ def capability_payloads() -> list[dict[str, Any]]:
             "kind": spec.kind,
             "description": spec.description,
             "params_schema": spec.params_schema,
-            "surface": "chat",
+            "surface": ",".join(spec.surfaces),
         }
         for spec in tools_for("*")
     ]

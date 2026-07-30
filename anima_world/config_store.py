@@ -73,6 +73,29 @@ def _infer_value_type(value: Any) -> str:
     return "str"
 
 
+def coerce_to_declared_type(value: Any, value_type: str) -> Any:
+    """按**声明类型**把一个值强转过去,转不了就抛 ValueError/TypeError。
+
+    `ConfigStore.set` 本身是原始写入(不强转),强转此前只长在 `World.config_set`
+    里 —— 于是任何**绕过门面**的写入(种子的 `config` 块就是一条)会把
+    `"needs.enabled": "yes"` 原样塞进去:db 里存 `"1"`、内存缓存里却是字符串
+    `"yes"`,两边不一致,而且没人报错。抽到这里让两条路共用同一份规则。
+    """
+    if value_type == "int":
+        return int(value)
+    if value_type == "float":
+        return float(value)
+    if value_type == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            if value.lower() not in ("true", "false", "1", "0"):
+                raise ValueError(f"invalid bool value: {value}")
+            return value.lower() in ("true", "1")
+        return bool(value)
+    return str(value)
+
+
 def mask_secret(value: str) -> str:
     """Prefix + last-4-characters mask for API responses (design.md D6)."""
     if not value:
@@ -260,6 +283,11 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "chat.loop.enabled": (False, "bool", "chat", False, "chat_burst keeps generating until the NPC yields (#17)"),
     "chat.loop.max_messages": (8, "int", "chat", False, "Hard cap on messages in one autonomous loop"),
     "chat.loop.max_tool_calls": (15, "int", "chat", False, "Hard cap on tool calls in one autonomous loop"),
+    # autonomy:没人跟她说话时的定时轮次。要 chat.tools.enabled 一起点亮 ——
+    # 没有能力可挑的轮次是一次白花的 LLM 调用。
+    "autonomy.enabled": (False, "bool", "autonomy", False, "Ask each character every N ticks whether she wants to do something on her own"),
+    "autonomy.interval_ticks": (72, "int", "autonomy", False, "World ticks between autonomy rounds (72 = 6 world hours at 5 min/tick)"),
+    "autonomy.max_per_day": (2, "int", "autonomy", False, "How many times a day one character may act on her own"),
     "memory.capacity": (50, "int", "memory", False, "Per-agent memory row cap before strength-based eviction"),
     "memory.sentiment_threshold": (0.3, "float", "memory", False, "Relationship-shift memory trigger threshold"),
     "memory.half_life_days": (3.0, "float", "memory", False, "Recency half-life for memory retrieval (world days)"),
