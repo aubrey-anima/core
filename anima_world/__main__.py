@@ -2831,7 +2831,17 @@ def run_doctor(args: argparse.Namespace) -> int:
 def run_simulate(args: argparse.Namespace) -> int:
     """Fast-forward a world headlessly: no sleep, no clock thread.
 
-    Builds the exact same scheduler `run` would (duties/planner/memory/
+    ⚠️ **定时轮次(autonomy)不在快进里跑。** 它挂在 `World` 上(`_install_autonomy`
+    是 `_autonomy_hook` 全仓库唯一的赋值处),而这里直接建 scheduler —— 于是
+    `start` / `run` 会问她"此刻想做点什么吗",`simulate` 从来不问。
+    这是有意的:快进一年 = 每个角色每 6 世界小时一次 LLM 调用,上千次网络往返,
+    而快进的全部意义是不等。但**不许无声** —— 开关开着时下面会打一行说明,
+    否则用户看到的是 `autonomy_stats()` 全 0,分不清"她不想做"和"根本没跑"。
+
+    叙事与规划照旧在快进里跑(它们的池子在退出前会被排空),所以别读成
+    "快进不打 LLM";漏的只有这一个。
+
+    Builds the same scheduler `run` would (duties/planner/memory/
     persistence all wired), drives the tick loop synchronously, then drains
     the narrative/planner pools before exiting — the run is meant to be
     picked up by `run --db-path` afterward. Nothing extra is written on the
@@ -2891,6 +2901,15 @@ def run_simulate(args: argparse.Namespace) -> int:
     # 2×wait_cap of dead time, never a hung run.
     # 快进的等规划纪律住在 `Scheduler.fast_forward` —— CLI 与 `World.fast_forward`
     # 共用同一份实现,免得两条快进路径慢慢长出不同的行为。
+    # 缺席必须看得见:出厂种子把 autonomy 点亮了,而快进不跑它。不说这一句,
+    # 用户看到的是 `autonomy_stats()` 全 0 —— 分不清"她不想做"和"根本没跑起来",
+    # 而那个函数存在的唯一理由就是把这两件事分开。
+    if scheduler.config_store is not None and scheduler.config_store.get(
+        "autonomy.enabled", default=False
+    ):
+        print("[simulate] 注意:定时轮次(autonomy)不在快进里跑 —— 它每次都要打网络,"
+              "而快进的意义是不等。要看她主动做事,用 anima-world run。")
+
     print(f"[simulate] fast-forwarding {ticks} tick(s) ...")
     outcome = scheduler.fast_forward(ticks, plan_wait_cap=args.plan_wait_cap)
     planner_gave_up = outcome["planner_gave_up"]

@@ -349,3 +349,46 @@ def test_a_crash_before_any_character_is_asked_is_recorded_not_swallowed(tmp_pat
         assert world.autonomy_stats()["last"] is not None
         assert "崩溃" in str(world.autonomy_stats()["last"])
         assert world.world_time().day >= 0   # 时钟没被拖垮
+
+
+# ---- 快进里它不跑,而这件事必须看得见 ---------------------------------------
+
+
+def test_simulate_says_out_loud_that_it_skips_autonomy(tmp_path):
+    """`simulate` 不跑定时轮次 —— 这是有意的,但**不许无声**。
+
+    `_autonomy_hook` 全仓库只在 `World._install_autonomy` 里赋值,而 `simulate`
+    直接建 scheduler、从不构造 `World`。于是 `start` / `run` 会问她"此刻想做点什么
+    吗",`simulate` 从来不问。快进一年 = 上千次网络往返,而快进的意义就是不等,
+    所以不接它是对的。
+
+    但出厂种子把 `autonomy.enabled` 点亮了,用户第一次快进看到的是
+    `autonomy_stats()` 全 0 —— **分不清"她不想做"和"根本没跑起来"**,而那个函数
+    存在的唯一理由就是把这两件事分开。所以要打一行。
+    """
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-m", "anima_world", "simulate",
+         "--db-path", str(tmp_path / "w.db"), "--ticks", "1", "--llm", "mock"],
+        capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "定时轮次" in done.stdout and "不在快进里跑" in done.stdout
+    assert "anima-world run" in done.stdout, "只说不跑不够,得说清去哪儿看得到"
+
+
+def test_the_notice_stays_quiet_when_autonomy_is_off(tmp_path, bare_seed):
+    """开关关着就别提 —— 一句和你无关的警告只会训练你忽略所有警告。"""
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-m", "anima_world", "simulate",
+         "--db-path", str(tmp_path / "bare.db"), "--seed", bare_seed,
+         "--ticks", "1", "--llm", "mock"],
+        capture_output=True, text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "定时轮次" not in done.stdout
