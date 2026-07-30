@@ -12,15 +12,32 @@ about the interlocutor — supplied by an injected `world_provider` callback
 (same pattern as `persona_provider`; the server wires a closure that reads
 the scheduler under its lock). No provider, or a failing one, degrades to
 the pre-grounding prompt: a chat must never die of a world read.
+
+chat-agent(1.3.0):同一轮里还多了三件事,全部默认关闭 ——
+
+- **stance**(`chat.stance.enabled`,#18):回复前显式选一个关系性意图。
+- **tool_call**(`chat.tools.enabled`,#15):她可以选择走开、静音、拒绝谈某事,
+  而不是只能"用词把话接下去"。走行内标记(见 `directives.py`),所以在 Mock 和
+  不支持 function calling 的端点上照样成立。
+- **autonomous_loop**(`chat.loop.enabled`,#17):一次触发连续输出到她自己想停,
+  预算按性格/关系/心情/时间算。
+
+三者共用一条流:`_stream_step` 把散文与指令按原顺序交出来,散文照旧一个字一个字
+流给玩家,指令交给引擎。全关的时候这条流的行为和 1.2 逐字相同。
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, AsyncIterator, Callable, Sequence
 
+from anima_world import intent as intent_mod
+from anima_world import stance as stance_mod
+from anima_world import tools as tools_mod
 from anima_world.chat_store import ChatStore
+from anima_world.directives import DirectiveParser
 from anima_world.llm_client import LLMClientProtocol, Message
 
 logger = logging.getLogger(__name__)
@@ -32,6 +49,16 @@ WorldProvider = Callable[[str, str], dict]
 _DEFAULT_K = 3  # past closed-session summaries to recall
 _DEFAULT_N = 10  # recent messages of the current conversation to keep in prompt
 
+# #17 的硬上限:预算算错、模型不肯让位,都不该让一次聊天无限跑下去。
+_LOOP_MAX_MESSAGES = 8
+_LOOP_MAX_TOOL_CALLS = 15
+_LOOP_BASE_BUDGET = 3
+
+# 从性格描述文本里抽话痨/内向倾向(#17 开放问题 2:v1 只从描述文本抽)。
+# 关键词表是确定性的:同一个世界跑两次预算一样,而且没有 key 也能算。
+_TALKATIVE_WORDS = ("话痨", "健谈", "多话", "外向", "开朗", "热情", "爱聊", "直爽", "咋咋呼呼")
+_SHY_WORDS = ("内向", "害羞", "寡言", "沉默", "冷淡", "疏离", "拘谨", "安静", "高冷", "怕生")
+
 _DEFAULT_SYSTEM_PERSONA_TEMPLATE = "你是{name}。{personality}"
 _DEFAULT_RESPONSE_FORMAT_TEMPLATE = (
     "回复格式硬性规则（必须逐条执行）：\n"
@@ -42,12 +69,162 @@ _DEFAULT_RESPONSE_FORMAT_TEMPLATE = (
     "正确示例：（{name}放下手里的抹布，从吧台后绕出来。）昭阳，你终于来了。\n"
     "错误示例：（放下手里的抹布）昭阳，你终于来了。"
 )
+# 用真模型跑过一局之后改的措辞:原来只写了"有哪些能力、怎么写",于是八轮里(包括
+# 两句明显越界的话)她一次也没用过 —— 她把话接得很漂亮,而那正是 issue #15 要修的
+# "100% 响应率"。缺的不是能力,是**什么时候用它是在角色里的**这句许可。
+_DEFAULT_TOOLS_BLOCK_TEMPLATE = (
+    "【你可以做的事,不只是说话】\n"
+    "如果你此刻想做下面某件事,就在回复里单独写一行:\n"
+    "〔tool:能力名 {{\"参数\": 值}}〕\n"
+    "这一行也不是动作描写,不受括号格式规则约束。\n"
+    "可用的能力:\n"
+    "{tool_menu}\n"
+    "什么时候该用:对方说了让你不舒服或越界的话、你不想聊这个话题、你手上有别的事要去做、"
+    "你想让对方等一会儿、或者你干脆此刻不想理他。\n"
+    "**你可以拒绝。** 不要因为「要客气」就把话顺着接下去 —— 该走就走、该不理就不理,"
+    "那比一句得体的推脱更像你自己。做了就是真的做了:走开就真的离开这里,"
+    "不理人就真的收不到对方的消息。\n"
+    "不想做任何一件就正常说话,不要写这一行。"
+)
+_DEFAULT_OVERRIDES_BLOCK_TEMPLATE = (
+    "【这位玩家教过你的对话规则,必须遵守】\n{rules}"
+)
+_DEFAULT_REFUSED_TOPIC_TEMPLATE = (
+    "【你拒绝谈的话题】对方这条消息又提到了：{keywords}。"
+    "你此前已经表明不谈这个 —— 岔开话题或直接表明态度,不要顺着讲下去。"
+)
+# 这段是踩过坑改的:原来只写"还有话就接着说",于是真模型的第二句常常是把第一句
+# 换个说法再说一遍(甚至一字不差)—— 它把玩家那条消息当成还没答,于是又答了一遍。
+# 连续输出的价值全在"往下推进",重复一遍比直接让位更糟。
+_DEFAULT_LOOP_CONTINUE_TEMPLATE = (
+    "你刚才已经说了 {emitted} 句,还可以再说 {left} 句。\n"
+    "**接着往下推进,不要重复自己**:不要把刚才说过的话换个说法再说一遍,"
+    "也不要再答一遍对方那句话。要么给出新的信息、要么做一个新的动作、"
+    "要么问出一个新的问题。\n"
+    "没有新的东西要说了就直接写一行〔wait〕把话头交回去 —— "
+    "问完对方一个问题、或者在等对方反应的时候,就是该交回去的时候。"
+)
+_DEFAULT_LOOP_INTERRUPT_TEMPLATE = (
+    "【对方在你说话的过程中插了一句】「{text}」\n"
+    "你自己决定:接着说你原来那段,还是转过去回应他 —— 也可以先按住他"
+    "（「等我说完」）。这是你的选择,不是规则。"
+)
 _DEFAULT_MEMORY_BLOCK_TEMPLATE = "你和对方过去的对话回顾：\n{summaries}"
 _DEFAULT_WORLD_MEMORY_TEMPLATE = "你最近记得的事：\n{memories}"
 _DEFAULT_PRESENCE_TEMPLATE = (
     "现在是第 {day} 天 {hh}:{mm}。你在{location}，{activity}。同在这里的还有：{others}。"
 )
 _DEFAULT_RELATION_TEMPLATE = "对方在你眼中：{r_type}（你们的关系处于「{band}」）。"
+
+
+# 隐式让位:问了对方一句话,就是把话头递过去了。判断放在结尾一小段上 ——
+# 一段独白里间或有个问号不算让位,最后那句才算。
+_YIELD_MARKS = ("?", "？")
+_YIELD_PHRASES = ("你觉得呢", "你说呢", "你怎么想", "对吧", "好吗", "行吗", "要不要")
+
+
+def _looks_like_a_question(text: str) -> bool:
+    tail = text.rstrip().rstrip("）)」』”\"'")[-24:]
+    if tail.endswith(_YIELD_MARKS):
+        return True
+    return any(phrase in tail for phrase in _YIELD_PHRASES)
+
+
+# 句子切分只为一件事:判"这一句我刚才是不是已经说过了"。
+_SENTENCE_SPLIT = re.compile(r"[。！？!?\n]+")
+# 新的一步里有多少比例的句子是旧的,就算"又说了一遍"。
+_REPEAT_RATIO = 0.5
+_SHORT_SENTENCE = 6  # 太短的句子("好。""嗯。")重复不算复读
+
+
+def _sentences(text: str) -> list[str]:
+    out = []
+    for piece in _SENTENCE_SPLIT.split(text or ""):
+        cleaned = re.sub(r"[\s（）()「」『』\"'、,，:：;；—…\.]+", "", piece)
+        if len(cleaned) >= _SHORT_SENTENCE:
+            out.append(cleaned)
+    return out
+
+
+def repeats_itself(said: str, earlier: Sequence[str]) -> bool:
+    """这一步是不是把前面说过的话又说了一遍。
+
+    两条规则都要在,因为两种坏法都真见过:
+
+    1. **整段一字不差**。没有 key 时世界跑在 Mock 上,而 Mock 就是模板回声 ——
+       同一句话刷三遍,那正是新用户看到的第一屏。句子级比对会漏掉它(模板回声太短)。
+    2. **换个说法说同一段**。真模型的样子:第二句整句照抄第一句的两三句,中间夹一句
+       新的动作描写;第四轮还能整段照抄第二轮说过的一段。所以按句子比对,新的一步里
+       过半的句子是旧的就算没往下推进。
+    """
+    stripped = re.sub(r"\s+", "", said or "")
+    if stripped and any(re.sub(r"\s+", "", text or "") == stripped for text in earlier):
+        return True
+    fresh = _sentences(said)
+    if not fresh:
+        return False
+    seen = {sentence for text in earlier for sentence in _sentences(text)}
+    if not seen:
+        return False
+    repeated = sum(1 for sentence in fresh if sentence in seen)
+    return repeated / len(fresh) >= _REPEAT_RATIO
+
+
+def personality_traits(personality: str) -> dict[str, float]:
+    """从性格描述文本里读出话多/话少的倾向,0~1,看不出来就是 0.5。
+
+    刻意不用 LLM:预算要在**没有 key 的默认状态**下也算得出来,而且同一个世界跑
+    两次得出同一个数 —— 一个会飘的预算没法调参。LLM 抽取(或运维台上的 slider)
+    是 v2 的事。
+    """
+    text = str(personality or "")
+    talkative = sum(1 for word in _TALKATIVE_WORDS if word in text)
+    shy = sum(1 for word in _SHY_WORDS if word in text)
+    if not talkative and not shy:
+        return {"talkative": 0.5, "shy": 0.5}
+    scale = float(max(talkative, shy, 1))
+    return {
+        "talkative": min(1.0, 0.5 + 0.5 * talkative / scale) if talkative else 0.2,
+        "shy": min(1.0, 0.5 + 0.5 * shy / scale) if shy else 0.2,
+    }
+
+
+def compute_budget(
+    *,
+    personality: str = "",
+    relation: dict[str, Any] | None = None,
+    mood: float | None = None,
+    hour: int | None = None,
+    hard_max: int = _LOOP_MAX_MESSAGES,
+) -> dict[str, Any]:
+    """这一轮她最多连着说几句(#17)。返回预算与它的算法依据。
+
+    不是硬编码的"最多 5 条":话痨能连着说五六句,内向的人一两句就等;深夜懒得多说;
+    刚认识的访客面前更收着。**依据一起返回**,因为一个说不出理由的预算没法调 ——
+    调参的人得看得见"3 = 基准 3 + 话痨 1 - 深夜 2"。
+    """
+    traits = personality_traits(personality)
+    reasons: list[str] = [f"基准 {_LOOP_BASE_BUDGET}"]
+    budget = _LOOP_BASE_BUDGET
+    talkative_bonus = int(traits["talkative"] * 2)
+    if talkative_bonus:
+        budget += talkative_bonus
+        reasons.append(f"话多 +{talkative_bonus}")
+    shy_penalty = int(traits["shy"] * 1)
+    if shy_penalty:
+        budget -= shy_penalty
+        reasons.append(f"内向 -{shy_penalty}")
+    if mood is not None and mood < 0.3:
+        budget -= 2
+        reasons.append("心情/精力低 -2")
+    if not relation:
+        budget -= 1
+        reasons.append("初次见面 -1")
+    if hour is not None and (hour >= 22 or hour < 6):
+        budget -= 2
+        reasons.append("深夜 -2")
+    budget = max(1, min(int(hard_max), budget))
+    return {"budget": budget, "traits": traits, "reasons": reasons}
 
 
 class _ActionNameNormalizer:
@@ -107,6 +284,9 @@ class ChatService:
         config_store: Any | None = None,
         prompt_store: Any | None = None,
         world_provider: WorldProvider | None = None,
+        state_store: Any | None = None,
+        tool_runtime: Any | None = None,
+        background_llm: LLMClientProtocol | None = None,
     ) -> None:
         self._store = store
         self._llm = llm
@@ -117,15 +297,120 @@ class ChatService:
         self._config_store = config_store
         self._prompt_store = prompt_store
         self._world_provider = world_provider
+        # chat-agent:三样注入。没有 state_store 就没有 stance/override/静音
+        # (纯库调用方自己 new 一个 ChatService 时的情形),整套安静地退回 1.2 行为。
+        self._state = state_store
+        self._tool_runtime = tool_runtime
+        # 分类器与 loop 的每一步走"背景槽":便宜快模型,不占聊天那一条。
+        # 没给就退回主 llm —— 慢一点,但不能因此不工作。
+        self._background_llm = background_llm or llm
 
     @property
     def store(self) -> ChatStore:
         return self._store
 
+    @property
+    def state(self) -> Any:
+        return self._state
+
     def _template(self, name: str, default: str) -> str:
         if self._prompt_store is not None:
             return self._prompt_store.get(name, default=default)
         return default
+
+    def _flag(self, key: str, default: bool = False) -> bool:
+        if self._config_store is None:
+            return default
+        return bool(self._config_store.get(key, default=default))
+
+    def _setting(self, key: str, default: Any) -> Any:
+        if self._config_store is None:
+            return default
+        value = self._config_store.get(key, default=default)
+        return default if value is None else value
+
+    def stance_enabled(self) -> bool:
+        return self._state is not None and self._flag("chat.stance.enabled")
+
+    def tools_enabled(self) -> bool:
+        return (
+            self._state is not None
+            and self._tool_runtime is not None
+            and self._flag("chat.tools.enabled")
+        )
+
+    def intent_enabled(self) -> bool:
+        return self._state is not None and self._flag("chat.intent.enabled")
+
+    def loop_enabled(self) -> bool:
+        return self._flag("chat.loop.enabled")
+
+    # ── chat-agent 的三块提示词 ─────────────────────────────────────────────
+
+    def _stance_block(self, agent_id: str, target_id: str) -> str | None:
+        if not self.stance_enabled():
+            return None
+        previous = (self._state.stance(agent_id, target_id) or {}).get("stance")
+        template = self._template("chat.stance_block", stance_mod.DEFAULT_STANCE_BLOCK_TEMPLATE)
+        try:
+            return stance_mod.render_block(template, previous=previous)
+        except (KeyError, IndexError, ValueError):
+            logger.warning("chat.stance_block 渲染失败,这轮不选 stance")
+            return None
+
+    def _tools_block(self, agent_id: str) -> str | None:
+        if not self.tools_enabled():
+            return None
+        template = self._template("chat.tools_block", _DEFAULT_TOOLS_BLOCK_TEMPLATE)
+        try:
+            return template.format(tool_menu=tools_mod.prompt_menu(agent_id))
+        except (KeyError, IndexError, ValueError):
+            logger.warning("chat.tools_block 渲染失败,这轮不给她工具")
+            return None
+
+    def _overrides_block(self, agent_id: str, player_id: str) -> str | None:
+        """玩家教过的对话规则。**不看开关** —— 一旦写进库就永久生效:
+        规则是玩家教的,不是运维点亮的能力。"""
+        if self._state is None:
+            return None
+        try:
+            rules = self._state.overrides(agent_id, player_id)
+        except Exception:  # noqa: BLE001 - 读不到规则不该让聊天告吹
+            logger.warning("读 persona override 失败", exc_info=True)
+            return None
+        if not rules:
+            return None
+        from anima_world.chat_state import OVERRIDE_KINDS
+
+        lines = "\n".join(
+            f"- {OVERRIDE_KINDS.get(rule['kind'], rule['kind'])}:{rule['value']}"
+            for rule in rules
+        )
+        template = self._template("chat.overrides_block", _DEFAULT_OVERRIDES_BLOCK_TEMPLATE)
+        try:
+            return template.format(rules=lines)
+        except (KeyError, IndexError, ValueError):
+            logger.warning("chat.overrides_block 渲染失败,这轮不带玩家的规则")
+            return None
+
+    def refused_topic_block(self, agent_id: str, user_text: str) -> str | None:
+        """她拒绝谈的话题又被提起了。**不硬拦**:拦下来玩家只会看到沉默,
+        而她自己表明态度才是那个角色该有的反应。"""
+        if self._state is None or not user_text:
+            return None
+        try:
+            hits = self._state.topics_hit_by(agent_id, user_text)
+        except Exception:  # noqa: BLE001
+            logger.warning("读拒谈话题失败", exc_info=True)
+            return None
+        if not hits:
+            return None
+        template = self._template("chat.refused_topic_block", _DEFAULT_REFUSED_TOPIC_TEMPLATE)
+        try:
+            return template.format(keywords="、".join(hits))
+        except (KeyError, IndexError, ValueError):
+            logger.warning("chat.refused_topic_block 渲染失败")
+            return None
 
     def _world_blocks(self, agent_id: str, interlocutor_id: str) -> list[str]:
         """Render the grounding blocks (memories / presence / relation) from a
@@ -222,18 +507,38 @@ class ChatService:
         messages.append({"role": "system", "content": system})
         for block in self._world_blocks(agent_id, interlocutor_id):
             messages.append({"role": "system", "content": block})
+        # 玩家教过的规则约束的是"怎么说",和人设/格式同一类,所以留在这儿。
+        overrides = self._overrides_block(agent_id, interlocutor_id)
+        if overrides:
+            messages.append({"role": "system", "content": overrides})
 
         return messages
 
-    async def respond(
+    def _choice_blocks(self, agent_id: str, interlocutor_id: str) -> list[str]:
+        """stance 与能力菜单 —— **拼在整段 system prompt 的最后**。
+
+        位置是踩过坑改的:它们原来夹在中间,后面紧跟着全篇最响的一段(身份声明,
+        标着"最高优先级事实"),再前面是同样很硬的回复格式规则。真模型跑一局的结果
+        是 stance 六轮里只声明了两轮、能力一次都没用 —— 她读到最后已经在想别的事。
+        长提示词里位置就是权重,这两块定的是"她要不要做点什么",必须是她最后读到的。
+        """
+        return [
+            block for block in (
+                self._stance_block(agent_id, interlocutor_id),
+                self._tools_block(agent_id),
+            ) if block
+        ]
+
+    def _prompt_for(
         self,
         agent_id: str,
         history: Sequence[Message],
         *,
         interlocutor_id: str,
         interlocutor: dict[str, str] | None = None,
-    ) -> AsyncIterator[str]:
-        """Generate from world-owned state without persisting platform history."""
+        extra_system: Sequence[str] | None = None,
+    ) -> list[Message]:
+        """把一轮的提示词拼出来(身份声明 + grounding + chat-agent 三块 + 历史)。"""
         messages = self._build_system_messages(agent_id, interlocutor_id)
         if interlocutor:
             display_name = str(interlocutor.get("display_name") or "").strip()
@@ -295,24 +600,156 @@ class ChatService:
                 if others:
                     identity += f"{others}只是同场角色，不是正在和你说话的人。"
                 messages.append({"role": "system", "content": identity})
+        for block in extra_system or ():
+            if block:
+                messages.append({"role": "system", "content": block})
+        # 最后才是"你要不要做点什么"(见 `_choice_blocks` 的位置说明)。
+        for block in self._choice_blocks(agent_id, interlocutor_id):
+            messages.append({"role": "system", "content": block})
         system_prompt = "\n\n".join(
             message["content"] for message in messages if message["role"] == "system"
         )
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history[-20:])
-        persona = self._persona_provider(agent_id) or {}
-        normalizer = _ActionNameNormalizer(persona.get("name") or agent_id)
+        prompt: list[Message] = [{"role": "system", "content": system_prompt}]
+        prompt.extend(history[-20:])
+        return prompt
+
+    async def _stream_step(
+        self, messages: Sequence[Message], *, speaker_name: str
+    ) -> AsyncIterator[tuple[str, Any]]:
+        """跑一次生成:`("text", 片段)` 与 `("directive", Directive)` 按原顺序流出。
+
+        空流回退成一次完整 completion —— 一次瞬时的空流不该让玩家对着沉默(1.2 的
+        老行为,原样保留)。指令解析在归一化**之前**:控制标记不该被当成动作描写。
+        """
+        parser = DirectiveParser()
+        normalizer = _ActionNameNormalizer(speaker_name)
+
+        def _emit(chunk: str) -> list[tuple[str, Any]]:
+            out: list[tuple[str, Any]] = []
+            for kind, value in parser.feed(chunk):
+                if kind == "text":
+                    out.extend(("text", formatted) for formatted in normalizer.feed(value))
+                else:
+                    out.append(("directive", value))
+            return out
+
         streamed = False
         async for token in self._llm.stream(messages):
             streamed = True
-            for formatted in normalizer.feed(token):
-                yield formatted
+            for item in _emit(token):
+                yield item
         if not streamed:
             reply = (await self._llm.complete(messages)).strip()
-            for formatted in normalizer.feed(reply):
-                yield formatted
+            if reply:
+                for item in _emit(reply):
+                    yield item
+        for kind, value in parser.flush():
+            if kind == "text":
+                for formatted in normalizer.feed(value):
+                    yield ("text", formatted)
         for formatted in normalizer.flush():
-            yield formatted
+            yield ("text", formatted)
+
+    # ── 指令的处置 ──────────────────────────────────────────────────────────
+
+    def _tool_context(self, agent_id: str, player_id: str) -> Any:
+        persona = self._persona_provider(agent_id) or {}
+        return tools_mod.ToolContext(
+            agent_id=agent_id, player_id=player_id, runtime=self._tool_runtime,
+            agent_name=persona.get("name") or agent_id,
+        )
+
+    def _run_tool(
+        self, agent_id: str, player_id: str, directive: Any, meta: dict[str, Any]
+    ) -> Any:
+        """执行一次工具调用,并把结果记进这一轮的观测量。"""
+        if not self.tools_enabled():
+            # 开关关着却收到 tool_call:说明提示词里没给菜单她自己编的。不静默丢 ——
+            # 记下来,否则"她说要走却没走"在产物上和"她没想走"一模一样。
+            logger.warning(
+                "%s 调了 %s,但 chat.tools.enabled 是关的 —— 这次调用没有执行",
+                agent_id, directive.name,
+            )
+            meta.setdefault("ignored_tool_calls", []).append(directive.name)
+            return None
+        result = tools_mod.call(
+            self._tool_context(agent_id, player_id), directive.name, directive.params
+        )
+        meta.setdefault("tool_calls", []).append(
+            result.to_dict(directive.name, directive.params)
+        )
+        if result.end_conversation:
+            meta["end_conversation"] = True
+        return result
+
+    def _record_stance(
+        self, agent_id: str, target_id: str, raw: str | None, meta: dict[str, Any]
+    ) -> None:
+        value, declared = stance_mod.normalize(raw)
+        meta["stance"] = value
+        meta["stance_declared"] = declared
+        if self._state is None:
+            return
+        if not declared and self._state.stance(agent_id, target_id) is not None:
+            # 没声明就**不许覆盖**已经记着的那个。真模型跑出来的样子:她声明了
+            # provoke、摔了围裙走人,而紧接着那一步只有一个 tool_call、没有台词 ——
+            # 兜底的 neutral 于是把"她刚刚跟你翻脸"改写成了"她对你很平淡"。
+            # 世界状态和刚发生的事对不上,正是最难查的那类错。
+            return
+        tick = 0
+        if self._tool_runtime is not None:
+            try:
+                tick = int(self._tool_runtime.tick())
+            except Exception:  # noqa: BLE001 - 记 stance 不该因为读不到时钟失败
+                tick = 0
+        try:
+            self._state.set_stance(agent_id, target_id, value, declared=declared, tick=tick)
+        except Exception:  # noqa: BLE001
+            logger.warning("写 stance 失败", exc_info=True)
+
+    async def respond(
+        self,
+        agent_id: str,
+        history: Sequence[Message],
+        *,
+        interlocutor_id: str,
+        interlocutor: dict[str, str] | None = None,
+        meta: dict[str, Any] | None = None,
+        extra_system: Sequence[str] | None = None,
+    ) -> AsyncIterator[str]:
+        """Generate from world-owned state without persisting platform history.
+
+        `meta` 是调用方递进来的收件盘:这一轮的 stance、调过的工具、是否要求结束
+        会话都写在里面(流耗尽后可读)。不给就丢弃 —— 老调用方逐字不变。
+        """
+        sink: dict[str, Any] = meta if meta is not None else {}
+        prompt = self._prompt_for(
+            agent_id, history, interlocutor_id=interlocutor_id,
+            interlocutor=interlocutor, extra_system=extra_system,
+        )
+        persona = self._persona_provider(agent_id) or {}
+        speaker_name = persona.get("name") or agent_id
+        stance_seen: str | None = None
+        async for kind, value in self._stream_step(prompt, speaker_name=speaker_name):
+            if kind == "text":
+                yield value
+                continue
+            if value.kind == "stance":
+                if stance_seen is None:
+                    stance_seen = value.name
+                continue
+            if value.kind == "tool":
+                result = self._run_tool(agent_id, interlocutor_id, value, sink)
+                if result is not None and result.text:
+                    yield result.text
+                continue
+            if value.kind == "wait":
+                sink["stop_reason"] = "explicit_yield"
+                continue
+            logger.warning("%s 输出了一条读不懂的控制指令:%r", agent_id, value.raw)
+            sink.setdefault("unknown_directives", []).append(value.raw)
+        if self.stance_enabled():
+            self._record_stance(agent_id, interlocutor_id, stance_seen, sink)
 
     async def send(
         self,
@@ -335,31 +772,284 @@ class ChatService:
         self._store.add_message(conversation_id, "user", user_text, ts)
 
         messages = self._build_messages(agent_id, conversation_id, interlocutor_id=player_id)
+        topic_block = self.refused_topic_block(agent_id, user_text)
+        if topic_block:
+            messages.insert(1, {"role": "system", "content": topic_block})
+        # 与 respond() 同一条位置纪律:选择那两块拼在最后(但要在对话历史之前 ——
+        # `_build_messages` 把历史直接接在 system 之后,所以插在历史前面)。
+        first_turn = next(
+            (index for index, message in enumerate(messages) if message["role"] != "system"),
+            len(messages),
+        )
+        for offset, block in enumerate(self._choice_blocks(agent_id, player_id)):
+            messages.insert(first_turn + offset, {"role": "system", "content": block})
         speaker_name = persona.get("name") or agent_id
-        normalizer = _ActionNameNormalizer(speaker_name)
+        meta: dict[str, Any] = {}
         parts: list[str] = []
-        streamed = False
+        stance_seen: str | None = None
         try:
-            async for token in self._llm.stream(messages):
-                streamed = True
-                for formatted in normalizer.feed(token):
-                    parts.append(formatted)
-                    yield formatted
-            if not streamed:
-                # A transient empty stream shouldn't leave the user with silence:
-                # fall back to a single full completion.
-                reply = (await self._llm.complete(messages)).strip()
-                if reply:
-                    for formatted in normalizer.feed(reply):
-                        parts.append(formatted)
-                        yield formatted
-            for formatted in normalizer.flush():
-                parts.append(formatted)
-                yield formatted
+            async for kind, value in self._stream_step(messages, speaker_name=speaker_name):
+                if kind == "text":
+                    parts.append(value)
+                    yield value
+                    continue
+                if value.kind == "stance":
+                    if stance_seen is None:
+                        stance_seen = value.name
+                elif value.kind == "tool":
+                    result = self._run_tool(agent_id, player_id, value, meta)
+                    if result is not None and result.text:
+                        parts.append(result.text)
+                        yield result.text
+                elif value.kind == "wait":
+                    meta["stop_reason"] = "explicit_yield"
+                else:
+                    logger.warning("%s 输出了一条读不懂的控制指令:%r", agent_id, value.raw)
         finally:
+            if self.stance_enabled():
+                self._record_stance(agent_id, player_id, stance_seen, meta)
             reply = "".join(parts)
             if reply:
-                self._store.add_message(conversation_id, "assistant", reply, self._clock())
+                message_id = self._store.add_message(
+                    conversation_id, "assistant", reply, self._clock()
+                )
+                self.annotate(message_id, meta)
+
+    def annotate(self, message_id: int, meta: dict[str, Any] | None) -> None:
+        """把一轮的观测量写到消息行上(stance / intent / tool_call)。
+
+        **不发事件。** 「聊天子系统与事件核解耦」那条不变量还在:观测量落在行上,
+        整场会话的分布随关闭时那一个 `conversation` 事件出去,而工具造成的**后果**
+        (走开、广播)照旧是世界事件。
+        """
+        if self._state is None or not meta:
+            return
+        try:
+            self._state.annotate_message(
+                message_id,
+                # 她没选就不写这一格。写上兜底的 neutral,下游的分布会变成
+                # "她 100% 中性" —— 而真相是"她一次都没选过",两件事差得很远。
+                stance=meta.get("stance") if meta.get("stance_declared") else None,
+                intent=meta.get("intent"),
+                intent_confidence=meta.get("intent_confidence"),
+                tool_calls=meta.get("tool_calls") or None,
+            )
+        except Exception:  # noqa: BLE001 - 观测量写不进去不该让这轮聊天失败
+            logger.warning("写消息观测量失败", exc_info=True)
+
+    # ── 意图分类(#16)────────────────────────────────────────────────────────
+
+    async def classify(
+        self,
+        text: str,
+        *,
+        present: Sequence[str] = (),
+        recent: Sequence[Message] = (),
+    ) -> intent_mod.Intent:
+        """判一条玩家消息的意图。走背景槽,失败一律退回 dialogue 并说明原因。"""
+        template = self._template("chat.intent_classifier", intent_mod.DEFAULT_CLASSIFIER_PROMPT)
+        min_confidence = float(
+            self._setting("chat.intent.min_confidence", intent_mod.DEFAULT_MIN_CONFIDENCE)
+        )
+        try:
+            messages = intent_mod.build_classifier_messages(
+                template, text, present=present, recent=recent
+            )
+        except (KeyError, IndexError, ValueError):
+            logger.warning("chat.intent_classifier 渲染失败,这条按对话处理")
+            return intent_mod.Intent(reason="分类器提示词渲染失败,按对话处理")
+        try:
+            raw = await self._background_llm.complete(messages)
+        except Exception as exc:  # noqa: BLE001 - 分类器挂了不该让人说不了话
+            logger.warning("意图分类调用失败:%s", exc)
+            return intent_mod.Intent(reason=f"分类器调用失败({type(exc).__name__}),按对话处理")
+        return intent_mod.parse_classification(raw, min_confidence=min_confidence)
+
+    # ── autonomous loop(#17)──────────────────────────────────────────────────
+
+    def budget_for(
+        self, agent_id: str, interlocutor_id: str, *, world_context: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """这一轮的连说预算 + 它的依据。"""
+        persona = self._persona_provider(agent_id) or {}
+        ctx = world_context
+        if ctx is None and self._world_provider is not None:
+            try:
+                ctx = self._world_provider(agent_id, interlocutor_id) or {}
+            except Exception:  # noqa: BLE001 - 读不到世界就按缺省算
+                ctx = {}
+        ctx = ctx or {}
+        presence = ctx.get("presence") or {}
+        hour: int | None
+        try:
+            hour = int(presence.get("hh"))
+        except (TypeError, ValueError):
+            hour = None
+        mood = ctx.get("mood")
+        hard_max = int(self._setting("chat.loop.max_messages", _LOOP_MAX_MESSAGES))
+        return compute_budget(
+            personality=persona.get("personality") or "",
+            relation=ctx.get("relation"),
+            mood=None if mood is None else float(mood),
+            hour=hour,
+            hard_max=max(1, hard_max),
+        )
+
+    async def autonomous_loop(
+        self,
+        agent_id: str,
+        history: Sequence[Message],
+        *,
+        interlocutor_id: str,
+        interlocutor: dict[str, str] | None = None,
+        extra_system: Sequence[str] | None = None,
+        interrupt_check: Callable[[], str | None] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """连续输出到她自己想停(#17)。逐步产出结构化事件,而不是一整段文本。
+
+        产出的 `kind`:`text`(散文片段)、`message`(这一步说完的整句)、`tool_call`、
+        `stance`、`stop`。**一次触发跑到底**,不是一 tick 一步。
+
+        ⚠️ `text` 是 `message` 的**流式视图**,同一段话的两种形态:要打字机效果就消费
+        `text`、忽略 `message`;要整句就反过来。两个都渲染 = 每句话出现两遍。
+
+        四类停下信号,一条都不能少:显式让位(`〔wait〕`)、隐式让位(问句结尾)、
+        预算耗尽、以及工具要求结束。硬上限兜底 —— 预算算错、模型不肯让位,都不该
+        让一次聊天无限跑下去。
+
+        插话由**她自己**判(issue #17 的选项 C):`interrupt_check` 返回一句话时,
+        下一步的提示词里带上"对方插了一句",接着说还是转向由她决定。于是连续输出的
+        破裂本身也是角色反应,不是引擎的硬中断。
+        """
+        turn: list[Message] = list(history)
+        plan = self.budget_for(agent_id, interlocutor_id)
+        budget = int(plan["budget"]) if self.loop_enabled() else 1
+        max_tools = int(self._setting("chat.loop.max_tool_calls", _LOOP_MAX_TOOL_CALLS))
+        yield {"kind": "budget", **plan, "effective": budget}
+
+        emitted = 0
+        tool_calls = 0
+        stop_reason = "budget"
+        interrupt: str | None = None
+        # "不要重复自己"要跨**整段对话**,不只是这一轮:真模型跑出来的样子是第四轮
+        # 里整段照抄第二轮说过的一段(一字不差)。宿主递进来的近期历史就是她说过的话,
+        # 拿它当底。
+        said_before: list[str] = [
+            str(message.get("content") or "")
+            for message in turn
+            if message.get("role") == "assistant"
+        ]
+        while emitted < budget:
+            extras: list[str] = list(extra_system or ())
+            if emitted:
+                extras.append(
+                    self._template("chat.loop_continue", _DEFAULT_LOOP_CONTINUE_TEMPLATE).format(
+                        emitted=emitted, left=budget - emitted
+                    )
+                )
+            if interrupt:
+                extras.append(
+                    self._template("chat.loop_interrupt", _DEFAULT_LOOP_INTERRUPT_TEMPLATE).format(
+                        text=interrupt
+                    )
+                )
+                turn = list(turn) + [{"role": "user", "content": interrupt}]
+                interrupt = None
+            meta: dict[str, Any] = {}
+            step_text: list[str] = []
+            stance_seen: str | None = None
+            prompt = self._prompt_for(
+                agent_id, turn, interlocutor_id=interlocutor_id,
+                interlocutor=interlocutor, extra_system=extras,
+            )
+            persona = self._persona_provider(agent_id) or {}
+            speaker_name = persona.get("name") or agent_id
+            stop_now = False
+            async for kind, value in self._stream_step(prompt, speaker_name=speaker_name):
+                if kind == "text":
+                    step_text.append(value)
+                    yield {"kind": "text", "text": value}
+                    continue
+                if value.kind == "stance":
+                    if stance_seen is None:
+                        stance_seen = value.name
+                    continue
+                if value.kind == "wait":
+                    stop_reason = "explicit_yield"
+                    stop_now = True
+                    continue
+                if value.kind == "tool":
+                    if tool_calls >= max_tools:
+                        logger.warning(
+                            "%s 这一轮的工具调用已达上限 %s,忽略 %s",
+                            agent_id, max_tools, value.name,
+                        )
+                        meta.setdefault("ignored_tool_calls", []).append(value.name)
+                        continue
+                    tool_calls += 1
+                    result = self._run_tool(agent_id, interlocutor_id, value, meta)
+                    if result is None:
+                        continue
+                    if result.text:
+                        step_text.append(result.text)
+                        yield {"kind": "text", "text": result.text}
+                    yield {
+                        "kind": "tool_call",
+                        "tool": value.name,
+                        "params": dict(value.params),
+                        "result": result.to_dict(value.name, value.params),
+                    }
+                    if result.end_conversation:
+                        stop_reason = "end_conversation"
+                        stop_now = True
+                    elif result.stop_loop:
+                        stop_reason = "tool_yield"
+                        stop_now = True
+                    continue
+                logger.warning("%s 输出了一条读不懂的控制指令:%r", agent_id, value.raw)
+                meta.setdefault("unknown_directives", []).append(value.raw)
+
+            if self.stance_enabled():
+                self._record_stance(agent_id, interlocutor_id, stance_seen, meta)
+                yield {
+                    "kind": "stance",
+                    "stance": meta.get("stance"),
+                    "declared": bool(meta.get("stance_declared")),
+                }
+            said = "".join(step_text).strip()
+            # 只在**续说**的那几步上查重。第一步照旧交出去 —— 哪怕它像刚说过的话,
+            # 玩家宁可收到一句重复的回答,也不能收到一片沉默。
+            if said and emitted and repeats_itself(said, said_before):
+                # 又把说过的话说了一遍:那不是"还有话要说",那是在原地绕圈。真人不会
+                # 连着说两句一样的话,而一个绕圈的模型会一路绕到预算耗尽 —— 玩家看到
+                # 的就是同一段话刷五遍。Mock 上一眼可见(它是模板回声),真模型上是
+                # "第二句把第一句换个说法"的样子。停下,并说明原因。
+                logger.info("%s 这一步在重复前面说过的话,这一轮到此为止", agent_id)
+                stop_reason = "repeated_step"
+                break
+            if said:
+                emitted += 1
+                said_before.append(said)
+                turn = list(turn) + [{"role": "assistant", "content": said}]
+                yield {"kind": "message", "text": said, "meta": dict(meta)}
+            elif not stop_now:
+                # 一步什么也没说出来:再转一圈只会再空一次。
+                stop_reason = "empty_step"
+                break
+            if stop_now:
+                break
+            if said and _looks_like_a_question(said):
+                stop_reason = "implicit_yield"
+                break
+            if interrupt_check is not None:
+                try:
+                    interrupt = interrupt_check()
+                except Exception:  # noqa: BLE001 - 读不到插话就当没人插话
+                    logger.warning("interrupt_check 失败", exc_info=True)
+                    interrupt = None
+
+        yield {"kind": "stop", "reason": stop_reason, "messages": emitted,
+               "tool_calls": tool_calls, "budget": budget}
 
     def active_conversation_id(self, agent_id: str) -> int | None:
         active = self._store.active_conversation(agent_id)

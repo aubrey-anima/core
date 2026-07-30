@@ -95,3 +95,47 @@ def test_achat_streams_on_the_hosts_own_loop(tmp_path):
 
     with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         assert asyncio.run(_main(world)).strip()
+
+
+def test_the_intent_classifier_awaits_on_the_hosts_loop(tmp_path):
+    """chat-agent:分类是一次真的 LLM 往返,`achat` 那条路上必须是 await 的。
+
+    同步阻塞地等它会把宿主的事件循环按住好几秒(FastAPI 的处理函数就是 async def),
+    而那种阻塞不会报错、只会让整个网站在每条消息上卡一下 —— 又是一件"照跑但给错
+    东西"。这条测试盯的是它在 async 宿主里跑得通且分类真的发生了。
+    """
+    import json
+
+    class SlowClassifier:
+        """真实一点:分类器有 await 点。同步路径会在这里把循环按住。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, messages):
+            yield ""
+
+        async def complete(self, messages) -> str:
+            self.calls += 1
+            await asyncio.sleep(0)
+            return json.dumps({"intent": "dialogue", "confidence": 0.9, "params": {}})
+
+    async def _main(world):
+        chunks = []
+        meta: dict = {}
+        async for token in world.achat(
+            "夏", [{"role": "user", "content": "在吗"}],
+            player_id="p1", display_name="阿檀", meta=meta,
+        ):
+            chunks.append(token)
+        return "".join(chunks), meta
+
+    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        classifier = SlowClassifier()
+        world.chat_service._background_llm = classifier
+        world.config_set("chat.intent.enabled", True)
+
+        reply, meta = asyncio.run(_main(world))
+        assert reply.strip()
+        assert classifier.calls == 1, "分类器该被调一次"
+        assert meta["intent"] == "dialogue"

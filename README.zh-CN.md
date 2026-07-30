@@ -134,6 +134,39 @@ with World.open("w.db") as world:
 anima-world config set needs.enabled true --db-path saves/world.db
 ```
 
+### 她自己的选择(1.3.0,四个开关,默认全关)
+
+1.2 的一轮聊天里,角色只有一件事可做:**把话接下去**。她没有可以选择的行动(说"我走了"
+也没真走)、说话背后没有关系性意图、也听不出你这句是在跟她说话还是在导演场景。这四个
+开关补的就是这缺掉的一半。
+
+| 开关 | 点亮后她多了什么 |
+|---|---|
+| `chat.stance.enabled` | 回复前显式选一个**关系性意图**(讨好/讨坏/试探/回避/宣泄/挑逗/顺从/中性)。按 (角色, 对方) 存 —— 她可以同时对你找茬、对别人讨好 |
+| `chat.tools.enabled` | 聊天里能**调能力**:静音你、结束对话、说"等会儿"(**到点真的回来**)、走开(真起一趟程,不是一句台词)、拒谈某话题、公开广播 |
+| `chat.intent.enabled` | 你的每条消息先分类:`dialogue` / `narrative_direction`(你在导演场景 —— 改的是世界,不是提示词)/ `style_adjust`("以后叫我霜霜" —— 写进她对**这个玩家**的 persona,永久) |
+| `chat.loop.enabled` | `world.chat_burst()` 连着说到**她自己**想停:显式让位、问了你一句、预算耗尽,或者调了个结束对话的能力 |
+
+调用走回复流里的**行内标记**(`〔tool:mute {"minutes": 5}〕`)而不是 OpenAI 的 `tools=`
+字段,因为默认状态必须成立:没有 key 时世界跑在 Mock 上,而本地与各家兼容端点的
+function calling 支持参差。散文照旧一个字一个字地流,控制标记一个字都不会漏给玩家。
+
+```python
+with World.open("saves/world.db") as world:
+    meta = {}
+    reply = world.chat_reply("夏", turn, player_id="p1", display_name="阿宇", meta=meta)
+    meta["stance"]        # 'provoke';meta['stance_declared'] 说明这是她选的还是兜的底
+    meta["tool_calls"]    # [{'tool': 'walk_away', 'ok': True, 'detail': {'to': 'home'}}]
+    world.record_chat_turn("夏", "p1", turn[-2:], meta=meta)   # 观测量落到消息行上
+
+    for step in world.chat_burst("夏", turn, player_id="p1"):   # 她可能连着说三句
+        if step["kind"] == "message":
+            print(step["text"])
+```
+
+她这会儿不理这个玩家时,`world.chat()` 抛 `AgentUnavailable` —— 回一句空话在宿主那边和
+"LLM 挂了"长得一模一样,而这两件事该让玩家看到完全不同的东西。
+
 ## 它是怎么搭的
 
 **一个卷就是一个世界。** `world.db`(事件/聊天/记忆/配置)+ `world.db.key`
@@ -149,7 +182,11 @@ anima-world config set needs.enabled true --db-path saves/world.db
 **版本即契约。** 一个版本 = (引擎代码, db format 版本, 包格式版本) 一起冻结:
 
 - `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
-- **主版本号 = db 格式**:db 格式变才升第一位,第二/三位都是程序优化
+- **主版本号 = db 格式 = 可挂载性**:让老引擎**读不了**世界文件的改动才升第一位,
+  第二位加能力,第三位纯修 bug
+- **加法修订**(1.3.0 起):纯新增的表与可空列不影响可挂载性,跟着次版本号走,戳在
+  `db_meta.schema_revision`(只增不减)。老引擎照样能开那个文件,只是不读新表 ——
+  所以这个戳存在的唯一理由是**让降级看得见**:`contract` 与 `doctor` 都报它
 - `db.py` 的 `DB_FORMAT_VERSION` / `MIN_SUPPORTED_DB_FORMAT` 是运行期安全联锁:
   挂错卷会当场拒绝而不是静默写坏
 
@@ -236,7 +273,7 @@ anima_world/
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest                 # 109 项:db 格式闸门 + 打包契约 + api 门面 + 四大机制
+python -m pytest                 # 370 项:db 格式闸门 + 打包契约 + api 门面 + 四大机制 + chat-agent
 python -m build                  # → dist/*.whl + dist/*.tar.gz
 ```
 

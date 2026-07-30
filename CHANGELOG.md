@@ -3,19 +3,148 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-Versioning is **not** plain semver: the major version *is* the db format version. A world
-file is pinned to the engine version that produced it, and there is no cross-version
-migration — hosts install one version and depend on that version.
+Versioning is **not** plain semver: the major version *is* the db format version — which
+is to say, the major version is **mountability**. A world file is pinned to the engine
+version that produced it, and there is no cross-version migration — hosts install one
+version and depend on that version.
 
-- **Major** — the database format changed. Existing worlds are not readable.
-- **Minor** — new capability, same database format.
-- **Patch** — fixes, same database format.
+- **Major** — the database format changed: existing worlds are not readable at all.
+- **Minor** — new capability, same database format. Since 1.3.0 this includes
+  **additive schema revisions** (new tables, new nullable columns): both directions still
+  mount, the older engine simply doesn't read the new tables, so those capabilities are
+  absent. `db_meta.schema_revision` records which revision wrote a file — that stamp is
+  the only thing that makes such a downgrade visible instead of silent.
+- **Patch** — fixes, same database format and schema revision.
 
-`tests/test_version_contract.py` enforces the major/db-format relationship mechanically,
-and `db.py` enforces it again at runtime: mounting an incompatible world file is refused
-on the spot rather than silently written to.
+`tests/test_version_contract.py` enforces this mechanically (major == db format, the hard
+pin window stays closed, the revision only ever moves forward, and a higher-revision world
+must still mount — if it refused, the change wasn't additive and belongs in a major), and
+`db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
+spot rather than silently written to.
 
 ## [Unreleased]
+
+## [1.3.0] — 2026-07-29
+
+同 db 格式(**1**)与包格式(**1**),**schema 加法修订 1 → 2**。1.0.x / 1.1.x / 1.2.x
+建的世界照常打开;这一版建的世界在 1.2 引擎上**也照样能开**,只是下面这些能力缺席。
+主题:**让她自己做选择** —— 一次真人 dogfooding(200+ 条聊天)之后,#15/#16/#17/#18
+四条一起兑现。四个开关**全部默认关闭**:每开一条都多一层"她自己的决定",也多一次
+LLM 往返,所以点亮与否是世界作者的决定。
+
+⚠️ 一处规则变更:**加法修订不再逼一次主版本跳跃**(见文件开头)。schema 一变就升
+db 格式、db 格式一升就升主版本 —— 按字面读,这一版该叫 2.0.0,而那会把所有 1.x 的
+世界作废,只为了一批加法。那条规则真正在保护的是"版本号能告诉你两个世界文件互不
+互通",加法不影响互通,所以规则收紧到它保护的那件事上:**主版本 = 可挂载性**,加法
+修订跟着次版本走并写进 `db_meta.schema_revision`(只增不减)。`contract` 与 `doctor`
+都报这个数,运维台镜像要一起读 —— 一个 1.3 的世界跑在 1.2 引擎上照样跑,但 stance /
+静音 / 拒谈话题整套不生效,而"照跑但给错东西"是这个仓库最在意的那类坏。
+
+### Added
+
+- **角色终于有可以选择的行动(issue #15)。** 此前她的"假"不在提示词、在**结构**:
+  100% 响应率、零主动,说"我走了"也没真走 —— 因为她**没有别的可做**,只能用词把话
+  接下去。`anima_world/tools/` 是数据化的能力注册表(`@tool`,形状对齐 function
+  calling),七条:`mute`(软静音,下一条消息当场被拒)、`end_conversation`、
+  `delay_reply`(**到点她真的回来敲门**)、`walk_away`(走 BT 那条路真的起程,不是嘴上
+  说说)、`refuse_topic`、`broadcast`、`wait_for_user`。调用走**行内标记**
+  (`〔tool:mute {"minutes": 5}〕`)而不是 OpenAI 的 `tools=` 字段:没有 key 时世界跑在
+  Mock 上,而本地 ollama 与若干兼容端点的 function calling 支持参差 —— 只在原生 tools
+  上可用的能力,等于在**默认状态下缺席**。散文照旧一个字一个字流给玩家,控制标记一个
+  字都不会漏(`directives.py` 是流式解析器)。
+  软静音抛 `AgentUnavailable`(带 `kind` / `seconds_left` / `reason`)而不是回一句空话
+  —— 空回复在宿主那边和"LLM 挂了"长得一模一样,而这两件事该让玩家看到完全不同的东西。
+- **stance:她这句话背后的关系性意图(issue #18)。** 八个枚举(讨好/讨坏/试探/回避/
+  宣泄/挑逗/顺从/中性),回复前显式选一个,影响遣词造句。是 (角色, 对方) 的属性 ——
+  她可以同时对你找茬、对别人讨好。两处刻意的设计:枚举**有限可穷举**(开放字符串一开
+  就散,LLM 每次编一个新词,下游没法消费);惯性(不要一句讨好下一句找茬)做成**提示词
+  压力而不是引擎摇骰子** —— 摇骰子会覆盖角色自己的选择,而且同一句话跑两次给两个结果、
+  日志上看不出为什么。`World.stance()` 的 `declared=False` 把"她没选、我们兜的底"和
+  "她选了中性"分开:两者在文本上一模一样。
+- **意图分派:你说的话不再全被当成 in-character 对话(issue #16)。**
+  `style_adjust`("以后叫我霜霜")写进 `persona_overrides`,**按 (角色, 玩家) 永久** ——
+  一次教会,跨会话跨天不忘;那个 feature 的核心就是"以后",应一两轮就忘正是要修的病。
+  `narrative_direction`("让林素也过来")交给 director,**不进提示词、进世界**:真把人
+  挪过来,于是她下一次读 grounding 会真的看到那个人在场,而不是"她想象里的林素"。
+  v1 只对已存在的角色动手,不认识的人拒绝并指出下一步(自然语言造人是 v2,那需要每日
+  上限、作者 opt-in 与 `authored_by_user` 标记)。分类**往 dialogue 上偏**:低置信度、
+  参数不全、分类器抽风一律退回对话并写明原因 —— 该 narrative 判成 dialogue 只是别扭,
+  反过来会把玩家正说的话吞掉。
+- **连续输出:她可以说完再停,而不是一句一等(issue #17)。** `World.chat_burst()` /
+  `achat_burst()` 产出结构化步骤(`budget` / `text` / `message` / `stance` /
+  `tool_call` / `stop`)。玩家的原话是"我发一句她回一大段然后停,我又要发才有反应,像
+  completion 不像聊天"。四类停下信号缺一不可:显式让位(`〔wait〕`)、隐式让位(问句
+  结尾)、预算耗尽、工具要求结束,外加硬上限兜住"模型不肯让位"。预算按性格/关系/心情/
+  时间算,**并把依据一起返回**(`3 = 基准 3 + 话多 2 - 深夜 2`)—— 一个说不出理由的
+  预算没法调参;性格倾向从 personality **文本**里确定性地抽,所以没有 key 也算得出来、
+  跑两次一样。插话由**她自己**判(接着说 / 转向 / 先按住你),于是连续输出的破裂本身
+  也是角色反应,不是引擎的硬中断。
+  外加一条 **`repeated_step`**:一字不差地又说了一遍就停下。这是装上 wheel 演一遍用户
+  故事时看见的 —— Mock 上她把同一句话刷了五遍。那不是"还有话要说",是卡住了(真模型上
+  是低温度或提示词打结的样子),而预算会一路把它刷到底。
+- **背景槽 `llm.background.model`。** 分类器与 loop 的每一步一轮要打好几次,用主模型
+  既慢又贵。空着就退回主模型 —— 便宜快模型是优化,不是前置条件。
+- **`anima-world play` 看得见这些。** 连续输出逐条打印,每轮末尾一行观测量
+  (`· stance=试探 intent=dialogue(0.92) mute`),软静音按她的口气说("她现在不想理你")
+  而不是报错。开关关着时这一行不出现 —— 和 1.2 逐字相同。
+- **`contract` 与 `doctor` 报 schema 修订与 chat 能力清单。** 镜像端要知道自己对齐的是
+  哪一版,而落后的镜像不报错,它只是对新格式给出旧答案。
+
+### Changed
+
+- `World.chat()` / `record_chat_turn()` 各多一个可选 `meta`:前者是收件盘(这一轮的
+  stance / intent / tool_calls),后者把它落到消息行上(intent 落**用户**那行,stance 与
+  tool_call 落她那行 —— 挂错行,运维台上的 tag 就挂在错的气泡上)。都是加法,老调用方
+  逐字不变。
+- 关闭会话那**一个** `conversation` 事件多带整场的 `stances` / `intents` /
+  `tools_used` 分布。
+
+### Fixed —— 用真模型跑三局之后改的六处
+
+四个开关点亮、接上真 LLM(LongCat-2.0)自己玩了三局:一局八轮的正常流程 + 两局
+"被真的欺负"的探针。**机制是通的**(她真的会走开、会结束对话,世界真的跟着变),
+但六处只有真人玩才看得见:
+
+- **提示词位置就是权重。** stance 与能力菜单原来夹在中间,后面紧跟着全篇最响的一段
+  (身份声明,标着"最高优先级事实")。结果:六轮里她只声明了两轮 stance,能力**一次
+  没用**。两块移到整段 system prompt 的最后之后,声明率变成 5/6,而被逼到难听话时
+  4/4 轮动用了能力。位置改动写在 `_choice_blocks` 的 docstring 里。
+- **两处措辞是对撞出来的。** 回复格式那段("所有动作描写必须放在括号内""输出前逐个
+  检查所有括号",正确示例以动作括号开头)和"第一行输出〔stance:…〕"直接冲突 ——
+  现在明说这一行不是动作描写、不受括号规则约束,且"漏了就等于没选"。能力菜单原来
+  只写了有哪些、怎么写,补上了**什么时候用是在角色里的**那句许可("你可以拒绝。不要
+  因为要客气就把话顺着接下去")。缺的从来不是能力,是那句许可。
+- **对一个不在你面前的人"走开"是个空动作。** 她在咖啡店被骂、`walk_away` 走去工作室
+  —— 对的;但玩家还在咖啡店,下一句照旧发得到(手机私聊),于是她又走开一次、再一次,
+  连着四趟真行程写进世界。现在隔着手机的 `walk_away` **降级成挂断**,并在 detail 里
+  写明 `degraded_to`。在场的语义得由引擎守住,不能指望模型每次都想到自己在打电话。
+- **一个只调工具、没有台词的步骤,会把她刚声明的 stance 覆盖成兜底的中性。** 她摔了
+  围裙走人(provoke),紧接着那一步只有一个 tool_call —— 世界于是记着"她对你很平淡"。
+  现在**没声明不许覆盖已经记着的那个**(只允许初始化)。
+- **连续输出会原地绕圈,而且跨轮复读。** 第二句常常是第一句换个说法(甚至一字不差),
+  第四轮里还能整段照抄第二轮说过的一段。续说提示词现在明说"往下推进、不要重复自己
+  也不要再答一遍对方那句话";查重从"一字不差"改成**按句子比对**,并且覆盖宿主递进来
+  的整段近期历史,不只是本轮。第一步永远照旧交出去 —— 查重不许把一轮变成沉默。
+- **同步门面每调一次就新建一个事件循环,而 HTTP 客户端是被缓存复用的。** 于是一个
+  属于已关闭循环的连接池被后面每一次调用继续用:每轮都在刷
+  `Task was destroyed but it is pending` 与 `aclose was never awaited`,而真正的危险
+  是它某天变成 `Event loop is closed`(表现是"聊天忽然全炸")。这是 1.2 就有的,
+  连续输出把每轮的调用次数乘了 3~5 倍才让它显形。现在世界自带一条循环线程
+  (`_BridgeLoop`,`close()` 收掉),`ConfigBackedLLMClient` 也把**循环并入缓存键**
+  —— 混用 `chat`(门面)与 `achat`(宿主自己的循环)时两边各自持有客户端。顺带:
+  连接与 TLS 握手能复用了。
+
+一句实测的等待时间,给做 UI 的人:一轮 2~12 秒是常态(一次连说 2~3 句),偶尔窜到
+20~30 秒,极端一次 92 秒。流式吐字能盖住大半,但**连续输出会把慢调用的暴露面乘上
+步数** —— 宿主那边"她还在说"的占位符不是装饰,是必需品。
+
+### 一处对 issue 文本的偏离(有意)
+
+#15/#16/#18 里都写着"每轮发一个事件"(`agent_stance` / `user_intent`)。这里**没有**
+那样做:每轮一个事件等于把聊天转录搬进世界的历史,而「聊天子系统与事件核解耦、整场
+会话只发一个事件」是这个子系统存在的前提。取法是:逐轮观测量落在 `messages` 行上
+(运维台照样能显示 tag),分布随关闭事件出去,而工具造成的**后果**(走开、广播、静音)
+照旧是世界事件 —— 世界的历史仍然只记世界里发生的事。
 
 ## [1.2.0] — 2026-07-28
 

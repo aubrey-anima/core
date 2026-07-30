@@ -40,6 +40,7 @@ class ChatSessionManager:
         config_store: Any | None = None,
         prompt_store: Any | None = None,
         judge_hook: JudgeHook | None = None,
+        meta_provider: Callable[[int], dict[str, Any]] | None = None,
     ) -> None:
         self._store = store
         self._llm = llm
@@ -49,6 +50,10 @@ class ChatSessionManager:
         self._config_store = config_store
         self._prompt_store = prompt_store
         self._judge_hook = judge_hook
+        # chat-agent:整场会话的 stance / intent 分布 + 调过的工具。**只在关闭时
+        # 出去一次** —— 每轮一个事件等于把聊天转录搬进世界的历史,而那条不变量
+        # (聊天子系统与事件核解耦)是这个子系统存在的前提。
+        self._meta_provider = meta_provider
 
     async def close_conversation(self, conversation_id: int) -> bool:
         """Close a conversation. Returns True iff a `conversation` event was emitted."""
@@ -66,25 +71,29 @@ class ChatSessionManager:
         summary = await self._summarize(conv, messages)
         self._store.close(conversation_id, summary=summary, ts=ts)
         participants = conv.get("participants") or []
-        self._emit_event(
-            {
-                "type": "conversation",
-                "who": conv["agent_id"],
-                "ts": ts,
-                "payload": {
-                    "agent_id": conv["agent_id"],
-                    "conversation_id": conversation_id,
-                    "summary": summary,
-                    "message_count": conv["message_count"],
-                    "started_at": conv["started_at"],
-                    "closed_at": ts,
-                    # player-visitor: who was in the room, and where — the
-                    # event finally names the human side of the conversation.
-                    "participants": participants,
-                    "location": conv.get("location"),
-                },
-            }
-        )
+        payload: dict[str, Any] = {
+            "agent_id": conv["agent_id"],
+            "conversation_id": conversation_id,
+            "summary": summary,
+            "message_count": conv["message_count"],
+            "started_at": conv["started_at"],
+            "closed_at": ts,
+            # player-visitor: who was in the room, and where — the
+            # event finally names the human side of the conversation.
+            "participants": participants,
+            "location": conv.get("location"),
+        }
+        if self._meta_provider is not None:
+            try:
+                payload.update(self._meta_provider(conversation_id) or {})
+            except Exception:  # noqa: BLE001 - 观测量读不到不该挡住关闭
+                logger.warning("读会话观测量失败 conversation=%s", conversation_id, exc_info=True)
+        self._emit_event({
+            "type": "conversation",
+            "who": conv["agent_id"],
+            "ts": ts,
+            "payload": payload,
+        })
         if self._judge_hook is not None:
             user = next((p for p in participants if p.get("kind") == "user"), None)
             try:

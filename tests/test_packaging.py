@@ -70,6 +70,21 @@ def test_engine_ships_no_ui_at_all():
     assert not (root / "author").is_dir()
 
 
+def test_the_chat_tools_subpackage_ships_and_registers_itself():
+    """`anima_world/tools/` 是 1.3.0 新增的**子包**。`packages.find` 是自动发现,
+    但一个漏进 wheel 的子目录只会在宿主环境里少文件 —— 而那时候的表现是
+    "她一个能力都不会调",不是 ImportError。这条盯的就是那种沉默。"""
+    assert (resources.files("anima_world") / "tools" / "social.py").is_file()
+
+    from anima_world import tools
+
+    registered = {spec.id for spec in tools.tools_for("*")}
+    assert {"mute", "end_conversation", "delay_reply", "walk_away",
+            "refuse_topic", "broadcast", "wait_for_user"} <= registered
+    # 声明里必须带 params_schema:没有它,提示词菜单会告诉她一个无参能力。
+    assert tools.get("mute").params_schema["minutes"]["required"] is True
+
+
 def test_authoring_is_not_importable_from_the_engine():
     """`anima_world.author` moved out. Leaving a shim would let the studio
     import the engine again, which is exactly what makes version switching a

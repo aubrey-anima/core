@@ -23,10 +23,13 @@ from anima_world.config_store import seed_defaults as seed_config_defaults
 from anima_world.db import (
     DB_FORMAT_VERSION,
     MIN_SUPPORTED_DB_FORMAT,
+    SCHEMA_REVISION,
     DBFormatError,
     open_db,
+    read_schema_revision,
 )
 from anima_world.events import EventLog
+from anima_world import tools as chat_tools
 from anima_world.graph import KnowledgeGraph
 from anima_world.locations import DEFAULT_POINTS
 from anima_world.memory_store import MemoryDescriptor, MemoryStore
@@ -1484,6 +1487,10 @@ def _seed_capability_catalog(
     read from this catalog in this change.
     """
     catalog = generate_capability_catalog(config_store, force_mock=force_mock_llm)
+    # chat-agent:chat 里能调的能力(`@tool` 注册表)也写进目录。只在创世时写 ——
+    # 往已有世界的日志里补写历史等于替过去撒谎;老世界照样能用这些能力,只是目录里
+    # 没有它们(`World.tools()` / `anima-world contract` 报的是注册表,始终是真的)。
+    catalog = list(catalog) + chat_tools.capability_payloads()
     for entry in catalog:
         event_log.append({
             "ts": 0,
@@ -1493,6 +1500,7 @@ def _seed_capability_catalog(
                 "kind": entry.get("kind", ""),
                 "description": entry.get("description", ""),
                 "params_schema": entry.get("params_schema", {}),
+                **({"surface": entry["surface"]} if entry.get("surface") else {}),
             },
         })
 
@@ -1681,6 +1689,67 @@ _PLAY_HELP = """  /who            这会儿谁在哪、在做什么
   其它任何一行     说给当前这个人听"""
 
 
+def _play_burst(
+    world: Any, args: argparse.Namespace, agent_id: str,
+    turn: list[dict[str, str]], display_name: str, speaker: str,
+    meta: dict[str, Any],
+) -> str:
+    """连续输出模式:逐条打印她说的每一句,工具与让位也显示出来。
+
+    返回拼起来的整段(交回 `record_chat_turn`,世界那边仍然是一轮)。
+    """
+    said: list[str] = []
+    for step in world.chat_burst(
+        agent_id, turn[-20:], player_id=args.player_id, display_name=display_name,
+    ):
+        kind = step.get("kind")
+        if kind == "message":
+            said.append(step["text"])
+            print(f"{speaker} > {step['text']}")
+            step_meta = step.get("meta") or {}
+            if step_meta.get("stance"):
+                meta.setdefault("stance", step_meta["stance"])
+            for call in step_meta.get("tool_calls") or []:
+                meta.setdefault("tool_calls", []).append(call)
+        elif kind == "intent":
+            meta.setdefault("intent", step.get("intent"))
+            meta.setdefault("intent_confidence", step.get("confidence"))
+            if step.get("reason"):
+                meta.setdefault("intent_reason", step["reason"])
+        elif kind == "tool_call":
+            ok = (step.get("result") or {}).get("ok", True)
+            label = step["tool"] + ("" if ok else "(没成)")
+            print(f"  {onboarding.dim('[' + label + ']')}")
+        elif kind == "stop" and step.get("reason") not in ("explicit_yield", "implicit_yield"):
+            reason = str(step.get("reason") or "")
+            print(f"  {onboarding.dim('(她停下了:' + reason + ')')}")
+    return "".join(said).strip() or "……"
+
+
+def _play_meta_line(meta: dict[str, Any]) -> str:
+    """一轮的观测量:她的意图、你这句被判成什么、她调了什么。看不见就等于没有。"""
+    bits: list[str] = []
+    if meta.get("stance"):
+        from anima_world import stance as stance_mod
+
+        suffix = "" if meta.get("stance_declared") else "?"
+        bits.append(f"stance={stance_mod.label(meta['stance'])}{suffix}")
+    if meta.get("intent"):
+        confidence = meta.get("intent_confidence")
+        bits.append(
+            f"intent={meta['intent']}"
+            + (f"({confidence:.2f})" if isinstance(confidence, (int, float)) else "")
+        )
+    if meta.get("intent_reason"):
+        # 退回按对话处理时的原因。降级不许无声 —— 这一行就是那个"说出来"。
+        bits.append(str(meta["intent_reason"]))
+    for call in meta.get("tool_calls") or []:
+        bits.append(call["tool"] + ("" if call.get("ok", True) else "(没成)"))
+    for ignored in meta.get("ignored_tool_calls") or []:
+        bits.append(f"{ignored}(开关关着,没执行)")
+    return f"  {onboarding.dim('· ' + '  '.join(bits))}\n" if bits else ""
+
+
 def run_play(args: argparse.Namespace) -> int:
     """在**活着**的世界里说话。
 
@@ -1691,7 +1760,7 @@ def run_play(args: argparse.Namespace) -> int:
     与 `chat` 的另一处不同:每说一句之前先把玩家挪到对方所在地,所以判定是面对面
     还是手机私聊会**随她走动而变**。
     """
-    from anima_world.api import World
+    from anima_world.api import AgentUnavailable, World
 
     try:
         world = World.open(
@@ -1759,19 +1828,32 @@ def run_play(args: argparse.Namespace) -> int:
 
             turn = history.setdefault(agent_id, [])
             turn.append({"role": "user", "content": line})
+            speaker = here.get("name", agent_id)
+            meta: dict[str, Any] = {}
             try:
-                reply = world.chat_reply(
-                    agent_id, turn[-20:],
-                    player_id=args.player_id, display_name=display_name,
-                )
+                if world.config_get("chat.loop.enabled", False):
+                    # #17:她可以连着说几句、中途做件事,然后自己停下。逐条打印,
+                    # 因为"她还在说"和"她说完了"对聊天的人是两种不同的体验。
+                    reply = _play_burst(world, args, agent_id, turn, display_name, speaker, meta)
+                else:
+                    reply = world.chat_reply(
+                        agent_id, turn[-20:],
+                        player_id=args.player_id, display_name=display_name, meta=meta,
+                    )
+                    reply = reply.strip() or "……"
+                    print(f"{speaker} > {reply}")
+                print(_play_meta_line(meta))
+            except AgentUnavailable as exc:
+                # 软静音:她不理你。这不是报错 —— 是她的选择,所以照她的口气说。
+                print(f"  {onboarding.yellow(str(exc))}\n")
+                turn.pop()
+                continue
             except (KeyError, ValueError) as exc:
                 print(f"[play] {exc}", file=sys.stderr)
                 turn.pop()
                 continue
-            reply = reply.strip() or "……"
-            print(f"{here.get('name', agent_id)} > {reply}\n")
             turn.append({"role": "assistant", "content": reply})
-            world.record_chat_turn(agent_id, args.player_id, turn[-2:])
+            world.record_chat_turn(agent_id, args.player_id, turn[-2:], meta=meta)
             turns += 1
 
         now = world.state().get("world_time", {})
@@ -2297,11 +2379,21 @@ def contract_payload() -> dict[str, Any]:
     return {
         "operation": "contract",
         "engine_version": anima_world.__version__,
-        # 主版本 = db 格式。两者相等即"硬不兼容",挂错卷当场拒绝。
+        # 主版本 = db 格式(可挂载性)。两者相等即"硬不兼容",挂错卷当场拒绝。
+        # `schema_revision` 是**加法修订**:纯新增的表/可空列跟着次版本号走,不改
+        # 可挂载性。镜像端要读它 —— 否则一个 1.3 的世界在 1.2 引擎上"照跑",而
+        # stance / 静音 / 拒谈话题整套缺席,谁也看不出来。
         "db": {
             "format_version": DB_FORMAT_VERSION,
             "min_supported": MIN_SUPPORTED_DB_FORMAT,
+            "schema_revision": SCHEMA_REVISION,
         },
+        # chat 里她能调的能力(声明在代码,`@tool` 登记)。宿主要显示"她走开了"
+        # 之类的事件,得先知道有哪些能力会产生它们。
+        "chat_tools": [
+            {"id": spec.id, "kind": spec.kind, "params": sorted(spec.params_schema)}
+            for spec in chat_tools.tools_for("*")
+        ],
         "package": {"format_version": PACKAGE_FORMAT_VERSION},
         "report": {"format_version": REPORT_FORMAT_VERSION, "buckets": list(BUCKETS)},
         "seed": {
@@ -2333,6 +2425,9 @@ def run_contract(args: argparse.Namespace) -> int:
     print(onboarding.rule(f"anima-world {payload['engine_version']} 的对外契约"))
     print(f"  db 格式        {payload['db']['format_version']}"
           f"(支持到 {payload['db']['min_supported']};主版本号 = db 格式)")
+    print(f"  schema 修订    {payload['db']['schema_revision']}   "
+          f"加法修订(新表/新可空列),跟次版本号走,不改可挂载性")
+    print(f"  chat 能力      {', '.join(t['id'] for t in payload['chat_tools'])}")
     print(f"  包格式         {payload['package']['format_version']}   .cyberworld")
     print(f"  报表口径       {payload['report']['format_version']}   simulate --report")
     print(f"  种子 schema    agents{payload['seed']['agent_keys']} "
@@ -2369,6 +2464,18 @@ def run_doctor(args: argparse.Namespace) -> int:
 
         print(f"  {onboarding.green(onboarding.OK)} db 格式版本 {read_db_format(conn)}"
               f"(本引擎支持到 {DB_FORMAT_VERSION})")
+        revision = read_schema_revision(conn)
+        if revision > SCHEMA_REVISION:
+            # 能挂、能跑,但这个世界身上有本引擎不读的表 —— 那些能力会整个缺席,
+            # 而"缺席"在产物上和"没启用"长得一模一样。所以这里必须是一句警告。
+            problems += 1
+            print(f"  {onboarding.yellow(onboarding.WARN)} schema 修订 {revision},"
+                  f"本引擎只到 {SCHEMA_REVISION} —— 这个世界是更新的引擎写的,"
+                  f"多出来的表本引擎不读,对应能力会缺席")
+            print(f"      {onboarding.dim('修复:装一个 ≥ 该修订的引擎(次版本号更高的那个)')}")
+        else:
+            print(f"  {onboarding.green(onboarding.OK)} schema 修订 {revision}"
+                  f"(本引擎写到 {SCHEMA_REVISION})")
 
         events, = conn.execute("SELECT COUNT(*) FROM events").fetchone()
         agents, = conn.execute(

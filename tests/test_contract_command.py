@@ -16,7 +16,8 @@ import pytest
 
 import anima_world
 from anima_world.beats import OP_REQUIRED_FIELDS, VALID_OPS
-from anima_world.db import DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT
+from anima_world.db import DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT, SCHEMA_REVISION
+from anima_world.tools import tools_for
 from anima_world.sim_report import REPORT_FORMAT_VERSION
 from anima_world.world_package import PACKAGE_FORMAT_VERSION
 from anima_world.world_seed import WORLD_SEED_AGENT_KEYS, WORLD_SEED_LOCATION_KEYS
@@ -42,9 +43,20 @@ def test_contract_reports_every_wire_format_version():
     assert payload["db"] == {
         "format_version": DB_FORMAT_VERSION,
         "min_supported": MIN_SUPPORTED_DB_FORMAT,
+        # 加法修订也要报:一个 1.3 的世界在 1.2 引擎上"照跑"而 stance/静音整套
+        # 缺席,镜像端只有读到这个数才看得出来(1.3.0)。
+        "schema_revision": SCHEMA_REVISION,
     }
     assert payload["package"]["format_version"] == PACKAGE_FORMAT_VERSION
     assert payload["report"]["format_version"] == REPORT_FORMAT_VERSION
+
+
+def test_contract_reports_the_chat_tools_a_host_will_see_events_from():
+    """她在聊天里能调的能力。宿主要显示"她走开了",得先知道哪些能力会产生它。"""
+    payload = json.loads(_contract("--json").stdout)
+    reported = {entry["id"] for entry in payload["chat_tools"]}
+    assert reported == {spec.id for spec in tools_for("*")}
+    assert {"mute", "walk_away", "wait_for_user"} <= reported
 
 
 def test_contract_reports_the_seed_and_beat_shapes_a_mirror_must_match():

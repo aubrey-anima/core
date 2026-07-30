@@ -286,6 +286,104 @@ tick 与不带它一致。
   planner 的决定 —— 没有 key 就没有 planner。`idle_social`(「想找个人说说话」)不指名
   道姓,所以它只传八卦、不产生关系判定。
 
+#### 2.9.1 她自己的选择:stance / 能力 / 意图分派 / 连续输出(1.3.0,四个开关默认关)
+
+1.2 之前的一轮聊天里,角色只有一件事可做:**把话接下去**。她没有可以选择的行动
+(说"我走了"也没真走)、没有关系性意图(讨好、赌气、试探全被压平成"回话")、
+听不出你这句是在和她说话还是在导演场景。这四条开关补的就是这些,彼此正交,可以
+单独点亮:
+
+| 开关 | 默认 | 她多出来的东西 | issue |
+|---|---|---|---|
+| `chat.stance.enabled` | 关 | 回复前显式选一个**关系性意图**,八个枚举之一 | #18 |
+| `chat.tools.enabled` | 关 | 聊天里能**调能力**:静音 / 走开 / 等会儿再说 / 拒谈话题 / 广播 | #15 |
+| `chat.intent.enabled` | 关 | 你的每条消息先**分类**:对话 / 导演场景 / 改对话规则 | #16 |
+| `chat.loop.enabled` | 关 | 一次触发**连着说到她自己想停**(`World.chat_burst`) | #17 |
+
+**线格式是行内标记,不是 OpenAI 的 `tools=`。** 她在回复流里写
+`〔stance:provoke〕`、`〔tool:mute {"minutes": 5}〕`、`〔wait〕`,引擎当场摘出来、
+散文原样流给玩家(一个字都不会漏)。理由是默认状态必须成立:没有 key 时世界跑在
+Mock 上,而本地 ollama 与若干 OpenAI 兼容端点的 function calling 支持参差 —— 只在
+原生 tools 上可用的能力,等于在默认状态下缺席。原生 tool-calling 是 v2 的路,声明
+(`params_schema`)已经是同一份。
+
+**stance(#18)** 是 (角色, 对方) 的属性,落在 `agent_stance` 表:她可以同时对你找茬、
+对别人讨好。`World.stance(agent_id, target_id)` 读它,`declared=False` 表示"这是兜的
+底,她没选" —— 文本上和"她选了中性"一模一样,只有这个字段能分开。惯性(不要一句
+讨好下一句找茬)做成**提示词压力**而不是引擎摇骰子:摇骰子会覆盖角色自己的选择,
+而且同一句话跑两次给两个结果、日志上看不出为什么。
+
+**能力(#15)** 七条,声明在代码里(`anima_world/tools/`,`@tool` 登记),
+`World.tools()` / `anima-world contract` 报出。v1 所有角色共用一套。
+
+| id | 语义 | 世界里真发生的事 |
+|---|---|---|
+| `mute` | 屏蔽这个人一段时间 | 写 `agent_mutes`;下一条消息被拒(`AgentUnavailable`),发 `mute_started` |
+| `end_conversation` | 结束对话,不屏蔽 | 关掉这场会话(照旧一个 `conversation` 事件) |
+| `delay_reply` | 等会儿再说 | 排一条 `agent_followups`;**到点她真的回来敲门**(`agent_hail`,`reason=delayed_reply`) |
+| `walk_away` | 话说到一半走人 | **面对面**时走 BT 那条路真的起程(`travel` / `location_join`);隔着手机时降级成**挂断**(`detail.degraded_to`)—— 对一个不在你面前的人"走开"是个空动作 |
+| `refuse_topic` | 以后不谈这个 | 写 `agent_refused_topics`;对方再提时提示词里加一段"岔开话题" |
+| `broadcast` | 说一句公开的话 | 一条 `agent_broadcast` 事件(`World.broadcasts()`) |
+| `wait_for_user` | 我说完了,轮到你 | 连续输出的正常出口(#17) |
+
+**软静音**:玩家还能发,世界当场拒 —— `World.chat` 抛 `AgentUnavailable`
+(带 `kind` / `seconds_left` / `reason`),而不是回一句空话(空回复在宿主那边和
+"LLM 挂了"长得一模一样)。硬静音(锁输入框)由宿主按 `mute_started` 事件自己决定。
+`World.is_muted()` 可以先探一下,`World.unmute()` 是作者/运维的手动解除。
+
+**意图分派(#16)** 走**背景槽**(`llm.background.model`,空则用主模型)一次分类:
+
+- `dialogue` —— 照旧,不动
+- `style_adjust` —— 写 `persona_overrides`,**按 (角色, 玩家) 永久**:一次教会,跨会话
+  跨天不忘("以后叫我霜霜" 的核心是"以后")。回一句轻确认,不走 in-character 生成。
+  可写的 kind 是白名单:`address_form` / `description_style` / `tone_preference` /
+  `forbidden_topics` / `nickname_for_player`。宿主也可以直接
+  `World.set_persona_override()`,不必经过分类器。
+- `narrative_direction` —— 交给 director:**v1 只对已经存在的角色动手**
+  (`come_here` / `leave` / `act`),而且不进提示词、进**世界** —— 让某人过来就是一次真的
+  行程,于是她下一次读 grounding 时会真的看到那个人在场。不认识的人一律拒绝并指出
+  下一步(自然语言造人是 v2:那需要每日上限、作者 opt-in、`authored_by_user` 标记)。
+
+分类**往 dialogue 上偏**:置信度低于 `chat.intent.min_confidence`(默认 0.6)、参数不
+全、分类器抽风,一律退回对话,并把原因写进 `meta["intent_reason"]`。两种错的代价不
+对称 —— 该 narrative 判成 dialogue 只是别扭,反过来会把玩家正说的话吞掉。
+
+**连续输出(#17)** 是 `World.chat_burst()` / `World.achat_burst()`:产出结构化步骤
+(`budget` / `intent` / `text` / `message` / `stance` / `tool_call` / `stop`),宿主可以
+逐条弹出。⚠️ `text` 是 `message` 的**流式视图**(同一段话的两种形态):要打字机效果就
+消费 `text` 并忽略 `message`,要整句就反过来 —— 两个都渲染会让每句话出现两遍。
+四类停下信号缺一不可:显式让位(`〔wait〕`)、隐式让位(问句结尾)、预算耗尽、工具要求
+结束;`chat.loop.max_messages` / `max_tool_calls` 是硬上限,兜住"模型不肯让位"。
+另有两条防跑飞:一步什么也没说出来(`empty_step`)、以及**又把说过的话说了一遍**
+(`repeated_step`)。后者按**句子**比对,并且覆盖宿主递进来的整段近期历史 —— 真模型的
+样子不是一字不差的复读,而是"第二句把第一句换个说法",甚至第四轮里整段照抄第二轮说过
+的一段;而一个绕圈的模型会一路绕到预算耗尽,玩家读到的是五条几乎一样的消息。**第一步
+永远照旧交出去**:查重不许把一轮变成沉默。`stop` 那一步的 `reason` 报的就是这几个
+(还有 `tool_yield` / `end_conversation` / `handled_by_intent`)。
+
+⚠️ **等待时间**(2026-07-29 实测,LongCat-2.0):一轮 2~12 秒是常态,偶尔 20~30 秒,
+极端一次 92 秒。连续输出把慢调用的暴露面乘上步数 —— 宿主那边"她还在说"的占位符不是
+装饰,是必需品。要压时间就给背景槽配个便宜快模型(`llm.background.model`)。
+预算按性格/关系/心情/时间算,而且**把依据一起交出来**(`reasons`) —— 一个说不出理由的
+预算没法调参。性格倾向从 personality **文本**里抽(确定性关键词,没有 key 也算得出
+来;LLM 抽取与运维台 slider 是 v2)。开关关着时它只跑一步,形状不变 —— 宿主不用写两套
+消费代码。
+
+⚠️ **观测量不进事件日志。** issue #18/#16 里写的是"每轮发一个 `agent_stance` /
+`user_intent` 事件";这里没有那样做 —— 那等于把聊天转录搬进世界的历史,而
+「聊天子系统与事件核解耦」是这个子系统存在的前提。取法是:每轮的 stance / intent /
+tool_call 落在**消息行**上(`messages` 表的四个新列,运维台照样能逐轮显示 tag),
+整场会话的分布随关闭时那**一个** `conversation` 事件出去
+(`stances` / `intents` / `tools_used`),而工具造成的**后果**(走开、广播、静音)照旧
+是世界事件。`World.chat(..., meta={})` 把一轮的观测量交给宿主,原样回传给
+`record_chat_turn(..., meta=…)` 就落到行上。
+
+**只有她真的选了的 stance 才上消息行。** 兜底的 neutral 不写(`declared=False`)——
+写上去,下游的分布就成了"她 100% 中性",而真相是"她一次都没选过";这两件事在文本上
+一模一样,而没有 key 的世界里全是后者。`World.stance()` 仍然记着那个兜底值,因为那是
+她此刻的状态。`chat_burst` 那条路上分类结果作为一个 `intent` 步骤交出去(含 `reason`)
+—— 判过了就得让宿主看得见。
+
 ### 2.10 剧情节拍(beat director)
 
 节拍脚本是编排好的剧情,打进运行中的世界。**加载严格**(坏脚本当场列出全部错误、拒绝
@@ -308,10 +406,35 @@ tick 与不带它一致。
 一个 core 版本 = (引擎代码, db 格式版本, 包格式版本) 一起冻结:
 
 - `anima_world.__version__` 是唯一版本源(pyproject 动态读取)
-- **主版本号 = db 格式**:db 格式变才升第一位;第二、三位都是程序优化(第二位加能力,
-  第三位纯修 bug)
+- **主版本号 = db 格式 = 可挂载性**:让老引擎**读不了**世界文件的改动才升第一位
+  (改列义、拆表、换单位)。第二位加能力,第三位纯修 bug
 - `DB_FORMAT_VERSION` 联锁:挂上更新格式的 db 当场拒绝打开,**不写入任何表**
+- **加法修订 `SCHEMA_REVISION`(1.3.0 起)**:纯加法的 schema 变化 —— 新表、新的可空列
+  —— 不改可挂载性,跟着**次版本号**走。1.3.0 是修订 **2**(1.0.0~1.2.x 是 1)
 - `anima_world.api` 的函数面**只加不改** —— 宿主应用的代码依赖它
+
+#### 加法修订:为什么它不是"偷偷改了 db 格式"
+
+1.3.0 加了六张表和 `messages` 的四个可空列。按原来的字面规则(schema 一变就升 db 格式,
+而 db 格式一升就升主版本),这一版本该叫 2.0.0 —— 而那会把**所有 1.x 的世界作废**,
+只为了一批加法。那条规则真正在保护的是"版本号能告诉你两个世界文件互不互通",而加法
+不影响互通:
+
+| 组合 | 结果 |
+|---|---|
+| 1.0~1.2 的世界 → 1.3 引擎 | 打开,补建新表,戳升到 2 |
+| 1.3 的世界 → 1.2 引擎 | **打开,照跑** —— 新表被忽略,那几个开关的能力缺席 |
+| 更高修订的世界 → 本引擎 | 打开,照跑,**并打一条警告**说明哪些能力这次运行会缺席 |
+
+所以规则改成:主版本 = 可挂载性,加法修订跟次版本走,而**修订号只增不减**并且被写进
+`db_meta.schema_revision`。它存在的唯一理由是让降级**看得见**:一个 1.3 的世界跑在 1.2
+引擎上照样跑,但 stance / 静音 / 拒谈话题整套不生效 —— 那正是这个仓库最在意的
+"照跑但给错东西"。`anima-world contract --json` 与 `anima-world doctor` 都报这个数,
+镜像端(运维台)对齐时要一起读。
+
+`tests/test_version_contract.py` 机器强制这一套:主版本仍等于 db 格式、硬钉窗口仍然
+关着、修订号只增不减、以及**更高修订的世界必须仍然能挂**(它要是拒绝,那这个改动就
+不是加法,应该去升主版本)。
 
 #### 下一个大版本发布时,已有的世界会怎样
 
@@ -386,13 +509,32 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `world.chat(agent_id, messages, *, player_id, display_name=None, role="player")` | 代玩家聊一轮,**流式**产出文本块。messages 是宿主持有的近期对话(≤20 条,末条须 user);世界不落转录。未知角色抛 KeyError |
+| `world.chat(agent_id, messages, *, player_id, display_name=None, role="player", meta=None)` | 代玩家聊一轮,**流式**产出文本块。messages 是宿主持有的近期对话(≤20 条,末条须 user);世界不落转录。未知角色抛 KeyError;她这会儿不理这个人抛 `AgentUnavailable`。`meta` 是可选收件盘,流耗尽后带这一轮的 stance / intent / tool_calls |
+| `world.achat(...)` | `chat()` 的原生 async 版本(参数逐字相同) |
 | `world.chat_reply(...)` | 同上,非流式,直接返回整段 |
-| `world.record_chat_turn(agent_id, player_id, messages)` | 把完成回合(恰好 user→assistant 两条)记入世界并关闭:摘要 + 一个 conversation 事件 + 关系判定。返回会话 id。失败即异常,重试由调用方决定 |
+| `world.chat_burst(agent_id, messages, *, player_id, display_name=None, role="player", interrupt_check=None)` | **连着说到她自己想停**(#17)。产出步骤 dict:`budget` / `text` / `message` / `stance` / `tool_call` / `stop`。`interrupt_check` 是一个 `() -> str | None` 回调,返回一句话就是玩家插话 —— 接着说还是转向**由她判**。`chat.loop.enabled` 关着时只跑一步,形状不变。`world.achat_burst(...)` 是 async 版 |
+| `world.record_chat_turn(agent_id, player_id, messages, *, meta=None)` | 把完成回合(恰好 user→assistant 两条)记入世界并关闭:摘要 + 一个 conversation 事件 + 关系判定。返回会话 id。失败即异常,重试由调用方决定。`meta` 把 `chat()` 那轮的观测量落到消息行上(intent 落用户那行,stance / tool_calls 落她那行) |
 | `world.conversations(agent_id)` / `world.conversation_messages(id)` | 会话列表 / 消息 |
 | `world.close_conversation(id)` | 手动关会话(摘要+事件+判定) |
 | `world.player_move(player_id, location)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError |
 | `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
+| `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条 |
+
+### 她自己的选择(1.3.0,见 §2.9.1)
+
+| 函数 | 说明 |
+|---|---|
+| `world.tools()` | 她在聊天里能调的能力清单(id / kind / description / params_schema) |
+| `world.stance(agent_id, target_id)` | 她此刻对某人的关系性意图。没聊过是 None;`declared=False` 表示"兜的底,她没选" |
+| `world.stances(agent_id)` | 她对所有人的意图 |
+| `world.is_muted(agent_id, player_id)` | 她这会儿理这个人吗?None = 理。带 `kind` / `seconds_left` / `reason` |
+| `world.mutes(agent_id=None)` | 还没过期的静音与"等会儿再说" |
+| `world.unmute(agent_id, player_id)` | 作者/运维的手动解除(角色自己不会调这个) |
+| `world.refused_topics(agent_id)` | 她拒绝谈的话题 |
+| `world.followups(agent_id=None)` | 还没到点的"回头找你"队列 |
+| `world.persona_overrides(agent_id, player_id)` | 这个玩家教给她的对话规则 |
+| `world.set_persona_override(agent_id, player_id, kind, value)` / `world.clear_persona_override(...)` | 直接写/删一条规则(宿主自己做 UI 时用,不必经过分类器)。kind 是白名单 |
+| `world.broadcasts(*, since_seq=0, limit=50)` | 她公开说过的话(`agent_broadcast` 事件) |
 
 ### 经济(`economy.enabled` 点亮后才有意义)
 
@@ -628,6 +770,7 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 | `llm.model` | str | `gpt-4o-mini` | 模型名 |
 | `llm.timeout` | float | 30.0 | 单次调用超时(秒) |
 | `llm.max_retries` | int | 2 | SDK 重试次数 |
+| `llm.background.model` | str | 空 | **背景槽**的模型:意图分类器与连续输出的每一步走它(便宜快模型)。空 = 用 `llm.model`。key 与端点共用主槽的 |
 | `scheduler.tick_rate` | float | 1/300 | 每现实秒的 tick 数;1/300 = 与现实 1:1,1.0 = 演示速度 |
 | `agent.idle_timeout` | float | 30.0 | 行为树 idle 看门狗阈值(秒) |
 | `world.minutes_per_tick` | int | 5 | 一 tick 代表的世界分钟(5 → 一天 288 tick) |
@@ -638,6 +781,15 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 | `chat.idle_timeout` | int | 600 | 会话闲置自动关闭(秒) |
 | `chat.recall_k` | int | 3 | 拼进 prompt 的历史会话摘要条数 |
 | `chat.recall_n` | int | 10 | 拼进 prompt 的当前会话轮数 |
+| `chat.stance.enabled` | bool | false | 她回复前显式选一个关系性意图(§2.9.1) |
+| `chat.tools.enabled` | bool | false | 她能在聊天里调能力:静音/走开/等会儿/拒谈话题/广播 |
+| `chat.tools.max_mute_minutes` | float | 1440.0 | 单次静音 / 拒谈话题的上限(分钟);超出按上限执行并警告 |
+| `chat.tools.max_delay_minutes` | float | 720.0 | 单次"等会儿再说"的上限(分钟) |
+| `chat.intent.enabled` | bool | false | 每条玩家消息先分类:对话 / 导演场景 / 改对话规则 |
+| `chat.intent.min_confidence` | float | 0.6 | 低于它一律退回按对话处理(并说明原因) |
+| `chat.loop.enabled` | bool | false | `chat_burst` 连着说到她自己想停 |
+| `chat.loop.max_messages` | int | 8 | 一次连续输出的消息硬上限 |
+| `chat.loop.max_tool_calls` | int | 15 | 一次连续输出的工具调用硬上限 |
 | `memory.capacity` | int | 50 | 每角色记忆容量(anchor 不占淘汰),超出按 strength 最弱优先 |
 | `memory.sentiment_threshold` | float | 0.3 | 关系变动触发记忆的阈值 |
 | `memory.half_life_days` | float | 3.0 | 检索时近因子的半衰期(世界日) |
@@ -660,6 +812,12 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 `judge.relationship` / `judge.user_relationship` / `judge.relabel`(关系判定三件套)·
 `world.setting`(世界观,**原样使用不做 format**,可放字面量 `{}`)。
 
+1.3.0 起还有 **chat-agent 的七块**(只在对应开关点亮时才进提示词,见 §2.9.1):
+`chat.stance_block`(关系性意图菜单 + 惯性)· `chat.tools_block`(能力菜单)·
+`chat.overrides_block`(玩家教过的对话规则)· `chat.refused_topic_block`(她拒绝谈的
+话题又被提起)· `chat.intent_classifier`(意图分类器)· `chat.loop_continue` /
+`chat.loop_interrupt`(连续输出的续说提醒与插话)。
+
 另有 **Mock 叙事模板**:`narrative.mock.<动作种类>`(`walk` / `chat` / `work` / `sleep` /
 `eat` / `idle_wander` / `idle_social` / `custom`,占位符 `{agent}` `{location}` `{target}`)
 与 `narrative.mock_memory_suffix`(占位符 `{summary}`)。
@@ -675,7 +833,7 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 | 文件 | 说明 |
 |---|---|
-| `world.db` | SQLite(WAL):事件、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳 |
+| `world.db` | SQLite(WAL):事件、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳与加法修订戳。1.3.0 起还有 stance / 静音 / 拒谈话题 / 回头找你 / 玩家教的规则五类当前值(§2.9.1) |
 | `world.db.key` | Fernet 密钥,**搬迁必须随行**;丢失 = secret 永久读不出(降级 Mock,但会点名) |
 | `world_seed.json` | 种子,字段见下表。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空库一次,静默降级不可挽回 |
 | `beats.json` | 可选节拍脚本(见 §9) |

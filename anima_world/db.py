@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 EVENTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -89,9 +92,85 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id INTEGER NOT NULL,
   role            TEXT NOT NULL,
   content         TEXT NOT NULL,
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  stance          TEXT,
+  intent          TEXT,
+  intent_confidence REAL,
+  tool_calls      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+"""
+
+# chat-agent(1.3.0):一轮聊天的"此刻"状态。全部是当前值(data-plane),不是历史
+# —— 后果(走开、广播、付钱)照旧走事件日志,这些表只回答"她现在对谁是什么姿态、
+# 谁被她静音到几点、她拒绝谈什么"。
+#
+# `agent_stance` 是 (agent, target) 的属性而不是 agent 全局属性:她可以同时对你
+# 找茬、对别人讨好。惯性要读上一轮的值,所以它必须落库 —— 进程重启后"她刚才在
+# 试探你"这件事不该凭空消失。
+AGENT_STANCE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_stance (
+  agent_id     TEXT NOT NULL,
+  target_id    TEXT NOT NULL,
+  stance       TEXT NOT NULL,
+  declared     INTEGER NOT NULL DEFAULT 1,
+  updated_tick INTEGER NOT NULL DEFAULT 0,
+  updated_at   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, target_id)
+);
+"""
+
+# 软静音与"等会儿再说"。`kind` 分开两者:mute 是"我不想理你",delay 是"等我一下"
+# —— 后者到点会真的回来找你(见 agent_followups),前者不会。
+AGENT_MUTES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_mutes (
+  agent_id   TEXT NOT NULL,
+  player_id  TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'mute' CHECK (kind IN ('mute','delay')),
+  expires_at INTEGER NOT NULL,
+  reason     TEXT,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, player_id, kind)
+);
+"""
+
+AGENT_REFUSED_TOPICS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_refused_topics (
+  agent_id   TEXT NOT NULL,
+  keyword    TEXT NOT NULL,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, keyword)
+);
+"""
+
+# "等会儿再说"的兑现表:到了 due_tick,世界让她回来敲一次门(agent_hail)。
+# 没有这张表,delay_reply 就只是一句被记录下来的托辞 —— 声明过,没人读。
+AGENT_FOLLOWUPS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_followups (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id   TEXT NOT NULL,
+  player_id  TEXT NOT NULL,
+  due_tick   INTEGER NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'delayed_reply',
+  reason     TEXT,
+  created_tick INTEGER NOT NULL DEFAULT 0,
+  fired_tick INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_followups_due ON agent_followups(due_tick, fired_tick);
+"""
+
+# 玩家教给角色的对话规则,**按 (角色, 玩家) 永久生效**:一次教会,跨会话跨天
+# 不忘。per-conversation 会让"以后叫我霜霜"应一两轮就忘 —— 那正是要修的。
+PERSONA_OVERRIDES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS persona_overrides (
+  agent_id   TEXT NOT NULL,
+  player_id  TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (agent_id, player_id, kind)
+);
 """
 
 # M5: runtime config + prompt templates — typed scalars and named text
@@ -221,12 +300,26 @@ CREATE INDEX IF NOT EXISTS idx_bt_nodes_tree ON bt_nodes(tree);
 """
 
 
-# Live-database format version. Bump whenever a migration changes schema or
-# data semantics; the stamp travels inside world.db (and therefore inside any
-# .cyberworld package or volume copy). An engine refuses formats newer than
-# it understands — never silently writes into one.
+# Live-database format version = **可挂载性**。凡是让老引擎读不了这个文件的改动
+# (改列义、拆表、换单位)都得升它;升它就得升主版本号,而主版本号一升,旧世界
+# 就打不开了。所以它只在真的读不了时才动。
+# 戳跟着 world.db 走(因此也跟着 .cyberworld 包和卷拷贝走)。引擎绝不静默写进
+# 一个它读不懂的格式。
 DB_FORMAT_VERSION = 1
 MIN_SUPPORTED_DB_FORMAT = 1
+
+# 加法修订(1.3.0 起)。**纯加法**的 schema 变化 —— 新表、新的可空列 —— 不改
+# 可挂载性:老引擎照样能开这个文件,只是不读那些新表,于是新能力缺席。这种改动
+# 跟着**次版本号**走,不再逼一次主版本号跳跃(那会把已有的世界全作废)。
+#
+#   1 = 1.0.0 ~ 1.2.x
+#   2 = 1.3.0:chat-agent 的六张表 + messages 的四个新列
+#
+# 这个戳存在的唯一理由是**让降级看得见**:一个 1.3 的世界跑在 1.2 引擎上照样跑,
+# 但 stance / 静音 / 拒谈话题一概不生效 —— 那正是"照跑但给错东西"。戳让工具能
+# 当场说出"这个文件是修订 2 写的,你这个引擎只到 1"。只增不减:低修订的引擎开过
+# 高修订的库,不许把戳改小。
+SCHEMA_REVISION = 2
 
 
 class DBFormatError(RuntimeError):
@@ -267,6 +360,22 @@ def _check_and_stamp_format(conn: sqlite3.Connection) -> None:
         )
 
 
+def read_schema_revision(conn: sqlite3.Connection) -> int:
+    """这个库的加法修订号。没有戳 = 1.2.x 或更早写的,读作 1。"""
+    try:
+        row = conn.execute(
+            "SELECT value FROM db_meta WHERE key='schema_revision'"
+        ).fetchone()
+    except sqlite3.OperationalError:  # no db_meta table yet
+        return 1
+    if not row:
+        return 1
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 1
+
+
 def _stamp_format(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute(
@@ -274,6 +383,23 @@ def _stamp_format(conn: sqlite3.Connection) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (str(DB_FORMAT_VERSION),),
     )
+    # 只增不减。一个 1.3 引擎打开 1.4 写的库时,库里那些表本引擎不建也不读 ——
+    # 把戳改小等于替未来的引擎撒谎,下一次谁也看不出这库里有它读不懂的东西。
+    existing = read_schema_revision(conn)
+    if existing < SCHEMA_REVISION:
+        conn.execute(
+            "INSERT INTO db_meta(key, value) VALUES('schema_revision', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(SCHEMA_REVISION),),
+        )
+    elif existing > SCHEMA_REVISION:
+        # 同格式,能挂,所以不拒绝 —— 但不许无声:这个世界身上有本引擎不读的表,
+        # 它们代表的能力在这次运行里会整个缺席。
+        logger.warning(
+            "这个世界是 schema 修订 %s 写的,本引擎只到 %s —— 能挂能跑,"
+            "但修订 %s 新增的表本引擎不读,对应的能力这次运行会缺席",
+            existing, SCHEMA_REVISION, existing,
+        )
 
 
 def open_db(path: str | Path) -> sqlite3.Connection:
@@ -314,7 +440,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(ITEM_DEFS_SCHEMA)
     conn.executescript(SHOP_STOCK_SCHEMA)
     conn.executescript(CLIQUES_SCHEMA)
+    conn.executescript(AGENT_STANCE_SCHEMA)
+    conn.executescript(AGENT_MUTES_SCHEMA)
+    conn.executescript(AGENT_REFUSED_TOPICS_SCHEMA)
+    conn.executescript(AGENT_FOLLOWUPS_SCHEMA)
+    conn.executescript(PERSONA_OVERRIDES_SCHEMA)
     _ensure_columns(conn, "conversations", {"participants": "TEXT", "location": "TEXT", "player_id": "TEXT"})
+    # chat-agent:一轮聊天的观测量落在消息行上(而不是每轮发一个事件 ——
+    # 聊天子系统与事件核解耦那条不变量还在)。老库的行留 NULL。
+    _ensure_columns(conn, "messages", {
+        "stance": "TEXT",
+        "intent": "TEXT",
+        "intent_confidence": "REAL",
+        "tool_calls": "TEXT",
+    })
     _ensure_columns(conn, "memories", {
         "strength": "REAL NOT NULL DEFAULT 1.0",
         "last_access": "INTEGER",

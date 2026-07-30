@@ -38,11 +38,19 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
+from anima_world import tools as tools_mod
+from anima_world.actions import ActionDescriptor
 from anima_world.chat_service import ChatService
 from anima_world.chat_session import ChatSessionManager
+from anima_world.chat_state import ChatStateStore
 from anima_world.chat_store import ChatStore
 from anima_world.config_store import mask_secret
-from anima_world.llm_client import create_llm_client_from_config, create_llm_client_from_env
+from anima_world.intent import Director
+from anima_world.llm_client import (
+    create_background_llm_client_from_config,
+    create_llm_client_from_config,
+    create_llm_client_from_env,
+)
 from anima_world.locations import DEFAULT_POINTS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
@@ -361,6 +369,200 @@ class _WorldView:
         }
 
 
+class _BridgeLoop:
+    """世界自己的一条事件循环线程:同步门面上的所有异步工作都跑在它上面。
+
+    为什么必须是同一条循环:LLM 客户端底层是一个 `httpx.AsyncClient`,连接池绑在
+    创建它的那个循环上。原来的桥每调一次就 `asyncio.run()` 开一个新循环再关掉,
+    而客户端是被缓存复用的 —— 于是**一个属于已关闭循环的连接池被后面每一次调用
+    继续用**。2026-07-29 用真模型跑一局时,每一轮都在刷
+    `Task was destroyed but it is pending` 与 `aclose was never awaited`;真正的
+    危险是它某天会变成 `Event loop is closed`,而那时表现是"聊天忽然全炸"。
+
+    顺带一个真实的好处:连接与 TLS 握手能复用。那一局里第一轮 31 秒、之后 7~20 秒,
+    差的那一截里有一部分就是每轮重连。
+
+    线程是 daemon,`World.close()` 会收掉它。语义与原来的桥逐字相同:调用方阻塞到
+    结果出来,流式仍然一段一段地回。
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="anima-chat-loop"
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def run(self, coro: Any) -> Any:
+        """跑一个协程,阻塞到它跑完。"""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    def iterate(self, agen: Any) -> Iterator[Any]:
+        """同步地迭代一个 async 生成器 —— 一次取一个,所以流式不退化成"等全部"。"""
+        try:
+            while True:
+                try:
+                    yield asyncio.run_coroutine_threadsafe(
+                        agen.__anext__(), self._loop
+                    ).result()
+                except StopAsyncIteration:
+                    return
+        finally:
+            # 调用方提前不要了(break / 异常)时,生成器要在**它自己的循环上**关掉,
+            # 否则那条 HTTP 流会挂在那里,等 GC 来抱怨。
+            try:
+                asyncio.run_coroutine_threadsafe(agen.aclose(), self._loop).result(5)
+            except Exception:  # noqa: BLE001 - 关一个已经结束的生成器是 best-effort
+                pass
+
+    def close(self) -> None:
+        if self._loop.is_closed():
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._loop.shutdown_asyncgens(), self._loop
+            )
+            fut.result(5)
+        except Exception:  # noqa: BLE001
+            pass
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+        if not self._thread.is_alive():
+            self._loop.close()
+
+
+class AgentUnavailable(RuntimeError):
+    """她这会儿不理这个人(软静音 / 等会儿再说 —— issue #15)。
+
+    抛而不是"返回一句空回复":静默的空回复在宿主那边和"LLM 挂了"长得一模一样,
+    而这两件事该给玩家看到完全不同的东西(「她五分钟后再理你」对「服务出错了」)。
+    `kind` / `seconds_left` / `reason` 都带在异常上,UI 直接用。
+    """
+
+    def __init__(self, agent_id: str, player_id: str, quiet: dict[str, Any]) -> None:
+        self.agent_id = agent_id
+        self.player_id = player_id
+        self.kind = quiet.get("kind", "mute")
+        self.expires_at = int(quiet.get("expires_at", 0))
+        self.seconds_left = int(quiet.get("seconds_left", 0))
+        self.reason = quiet.get("reason")
+        minutes = max(1, round(self.seconds_left / 60))
+        label = "不想理你" if self.kind == "mute" else "说了等会儿再聊"
+        super().__init__(f"{agent_id} 现在{label}(还有约 {minutes} 分钟)")
+
+
+class _ToolRuntime:
+    """工具与 director 能碰到的世界(`tools.base.ToolRuntime` 的实现)。
+
+    存在的理由是**方向**:聊天子系统不认识调度器,只认识这个对象;世界也不认识
+    聊天,只被这个对象调用。工具因此能真改世界(走开、广播)而不用把 `World`
+    整个传进 chat_service。
+    """
+
+    def __init__(self, world: "World") -> None:
+        self._world = world
+
+    @property
+    def state(self) -> ChatStateStore:
+        return self._world.chat_state
+
+    def tick(self) -> int:
+        return int(self._world.scheduler.clock)
+
+    def now(self) -> int:
+        return int(time.time())
+
+    def ticks_for_minutes(self, minutes: float) -> int:
+        """墙钟分钟 → 世界 tick 数。演示速度与实时速度下都成立。"""
+        mpt = DEFAULT_MINUTES_PER_TICK
+        config_store = self._world.scheduler.config_store
+        if config_store is not None:
+            mpt = config_store.get("world.minutes_per_tick", default=mpt)
+        return max(1, int(round(float(minutes) / max(1, int(mpt)))))
+
+    def config(self, key: str, default: Any = None) -> Any:
+        config_store = self._world.scheduler.config_store
+        if config_store is None:
+            return default
+        value = config_store.get(key, default=default)
+        return default if value is None else value
+
+    def emit(self, event: dict[str, Any]) -> None:
+        with self._world.scheduler._lock:
+            self._world._record_and_fan(event)
+            self._world.scheduler.checkpoint()  # 交互即检查点(RLock,可重入)
+
+    def agent_ids(self) -> list[str]:
+        return list(self._world.scheduler.agents)
+
+    def agent_names(self) -> dict[str, str]:
+        return {
+            aid: brain.agent.name or aid
+            for aid, brain in self._world.scheduler.agents.items()
+        }
+
+    def agent_location(self, agent_id: str) -> str:
+        brain = self._world.scheduler.agents.get(agent_id)
+        if brain is None:
+            return ""
+        return str(brain.agent.blackboard.read("loc") or brain.agent.location or "")
+
+    def face_to_face(self, agent_id: str, player_id: str) -> bool:
+        """她和这个玩家此刻是面对面,还是隔着手机?
+
+        判定与身份声明那一段共用同一条规矩(`chat_service.respond`):同地、且她不在
+        途中。宿主没调过 `player_move` 就是没告诉世界他在哪 —— 一律按不在场,引擎不猜。
+        """
+        if agent_id in self._world.scheduler._transit:
+            return False  # 在途不算在场,与 `_colocated_agents` 同一条规矩
+        here = self.agent_location(agent_id)
+        where = str((self._world.players.get(player_id) or {}).get("location") or "").strip()
+        return bool(here) and bool(where) and here == where
+
+    def point_ids(self) -> list[str]:
+        store = self._world.scheduler.location_store
+        if store is None:
+            return sorted(str(row["id"]) for row in DEFAULT_POINTS)
+        return sorted(
+            str(row["id"]) for row in store.all()
+            if (row or {}).get("kind", "point") == "point"
+        )
+
+    def move_agent(self, agent_id: str, location: str) -> dict[str, Any]:
+        """让一个角色真的动起来 —— 走的是 BT 走的那条路。
+
+        因此"她走了"和"她自己决定走了"在世界里是**同一件事**:一样发 travel /
+        location_join 事件,一样要走路花时间。提示词里塞一句"她走了"是另一回事,
+        那种"她"下一 tick 还站在原地。
+        """
+        scheduler = self._world.scheduler
+        brain = scheduler.agents.get(agent_id)
+        if brain is None:
+            raise tools_mod.ToolCallError(f"没有 {agent_id} 这个人")
+        store = scheduler.location_store
+        if store is not None:
+            row = store.get(location)
+            if row is None or row.get("kind", "point") != "point":
+                raise tools_mod.ToolCallError(f"没有 {location} 这个地方")
+        with scheduler._lock:
+            scheduler.emit_action(brain.agent, ActionDescriptor("walk", {"location": location}))
+            trip = scheduler._transit.get(agent_id)
+            scheduler.checkpoint()
+        if trip is not None:
+            return {"in_transit": True, "arrive_at": int(trip.get("arrive_at", 0))}
+        return {"in_transit": False, "location": self.agent_location(agent_id)}
+
+    def close_conversation(self, agent_id: str, player_id: str) -> bool:
+        active = self._world.chat_store.active_conversation(agent_id, player_id=player_id)
+        if active is None:
+            return False
+        return self._world.close_conversation(int(active["id"]))
+
+
 class World:
     """一个打开的世界:时钟、状态、聊天、玩家、配置,全部函数化。
 
@@ -383,12 +585,26 @@ class World:
         if scheduler.event_log is None:
             raise ValueError("World requires a persistent scheduler (event_log wired)")
         conn = scheduler.event_log.conn
+        # 同步门面的异步工作全跑在这一条循环上(见 `_BridgeLoop`:一个跨循环复用的
+        # HTTP 连接池是"每轮泄一条连接,某天忽然全炸"那种坏)。
+        self._bridge = _BridgeLoop()
         self.chat_store = ChatStore(conn, lock=scheduler._lock)
+        # chat-agent(1.3.0):一轮聊天要读写的当前值(stance / 静音 / 拒谈话题 /
+        # 玩家教的规则)。和 ChatStore 共用同一个连接与同一把锁。
+        self.chat_state = ChatStateStore(conn, lock=scheduler._lock)
+        self._tool_runtime = _ToolRuntime(self)
+        self._director = Director(self._tool_runtime)
+        scheduler.chat_state = self.chat_state
         config_store = scheduler.config_store
         chat_llm = (
             create_llm_client_from_config(config_store)
             if config_store is not None
             else create_llm_client_from_env()
+        )
+        background_llm = (
+            create_background_llm_client_from_config(config_store)
+            if config_store is not None
+            else chat_llm
         )
         self.chat_service = ChatService(
             store=self.chat_store,
@@ -397,6 +613,9 @@ class World:
             config_store=config_store,
             prompt_store=scheduler.prompt_store,
             world_provider=self.world_context,
+            state_store=self.chat_state,
+            tool_runtime=self._tool_runtime,
+            background_llm=background_llm,
         )
         self.session_manager = ChatSessionManager(
             store=self.chat_store,
@@ -405,6 +624,7 @@ class World:
             config_store=config_store,
             prompt_store=scheduler.prompt_store,
             judge_hook=lambda info: scheduler.submit_user_chat_judgment(**info),
+            meta_provider=self.chat_state.conversation_meta,
         )
         # 在场玩家(刻意内存态:重启即新访;持久的部分——会话/记忆/关系——在 db 里)
         self.players: dict[str, dict[str, Any]] = {}
@@ -426,7 +646,7 @@ class World:
         self.scheduler.claim_ownership()
 
         try:
-            orphans = _run_coro_blocking(self.session_manager.reap_orphans())
+            orphans = self._bridge.run(self.session_manager.reap_orphans())
             if orphans:
                 logger.info("closed %d orphaned conversation(s) from a previous run", len(orphans))
         except Exception:  # noqa: BLE001 - recovery must never block open
@@ -468,6 +688,7 @@ class World:
         self.stop_clock()
         self.scheduler.release_ownership()   # 撤戳要在 stop 之前:stop 之后连接可能已经关了
         self.scheduler.stop(wait=wait)
+        self._bridge.close()   # 收掉那条循环线程(以及挂在它上面的 HTTP 连接)
 
     def __enter__(self) -> "World":
         return self
@@ -633,7 +854,7 @@ class World:
                 if not self._clock_running or self.scheduler._stopped:
                     return
                 try:
-                    _run_coro_blocking(self.session_manager.reap_idle())
+                    self._bridge.run(self.session_manager.reap_idle())
                 except Exception:  # reaper is best-effort
                     pass
 
@@ -844,15 +1065,23 @@ class World:
         player_id: str,
         display_name: str | None = None,
         role: str = "player",
+        meta: dict[str, Any] | None = None,
     ) -> Iterator[str]:
         """代玩家和角色聊一轮,流式产出回复文本块。
 
         `messages` 是调用方持有的近期对话(≤20 条,末条须 user);世界不落
         完整转录 —— 完整历史归宿主应用管。身份即参数(纪律 3)。
+
+        `meta` 是可选的收件盘(chat-agent):流耗尽后里面是这一轮的
+        `stance` / `intent` / `tool_calls` / `end_conversation`,可以原样交回
+        `record_chat_turn(..., meta=…)` 落到消息行上。不给就丢弃。
+
+        她这会儿不理这个人时抛 `AgentUnavailable` —— 静默的空回复在宿主那边和
+        "LLM 挂了"长得一样,而这两件事该让玩家看到完全不同的东西。
         """
-        yield from _iterate_sync(
+        yield from self._bridge.iterate(
             self._chat_agen(agent_id, messages, player_id=player_id,
-                            display_name=display_name, role=role)
+                            display_name=display_name, role=role, meta=meta)
         )
 
     async def achat(
@@ -863,6 +1092,7 @@ class World:
         player_id: str,
         display_name: str | None = None,
         role: str = "player",
+        meta: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
         """`chat()` 的原生 async 版本 —— 直接跑在宿主自己的事件循环上。
 
@@ -875,11 +1105,11 @@ class World:
         """
         async for token in self._chat_agen(
             agent_id, messages, player_id=player_id,
-            display_name=display_name, role=role,
+            display_name=display_name, role=role, meta=meta,
         ):
             yield token
 
-    def _chat_agen(
+    def _chat_prelude(
         self,
         agent_id: str,
         messages: list[dict[str, str]],
@@ -887,12 +1117,21 @@ class World:
         player_id: str,
         display_name: str | None,
         role: str,
-    ) -> AsyncIterator[str]:
-        """`chat` / `achat` 共用的那一份:校验、身份、在场,然后交给 chat_service。"""
+    ) -> dict[str, Any]:
+        """一轮聊天开口之前要办的事:校验、静音闸、身份、在场。
+
+        返回 `{"interlocutor": …, "user_text": …}`。`chat` / `chat_burst` 共用 ——
+        两条路上的静音与身份判定必须是同一份,不然一条路上守住的边界在另一条上漏。
+        """
         if agent_id not in self.scheduler.agents:
             raise KeyError(f"agent {agent_id} not found")
         if not messages or messages[-1].get("role") != "user":
             raise ValueError("messages must end with a user turn")
+        # 软静音(#15):世界当场拒,消息不进 LLM。硬静音(锁输入框)由宿主按
+        # `mute_started` 事件自己决定 —— 引擎不替 UI 做主。
+        quiet = self.chat_state.quiet_until(agent_id, player_id)
+        if quiet is not None:
+            raise AgentUnavailable(agent_id, player_id, quiet)
         interlocutor: dict[str, str] = {
             "display_name": display_name or f"player-{player_id[:8]}",
             "role": role,
@@ -910,12 +1149,222 @@ class World:
         if where:
             interlocutor["location"] = where
             interlocutor["location_name"] = self._location_display_name(where)
-        return self.chat_service.respond(
+        return {
+            "interlocutor": interlocutor,
+            "user_text": str(messages[-1].get("content") or ""),
+        }
+
+    def _present_names(self, agent_id: str) -> list[str]:
+        """这场对话里角色看得见的人 —— 分类器要知道"林素在不在场"。"""
+        here = self._tool_runtime.agent_location(agent_id)
+        names = self._tool_runtime.agent_names()
+        return [
+            name for aid, name in names.items()
+            if aid != agent_id and self._tool_runtime.agent_location(aid) == here
+        ]
+
+    async def _dispatch_intent(
+        self, agent_id: str, player_id: str, user_text: str, history: list[dict[str, str]]
+    ) -> dict[str, Any]:
+        """意图分类 + 三条 handler 的分派(issue #16)。
+
+        返回 `{"intent", "confidence", "handled", "text", "detail"}`。`handled=True`
+        表示这条消息已经被 style / narrative 那条路处理掉了,不该再走 in-character
+        生成;`text` 是那条路要回给玩家的一句。
+
+        分类器不通、置信度不够、handler 拒绝 —— 一律退回 dialogue,并把原因带上。
+        """
+        from anima_world.chat_state import OVERRIDE_KINDS
+
+        outcome: dict[str, Any] = {"handled": False, "text": ""}
+        verdict = await self.chat_service.classify(
+            user_text, present=self._present_names(agent_id), recent=history[-5:],
+        )
+        outcome.update(verdict.to_dict())
+        if verdict.intent == "style_adjust":
+            kind = str((verdict.params or {}).get("kind") or "").strip()
+            value = str((verdict.params or {}).get("value") or "").strip()
+            if kind not in OVERRIDE_KINDS or not value:
+                logger.warning(
+                    "style_adjust 的参数不完整(kind=%r value=%r)—— 这条退回按对话处理",
+                    kind, value,
+                )
+                outcome["intent"] = "dialogue"
+                outcome["reason"] = "style_adjust 少了 kind/value,按对话处理"
+                return outcome
+            self.chat_state.set_override(agent_id, player_id, kind, value)
+            outcome["handled"] = True
+            # 轻确认,不 in-character:这一句是"规则已记下",不是她在说话。
+            outcome["text"] = f"（记下了:{OVERRIDE_KINDS[kind]} —— {value}。）"
+            outcome["detail"] = {"kind": kind, "value": value}
+            return outcome
+        if verdict.intent == "narrative_direction":
+            directed = self._director.direct(agent_id=agent_id, params=verdict.params or {})
+            outcome["handled"] = True
+            outcome["text"] = directed.text
+            outcome["detail"] = dict(directed.detail)
+            outcome["ok"] = directed.ok
+            return outcome
+        return outcome
+
+    async def _intent_prelude(
+        self,
+        agent_id: str,
+        player_id: str,
+        user_text: str,
+        messages: list[dict[str, str]],
+        sink: dict[str, Any],
+    ) -> str | None:
+        """分类 + 分派,把结果写进 `sink`。返回一句"这条已经处理掉了"的回话,或 None。
+
+        `chat` 与 `chat_burst` **共用这一份**:两条路上的分派必须是同一份,否则点亮了
+        `chat.intent.enabled` 之后,走连续输出那条路的世界会静默地不分类 —— 玩家教的
+        "以后叫我霜霜" 永远不落库,而表面上一切照跑。
+
+        是 async 的,因为分类是一次真的 LLM 往返:在 `achat` 那条路上同步阻塞地等它,
+        会把宿主的事件循环按住好几秒(FastAPI 的处理函数就是 async def,而 README 把
+        "嵌入到应用里"写成主要用法)。
+        """
+        if not self.chat_service.intent_enabled():
+            return None
+        verdict = await self._dispatch_intent(agent_id, player_id, user_text, list(messages))
+        sink["intent"] = verdict.get("intent")
+        sink["intent_confidence"] = verdict.get("confidence")
+        if verdict.get("reason"):
+            sink["intent_reason"] = verdict["reason"]
+        if verdict.get("detail"):
+            sink["intent_detail"] = verdict["detail"]
+        if not verdict.get("handled"):
+            return None
+        sink["handled_by"] = verdict.get("intent")
+        return str(verdict.get("text") or "")
+
+    async def _chat_agen(
+        self,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        *,
+        player_id: str,
+        display_name: str | None,
+        role: str,
+        meta: dict[str, Any] | None = None,
+    ) -> AsyncIterator[str]:
+        """`chat` / `achat` 共用的那一份:开口前的那一套,然后交给 chat_service。"""
+        prelude = self._chat_prelude(
+            agent_id, messages, player_id=player_id, display_name=display_name, role=role,
+        )
+        sink: dict[str, Any] = meta if meta is not None else {}
+        extra_system: list[str] = []
+        handled = await self._intent_prelude(
+            agent_id, player_id, prelude["user_text"], messages, sink
+        )
+        if handled is not None:
+            # style / narrative 走完了自己那条路:回一句确认,不再 in-character
+            # 生成。narrative 的后果已经在世界里(她下一次读 world_context 会真的
+            # 看到那个人在场),不是提示词里的一句想象。
+            if handled:
+                yield handled
+            return
+        topic_block = self.chat_service.refused_topic_block(agent_id, prelude["user_text"])
+        if topic_block:
+            extra_system.append(topic_block)
+        async for token in self.chat_service.respond(
             agent_id,
             messages[-20:],
             interlocutor_id=player_id,
-            interlocutor=interlocutor,
+            interlocutor=prelude["interlocutor"],
+            meta=sink,
+            extra_system=extra_system,
+        ):
+            yield token
+
+    def chat_burst(
+        self,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        *,
+        player_id: str,
+        display_name: str | None = None,
+        role: str = "player",
+        interrupt_check: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """连着说到她自己想停(issue #17)。产出结构化的步骤,不是一整段文本。
+
+        `chat()` 是回合制:你一句 → 她一段 → 停。这条路是 agent 那个形状:她可以
+        一口气说三条、中间去做件事、问你一句然后停下等你。每一步产出一个 dict
+        (`kind` 为 `budget` / `text` / `message` / `stance` / `tool_call` / `stop`),
+        宿主可以逐条弹出来,也可以只取 `message`。
+
+        `chat.loop.enabled` 关着时它只跑一步 —— 形状仍是这个形状,所以宿主不用写
+        两套消费代码。
+        """
+        yield from self._bridge.iterate(
+            self._chat_burst_agen(
+                agent_id, messages, player_id=player_id, display_name=display_name,
+                role=role, interrupt_check=interrupt_check,
+            )
         )
+
+    async def achat_burst(
+        self,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        *,
+        player_id: str,
+        display_name: str | None = None,
+        role: str = "player",
+        interrupt_check: Any | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """`chat_burst()` 的原生 async 版本。"""
+        async for step in self._chat_burst_agen(
+            agent_id, messages, player_id=player_id, display_name=display_name,
+            role=role, interrupt_check=interrupt_check,
+        ):
+            yield step
+
+    async def _chat_burst_agen(
+        self,
+        agent_id: str,
+        messages: list[dict[str, str]],
+        *,
+        player_id: str,
+        display_name: str | None,
+        role: str,
+        interrupt_check: Any | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        prelude = self._chat_prelude(
+            agent_id, messages, player_id=player_id, display_name=display_name, role=role,
+        )
+        sink: dict[str, Any] = {}
+        handled = await self._intent_prelude(
+            agent_id, player_id, prelude["user_text"], messages, sink
+        )
+        if sink:
+            # 判过了就得让宿主看得见 —— #16 要的就是"这条为什么被那样处理"可解释。
+            # 只写进一个内部 dict 然后丢掉,等于分类了但没人知道。
+            if handled is not None:
+                yield {"kind": "budget", "budget": 1, "effective": 1,
+                       "reasons": ["意图分派已经处理掉这条"], "traits": {}}
+            yield _intent_step(sink)
+        if handled is not None:
+            if handled:
+                yield {"kind": "message", "text": handled, "meta": dict(sink)}
+            yield {"kind": "stop", "reason": "handled_by_intent",
+                   "messages": 1 if handled else 0, "tool_calls": 0, "budget": 1}
+            return
+        extra_system: list[str] = []
+        topic_block = self.chat_service.refused_topic_block(agent_id, prelude["user_text"])
+        if topic_block:
+            extra_system.append(topic_block)
+        async for step in self.chat_service.autonomous_loop(
+            agent_id,
+            messages[-20:],
+            interlocutor_id=player_id,
+            interlocutor=prelude["interlocutor"],
+            extra_system=extra_system,
+            interrupt_check=interrupt_check,
+        ):
+            yield step
 
     def _location_display_name(self, location_id: str) -> str:
         """地点 id → 给角色看的名字。查不到就用 id,聊天不该因此告吹。"""
@@ -934,12 +1383,18 @@ class World:
         agent_id: str,
         player_id: str,
         messages: list[dict[str, str]],
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> int:
         """把一个已完成回合(user→assistant 恰好两条)记入世界并立即关闭:
         生成摘要、发一个 conversation 事件、触发关系判定。返回会话 id。
 
         与旧 chat-evolution 不同,这里没有投递回执 —— 进程内调用失败即异常,
         重试与否是调用方一行代码的事。
+
+        `meta` 收 `chat()` 那一轮填出来的观测量(stance / intent / tool_calls):
+        它们落到 assistant 那一行上,并汇总进关闭时那一个 `conversation` 事件。
+        不给就只是少了那份观测量,链路照旧。
         """
         if agent_id not in self.scheduler.agents:
             raise KeyError(f"agent {agent_id} not found")
@@ -957,14 +1412,30 @@ class World:
             location=location,
             player_id=player_id,
         )
+        message_ids: dict[str, int] = {}
         for message in messages:
             content = str(message.get("content") or "").strip()
             if not content:
                 raise ValueError("chat message content cannot be empty")
-            self.chat_store.add_message(
+            message_ids[message["role"]] = self.chat_store.add_message(
                 conversation_id, message["role"], content, int(time.time())
             )
-        _run_coro_blocking(self.session_manager.close_conversation(conversation_id))
+        if meta:
+            # 意图落在**用户那一行**(它是对那条消息的判定),stance 与 tool_call
+            # 落在她的回复那一行。分开写,否则运维台上的 tag 会挂错气泡。
+            if message_ids.get("user") and meta.get("intent"):
+                self.chat_state.annotate_message(
+                    message_ids["user"], intent=meta.get("intent"),
+                    intent_confidence=meta.get("intent_confidence"),
+                )
+            if message_ids.get("assistant"):
+                self.chat_state.annotate_message(
+                    message_ids["assistant"],
+                    # 只记她真的选了的那一格 —— 见 ChatService.annotate 的同一条理由。
+                    stance=meta.get("stance") if meta.get("stance_declared") else None,
+                    tool_calls=meta.get("tool_calls") or None,
+                )
+        self._bridge.run(self.session_manager.close_conversation(conversation_id))
         # 交互即检查点:说完这句话的瞬间,db 就是完整的(可打包、可崩)。
         self.scheduler.checkpoint()
         return conversation_id
@@ -977,9 +1448,69 @@ class World:
 
     def close_conversation(self, conversation_id: int) -> bool:
         """手动关闭会话(摘要 + 事件 + 判定);返回是否发了世界事件。"""
-        emitted = _run_coro_blocking(self.session_manager.close_conversation(conversation_id))
+        emitted = self._bridge.run(self.session_manager.close_conversation(conversation_id))
         self.scheduler.checkpoint()  # 交互即检查点
         return emitted
+
+    # ── chat-agent(1.3.0):stance / 能力 / 玩家教的规则 ─────────────────────
+
+    def tools(self) -> list[dict[str, Any]]:
+        """她在聊天里能调的能力清单(声明在代码里,`@tool` 登记)。"""
+        return [
+            {"id": spec.id, "kind": spec.kind, "description": spec.description,
+             "params_schema": dict(spec.params_schema)}
+            for spec in tools_mod.tools_for("*")
+        ]
+
+    def stance(self, agent_id: str, target_id: str) -> dict[str, Any] | None:
+        """她此刻对某人的关系性意图(#18)。没聊过就是 None。
+
+        `declared=False` 的意思是"这是兜的底,不是她选的" —— 两者在文本上一模一样,
+        只有这个字段能分开它们。
+        """
+        return self.chat_state.stance(agent_id, target_id)
+
+    def stances(self, agent_id: str) -> list[dict[str, Any]]:
+        return self.chat_state.stances(agent_id)
+
+    def mutes(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """还没过期的静音 / "等会儿再说"。"""
+        return self.chat_state.mutes(agent_id)
+
+    def is_muted(self, agent_id: str, player_id: str) -> dict[str, Any] | None:
+        """她这会儿理这个人吗?返回 None 表示理。宿主可以拿它先探一下再开口。"""
+        return self.chat_state.quiet_until(agent_id, player_id)
+
+    def unmute(self, agent_id: str, player_id: str) -> None:
+        """作者/运维的手动解除(角色自己不会调这个 —— 那是她的决定)。"""
+        self.chat_state.clear_quiet(agent_id, player_id)
+
+    def refused_topics(self, agent_id: str) -> list[dict[str, Any]]:
+        return self.chat_state.refused_topics(agent_id)
+
+    def followups(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """还没到点的"回头找你" —— delay_reply 的兑现队列。"""
+        return self.chat_state.pending_followups(agent_id)
+
+    def persona_overrides(self, agent_id: str, player_id: str) -> list[dict[str, Any]]:
+        """这个玩家教给这个角色的对话规则(#16,跨会话永久)。"""
+        return self.chat_state.overrides(agent_id, player_id)
+
+    def set_persona_override(
+        self, agent_id: str, player_id: str, kind: str, value: str
+    ) -> None:
+        """直接写一条规则(宿主自己做 UI 时用,不必经过分类器)。"""
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        self.chat_state.set_override(agent_id, player_id, kind, value)
+
+    def clear_persona_override(self, agent_id: str, player_id: str, kind: str) -> bool:
+        return self.chat_state.clear_override(agent_id, player_id, kind)
+
+    def broadcasts(self, *, since_seq: int = 0, limit: int = 50) -> list[dict[str, Any]]:
+        """她公开说过的话(`broadcast` 能力的产物)。"""
+        page = self.history(since_seq=since_seq, limit=limit, kind="agent_broadcast")
+        return page["events"]
 
     def player_move(self, player_id: str, location: str, *, role: str = "player") -> None:
         """玩家移动到某个 point 地点。未知地点抛 KeyError。"""
@@ -1320,102 +1851,37 @@ class World:
                     "r_type": rel.r_type,
                     "band": BAND_NAMES[band(rel.sentiment)],
                 }
+            # #17 的预算要读心情。needs 没点亮时读不到 —— 那时预算就少一项依据,
+            # 而不是拿 0.5 假装读到了(那会让"她累了"和"没装需求系统"混成一件事)。
+            mood = brain.agent.blackboard.read("need.mood")
+            if mood is not None:
+                ctx["mood"] = float(mood)
             return ctx
+
+
+def _intent_step(meta: dict[str, Any]) -> dict[str, Any]:
+    """分类结果作为 `chat_burst` 的一个步骤 —— 宿主的消费代码只有一套。"""
+    return {
+        "kind": "intent",
+        "intent": meta.get("intent"),
+        "confidence": meta.get("intent_confidence"),
+        "reason": meta.get("intent_reason"),
+        "detail": meta.get("intent_detail"),
+        "handled": bool(meta.get("handled_by")),
+    }
 
 
 def _host_loop_is_running() -> bool:
     """调用线程上已经有一个在跑的事件循环吗?
 
-    "同步门面"不等于"只能从非 async 代码里调用" —— FastAPI / aiohttp 的处理函数
-    就是 `async def`,而 README 把"嵌入到应用里"写成主要用法。在有 running loop 的
-    线程上,`asyncio.run()` 与 `loop.run_until_complete()` 都会当场 RuntimeError,
-    并且漏一个 never-awaited coroutine。检测到就换个线程跑:调用方照样阻塞到结果
-    出来,语义逐字不变,世界照样不知道有 asyncio 这回事。
+    留着是为了把那条纪律说清楚:**"同步门面"不等于"只能从非 async 代码里调用"**
+    —— FastAPI / aiohttp 的处理函数就是 `async def`,而 README 把"嵌入到应用里"写成
+    主要用法。1.3.0 起门面不再靠"检测到有循环就换个线程 `asyncio.run`"来兜(那条路
+    每次开一个新循环,而 HTTP 连接池是被缓存复用的 —— 见 `_BridgeLoop`),而是一律交给
+    世界自己那条循环。两种宿主因此走同一条路,`achat` 那条原生 async 的门也照旧。
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return False
     return True
-
-
-def _run_coro_blocking(coro: Any) -> Any:
-    """跑一个协程并阻塞到它跑完 —— 宿主线程上有没有 running loop 都行。"""
-    if not _host_loop_is_running():
-        return asyncio.run(coro)
-
-    box: dict[str, Any] = {}
-
-    def _runner() -> None:
-        try:
-            box["value"] = asyncio.run(coro)
-        except BaseException as exc:  # noqa: BLE001 - 原样抬回调用线程
-            box["error"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True, name="anima-sync-bridge")
-    thread.start()
-    thread.join()
-    if "error" in box:
-        raise box["error"]
-    return box.get("value")
-
-
-def _drive_agen_here(agen: Any) -> Iterator[str]:
-    """私有事件循环里驱动 async 生成器(调用线程上没有别的循环时)。"""
-    loop = asyncio.new_event_loop()
-    try:
-        while True:
-            try:
-                yield loop.run_until_complete(agen.__anext__())
-            except StopAsyncIteration:
-                return
-    finally:
-        try:
-            loop.run_until_complete(agen.aclose())
-        except Exception:  # noqa: BLE001 - closing an exhausted generator is best-effort
-            pass
-        loop.close()
-
-
-def _drive_agen_on_thread(agen: Any) -> Iterator[str]:
-    """在独立线程上驱动,token 经队列交回调用线程 —— 流式不退化成"等全部"。"""
-    import queue as _queue
-
-    box: _queue.Queue[tuple[str, Any]] = _queue.Queue(maxsize=64)
-
-    def _runner() -> None:
-        async def _pump() -> None:
-            try:
-                async for token in agen:
-                    box.put(("token", token))
-            except BaseException as exc:  # noqa: BLE001
-                box.put(("error", exc))
-                return
-            box.put(("done", None))
-
-        try:
-            asyncio.run(_pump())
-        except BaseException as exc:  # noqa: BLE001 - 连 run 都起不来
-            box.put(("error", exc))
-
-    thread = threading.Thread(target=_runner, daemon=True, name="anima-chat-bridge")
-    thread.start()
-    try:
-        while True:
-            kind, value = box.get()
-            if kind == "token":
-                yield value
-            elif kind == "error":
-                raise value
-            else:
-                return
-    finally:
-        thread.join(timeout=5.0)
-
-
-def _iterate_sync(agen: Any) -> Iterator[str]:
-    """把 async 生成器桥成同步迭代器(库门面是同步世界,聊天流式在
-    调用方线程上消费;不与宿主的 asyncio 纠缠)。"""
-    if _host_loop_is_running():
-        return _drive_agen_on_thread(agen)
-    return _drive_agen_here(agen)

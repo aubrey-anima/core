@@ -39,6 +39,7 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 | `anima_world/world_package.py` | `.cyberworld` 数据包格式 | 运维台 `lib/worldPackage.js` |
 | `anima_world/world_seed.py` | 种子 schema 校验 | 运维台 `lib/worldSeed.js` |
 | `anima_world/beats.py` | 节拍脚本严格校验 | (无镜像;创作台经 CLI 委托校验) |
+| `anima_world/db.py` 的 `DB_FORMAT_VERSION` / `SCHEMA_REVISION` | 世界文件的可挂载性与加法修订 | 运维台读 `contract --json` 的 `db.*` |
 
 数据包与种子两项由运维台的 `test/contract.test.js` 与本包**双向互验**(引擎不可用时整体 skip)。
 节拍脚本的严格校验有个硬要求:**坏脚本必须在加载时当场报错,不能流到世界启动**。
@@ -53,7 +54,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 119 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 370 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
@@ -85,14 +86,36 @@ anima-world world import my.cyberworld --destination ./instances
   与"读不出来",`build_serve_scheduler` 开机点名,`World.state()` 的
   `runtime.llm.degraded_reason` 常驻(见 `tests/test_startup_diagnostics.py`)。
 - **scheduler 持有系统唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。
-- **聊天子系统与事件核解耦**:整场会话只在关闭时发一个事件。
+- **聊天子系统与事件核解耦**:整场会话只在关闭时发一个事件。1.3.0 的 chat-agent 逐轮
+  观测量(stance / intent / tool_call)因此**落在 `messages` 行上**,不是每轮一个事件 ——
+  issue #18/#16 的原文写的是"每轮发一个事件",那条被有意否决了(见 CHANGELOG 1.3.0
+  末尾)。工具造成的**后果**(走开 / 广播 / 静音)照旧是世界事件:世界的历史只记世界里
+  发生的事。
 - 世界只收当轮有限历史(`World.chat` 传入、`record_chat_turn` 回传),完整转录留在
   宿主应用里,不落世界。
+- **chat-agent 的四个开关默认关**(`chat.stance/tools/intent/loop.enabled`),而且
+  **关着时连提示词都不进**:给了菜单却不执行,等于让她照着念一个没人读的标记。
+  能力调用走**行内标记**(`directives.py`)而不是 OpenAI 原生 `tools=`,理由是没有 key
+  是默认状态、Mock 与本地端点的 function calling 支持参差 —— 只在原生 tools 上可用的
+  能力等于在默认状态下缺席。要加原生路径就当降级路径的对偶来加,别替换掉它。
+- **她的选择必须在世界里兑现**:`walk_away` 走 BT 那条路真的起程,`delay_reply` 到点真的
+  回来敲门(`agent_followups` → `agent_hail`),`narrative_direction` 真的把人挪过来。
+  只改提示词的版本("她走了"但下一 tick 还站在原地)就是这几条 issue 要修的病本身。
 - **LLM 客户端注入**,**永不在 tick 线程调用**;叙事、规划、关系判定各自跑在线程池上。
 - **版本即契约(硬钉版模型)**:一个 core 版本 = (引擎代码, db format 版本, 包格式版本)
   一起冻结。宿主装上某个版本后就只依赖该版本,不做跨版本迁移。
   - `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
-  - **主版本号 = db 格式**:db 格式变才升第一位;第二位加能力,第三位纯修 bug
+  - **主版本号 = db 格式 = 可挂载性**:让老引擎**读不了**世界文件的改动(改列义/拆表/
+    换单位)才升第一位;第二位加能力,第三位纯修 bug
+  - **加法修订 `SCHEMA_REVISION`(1.3.0 起 = 2)**:纯加法的 schema 变化(新表、新的可空列)
+    不改可挂载性,跟着**次版本号**走,戳在 `db_meta.schema_revision`,**只增不减**。
+    1.3.0 破的是"schema 一变就升主版本"那条 —— 那会把已有的世界为一批加法全作废;守的
+    是"版本号能告诉你两个文件互不互通"这条,后者才是联锁真正在保护的东西。
+    加表时问自己一句:**老引擎打开这个文件还能跑吗?** 能 → 加法修订 + 次版本;
+    不能 → 那是 db 格式变更,升主版本。`tests/test_version_contract.py` 里
+    "更高修订的世界仍然能挂"那条测试就是这道闸。
+  - 这个戳存在的唯一理由是**让降级看得见**(1.3 的世界跑在 1.2 引擎上照跑,但 stance /
+    静音 / 拒谈话题整套缺席);`contract --json` 与 `doctor` 都报它,**运维台镜像要同步读**
   - `db.py` 的 `DB_FORMAT_VERSION` / `MIN_SUPPORTED_DB_FORMAT` 是运行期安全联锁:两者相等即
     "硬不兼容",挂错卷会当场拒绝而不是静默写坏(见 `tests/test_db_format.py`)
 - `world_seed.json` 是本包**唯一的 package data**,随 wheel 分发
@@ -105,14 +128,22 @@ anima-world world import my.cyberworld --destination ./instances
 
 ## 当前状态
 
-**首发版本 1.0.0(db 格式 1),尚未发布到包索引。** 主版本 = db 格式由
-`tests/test_version_contract.py` 机器强制。原路线图(docs/ROADMAP.md)的
+**1.3.0(db 格式 1,schema 加法修订 2)。** PyPI 上已发布到 1.1.1;1.2.0 与 1.3.0 尚未
+推 tag。版本规则由 `tests/test_version_contract.py` 机器强制。原路线图(docs/ROADMAP.md)的
 2.0–5.0 四大机制已并入首发,全部带默认关闭的开关:
 
 - **记忆 2.0**(常开):三因子检索、反思、遗忘曲线
 - **需求系统** `needs.enabled`:energy/hunger/social 曲线驱动行为树紧急带
 - **经济** `economy.enabled`:物品/钱/店铺/价格漂移,账本是事件投影
 - **社交** `social.enabled`:三轴关系(常开)+ 八卦传播 + 小团体
+
+1.3.0 加的一层是**她自己的选择**(一次真人 dogfooding 之后,issue #15/#16/#17/#18 一起
+兑现),同样四个默认关闭的开关 —— 细节见 docs/REFERENCE.md §2.9.1:
+
+- `chat.stance.enabled` 关系性意图(八枚举,按 (角色,对方) 存)
+- `chat.tools.enabled` 聊天里的能力(`anima_world/tools/`:静音/走开/等会儿/拒谈/广播)
+- `chat.intent.enabled` 意图分派(对话 / 导演场景 / 改对话规则 + `persona_overrides`)
+- `chat.loop.enabled` 连续输出(`World.chat_burst`,预算 f(性格,关系,心情,时间))
 
 HTTP 层于 2026-07 移除:网站/运维台若要对接,走 import(Python)或 CLI + `.cyberworld`
 (非 Python);旧的 `/internal/v1` 协议与 membership claim 实现在 git 历史里

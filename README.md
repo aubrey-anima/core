@@ -147,6 +147,41 @@ enable is more LLM spend and more surface to reason about.
 anima-world config set needs.enabled true --db-path saves/world.db
 ```
 
+### Choices of her own (1.3.0, four more flags, all off)
+
+In a 1.2 chat turn a character had exactly one thing she could do: **continue the
+sentence**. She had no action to choose (saying "I'm leaving" left her standing there),
+no relational intent behind her words, and no way to tell whether your message was
+addressed to her or was you directing the scene. These four flags are that missing half.
+
+| Flag | What she gains |
+|---|---|
+| `chat.stance.enabled` | She picks an explicit **stance** before replying — placate, provoke, probe, avoid, vent, seduce, defer, neutral. Stored per (character, target): she can be prickly with you and sweet to someone else |
+| `chat.tools.enabled` | She can **call capabilities** mid-chat: mute you, end the conversation, say "later" (and actually come back), walk away (a real journey, not a line of prose), refuse a topic, broadcast |
+| `chat.intent.enabled` | Each of your messages is classified first: `dialogue` / `narrative_direction` (you're directing the scene — it changes the world, not the prompt) / `style_adjust` ("call me 霜霜" — written into her persona for this player, permanently) |
+| `chat.loop.enabled` | `world.chat_burst()` keeps generating until **she** decides to stop: explicit yield, a question, budget exhausted, or a tool that ends the turn |
+
+Calls ride as inline markers in the reply stream (`〔tool:mute {"minutes": 5}〕`) rather
+than OpenAI's `tools=` field, because the default state has to work: with no key a world
+runs on Mock, and function-calling support across local and OpenAI-compatible endpoints is
+uneven. Prose still streams a character at a time; not one marker leaks to the player.
+
+```python
+with World.open("saves/world.db") as world:
+    meta = {}
+    reply = world.chat_reply("夏", turn, player_id="p1", display_name="阿宇", meta=meta)
+    meta["stance"]        # 'provoke' — and meta['stance_declared'] tells you she chose it
+    meta["tool_calls"]    # [{'tool': 'walk_away', 'ok': True, 'detail': {'to': 'home'}}]
+    world.record_chat_turn("夏", "p1", turn[-2:], meta=meta)   # observability onto the rows
+
+    for step in world.chat_burst("夏", turn, player_id="p1"):   # she may say three things
+        if step["kind"] == "message":
+            print(step["text"])
+```
+
+`world.chat()` raises `AgentUnavailable` while she is ignoring that player — an empty reply
+would be indistinguishable from an LLM outage, and those two deserve different UI.
+
 ## How it is built
 
 **One file is one world.** `world.db` holds events, chats, memories, and config.
@@ -163,9 +198,12 @@ locks, thread pools), so a second process writing the same `world.db` forks it
 immediately. Offline work — packaging, fast-forwarding — happens after the world closes.
 
 **Version is contract.** One release freezes (engine code, db format, package format)
-together. The major version *is* the db format version, and `db.py` enforces it at
-runtime: mount a database from an incompatible format and it refuses on the spot rather
-than quietly writing garbage.
+together. The major version *is* the db format version — meaning it is **mountability**:
+`db.py` enforces it at runtime, so mounting a database from an incompatible format is
+refused on the spot rather than quietly writing garbage. Purely additive schema changes
+(new tables, new nullable columns) don't affect mountability and ride the minor version
+instead, stamped into `db_meta.schema_revision` so a downgrade is visible — an older engine
+still opens the file, it just doesn't read the new tables, and `contract` / `doctor` say so.
 
 ## Ship a world to someone else
 

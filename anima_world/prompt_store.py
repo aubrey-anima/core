@@ -31,6 +31,23 @@ from anima_world.chat_service import (
 from anima_world.chat_service import (
     _DEFAULT_WORLD_MEMORY_TEMPLATE as _CHAT_WORLD_MEMORY,
 )
+from anima_world.chat_service import (
+    _DEFAULT_LOOP_CONTINUE_TEMPLATE as _CHAT_LOOP_CONTINUE,
+)
+from anima_world.chat_service import (
+    _DEFAULT_LOOP_INTERRUPT_TEMPLATE as _CHAT_LOOP_INTERRUPT,
+)
+from anima_world.chat_service import (
+    _DEFAULT_OVERRIDES_BLOCK_TEMPLATE as _CHAT_OVERRIDES,
+)
+from anima_world.chat_service import (
+    _DEFAULT_REFUSED_TOPIC_TEMPLATE as _CHAT_REFUSED_TOPIC,
+)
+from anima_world.chat_service import (
+    _DEFAULT_TOOLS_BLOCK_TEMPLATE as _CHAT_TOOLS,
+)
+from anima_world.intent import DEFAULT_CLASSIFIER_PROMPT as _INTENT_CLASSIFIER
+from anima_world.stance import DEFAULT_STANCE_BLOCK_TEMPLATE as _CHAT_STANCE
 from anima_world.narrative import (
     _MOCK_MEMORY_SUFFIX,
     _MOCK_TEMPLATE_DEFAULTS,
@@ -78,6 +95,17 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         "others": "罗本",
     },
     "chat.relation_block": {"r_type": "有点好奇的新面孔", "band": "熟识"},
+    # chat-agent(1.3.0):四块新提示词的实参。作者改坏了要在**保存时**报错,
+    # 而不是在她该选 stance 那一刻静默丢块。
+    "chat.stance_block": {
+        "stance_menu": "- neutral（中性）：平常回话", "current": "上一轮你对 ta 的意图是「讨好」。\n",
+    },
+    "chat.tools_block": {"tool_menu": "- mute：屏蔽这个人一段时间 参数:minutes:必填"},
+    "chat.overrides_block": {"rules": "- 怎么称呼玩家：霜霜"},
+    "chat.refused_topic_block": {"keywords": "彩票"},
+    "chat.intent_classifier": {"present": "林素", "recent": "user: 冷不冷?"},
+    "chat.loop_continue": {"emitted": 2, "left": 3},
+    "chat.loop_interrupt": {"text": "等等,我不是这个意思"},
     "judge.user_relationship": {
         "a_name": "夏", "a_personality": "开朗", "player_name": "阿檀",
         "a_to_b": 0.1, "b_to_a": 0.0, "r_type": "初次见面的访客",
@@ -145,6 +173,34 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "chat.relation_block": (
         _CHAT_RELATION,
         "Chat 关系块——对来访者的 r_type 与档位（chat-grounding）",
+    ),
+    "chat.stance_block": (
+        _CHAT_STANCE,
+        "Chat 关系性意图块——八个 stance 的菜单与惯性提示（#18；chat.stance.enabled）",
+    ),
+    "chat.tools_block": (
+        _CHAT_TOOLS,
+        "Chat 能力菜单——她可以走开/静音/拒谈话题（#15；chat.tools.enabled）",
+    ),
+    "chat.overrides_block": (
+        _CHAT_OVERRIDES,
+        "玩家教给这个角色的对话规则块（#16，写进库就永久生效）",
+    ),
+    "chat.refused_topic_block": (
+        _CHAT_REFUSED_TOPIC,
+        "对方又提到她拒绝谈的话题时插进去的一段（#15）",
+    ),
+    "chat.intent_classifier": (
+        _INTENT_CLASSIFIER,
+        "意图分类器的 prompt——dialogue / narrative_direction / style_adjust（#16）",
+    ),
+    "chat.loop_continue": (
+        _CHAT_LOOP_CONTINUE,
+        "连续输出时提醒她还能说几句、以及怎么让位（#17）",
+    ),
+    "chat.loop_interrupt": (
+        _CHAT_LOOP_INTERRUPT,
+        "玩家在她说话时插话——接着说还是转向由她自己判（#17）",
     ),
     "judge.relationship": (
         _JUDGE_RELATIONSHIP,

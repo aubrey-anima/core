@@ -9,6 +9,7 @@ network, for offline / no-key runs and hermetic tests.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, AsyncIterator, Protocol, Sequence, runtime_checkable
 
@@ -149,36 +150,71 @@ class ConfigBackedLLMClient:
     changes since the last call — an admin editing config via `World.config_set` takes
     effect on the next call with no process restart, but an unchanged
     config reuses the existing client instead of reconnecting every time.
+
+    chat-agent(1.3.0):`model_key` 让**背景槽**成为同一个类的一个参数 —— 意图
+    分类器与 autonomous loop 的每一步该走便宜快模型,而不是占着聊天那一条。
+    留空(默认)时逐字等于 1.2 的行为:背景槽读不到自己的模型就用主模型。
     """
 
-    def __init__(self, config_store: Any, client_factory: Any = LLMClient) -> None:
+    def __init__(
+        self,
+        config_store: Any,
+        client_factory: Any = LLMClient,
+        *,
+        model_key: str | None = None,
+    ) -> None:
         self._config_store = config_store
         self._client_factory = client_factory
-        self._fingerprint: tuple[Any, ...] | None = None
-        self._client: LLMClientProtocol | None = None
+        self._model_key = model_key
+        # (配置指纹, 事件循环) -> (循环, 客户端)。**循环也是键的一部分**:底层是一个
+        # httpx.AsyncClient,连接池绑在创建它的那个循环上。而同步门面每调一次就新建
+        # 一个循环(`asyncio.run`),于是一个被缓存住的客户端会被后面每一个循环复用
+        # —— 轻则每轮泄一条连接并刷 "Task was destroyed / aclose was never awaited",
+        # 重则某天开始报 "Event loop is closed"。2026-07-29 用真模型跑一局时,
+        # 每一轮都在刷这两条。
+        self._clients: dict[tuple[Any, ...], tuple[Any, LLMClientProtocol]] = {}
+
+    @staticmethod
+    def _running_loop() -> Any:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _prune(self) -> None:
+        """丢掉属于已经关掉的循环的条目 —— 否则每调一次就攒一个。"""
+        for key, (loop, _) in list(self._clients.items()):
+            if loop is not None and loop.is_closed():
+                self._clients.pop(key, None)
 
     def _resolve(self) -> LLMClientProtocol:
         cfg = self._config_store
         api_key = cfg.get("llm.api_key", default="") or ""
         base_url = cfg.get("llm.base_url", default="") or "https://api.openai.com/v1"
         model = cfg.get("llm.model", default="gpt-4o-mini")
+        if self._model_key:
+            model = cfg.get(self._model_key, default="") or model
         timeout = cfg.get("llm.timeout", default=_DEFAULT_TIMEOUT)
         max_retries = cfg.get("llm.max_retries", default=_DEFAULT_MAX_RETRIES)
-        fingerprint = (api_key, base_url, model, timeout, max_retries)
+        loop = self._running_loop()
+        key = (api_key, base_url, model, timeout, max_retries, id(loop) if loop else None)
 
-        if self._client is None or fingerprint != self._fingerprint:
-            if not api_key:
-                self._client = MockLLMClient()
-            else:
-                self._client = self._client_factory(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    timeout=timeout,
-                    max_retries=max_retries,
-                )
-            self._fingerprint = fingerprint
-        return self._client
+        self._prune()
+        entry = self._clients.get(key)
+        if entry is not None:
+            return entry[1]
+        if not api_key:
+            client: LLMClientProtocol = MockLLMClient()
+        else:
+            client = self._client_factory(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        self._clients[key] = (loop, client)
+        return client
 
     async def stream(self, messages: Sequence[Message]) -> AsyncIterator[str]:
         async for token in self._resolve().stream(messages):
@@ -191,6 +227,15 @@ class ConfigBackedLLMClient:
 def create_llm_client_from_config(config_store: Any) -> LLMClientProtocol:
     """Build a `ConfigBackedLLMClient` that hot-reloads `llm.*` config."""
     return ConfigBackedLLMClient(config_store)
+
+
+def create_background_llm_client_from_config(config_store: Any) -> LLMClientProtocol:
+    """背景槽的客户端:同一把 key / 同一个端点,模型读 `llm.background.model`。
+
+    分类器(#16)与 loop 的每一步(#17)一轮要打好几次,用主模型既慢又贵;而没有配
+    背景模型时它退回主模型 —— 便宜快模型是优化,不是前置条件。
+    """
+    return ConfigBackedLLMClient(config_store, model_key="llm.background.model")
 
 
 def create_llm_client_from_env() -> LLMClientProtocol:

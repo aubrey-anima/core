@@ -193,6 +193,9 @@ class Scheduler:
         self._subsystem_health: dict[str, dict[str, Any]] = {}
         # 在场玩家名单的来源(World 注入)。scheduler 不认识 World,只认识这个回调。
         self._present_players: Any | None = None
+        # chat-agent:聊天的当前值存储(World 注入)。只为一件事:到点把
+        # "等会儿再说"兑现成一次敲门。没有它世界照跑,那条约就永远不到期。
+        self.chat_state: Any | None = None
         # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
         self._hailed: dict[tuple[str, str], int] = {}
         # 本世界日各人上了多久班(tick)。日切结算工资时清空。
@@ -856,6 +859,9 @@ class Scheduler:
             #    decision below already sees the injected state (the same
             #    "derived state must not lag the events" rule as arrivals).
             self._check_beats(now)
+
+            # 3.5 到点的"等会儿再说":她真的回来敲一次门(chat-agent)。
+            self._fire_due_followups()
 
             # 4. World clock → every agent's blackboard, then run its BT.
             #    bt-duties D1: the tree is driven by TIME, not by boredom. The
@@ -1724,6 +1730,69 @@ class Scheduler:
                 # 作息都没有(演示世界现在就是),那样这条路就永远走不到。
                 self._maybe_hail_player(agent)
             return True
+
+    def _fire_due_followups(self) -> None:
+        """她说的"等会儿再说"到点了 —— 真的回来敲一次门(chat-agent,#15)。
+
+        只落一行"我等会儿再说"而没有人回来,就又是一条声明过没人读的机制:玩家
+        等着,她永远不回来。兑现走 issue #13 那条 `agent_hail` —— **敲门不是对话**,
+        不产生记忆、不动关系、不开会话,只是"我回来了"。
+
+        玩家不在场时**不发**,那条约留着等他回来(给不在的人写事件是这个仓库最在意
+        的那类错)。但也不永远留着:过期一个世界日就作罢并说明,否则玩家下周登录会
+        收到上周那句"等我一下"。
+        """
+        store = self.chat_state
+        if store is None:
+            return
+        try:
+            due = store.due_followups(self.clock)
+        except Exception:  # noqa: BLE001 - 读不到约不该掀翻 tick
+            logger.warning("读 followup 队列失败", exc_info=True)
+            return
+        if not due:
+            return
+        present: dict[str, Any] = {}
+        if self._present_players is not None:
+            try:
+                present = self._present_players() or {}
+            except Exception:  # noqa: BLE001
+                logger.warning("could not read present players", exc_info=True)
+                present = {}
+        grace = max(1, 1440 // self._minutes_per_tick())
+        for row in due:
+            agent_id, player_id = row["agent_id"], row["player_id"]
+            brain = self.agents.get(agent_id)
+            if brain is None:
+                store.mark_followup_fired(row["id"], self.clock)
+                continue
+            info = present.get(player_id)
+            if info is None:
+                if self.clock - int(row["due_tick"]) > grace:
+                    logger.info(
+                        "%s 对 %s 说的「等会儿再说」过期作罢:约在 tick %s,已经过了一个世界日"
+                        "而人一直不在场", agent_id, player_id, row["due_tick"],
+                    )
+                    store.mark_followup_fired(row["id"], self.clock)
+                continue
+            here = brain.agent.blackboard.read("loc") or brain.agent.location
+            store.mark_followup_fired(row["id"], self.clock)
+            store.clear_quiet(agent_id, player_id, kind="delay")
+            self._record_event({
+                "type": "agent_hail",
+                "who": agent_id,
+                "loc": here,
+                "payload": {
+                    "agent_id": agent_id,
+                    "player_id": player_id,
+                    "player_name": (info or {}).get("display_name") or player_id,
+                    "location": here,
+                    # 这一条不是"闲着想找人说话",是她欠你的那句话。宿主可以按
+                    # 这个字段把它显示成"她回来了"而不是"她来打招呼"。
+                    "reason": row.get("kind") or "delayed_reply",
+                    "note": row.get("reason"),
+                },
+            })
 
     def _maybe_hail_player(self, agent: Agent) -> None:
         """「想找个人说说话」时,同地的在场玩家也算一个人(issue #13,访客模型)。
