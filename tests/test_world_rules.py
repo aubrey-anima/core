@@ -366,3 +366,64 @@ def test_batching_did_not_change_the_numbers(tmp_path):
         assert len(sizes) == 1, f"同样的树算出了不同的值:{sizes}"
         # 0.5 + 0.01 × 已结算的 tick 数(最后一次求值在 tick 109,dt 累计 109)
         assert sizes.pop() == pytest.approx(0.5 + 0.01 * 109)
+
+
+# ---- 写不到的地方,开机就拒 -------------------------------------------------
+
+
+def test_writing_a_global_is_refused_at_load(tmp_path):
+    """`set` 到 `world_x` 曾经是**静默写错地方**,而仪表报的是成功。
+
+    一条规律只能写它自己那个 owner 的量。而 `"set": {"world_总产量": …}` 此前被
+    照单全收,在那个角色名下建了一个叫 `world_总产量` 的量 —— 世界的量一动没动,
+    `rule_stats()` 却报 `written: 5, skipped: 0`。专门用来回答"这层跑通了吗"的仪表
+    说的是成功,这正是"照跑但给错东西"。
+    `world_x` 尤其毒:**读**它是对的,于是作者理所当然假设写也对称。
+    """
+    with pytest.raises(RuleError) as caught:
+        parse_rules([{
+            "id": "acc", "for_each": {"owner": "agent:夏"},
+            "set": {"world_总产量": "world_总产量 + 1"},
+        }])
+    message = "\n".join(caught.value.errors)
+    assert "写不到全局量" in message
+    # 光说"不行"不够,得说清怎么写才对
+    assert '"for_each": {"owner": "world"}' in message
+
+
+def test_writing_another_entity_is_refused_at_load(tmp_path):
+    """跨实体的相互作用(挖矿让矿脉减少)v1 表达不了 —— 那就当场说出来。
+
+    不悄悄放行的理由:双缓冲下扇入没有意义。一条作用在一百棵树上的规律,每棵读到的
+    全局量都是这一轮开始前的同一个值,"每棵 +1"的结果是 +1 而不是 +100 —— 一个
+    看起来对、算出来错的语义,比当场报错坏得多。
+    """
+    for target in ("mine:north.储量", "agent:夏.体力"):
+        with pytest.raises(RuleError) as caught:
+            parse_rules([{
+                "id": "mining", "for_each": {"owner": "agent:夏"},
+                "set": {target: "矿石 - 1"},
+            }])
+        assert "写不到别的实体身上" in "\n".join(caught.value.errors)
+
+
+def test_a_rule_writing_its_own_owner_still_loads():
+    """闸门不许误伤正常写法 —— 出厂种子的两条规律都是这一类。"""
+    rules = parse_rules([
+        {"id": "rain", "for_each": {"owner": "world"}, "set": {"雨天数": "雨天数 + 1"}},
+        {"id": "grow", "for_each": {"kind": "tree"},
+         "when": ["world_季节 != 4"],
+         "set": {"树高": "min(树高 + 生长速度 * dt, 最大树高)"}},
+    ])
+    assert [r.id for r in rules] == ["rain", "grow"]
+
+
+def test_the_bundled_seed_survives_the_gate():
+    """出厂世界必须开得了机 —— 这道闸是加在**加载期**的,误伤等于装上包就打不开。"""
+    import json
+    from importlib import resources
+
+    seed = json.loads(
+        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
+    )
+    assert parse_rules(seed.get("rules")), "内置种子的规律被自己的闸门拒了"

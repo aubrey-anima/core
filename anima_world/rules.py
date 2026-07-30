@@ -147,10 +147,15 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
         errors.append(f"{label}:set 必须是「量名 → 表达式」的对象,而且不能为空")
     else:
         for key, source in raw_outputs.items():
+            name = str(key)
+            problem = bad_output_name(name)
+            if problem:
+                errors.append(f"{label}.set.{name}:{problem}")
+                continue
             try:
-                outputs[str(key)] = compile_expression(source)
+                outputs[name] = compile_expression(source)
             except ExpressionError as exc:
-                errors.append(f"{label}.set.{key}:{exc}")
+                errors.append(f"{label}.set.{name}:{exc}")
 
     conditions: list[Expression] = []
     raw_when = entry.get("when") or []
@@ -198,6 +203,45 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
         conditions=tuple(conditions),
         emits=tuple(emits),
     )
+
+
+def bad_output_name(name: str) -> str | None:
+    """`set` 的目标是不是一个这条规律**写得到**的量。写不到就当场拒。
+
+    这道闸是踩出来的,而且踩的是最坏的形状。一条规律只能写**它自己那个 owner** 的量,
+    但两种"看起来显然能写"的写法此前都被静默接受了:
+
+        "set": {"world_总产量": "world_总产量 + 1"}   → 在那个角色名下建了个
+                                                        叫 `world_总产量` 的量
+        "set": {"mine:north.储量": "储量 - 1"}        → 同样,建了个带冒号的怪名字
+
+    两次 `rule_stats()` 都报 `written: 5, skipped: 0` —— 专门用来回答"这层跑通了吗"的
+    仪表**说的是成功**,而世界的量一动没动。这正是"照跑但给错东西"。
+    `world_x` 尤其毒:**读**它是对的(任何表达式都能读全局),于是作者理所当然假设
+    写也对称。
+
+    为什么不干脆支持跨 owner 写,而是拒绝:双缓冲下**扇入没有意义**。一条
+    `for_each: {"kind": "tree"}` 的规律作用在一百棵树上,每棵读到的 `world_总产量`
+    都是这一轮开始前的同一个值,于是"每棵树 +1"的结果是 +1 而不是 +100 —— 一个
+    看起来对、算出来错的语义,比当场报错坏得多。要跨实体的相互作用(挖矿让矿脉减少、
+    收割让粮仓增加),那是 v2 要设计的东西,不是在这里悄悄放行。
+    """
+    if not name.strip():
+        return "量名不能为空"
+    if name.startswith(WORLD_PREFIX):
+        return (
+            f"写不到全局量:`{name}` 只会在这条规律自己的 owner 名下建一个叫这个名字的量。"
+            f"读 `{name}` 是可以的,写不行 —— 要改全局量,用 "
+            f'`"for_each": {{"owner": "world"}}` 的规律去写它自己的 `{name[len(WORLD_PREFIX):]}`'
+        )
+    for mark in (":", "."):
+        if mark in name:
+            return (
+                f"写不到别的实体身上:`{name}` 只会在这条规律自己的 owner 名下建一个"
+                f"带 `{mark}` 的怪名字。一条规律只写它自己那个 owner 的量 —— "
+                "跨实体的相互作用(挖矿让矿脉减少)v1 还表达不了"
+            )
+    return None
 
 
 def _parse_interval(label: str, raw: Any, errors: list[str]) -> int:
