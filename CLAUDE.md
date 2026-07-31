@@ -48,13 +48,17 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 
 Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)。它是宿主应用
 依赖的 API 面:**只加不改**,破坏性变更等于跨仓库破坏。
+`tests/test_reference_docs.py` 是这条纪律的闸门:**加公开方法就必须写进
+`docs/REFERENCE.md`**(或进 `UNDOCUMENTED_ON_PURPOSE` 并说明理由),文档写的形参名
+必须和真实签名对得上。REFERENCE 是宿主照着写代码的那份东西,而它和代码之间原本没有
+任何机械联系 —— 一次人工对账就查出四处不实。
 
 ## 常用命令
 
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 452 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 464 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 

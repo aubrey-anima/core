@@ -2678,10 +2678,19 @@ def contract_payload() -> dict[str, Any]:
             "min_supported": MIN_SUPPORTED_DB_FORMAT,
             "schema_revision": SCHEMA_REVISION,
         },
-        # chat 里她能调的能力(声明在代码,`@tool` 登记)。宿主要显示"她走开了"
+        # 她能调的能力**全目录**(声明在代码,`@tool` 登记)。宿主要显示"她走开了"
         # 之类的事件,得先知道有哪些能力会产生它们。
+        #
+        # ⚠️ 字段名是历史包袱:它**不只有 chat 面**。`reach_out` 只在定时轮次里
+        # 出现,聊天里永远不会被调用 —— 照着这个名字做一个"聊天能力"列表就会把它
+        # 也列进去。所以每条带上 `surfaces`,消费方按它过滤;名字不改是因为运维台
+        # 镜像已经在读 `chat_tools`,改名等于跨仓库破坏。
         "chat_tools": [
-            {"id": spec.id, "kind": spec.kind, "params": sorted(spec.params_schema)}
+            {
+                "id": spec.id, "kind": spec.kind,
+                "params": sorted(spec.params_schema),
+                "surfaces": list(spec.surfaces),
+            }
             for spec in chat_tools.tools_for("*")
         ],
         "package": {"format_version": PACKAGE_FORMAT_VERSION},
@@ -2717,7 +2726,9 @@ def run_contract(args: argparse.Namespace) -> int:
           f"(支持到 {payload['db']['min_supported']};主版本号 = db 格式)")
     print(f"  schema 修订    {payload['db']['schema_revision']}   "
           f"加法修订(新表/新可空列),跟次版本号走,不改可挂载性")
-    print(f"  chat 能力      {', '.join(t['id'] for t in payload['chat_tools'])}")
+    for surface in ("chat", "autonomy"):
+        ids = [t["id"] for t in payload["chat_tools"] if surface in t["surfaces"]]
+        print(f"  {surface:<8} 能力  {', '.join(ids)}")
     print(f"  包格式         {payload['package']['format_version']}   .cyberworld")
     print(f"  报表口径       {payload['report']['format_version']}   simulate --report")
     print(f"  种子 schema    agents{payload['seed']['agent_keys']} "

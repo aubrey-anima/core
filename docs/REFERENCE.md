@@ -703,6 +703,10 @@ from anima_world.api import World
 | `world.graph(agent_id=None)` | 关系图谱三元组 |
 | `world.cliques()` | 小团体(friendship 连通分量,日切重算) |
 | `world.events(since_seq=None)` | 近期事件缓冲(全量历史离线读 `events` 表) |
+| `world.history(*, since_seq=0, limit=1000, who=None, kind=None)` | **全量事件历史,分页**。事件形状与 `events()` 完全一致;`who` / `kind` 过滤。`broadcasts()` 就是它的一层壳 |
+| `world.fast_forward(ticks, *, plan_wait_cap=None)` | 无头快进,每个世界日等在途的规划落地。和 `simulate` **共用** `Scheduler.fast_forward`,免得两条快进路径长出不同行为。⚠️ 定时轮次不在快进里跑(§2.9.2) |
+| `world.report(*, ticks=None)` | 把跑出来的历史读成一份运行摘要,与 `simulate --report` **同一口径**(`report_format_version` 见 `contract`) |
+| `world.paused` | 这个世界的时钟停没停(属性,不是方法) |
 | `world.subscribe()` / `world.unsubscribe(q)` | 事件推送订阅(线程安全队列,批量帧 `{type:'batch', events:[…]}`) |
 | `world.agent_context(agent_id, interlocutor_id)` | 有界 grounding:锁内一次快照角色的 lived state(检索 `chat.recall_k` 条记忆 + 在场 + 关系档位),只读、无 LLM、无 IO。`world.world_context(...)` 是同一个函数的别名 |
 
@@ -715,8 +719,8 @@ from anima_world.api import World
 | `world.chat_reply(...)` | 同上,非流式,直接返回整段 |
 | `world.chat_burst(agent_id, messages, *, player_id, display_name=None, role="player", interrupt_check=None)` | **连着说到她自己想停**(#17)。产出步骤 dict:`budget` / `text` / `message` / `stance` / `tool_call` / `stop`。`interrupt_check` 是一个 `() -> str | None` 回调,返回一句话就是玩家插话 —— 接着说还是转向**由她判**。`chat.loop.enabled` 关着时只跑一步,形状不变。`world.achat_burst(...)` 是 async 版 |
 | `world.record_chat_turn(agent_id, player_id, messages, *, meta=None)` | 把完成回合(恰好 user→assistant 两条)记入世界并关闭:摘要 + 一个 conversation 事件 + 关系判定。返回会话 id。失败即异常,重试由调用方决定。`meta` 把 `chat()` 那轮的观测量落到消息行上(intent 落用户那行,stance / tool_calls 落她那行) |
-| `world.conversations(agent_id)` / `world.conversation_messages(id)` | 会话列表 / 消息 |
-| `world.close_conversation(id)` | 手动关会话(摘要+事件+判定) |
+| `world.conversations(agent_id)` / `world.conversation_messages(conversation_id)` | 会话列表 / 消息 |
+| `world.close_conversation(conversation_id)` | 手动关会话(摘要+事件+判定) |
 | `world.player_move(player_id, location)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError |
 | `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
 | `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条 |
@@ -750,7 +754,7 @@ from anima_world.api import World
 | `world.rule_stats()` | 规律引擎跑得怎么样:`{evaluated, written, emitted, skipped, last_error}` |
 | `world.perception(agent_id)` | 她此刻**感知到**什么(不是世界有什么),分 `own`/`here`/`public` 三档(§2.9.4) |
 | `world.debug_prompt(agent_id, *, player_id="p1", message="在吗", display_name=None, role="player", history=None)` | 她这一刻**会收到的提示词**,逐块带来源标签(§2.9.5)。`blocks` / `order` / `absent`(哪块没出现**以及为什么**)/ `system`(并起来的整段,和真聊天逐字相同)。**看,但不碰**:不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来 |
-| `world.declare_visibility(kind, key, visibility, label=None)` | 声明某类量的可见档:`self`/`here`/`public`/`hidden` |
+| `world.declare_visibility(owner_kind, key, visibility, label=None)` | 声明某类量的可见档:`self`/`here`/`public`/`hidden` |
 | `world.place_stock(owner, location, label=None)` | 这个东西在哪(`here` 档要用) |
 | `world.visibility_rules()` | 现有的可见性声明 |
 

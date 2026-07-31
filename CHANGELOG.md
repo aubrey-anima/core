@@ -208,6 +208,32 @@ db 格式、db 格式一升就升主版本 —— 按字面读,这一版该叫 2
   顺序是它的子序列。**末尾只有一个,抢的人多了就不值钱** —— 认知层就留在中间,实测她
   在那儿照样读得到。往末尾加块之前必须回答:它是"事实"还是"要照做的"?
 
+### Fixed —— 文档对账:REFERENCE 说的话有四处不是真的(2026-07-30)
+
+REFERENCE 是**宿主照着写代码**的那份东西,而它和代码之间此前没有任何机械联系。逐行
+对账查出四处:
+
+- **`world.declare_visibility(kind, …)`** —— 真实形参是 `owner_kind`。位置调用照样
+  能用,所以永远不会有人发现 —— 直到有人写关键字参数。而种子里那个字段**确实**叫
+  `kind`,所以这个错特别容易犯。
+- **`close_conversation(id)` / `conversation_messages(id)`** —— 真实是 `conversation_id`。
+- **`world.history` / `fast_forward` / `report` 在 REFERENCE 里零次出现** —— 三个真实
+  的公开 API。`history` 尤其可惜:它是分页的全量历史,而 `broadcasts()` 就是它的一层壳。
+- **`contract --json` 的 `chat_tools` 不只有 chat 面。** 字段名和代码注释都写着
+  "chat 里她能调的能力",而代码故意取全目录 —— `reach_out` 只在定时轮次里出现,聊天
+  里永远调不到。运维台照着字段名做一个"聊天能力"列表,就会给用户一个永远等不到的按钮。
+  名字不改(镜像已经在读它,改名等于跨仓库破坏),但**每条加上 `surfaces`**(纯加法),
+  `contract` 的人读输出也按面分开打印。
+
+一次性改完没有用,下次加个方法照样飘。所以把对账钉成闸门(`tests/test_reference_docs.py`):
+文档写的方法必须存在、写的形参必须对得上、**公开方法必须写进文档**(或者进
+`UNDOCUMENTED_ON_PURPOSE` 并说明理由),外加 `contract --json` 的两个数必须等于代码里的
+常量。三道闸都做过变异验证。
+
+对账里核对无误的:`.cyberworld` 环回(整库 backup,四张新表自动跟着走)、`contract` 的
+beats ops / 谓词(与 `beats.py` 双向无差)、report 的 12 个 bucket 与
+`report_format_version`、`needs` 惰性结算。
+
 ### Fixed —— `simulate` 悄悄不跑定时轮次(2026-07-30)
 
 `_autonomy_hook` 全仓库只在 `World._install_autonomy` 里赋值,而 `simulate` 直接建
