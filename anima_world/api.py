@@ -578,6 +578,24 @@ class _ToolRuntime:
             return {"in_transit": True, "arrive_at": int(trip.get("arrive_at", 0))}
         return {"in_transit": False, "location": self.agent_location(agent_id)}
 
+    def do_action(self, agent_id: str, kind: str, params: dict[str, Any]) -> bool:
+        """过日子的动作 —— **委托行为树走的那条路**(`Scheduler.emit_action`)。
+
+        于是"排班让她走"和"她自己决定走"在世界里是同一件事:一样发 travel /
+        location_join、一样花时间、一样在途中不可打断。另写一份"外部版本的走路"
+        迟早和行为树那份分叉,而分叉的那天没人会发现。
+
+        返回 `False` 是**世界说"还不行"**(她在半路上、要找的人不在这儿),不是失败。
+        """
+        from anima_world.actions import ActionDescriptor
+
+        brain = self._world.scheduler.agents.get(agent_id)
+        if brain is None:
+            raise tools_mod.ToolCallError(f"没有 {agent_id} 这个人")
+        return bool(
+            self._world.scheduler.emit_action(brain.agent, ActionDescriptor(kind, dict(params)))
+        )
+
     def close_conversation(self, agent_id: str, player_id: str) -> bool:
         active = self._world.chat_store.active_conversation(agent_id, player_id=player_id)
         if active is None:

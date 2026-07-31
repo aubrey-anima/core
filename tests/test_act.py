@@ -151,8 +151,13 @@ def test_verbs_lists_what_she_can_do(world):
     assert "broadcast" in autonomy and "reach_out" in autonomy
     assert "walk_away" in chat and "reach_out" not in chat
 
+    body = {v["id"] for v in world.verbs(agent, "body")}
+    assert "walk" in body and "walk" not in autonomy, (
+        "过日子的动词该在 body 面上,而且不该漏进自主菜单(那会改提示词)"
+    )
+
     everything = world.verbs(agent)
-    assert {v["id"] for v in everything} == autonomy | chat
+    assert {v["id"] for v in everything} == autonomy | chat | body
     for entry in everything:
         assert entry["surfaces"], f"{entry['id']} 没说自己在哪个面上"
         assert entry["description"], f"{entry['id']} 没有给人读的说明"

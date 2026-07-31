@@ -732,6 +732,20 @@ from anima_world.api import World
 | `world.act(agent_id, verb, params=None, *, player_id="", surface="autonomy")` | **以某个角色的身份做一件事** —— 外面的进程改变这个世界的唯一入口。整个执行期持有世界那把唯一的锁,所以**一个动作是原子的**(world-rules 的双缓冲、三源仲裁、`events.seq` 的折叠顺序都要求它)。**在执行时校验,不在决定时**:她想了 6.5 秒,决定送达时世界早变了,所以"还在不在场""走不走得掉"由动词自己在执行那一刻查。未知动词 / 不在这个面上 / 工具失败一律返回 `ok=False` **并说明原因**(一个 agent 进程挑错动词不该让世界崩);未知角色抛 `KeyError`。结果形状与聊天里的工具调用**逐字相同**。⚠️ 它**不推进世界的时间** |
 | `world.verbs(agent_id="*", surface=None)` | 她能做什么 —— `act()` 的配套目录,逐条带 `id` / `kind` / `description` / `params` / `surfaces`。给了能力却不给目录等于没给 |
 
+**三个面**:`chat`(玩家在跟她说话)/ `autonomy`(没人说话,她自己决定)/
+`body`(过日子的动作:走、吃、干活、睡、搭话、待着)。`body` 那批**只在 `act()` 上可用,
+不进任何提示词菜单** —— 把 `walk` 摆进自主菜单会改提示词,而改提示词得接真模型验过
+再说(这个仓库为此付过学费:位置就是权重)。
+
+`body` 的动词全部委托 `Scheduler.emit_action` —— **行为树走的就是它**。于是"排班让她走"
+和"她自己决定走"在世界里是同一件事:一样发 `travel` / `location_join`、一样花时间、
+一样在途中不可打断。`emit_action` 返回 `False` 是"世界这会儿不接"(她在赶路、要找的人
+不在这儿),照实报成 `ok=False`,不假装成功。
+
+⚠️ `bt_actions` 不是动词表,是**已经绑好参数的调用表**(`go_to_cafe` =
+`walk(location="cafe")`)。`tests/test_body_verbs.py` 有一条测试盯着:表里每个 `kind`
+都必须是注册表里的一个动词 —— 行为树能做而动词表里没有,割裂就还在。
+
 **面(surface)是硬的**:`walk_away` / `end_conversation` 这些需要"对面有个人",默认面
 `autonomy`(她自己决定做点什么)上没有它们;要聊天里那批就显式传 `surface="chat"`
 并给 `player_id`。

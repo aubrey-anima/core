@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+from anima_world.tools import body as _body      # noqa: F401 - import 即登记
 from anima_world.tools import social as _social  # noqa: F401 - import 即登记
 from anima_world.tools.base import (
+    BODY,
     AUTONOMY,
     CHAT,
     SURFACES,

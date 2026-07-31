@@ -92,6 +92,8 @@ class ToolRuntime(Protocol):
 
     def move_agent(self, agent_id: str, location: str) -> dict[str, Any]: ...
 
+    def do_action(self, agent_id: str, kind: str, params: dict[str, Any]) -> bool: ...
+
     def close_conversation(self, agent_id: str, player_id: str) -> bool: ...
 
 
@@ -117,7 +119,8 @@ ToolHandler = Callable[[ToolContext, dict[str, Any]], ToolResult]
 # 在无人对话时也能被选中的 `end_conversation` 只会写出一堆关掉空会话的动作。
 CHAT = "chat"            # 玩家跟她说话的那一轮
 AUTONOMY = "autonomy"    # 定时轮次:没人跟她说话,她自己决定要不要做点什么
-SURFACES = (CHAT, AUTONOMY)
+BODY = "body"            # 过日子的动作:走、吃、干活、睡 —— 谁都能做,不挑场合
+SURFACES = (CHAT, AUTONOMY, BODY)
 
 
 @dataclass(frozen=True)
