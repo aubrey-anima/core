@@ -1616,6 +1616,21 @@ class Scheduler:
                 if not self._planning:
                     self._planning_idle.notify_all()
 
+    def _advance_intent(self, agent: Any) -> None:
+        """这一步真的生效了,才把她的意图队列往前走一格。
+
+        **不在挑选时弹**:一步在途中会被重挑很多次(`emit_action` 在途时返回 False),
+        挑一次弹一次会把后面几步一起吃掉,而她只走了第一步。生效才算数 —— 和
+        `_current_action` 只在世界放行时才记录是同一条规矩。
+        """
+        blackboard = agent.blackboard
+        if blackboard.read("_selected_action_id") != "follow_intent":
+            return
+        queue = list(blackboard.read("intent.queue") or [])
+        if queue:
+            queue.pop(0)
+        blackboard.write("intent.queue", queue)
+
     def _emit_on_transition(self, agent: Any, action: ActionDescriptor | None) -> None:
         """Emit only when the chosen action CHANGES (bt-duties D2).
 
@@ -1633,6 +1648,7 @@ class Scheduler:
         # un-recorded so the tree tries again next tick — that is what turns a
         # constraint into a wait, and a wait into an encounter.
         if self.emit_action(agent, action):
+            self._advance_intent(agent)
             self._current_action[agent.id] = action
 
     @staticmethod

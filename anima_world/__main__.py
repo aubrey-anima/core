@@ -1397,10 +1397,15 @@ def _wrap_with_needs_band(bt_root: Any) -> Any:
 
     # 触发线 → 释放线:开始恢复就恢复到饱,而不是跨过触发线就收工(见 NeedAction
     # 与 needs.RELEASE —— 单阈值下角色永远卡在触发线上方抖)。
+    from anima_world.bt_nodes import IntentAction
+
     return Selector(children=[
         NeedAction("energy", URGENT, "go_sleep", RELEASE["energy"]),
         NeedAction("hunger", URGENT, "eat", RELEASE["hunger"]),
         NeedAction("social", URGENT, "idle_social", RELEASE["social"]),
+        # 她刚决定要做的事:身体之下、排班之上。队列空时 FAILURE,所以没人调用
+        # `intend()` 的世界行为逐字不变 —— 纯加法。
+        IntentAction(),
         bt_root,
     ])
 

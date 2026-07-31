@@ -10,6 +10,7 @@ from anima_world.bt_nodes import Status, tick
 
 # The BT leaf id that means "do whatever the planner scheduled for right now".
 FOLLOW_PLAN_ID = "follow_plan"
+FOLLOW_INTENT_ID = "follow_intent"
 
 
 class Brain:
@@ -60,6 +61,17 @@ class Brain:
         if node_id is None:
             # Fallback: BT succeeded without recording a specific action id — return idle
             return ActionDescriptor("idle_wander")
+
+        if node_id == FOLLOW_INTENT_ID:
+            # 她刚决定要做的那一串,队首就是这一步。和 follow_plan 同一个道理:
+            # 动态动作进不了静态的 action 表,描述符现场从黑板建。
+            # **只看不弹** —— 弹出由调度器在这一步真的生效之后做(见
+            # `_advance_intent`),否则一步在途中被重挑时会把后面的吃掉。
+            queue = blackboard.read("intent.queue") or []
+            if not queue:
+                return ActionDescriptor("idle_wander")
+            step = queue[0]
+            return ActionDescriptor(str(step.get("kind")), dict(step.get("params") or {}))
 
         if node_id == FOLLOW_PLAN_ID:
             # The planner's step is dynamic (walk to X, chat with Y), so it

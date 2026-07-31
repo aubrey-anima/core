@@ -1929,6 +1929,54 @@ class World:
             logger.info("act(%s, %s) 没成:%s", agent_id, verb, result.error)
         return result.to_dict(verb, dict(params or {}))
 
+    def intend(
+        self, agent_id: str, steps: list[dict[str, Any]] | None
+    ) -> dict[str, Any]:
+        """**告诉她接下来打算做什么** —— 一串动作,世界替她走完脚步。
+
+        `act()` 是"现在做这一件事",`intend()` 是"接下来这几步"。区别不是语法糖:
+        一个 LLM 驱动的进程**不该一步一次网络往返地编排走路** —— 那又贵又编得烂。
+        她该说"先走到咖啡店,然后干活",剩下的交给世界。
+
+        **调用即设定意图,不是执行到底。** 立刻返回;之后每个 tick 由仲裁器在
+        [身体 → 她刚决定的 → 排班 → 空闲规划 → 兜底] 之间挑。所以:
+
+        - **饿到一定程度她会先去吃**,吃完再回来接着走 —— 紧急带没被架空
+        - **可被打断是特性**:路上被人叫住、被需求压倒,都该发生
+        - 一步真的生效了队列才往前走一格(在途时会被重挑很多次,挑一次弹一次
+          会把后面几步一起吃掉)
+
+        `steps` 是 `[{"verb": "walk", "params": {...}}, {"verb": "work"}]`,
+        动词必须在 `body` 面上(过日子的动作)。传 `None` 或空列表 = **取消**她
+        当前的打算。返回 `{"agent_id", "queued", "steps"}`。
+        """
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        allowed = {spec.id: spec for spec in tools_mod.tools_for(agent_id, tools_mod.BODY)}
+        queue: list[dict[str, Any]] = []
+        for index, step in enumerate(steps or []):
+            verb = str((step or {}).get("verb") or "").strip()
+            spec = allowed.get(verb)
+            if spec is None:
+                raise ValueError(
+                    f"第 {index + 1} 步的 {verb!r} 不是过日子的动作;"
+                    f"可用的是 {sorted(allowed)}"
+                )
+            queue.append({"kind": spec.kind, "params": dict((step or {}).get("params") or {}),
+                          "verb": verb})
+        with self.scheduler._lock:
+            brain = self.scheduler.agents[agent_id]
+            brain.agent.blackboard.write("intent.queue", queue)
+        return {"agent_id": agent_id, "queued": len(queue), "steps": list(queue)}
+
+    def intent(self, agent_id: str) -> list[dict[str, Any]]:
+        """她此刻还打算做的事(队首是下一步)。做完一步就少一条。"""
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        with self.scheduler._lock:
+            queue = self.scheduler.agents[agent_id].agent.blackboard.read("intent.queue")
+        return [dict(step) for step in (queue or [])]
+
     def verbs(self, agent_id: str = "*", surface: str | None = None) -> list[dict[str, Any]]:
         """这个角色在某个面上能做什么 —— `act()` 的配套目录。
 

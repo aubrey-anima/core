@@ -180,6 +180,35 @@ class PlanAction(Node):
 
 
 @dataclass
+class IntentAction(Node):
+    """她刚决定要做的事 —— **排在身体之下、排班之上**。
+
+    这是"很多进程操作同一个世界"里 agent 那一侧的落点:一个 LLM 驱动的进程说
+    "先走到咖啡店,然后干活",队列进来,世界替她走完脚步。她**不该**一步一次网络
+    往返地编排走路,那又贵又编得烂。
+
+    位置是有理由的:
+
+    - **在身体之下** —— 饿到一定程度先吃,再去开店。她刚决定的事不该架空紧急带,
+      否则"饿死也要把店开了"就回来了(`_wrap_with_needs_band` 花力气解掉的就是它)。
+    - **在排班之上** —— 她此刻明确决定的事,该压过排班表。否则"她自己决定"是假的。
+
+    队列空的时候 FAILURE,于是没人调用 `intend()` 的世界**行为逐字不变** ——
+    这一层是纯加法。
+    """
+
+    action_id: str = "follow_intent"
+    name: ClassVar[str] = "intent"
+
+    def tick(self, blackboard: Blackboard) -> Status:
+        queue = blackboard.read("intent.queue") or []
+        if not queue:
+            return Status.FAILURE
+        blackboard.write("_selected_action_id", self.action_id)
+        return Status.SUCCESS
+
+
+@dataclass
 class NeedAction(Node):
     """needs-v3 leaf: fire a restorative action when a need runs low.
 
