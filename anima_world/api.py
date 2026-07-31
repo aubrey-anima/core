@@ -1843,6 +1843,95 @@ class World:
                 self._autonomy_stats["failed"] += 1
                 self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
 
+    def act(
+        self,
+        agent_id: str,
+        verb: str,
+        params: dict[str, Any] | None = None,
+        *,
+        player_id: str = "",
+        surface: str = tools_mod.AUTONOMY,
+    ) -> dict[str, Any]:
+        """**以某个角色的身份做一件事。** 外面的进程改变这个世界的唯一入口。
+
+        存在的理由:此前"她做了什么"只能由引擎内部触发 —— 聊天那一轮、定时轮次、
+        节拍脚本。一个住在别的进程里、由 LLM 驱动的角色**碰不到任何动词**,
+        于是"很多进程操作同一个世界"这件事在引擎这一侧是断的。这个方法就是那扇门。
+
+        四条性质,每条都有理由:
+
+        1. **一个动作是原子的。** 整个执行期持有世界那把唯一的锁(RLock,所以工具
+           内部再拿一次是安全的)。这不是为了性能 —— 锁每次只持 62 微秒,而一次 LLM
+           往返是 6.5 秒。是为了 world-rules 的双缓冲、三源仲裁、`events.seq` 的折叠
+           顺序:这三件事都要求"一个动作期间世界不会从下面被换掉"。
+        2. **在执行时校验,不在决定时。** 她想了 6.5 秒,决定送达时世界早就变了 ——
+           所以"她还在不在场""走不走得掉"由动词自己在执行的那一刻查
+           (`walk_away` 隔着手机降级成挂断就是这个模式)。**别在这里预先校验**,
+           那会变成第二份判断,迟早和动词里那份分叉。
+        3. **面是硬的。** `walk_away` / `end_conversation` 这些需要"对面有个人",
+           在没人说话的场合是空动作。默认面是 `autonomy`(她自己决定做点什么),
+           要聊天里那批就显式传 `surface="chat"` 并给 `player_id`。
+        4. **坏调用不掀翻世界,但也不静默。** 未知动词 / 不在这个面上 / 工具自己
+           失败,一律返回 `ok=False` 并说明原因(而不是抛异常)—— 一个 agent 进程
+           挑错了动词,不该让世界跟着崩。未知角色仍然抛 `KeyError`:那是调用方
+           搞错了对象,不是一次失败的尝试。
+
+        返回 `{"tool", "params", "ok", ...}`,形状和聊天里那批工具调用**逐字相同**
+        (共用 `ToolResult.to_dict`)—— 两条路的结果不该长得不一样。
+
+        ⚠️ **它不推进世界的时间。** `docs/AGENT-RUNTIME.md` 里"时间是动作的副产品"
+        那一半还没实施,现在仍然由调用方决定什么时候 `tick()`。这个方法只负责
+        "做这件事并记一笔"。
+        """
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        allowed = {spec.id for spec in tools_mod.tools_for(agent_id, surface)}
+        if verb not in allowed:
+            known = {spec.id for spec in tools_mod.tools_for(agent_id)}
+            reason = (
+                f"{verb!r} 在 {surface!r} 这个面上没有;它在 "
+                f"{sorted(s for s in tools_mod.SURFACES if verb in {x.id for x in tools_mod.tools_for(agent_id, s)})} 上"
+                if verb in known
+                else f"没有 {verb!r} 这个动词;这个面上有:{sorted(allowed)}"
+            )
+            logger.warning("act(%s, %s) 被拒:%s", agent_id, verb, reason)
+            return {"tool": verb, "params": dict(params or {}), "ok": False, "error": reason}
+
+        name = ""
+        brain = self.scheduler.agents.get(agent_id)
+        if brain is not None:
+            name = getattr(brain.agent, "name", "") or ""
+        context = tools_mod.ToolContext(
+            agent_id=agent_id, player_id=player_id,
+            runtime=self._tool_runtime, agent_name=name,
+        )
+        with self.scheduler._lock:
+            result = tools_mod.call(context, verb, dict(params or {}))
+        if not result.ok:
+            logger.info("act(%s, %s) 没成:%s", agent_id, verb, result.error)
+        return result.to_dict(verb, dict(params or {}))
+
+    def verbs(self, agent_id: str = "*", surface: str | None = None) -> list[dict[str, Any]]:
+        """这个角色在某个面上能做什么 —— `act()` 的配套目录。
+
+        `surface=None` 给全部并逐条标出它在哪些面上。外面的 agent 进程要先知道
+        自己能做什么,才谈得上选一个 —— **给了能力却不给目录,等于没给**。
+        """
+        specs = tools_mod.tools_for(agent_id, surface)
+        return [
+            {
+                "id": spec.id,
+                "kind": spec.kind,
+                "description": spec.description,
+                "params": {
+                    key: dict(meta) if isinstance(meta, dict) else {"type": "string"}
+                    for key, meta in spec.params_schema.items()
+                },
+                "surfaces": list(spec.surfaces),
+            }
+            for spec in specs
+        ]
+
     def autonomy_stats(self) -> dict[str, Any]:
         """定时轮次到底跑没跑、做没做。
 

@@ -725,6 +725,17 @@ from anima_world.api import World
 | `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
 | `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条 |
 
+### 让外面的进程做事(见 `docs/AGENT-RUNTIME.md`)
+
+| 函数 | 说明 |
+|---|---|
+| `world.act(agent_id, verb, params=None, *, player_id="", surface="autonomy")` | **以某个角色的身份做一件事** —— 外面的进程改变这个世界的唯一入口。整个执行期持有世界那把唯一的锁,所以**一个动作是原子的**(world-rules 的双缓冲、三源仲裁、`events.seq` 的折叠顺序都要求它)。**在执行时校验,不在决定时**:她想了 6.5 秒,决定送达时世界早变了,所以"还在不在场""走不走得掉"由动词自己在执行那一刻查。未知动词 / 不在这个面上 / 工具失败一律返回 `ok=False` **并说明原因**(一个 agent 进程挑错动词不该让世界崩);未知角色抛 `KeyError`。结果形状与聊天里的工具调用**逐字相同**。⚠️ 它**不推进世界的时间** |
+| `world.verbs(agent_id="*", surface=None)` | 她能做什么 —— `act()` 的配套目录,逐条带 `id` / `kind` / `description` / `params` / `surfaces`。给了能力却不给目录等于没给 |
+
+**面(surface)是硬的**:`walk_away` / `end_conversation` 这些需要"对面有个人",默认面
+`autonomy`(她自己决定做点什么)上没有它们;要聊天里那批就显式传 `surface="chat"`
+并给 `player_id`。
+
 ### 她自己的选择(1.3.0,见 §2.9.1)
 
 | 函数 | 说明 |
