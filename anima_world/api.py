@@ -187,8 +187,7 @@ class _WorldView:
                 (int(ev.get("seq", 0) or 0) for ev in self.scheduler.recent_events),
                 default=0,
             )
-        row = self.scheduler.event_log.conn.execute("SELECT MAX(seq) FROM events").fetchone()
-        return int(row[0] or 0)
+        return self.scheduler.event_log.max_seq()
 
     def _agent_activity(self, agent_id: str) -> dict[str, Any]:
         brain = self.scheduler.agents.get(agent_id)
@@ -316,13 +315,12 @@ class _WorldView:
         return None
 
     def _runtime_status(self, recent_events: list[dict[str, Any]]) -> dict[str, Any]:
-        conn = self.scheduler.event_log.conn if self.scheduler.event_log is not None else None
-        if conn is not None:
-            event_row = conn.execute("SELECT COUNT(*), MAX(seq) FROM events").fetchone()
+        log = self.scheduler.event_log
+        if log is not None:
             db_status = {"enabled": True, "path": self.scheduler.db_path}
             events_status = {
-                "count": int(event_row[0] or 0),
-                "latest_seq": int(event_row[1] or 0),
+                "count": log.count(),
+                "latest_seq": log.max_seq(),
                 "buffered_count": len(recent_events),
             }
         else:
@@ -1113,29 +1111,13 @@ class World:
         from anima_world.events import Event
 
         limit = max(1, min(int(limit), _HISTORY_MAX_PAGE))
-        filters: list[str] = []
-        filter_params: list[Any] = []
-        if who:
-            filters.append("who = ?")
-            filter_params.append(who)
-        if kind:
-            filters.append("type = ?")
-            filter_params.append(kind)
-        filter_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
-        page_clause = " WHERE " + " AND ".join(["seq > ?", *filters])
-
-        conn = self.scheduler.event_log.conn
+        log = self.scheduler.event_log
         with self.scheduler._lock:
-            total = conn.execute(
-                f"SELECT COUNT(*) FROM events{filter_clause}", filter_params
-            ).fetchone()[0]
-            rows = conn.execute(
-                "SELECT seq, ts, type, who, loc, payload FROM events"
-                f"{page_clause} ORDER BY seq ASC LIMIT ?",
-                (int(since_seq), *filter_params, limit + 1),  # +1 = "还有没有下一页"
-            ).fetchall()
+            total = log.count(who=who, kind=kind)
+            # +1 = "还有没有下一页"
+            rows = log.page(since_seq=int(since_seq), limit=limit + 1, who=who, kind=kind)
 
-        page = [Event.from_row(row) for row in rows[:limit]]
+        page = rows[:limit]
         events = [
             self.scheduler._stream_event({
                 "seq": e.seq, "ts": e.ts, "type": e.type,

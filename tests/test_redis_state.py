@@ -360,3 +360,83 @@ def test_acting_catches_up_first(world, redis):
     finally:
         world.scheduler.catch_up_projection = real
     assert calls, "act() 没有先追赶投影"
+
+
+# ---- 事件日志:唯一真相那张表 -----------------------------------------------
+
+
+def _drive(log, script):
+    return [log.append(e) for e in script]
+
+
+_SCRIPT = [
+    {"ts": 0, "type": "travel", "who": "夏", "payload": {"to": "cafe"}},
+    {"ts": 1, "type": "narrative", "who": "夏", "payload": {"text": "她推开门"}},
+    {"ts": 2, "type": "travel", "who": "柔", "payload": {"to": "home"}},
+    {"ts": 3, "type": "payment", "who": "夏", "loc": "cafe", "payload": {"amount": 12}},
+]
+
+
+def test_the_two_event_logs_answer_identically(tmp_path, redis):
+    """**两个实现互验。**
+
+    换后端最坏的坏法不是崩,是"两边都能跑,但答案不一样" —— 而事件日志是唯一真相,
+    它答错一次,所有投影跟着错。所以不各测各的:同一串事件喂给两个实现,逐个问题
+    比对答案。
+    """
+    import sqlite3
+
+    from anima_world.db import open_db
+    from anima_world.events import EventLog
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        sqlite_log = EventLog(conn)
+        redis_log = RedisEventLog(redis, events_key("cmp"))
+        for log in (sqlite_log, redis_log):
+            _drive(log, _SCRIPT)
+
+        def shape(events):
+            return [(e.seq, e.ts, e.type, e.who, e.loc, e.payload) for e in events]
+
+        assert shape(sqlite_log.replay()) == shape(redis_log.replay())
+        assert sqlite_log.max_seq() == redis_log.max_seq() == 4
+        for kwargs in (
+            {}, {"who": "夏"}, {"kind": "travel"}, {"who": "夏", "kind": "travel"},
+        ):
+            assert sqlite_log.count(**kwargs) == redis_log.count(**kwargs), kwargs
+        for since in (0, 1, 3, 9):
+            assert shape(sqlite_log.replay(since)) == shape(redis_log.replay(since)), since
+        for kwargs in ({"limit": 2}, {"since_seq": 1, "limit": 2, "kind": "travel"}):
+            assert shape(sqlite_log.page(**kwargs)) == shape(redis_log.page(**kwargs)), kwargs
+    finally:
+        conn.close()
+
+
+def test_two_appenders_get_unique_increasing_seqs(redis):
+    """`seq` 的保序是多进程下最不能含糊的东西之一。
+
+    `RPUSH` 返回新长度,而 Redis 是单线程的 —— 所以两个进程同时追加,各自拿到唯一且
+    递增的号。没有这一条,"日志是唯一真相、重放能重建状态"整个失去依据。
+    """
+    import threading
+
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    seqs: list[int] = []
+    lock = threading.Lock()
+
+    def hammer(n):
+        log = RedisEventLog(redis, events_key("race"))
+        for i in range(25):
+            e = log.append({"ts": i, "type": "t", "who": f"w{n}", "payload": {}})
+            with lock:
+                seqs.append(e.seq)
+
+    threads = [threading.Thread(target=hammer, args=(n,)) for n in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(seqs) == 100
+    assert len(set(seqs)) == 100, "有 seq 撞车了 —— 重放重建不出这个世界"
+    assert sorted(seqs) == list(range(1, 101)), "seq 不连续 —— since_seq 分页会漏事件"

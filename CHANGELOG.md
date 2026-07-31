@@ -24,6 +24,32 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Changed —— `events` 表只剩一扇门;`RedisEventLog` 可以接管它(第五步)
+
+搬"唯一真相"那张表之前先发现一件事:**有 10 处直接写 SQL 读 `events`**,绕过了
+`EventLog`。换后端之后它们会读到一张空表**而且不报错** —— 返回 0 条,一切照跑。
+那正是这个仓库最怕的那类坏。所以顺序反过来做:先让这张表只剩一扇门。
+
+- `EventLog` 补齐 `count(who, kind)` / `max_seq()` / `page(since_seq, limit, who, kind)`。
+  `api.py` 里的 4 处(`state` 的 max seq、`runtime` 的计数、`history` 的过滤分页)
+  全部改走它,**`api.py` 里 `FROM events` 归零**。
+- `RedisEventLog` 接口逐字相同,可直接替换。**用列表不用 Stream**:`seq` 在这个引擎
+  里是 1 起的连续整数,而投影、分页、`since_seq` 全建立在"它连续"上;`RPUSH` 返回新
+  长度正好就是 seq,原子,而 Redis 单线程 —— **两个进程同时追加,各自拿到唯一且递增
+  的号**。Stream 的 ID 是"时间-序号",换过去要把 `seq` 的语义一起改,而 `seq` 是跨
+  仓库看得见的东西(`events export` 的每一行、`history` 的分页游标)。
+- **两个实现互验**:同一串事件喂给两个后端,`replay` / `count` / `max_seq` / `page`
+  逐个问题比对答案。换后端最坏的坏法不是崩,是"两边都能跑,但答案不一样"。
+- 并发验证:4 个线程各追加 25 条,100 个 seq **不撞、连续**。没有这一条,
+  "日志是唯一真相、重放能重建状态"整个失去依据。
+- 代价写明:`who` / `kind` 过滤在客户端做(列表没有二级索引)。一个世界日约 100 条,
+  一年 3.6 万条,这个量级没问题,但**它不是能一直撑下去的形状**。
+
+⚠️ **`__main__.py` 里还有 6 处直读**,而它们是另一类:`doctor` / `events export` /
+`report` / 创世空库判断,全是**在没有 World 的情况下离线看一个 db 文件**。世界一旦
+住进 Redis,"离线看文件"这件事本身就不成立了 —— 这些命令(以及 `.cyberworld` 打包、
+可挂载性联锁、创作台按版本归档)都要重新想。这是把世界搬出文件的真实代价,不是遗漏。
+
 ### Added —— 规划进 Redis;而**投影不进**,它追赶(第四步)
 
 - `_plans` 是真状态,搬走,和前面几样同一个模式。

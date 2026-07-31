@@ -361,3 +361,94 @@ def decode_action(raw: Any) -> Any:
 
 def plans_key(world_id: str) -> str:
     return f"{KEY_PREFIX}:{world_id}:plans"
+
+
+def events_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:events"
+
+
+class RedisEventLog:
+    """事件日志住进 Redis。**这是"唯一真相"那张表。**
+
+    接口和 `EventLog` 逐字相同(`append` / `replay` / `count` / `max_seq` / `page`),
+    所以它是直接替换 —— 前提是所有读日志的路都走这扇门,而那是先做的一步:
+    此前有 10 处直接写 SQL 读 `events` 表,搬完之后它们会读到一张空表**而且不报错**。
+
+    ## 用列表,而不是 Stream
+
+    `seq` 在这个引擎里是**1 起的连续整数**,而且投影、分页、`since_seq` 全都建立在
+    "它连续"上。Redis 列表的 `RPUSH` 返回新长度,那正好就是 seq —— 而且 RPUSH 是原子的,
+    Redis 又是单线程的,所以**两个进程同时追加,各自拿到唯一且递增的 seq**。
+    这一条正是多进程下最不能含糊的东西(`docs/AGENT-RUNTIME.md` §4 的三个问题之二)。
+
+    Stream 的 ID 是 `时间-序号`,换过去就要把 `seq` 的语义一起改,而 `seq` 是跨仓库
+    看得见的东西(`events export` 的每一行、`history` 的分页游标)。不值得。
+
+    ## 代价
+
+    `who` / `kind` 过滤在客户端做:列表没有二级索引。一个世界日约 100 条事件,一年
+    3.6 万条 —— `LRANGE` 全量再过滤,在这个量级上没问题,但**它不是能一直撑下去的
+    形状**。真需要的时候再加按类型的索引集合,别现在就猜。
+    """
+
+    __slots__ = ("_redis", "_key")
+
+    def __init__(self, redis: Any, key: str) -> None:
+        self._redis = redis
+        self._key = key
+
+    def append(self, event: dict) -> Any:
+        from anima_world.types import Event
+
+        ts = event["ts"]
+        if ts < 0:
+            raise ValueError("event ts MUST be non-negative")
+        e = Event(
+            seq=0, ts=ts, type=event["type"],
+            who=event.get("who"), loc=event.get("loc"),
+            payload=event.get("payload", {}),
+        )
+        # RPUSH 返回新长度 = 这一条的 seq。原子,而且 Redis 单线程 ——
+        # 两个进程同时追加,各自拿到唯一且递增的号。
+        e.seq = int(self._redis.rpush(self._key, _dumps({
+            "ts": e.ts, "type": e.type, "who": e.who, "loc": e.loc, "payload": e.payload,
+        })))
+        return e
+
+    def _rows(self, since_seq: int = 0) -> list[Any]:
+        from anima_world.types import Event
+
+        raw = self._redis.lrange(self._key, int(since_seq), -1) or []
+        out = []
+        for offset, item in enumerate(raw):
+            d = _loads(item) or {}
+            out.append(Event(
+                seq=int(since_seq) + offset + 1,
+                ts=int(d.get("ts") or 0), type=str(d.get("type") or ""),
+                who=d.get("who"), loc=d.get("loc"), payload=d.get("payload") or {},
+            ))
+        return out
+
+    def replay(self, since_seq: int = 0) -> list[Any]:
+        return self._rows(since_seq)
+
+    def max_seq(self) -> int:
+        return int(self._redis.llen(self._key) or 0)
+
+    def count(self, *, who: str | None = None, kind: str | None = None) -> int:
+        if who is None and kind is None:
+            return self.max_seq()
+        return len(self._match(self._rows(0), who, kind))
+
+    def page(
+        self, *, since_seq: int = 0, limit: int = 100,
+        who: str | None = None, kind: str | None = None,
+    ) -> list[Any]:
+        return self._match(self._rows(since_seq), who, kind)[: int(limit)]
+
+    @staticmethod
+    def _match(rows: list[Any], who: str | None, kind: str | None) -> list[Any]:
+        return [
+            e for e in rows
+            if (who is None or e.who == who) and (kind is None or e.type == kind)
+        ]
