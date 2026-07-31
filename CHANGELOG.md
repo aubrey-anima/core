@@ -24,6 +24,24 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 谁在路上、谁在干嘛,也进 Redis(第三步)
+
+`_transit`(在途)与 `_current_action`(当前动作)此前是纯内存的 dict。后果很具体:
+**另一个进程不知道她正在赶路**,于是会让她"走开"、让她跟一个还没走到的人搭话 ——
+而"在途"这道闸恰恰是引擎用来把约束变成等待、把等待变成相遇的(提示词里那段自相矛盾
+的身份声明,修的是同一种病的另一扇门)。
+
+- `RedisDict` 是住在 Redis hash 里的 dict,**只实现真正被用到的那几个操作**
+  (`get / pop / items / [] / in / len / bool`)。不做成通用 MutableMapping:多实现
+  一个方法就多一处"它看起来像 dict,但在某个边角上不是",而那种错最难查。
+- `items()` **返回快照**:调用方会在遍历里改它(`_transit` 就是边走边删),而对着一个
+  活的 hash 边遍历边删,行为取决于服务端实现。
+- `_current_action` 存 `ActionDescriptor`,不是 JSON 原生的,所以带 `encode`/`decode`
+  —— 丢了类型的话取回来是个 dict,而调用方全都在 `.kind` 上判断。
+
+两个真进程验过:进程 A 让她去工作室,进程 B(只有 `redis://` URL)读到
+"**她在去 workshop 的路上,第 53 tick 到**";她到了之后 B 读到"不在路上"。
+
 ### Added —— 时钟与跨进程的世界锁进 Redis(第二步)
 
 - **时钟只能有一个答案。** 两个进程各推各的,世界就分叉了 —— 而分叉之后两边都还在

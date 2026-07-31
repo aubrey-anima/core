@@ -742,7 +742,9 @@ class World:
         world = cls(scheduler)
         if redis is not None:
             from anima_world.redis_state import (
-                RedisBlackboard, RedisClock, RedisLock, agent_key, clock_key, lock_key,
+                RedisBlackboard, RedisClock, RedisDict, RedisLock,
+                agent_key, clock_key, current_action_key, decode_action,
+                encode_action, lock_key, transit_key,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -755,6 +757,22 @@ class World:
             scheduler._clock_store = RedisClock(
                 redis, clock_key(world_id), initial=scheduler.clock
             )
+            # 谁在路上、谁在干嘛。此前是纯内存的 dict,后果很具体:另一个进程不知道
+            # 她**正在赶路**,于是会让她"走开"、让她跟一个还没走到的人搭话 —— 而这些
+            # 判断恰恰是引擎用来把约束变成等待、把等待变成相遇的。
+            transit = RedisDict(redis, transit_key(world_id))
+            for agent_id, trip in list(scheduler._transit.items()):
+                transit[agent_id] = trip
+            scheduler._transit = transit
+
+            doing = RedisDict(
+                redis, current_action_key(world_id),
+                encode=encode_action, decode=decode_action,
+            )
+            for agent_id, action in list(scheduler._current_action.items()):
+                doing[agent_id] = action
+            scheduler._current_action = doing
+
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
             world._world_lock = RedisLock(redis, lock_key(world_id))

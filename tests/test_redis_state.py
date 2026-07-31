@@ -230,3 +230,72 @@ def test_a_lock_left_behind_by_a_dead_process_expires(redis):
     time.sleep(0.12)
     assert alive.acquire(blocking=False) is True, "锁过期之后没人接得了手"
     alive.release()
+
+
+# ---- 谁在路上、谁在干嘛 -----------------------------------------------------
+
+
+def test_another_process_knows_she_is_on_the_road(world, redis):
+    """`_transit` 此前是纯内存,后果很具体。
+
+    另一个进程不知道她**正在赶路**,就会让她"走开"、让她跟一个还没走到的人搭话 ——
+    而"在途"这道闸恰恰是引擎用来把约束变成等待、把等待变成相遇的
+    (提示词里那段自相矛盾的身份声明,修的也是同一种病)。
+    """
+    from anima_world.redis_state import RedisDict, transit_key
+
+    agent = _an_agent(world)
+    world.tick(50)
+    target = next(
+        p for p in world._tool_runtime.point_ids()
+        if p != world._tool_runtime.agent_location(agent)
+    )
+    assert world.act(agent, "walk", {"location": target}, surface="body")["ok"]
+
+    outsider = RedisDict(redis, transit_key("t"))
+    trip = outsider.get(agent)
+    assert trip, "她在路上,而另一个进程不知道"
+    assert trip["to"] == target
+    assert "arrive_at" in trip, "别的进程看不出她什么时候到"
+
+    for _ in range(60):
+        world.tick(1)
+        if not outsider:
+            break
+    assert not outsider, "她到了,而在途集合没清"
+
+
+def test_another_process_knows_what_she_is_doing(world, redis):
+    """`_current_action` 存的是 `ActionDescriptor` —— 不是 JSON 原生的,要带编解码。"""
+    from anima_world.actions import ActionDescriptor
+    from anima_world.redis_state import RedisDict, current_action_key, decode_action
+
+    world.tick(60)
+    outsider = RedisDict(redis, current_action_key("t"), decode=decode_action)
+    doing = dict(outsider.items())
+    assert doing, "跑了 60 tick,没有任何人在干任何事"
+    for agent_id, action in doing.items():
+        assert isinstance(action, ActionDescriptor), (
+            f"{agent_id} 那条取回来不是 ActionDescriptor 而是 {type(action).__name__} —— "
+            "编解码丢了类型"
+        )
+        assert action.kind
+
+
+def test_the_redis_dict_only_pretends_to_be_a_dict_where_it_really_is(redis):
+    """只实现真正被用到的操作 —— 多实现一个就多一处"看起来像 dict 但边角上不是"。"""
+    from anima_world.redis_state import RedisDict
+
+    d = RedisDict(redis, "t:d")
+    assert not d and len(d) == 0
+    d["x"] = {"to": "cafe"}
+    assert bool(d) and len(d) == 1 and "x" in d
+    assert d["x"] == {"to": "cafe"}
+    assert d.get("x")["to"] == "cafe"
+    assert d.get("没有的", "兜底") == "兜底"
+    assert d.items() == [("x", {"to": "cafe"})]
+    assert d.pop("x") == {"to": "cafe"}
+    assert not d
+    assert d.pop("x", "兜底") == "兜底"
+    with pytest.raises(KeyError):
+        d["x"]

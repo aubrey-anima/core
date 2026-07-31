@@ -273,3 +273,87 @@ class RedisLock:
 
     def __exit__(self, *_exc: Any) -> None:
         self.release()
+
+
+class RedisDict:
+    """一个住在 Redis hash 里的 dict —— 只实现真正被用到的那几个操作。
+
+    `_transit`(谁在路上)与 `_current_action`(谁在干嘛)此前是纯内存的 dict。
+    它们的后果很具体:另一个进程不知道她**正在赶路**,于是会让她"走开"、让她跟一个
+    还没走到的人搭话 —— 而这些判断恰恰是引擎用来把约束变成等待、把等待变成相遇的。
+
+    **不做成通用 MutableMapping**:只实现 `get / pop / items / [] / in / len / bool`,
+    因为只有这几个被用到。多实现一个方法就多一处"它看起来像 dict,但在某个边角上
+    不是"的机会,而那种错最难查。
+
+    `encode` / `decode` 让值不必是 JSON 原生的(`ActionDescriptor` 就不是)。
+    """
+
+    __slots__ = ("_redis", "_key", "_encode", "_decode")
+
+    def __init__(self, redis: Any, key: str, *, encode: Any = None, decode: Any = None) -> None:
+        self._redis = redis
+        self._key = key
+        self._encode = encode or (lambda v: v)
+        self._decode = decode or (lambda v: v)
+
+    def __getitem__(self, key: str) -> Any:
+        raw = self._redis.hget(self._key, key)
+        if raw is None:
+            raise KeyError(key)
+        return self._decode(_loads(raw))
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._redis.hset(self._key, key, _dumps(self._encode(value)))
+
+    def __contains__(self, key: str) -> bool:
+        return bool(self._redis.hexists(self._key, key))
+
+    def __len__(self) -> int:
+        return int(self._redis.hlen(self._key) or 0)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def __iter__(self) -> Any:
+        return iter(self._redis.hkeys(self._key) or [])
+
+    def get(self, key: str, default: Any = None) -> Any:
+        raw = self._redis.hget(self._key, key)
+        return default if raw is None else self._decode(_loads(raw))
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        raw = self._redis.hget(self._key, key)
+        self._redis.hdel(self._key, key)
+        return default if raw is None else self._decode(_loads(raw))
+
+    def items(self) -> list[tuple[str, Any]]:
+        # 快照一份再返回:调用方会在遍历里改它(`_transit` 就是边走边删),
+        # 而对着一个活的 Redis hash 边遍历边删,行为取决于服务端实现。
+        return [
+            (k, self._decode(_loads(v)))
+            for k, v in (self._redis.hgetall(self._key) or {}).items()
+        ]
+
+    def __repr__(self) -> str:
+        return f"RedisDict({self._key!r}, {len(self)} 项)"
+
+
+def transit_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:transit"
+
+
+def current_action_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:doing"
+
+
+def encode_action(action: Any) -> dict[str, Any]:
+    return {"kind": action.kind, "params": dict(action.params)}
+
+
+def decode_action(raw: Any) -> Any:
+    from anima_world.actions import ActionDescriptor
+
+    if raw is None:
+        return None
+    return ActionDescriptor(str(raw.get("kind")), dict(raw.get("params") or {}))
