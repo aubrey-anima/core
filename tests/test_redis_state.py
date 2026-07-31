@@ -136,3 +136,97 @@ def test_the_cached_variant_batches_but_says_so(redis):
 
     board.flush()
     assert RedisBlackboard(redis, "t:cached").read("loc") == "workshop"
+
+
+# ---- 时钟与跨进程的锁 -------------------------------------------------------
+
+
+def test_the_clock_lives_in_redis_and_has_one_answer(world, redis):
+    """**"现在是第几 tick"只能有一个答案。**
+
+    两个进程各推各的时钟,世界就分叉了 —— 而分叉之后两边都还在正常跑,只是不再是
+    同一个世界。这正是这个仓库最怕的那种坏:照跑,但给的不是同一个东西。
+    """
+    from anima_world.redis_state import RedisClock, clock_key
+
+    world.tick(30)
+    outsider = RedisClock(redis, clock_key("t"))
+    assert outsider.get() == world.scheduler.clock == 30
+    world.tick(5)
+    assert outsider.get() == 35, "别的进程读到的时钟停在了旧值"
+
+
+def test_reopening_does_not_wind_the_clock_back(tmp_path, redis):
+    """重开一个世界不该把时钟拨回去 —— Redis 里已有的值说了算。"""
+    from anima_world.redis_state import RedisClock, clock_key
+
+    first = World.open(
+        str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t"
+    )
+    first.tick(40)
+    first.close()
+    assert RedisClock(redis, clock_key("t")).get() == 40
+
+    again = World.open(
+        str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t"
+    )
+    try:
+        assert again.scheduler.clock == 40, "重开把时钟拨回去了"
+    finally:
+        again.close()
+
+
+def test_an_action_locks_the_world_against_other_processes(world, redis):
+    """一个动作执行期间,别的进程拿不到世界锁。
+
+    **一个动作原子**这条要求跨进程也成立才有意义:两个 agent 进程同时提交动作,
+    必须一个做完另一个才开始,否则 world-rules 的双缓冲、三源仲裁、`events.seq`
+    的折叠顺序全都失去依据。
+    """
+    from anima_world import tools as tools_mod
+    from anima_world.redis_state import RedisLock, lock_key
+
+    agent = _an_agent(world)
+    got: list[bool] = []
+    real = tools_mod.call
+
+    def spy(ctx, tool_id, params):
+        outsider = RedisLock(redis, lock_key("t"), wait_seconds=0.2)
+        got.append(outsider.acquire(blocking=False))
+        return real(ctx, tool_id, params)
+
+    tools_mod.call = spy
+    try:
+        world.act(agent, "broadcast", {"text": "占着锁呢"})
+    finally:
+        tools_mod.call = real
+    assert got == [False], "动作执行期间别的进程拿到了世界锁 —— 跨进程不是原子的"
+
+
+def test_the_lock_is_reentrant_and_releases(redis):
+    """一个动作里工具会再拿一次锁(`move_agent` 自己就拿)—— 不可重入就是死锁。"""
+    from anima_world.redis_state import RedisLock
+
+    mine = RedisLock(redis, "t:lock", wait_seconds=0.2)
+    other = RedisLock(redis, "t:lock", wait_seconds=0.2)
+    with mine:
+        with mine:  # 重入
+            assert other.acquire(blocking=False) is False
+        assert other.acquire(blocking=False) is False, "内层退出就把锁放了 —— 深度没算对"
+    assert other.acquire(blocking=False) is True
+    other.release()
+
+
+def test_a_lock_left_behind_by_a_dead_process_expires(redis):
+    """拿着锁的进程崩了,世界不能永远停摆 —— ttl 到了别人能接手。"""
+    import time
+
+    from anima_world.redis_state import RedisLock
+
+    dead = RedisLock(redis, "t:dead", ttl_ms=60)
+    dead.acquire()
+    alive = RedisLock(redis, "t:dead", wait_seconds=2.0)
+    assert alive.acquire(blocking=False) is False
+    time.sleep(0.12)
+    assert alive.acquire(blocking=False) is True, "锁过期之后没人接得了手"
+    alive.release()

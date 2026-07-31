@@ -119,7 +119,12 @@ class Scheduler:
         self.agents: dict[str, BrainLike] = {}
         self._queue: deque[dict[str, Any]] = deque()
         self.tick_delta = tick_delta
-        self.clock: int = 0
+        # 时钟住在一个可替换的盒子里。默认在进程内(行为逐字不变);给了 Redis
+        # 之后,**"现在是第几 tick"只有一个答案** —— 两个进程各推各的时钟,世界就
+        # 分叉了,而分叉之后两边都还在正常跑,只是不再是同一个世界。
+        from anima_world.redis_state import ClockStore
+
+        self._clock_store = ClockStore(0)
         self._stopped: bool = False
         self.narrative_provider = narrative_provider
         self.event_log = event_log
@@ -483,6 +488,30 @@ class Scheduler:
         )
         conn.commit()
         self._submit_reflection(agent_id)
+
+    def _clock_box(self) -> Any:
+        """时钟那个盒子,没有就现造一个。
+
+        **属性必须是全函数**:测试里会 `Scheduler.__new__(Scheduler)` 绕过 `__init__`
+        再设 `clock`(`_gossip_seed` 的跨进程稳定性就是这么验的)。此前 `clock` 是个
+        普通字段,那样用没问题;换成属性之后不兜底就会 AttributeError ——
+        换实现不该让"绕过 __init__"这种正当用法炸掉。
+        """
+        from anima_world.redis_state import ClockStore
+
+        box = self.__dict__.get("_clock_store")
+        if box is None:
+            box = ClockStore(0)
+            self.__dict__["_clock_store"] = box
+        return box
+
+    @property
+    def clock(self) -> int:
+        return self._clock_box().get()
+
+    @clock.setter
+    def clock(self, value: int) -> None:
+        self._clock_box().set(int(value))
 
     def _persist_clock(self) -> None:
         """Checkpoint the world clock into `db_meta` (lock held).

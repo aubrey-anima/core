@@ -140,3 +140,136 @@ class CachedRedisBlackboard(RedisBlackboard):
             self._dirty.add(key)
             return
         super().write(key, value)
+
+
+class ClockStore:
+    """时钟住哪儿。默认在进程里 —— 行为和以前逐字相同。"""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: int = 0) -> None:
+        self._value = int(value)
+
+    def get(self) -> int:
+        return self._value
+
+    def set(self, value: int) -> None:
+        self._value = int(value)
+
+
+class RedisClock(ClockStore):
+    """时钟住进 Redis:**"现在是第几 tick"只有一个答案**。
+
+    这是多进程里最不能含糊的一个数。两个进程各推各的时钟,世界就分叉了 —— 而分叉
+    之后两边都还在正常跑,只是它们不再是同一个世界。这正是这个仓库最怕的那种坏。
+
+    实测每 tick 读 7.3 次、写 1 次(黑板是 80 次),所以逐次访问 Redis 完全可接受,
+    不需要缓存 —— 而不缓存意味着**任何一个进程随时读到的都是真的现在**。
+    """
+
+    __slots__ = ("_redis", "_key")
+
+    def __init__(self, redis: Any, key: str, initial: int = 0) -> None:
+        self._redis = redis
+        self._key = key
+        # 只在没有值时写入初值:重开一个世界不该把时钟拨回去。
+        self._redis.setnx(self._key, int(initial))
+
+    def get(self) -> int:
+        raw = self._redis.get(self._key)
+        return 0 if raw is None else int(raw)
+
+    def set(self, value: int) -> None:
+        self._redis.set(self._key, int(value))
+
+
+def clock_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:clock"
+
+
+def lock_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:lock"
+
+
+# 释放锁必须是"我持有的才删" —— 直接 DEL 会删掉别人刚拿到的那把(我超时了、别人拿走
+# 了、我醒来把它删了)。比对 token 再删,这一步必须原子,所以走 Lua。
+_RELEASE = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+class RedisLock:
+    """跨进程的世界锁。**它在进程内的 RLock 之外,不是替代它。**
+
+    为什么是两层:调度器那把 `threading.RLock` 还被 `threading.Condition` 用着
+    (等规划落地),而 Condition 要的是真线程锁。所以进程内的线程照旧走 RLock,
+    跨进程走这一把。
+
+    **可重入**:一个动作里工具会再拿一次锁(`move_agent` 自己就拿),深度计数在
+    线程本地,只有最外层才真的去 Redis 拿和放。
+
+    **有超时**(`ttl_ms`):一个进程拿着锁崩了,世界不能就此永远停摆。代价是超时
+    之后别人会拿到锁,而原主人若还活着就会写坏 —— 所以 ttl 要显著大于一个动作的
+    真实耗时(实测持锁 62 微秒,默认 30 秒有五个数量级的余量)。
+    """
+
+    def __init__(self, redis: Any, key: str, *, ttl_ms: int = 30_000,
+                 retry_seconds: float = 0.005, wait_seconds: float = 30.0) -> None:
+        import threading
+
+        self._redis = redis
+        self._key = key
+        self._ttl_ms = int(ttl_ms)
+        self._retry = float(retry_seconds)
+        self._wait = float(wait_seconds)
+        self._local = threading.local()
+
+    def _depth(self) -> int:
+        return getattr(self._local, "depth", 0)
+
+    def acquire(self, blocking: bool = True) -> bool:
+        import time
+        import uuid
+
+        if self._depth():                      # 可重入:已经是我的了
+            self._local.depth += 1
+            return True
+        token = uuid.uuid4().hex
+        deadline = time.monotonic() + self._wait
+        while True:
+            if self._redis.set(self._key, token, nx=True, px=self._ttl_ms):
+                self._local.token = token
+                self._local.depth = 1
+                return True
+            if not blocking:
+                return False
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"等世界锁 {self._key} 超过 {self._wait:.0f} 秒 —— "
+                    "多半是有个进程拿着锁挂了,而它的 ttl 还没到"
+                )
+            time.sleep(self._retry)
+
+    def release(self) -> None:
+        depth = self._depth()
+        if depth <= 1:
+            self._local.depth = 0
+            token = getattr(self._local, "token", None)
+            if token is not None:
+                try:
+                    self._redis.eval(_RELEASE, 1, self._key, token)
+                except Exception:  # noqa: BLE001 - 释放失败不该掀翻调用方
+                    logger.warning("释放世界锁失败,等它自己超时", exc_info=True)
+                self._local.token = None
+        else:
+            self._local.depth = depth - 1
+
+    def __enter__(self) -> "RedisLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.release()

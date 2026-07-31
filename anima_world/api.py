@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import queue
 import sqlite3
@@ -738,8 +739,11 @@ class World:
             beats_path=beats_path,
             force_mock_llm=force_mock_llm,
         )
+        world = cls(scheduler)
         if redis is not None:
-            from anima_world.redis_state import RedisBlackboard, agent_key
+            from anima_world.redis_state import (
+                RedisBlackboard, RedisClock, RedisLock, agent_key, clock_key, lock_key,
+            )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
             # 跟过去,否则第一个 tick 她会以为自己没有性格。
@@ -747,7 +751,14 @@ class World:
                 board = RedisBlackboard(redis, agent_key(world_id, aid))
                 board.restore(brain.agent.blackboard.snapshot())
                 brain.agent.blackboard = board
-        return cls(scheduler)
+            # 时钟同理:先把 db 里恢复出来的那个值带过去,再交给 Redis 管。
+            scheduler._clock_store = RedisClock(
+                redis, clock_key(world_id), initial=scheduler.clock
+            )
+            # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
+            # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
+            world._world_lock = RedisLock(redis, lock_key(world_id))
+        return world
 
     def close(self, *, wait: bool = True) -> None:
         """停时钟、排干 LLM 线程池、存快照。幂等。"""
@@ -1883,6 +1894,17 @@ class World:
                 self._autonomy_stats["failed"] += 1
                 self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
 
+    _world_lock: Any = None
+
+    def _guard(self) -> Any:
+        """跨进程的世界锁;没配 Redis 时是个不做事的上下文。
+
+        **一个动作原子**这条要求跨进程也成立才有意义:两个 agent 进程同时提交动作,
+        必须一个做完另一个才开始,否则 world-rules 的双缓冲、三源仲裁、`events.seq`
+        的折叠顺序全都失去依据。
+        """
+        return self._world_lock if self._world_lock is not None else contextlib.nullcontext()
+
     def act(
         self,
         agent_id: str,
@@ -1945,7 +1967,7 @@ class World:
             agent_id=agent_id, player_id=player_id,
             runtime=self._tool_runtime, agent_name=name,
         )
-        with self.scheduler._lock:
+        with self._guard(), self.scheduler._lock:
             result = tools_mod.call(context, verb, dict(params or {}))
         if not result.ok:
             logger.info("act(%s, %s) 没成:%s", agent_id, verb, result.error)
@@ -1986,7 +2008,7 @@ class World:
                 )
             queue.append({"kind": spec.kind, "params": dict((step or {}).get("params") or {}),
                           "verb": verb})
-        with self.scheduler._lock:
+        with self._guard(), self.scheduler._lock:
             brain = self.scheduler.agents[agent_id]
             brain.agent.blackboard.write("intent.queue", queue)
         return {"agent_id": agent_id, "queued": len(queue), "steps": list(queue)}
