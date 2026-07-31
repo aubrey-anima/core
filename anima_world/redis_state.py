@@ -357,3 +357,7 @@ def decode_action(raw: Any) -> Any:
     if raw is None:
         return None
     return ActionDescriptor(str(raw.get("kind")), dict(raw.get("params") or {}))
+
+
+def plans_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:plans"

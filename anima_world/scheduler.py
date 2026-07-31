@@ -150,6 +150,10 @@ class Scheduler:
         # separately replayed into this projection after construction.
         boot_events = event_log.replay() if event_log is not None else []
         self._memory_projection = project_events(boot_events)
+        # 投影折到哪一条了。**投影是派生的,不是原始状态** —— 所以它不进 Redis:
+        # 存一份派生数据的唯一后果,是多出一种"它和日志不一致"的坏法。正确的做法是
+        # 让它跟上日志(`catch_up_projection`),而日志本来就是共享的。
+        self._projection_seq = max((int(e.seq or 0) for e in boot_events), default=0)
         # beat-director D1: the script is config; which beats FIRED is history.
         # The fired-set is rebuilt here from replayed `beat_fired` events, so a
         # restart never re-fires a beat (aligned by beat id — a script edit
@@ -405,6 +409,7 @@ class Scheduler:
             payload=dict(event.get("payload") or {}),
         )
         project_events([ev], base=self._memory_projection)
+        self._projection_seq = max(self._projection_seq, int(ev.seq or 0))
 
     # ── Reflection (memory-2.0) ────────────────────────────────────────────
 
@@ -488,6 +493,25 @@ class Scheduler:
         )
         conn.commit()
         self._submit_reflection(agent_id)
+
+    def catch_up_projection(self) -> int:
+        """把别的进程写进日志、而这个进程还没折进来的事件补上。
+
+        多进程下这一步是必需的:进程 A 记了一条 `payment`,进程 B 的投影里那笔钱
+        还没动 —— 而 B 正是靠投影判断"她买得起吗"。**投影不进 Redis**(见
+        `_projection_seq` 那条注释):派生数据存两份只会多一种不一致的坏法,
+        而事件日志本身已经是共享的,重折是廉价且必然正确的。
+
+        返回补进来了多少条。没有新事件时是纯读一次 db。
+        """
+        if self.event_log is None:
+            return 0
+        fresh = self.event_log.replay(since_seq=self._projection_seq)
+        if not fresh:
+            return 0
+        project_events(fresh, base=self._memory_projection)
+        self._projection_seq = max(int(e.seq or 0) for e in fresh)
+        return len(fresh)
 
     def _clock_box(self) -> Any:
         """时钟那个盒子,没有就现造一个。

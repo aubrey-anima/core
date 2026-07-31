@@ -299,3 +299,64 @@ def test_the_redis_dict_only_pretends_to_be_a_dict_where_it_really_is(redis):
     assert d.pop("x", "兜底") == "兜底"
     with pytest.raises(KeyError):
         d["x"]
+
+
+# ---- 规划,以及"投影不进 Redis"这个决定 -------------------------------------
+
+
+def test_plans_move_too(world, redis):
+    from anima_world.redis_state import RedisDict, plans_key
+
+    assert isinstance(world.scheduler._plans, RedisDict)
+    world.scheduler._plans["夏"] = [{"kind": "walk", "params": {"location": "cafe"}}]
+    outsider = RedisDict(redis, plans_key("t"))
+    assert outsider.get("夏")[0]["kind"] == "walk"
+
+
+def test_the_projection_is_not_moved_but_caught_up(tmp_path, redis):
+    """**投影是派生的,不进 Redis。**
+
+    它从事件日志折出来,而日志本来就是共享的。存一份派生数据的唯一后果,是多出一种
+    "它和日志不一致"的坏法 —— 而这个仓库最怕的就是那类。
+
+    但**不搬不等于不管**:进程 A 记了一条事件,进程 B 的投影里还没有它,而 B 正是
+    靠投影判断"她买得起吗""他们认识吗"。所以 B 要能追上。
+    """
+    a = World.open(str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t")
+    try:
+        a.tick(40)
+        # 同一个世界文件的第二个"进程"
+        b = World.open(str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t")
+        try:
+            seen_before = b.scheduler._projection_seq
+            # 让 A 真的写进去一条:光 tick 不一定产生事件 —— 事件只在动作**改变**
+            # 时才发(`_emit_on_transition`),大家在睡觉的那段时间一条都没有。
+            assert a.act(_an_agent(a), "broadcast", {"text": "A 写的"})["ok"]
+            caught = b.scheduler.catch_up_projection()
+            assert caught > 0, "A 写了一批事件,B 一条都没追上"
+            assert b.scheduler._projection_seq > seen_before
+            # 再追一次不该重复折
+            assert b.scheduler.catch_up_projection() == 0
+        finally:
+            b.close()
+    finally:
+        a.close()
+
+
+def test_acting_catches_up_first(world, redis):
+    """提交动作前先追赶 —— 否则会拿着过时的投影去判断世界。"""
+    agent = _an_agent(world)
+    world.tick(20)
+    calls: list[int] = []
+    real = world.scheduler.catch_up_projection
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    world.scheduler.catch_up_projection = counting
+    try:
+        world.act(agent, "broadcast", {"text": "喂"})
+    finally:
+        world.scheduler.catch_up_projection = real
+    assert calls, "act() 没有先追赶投影"

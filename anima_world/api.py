@@ -744,7 +744,7 @@ class World:
             from anima_world.redis_state import (
                 RedisBlackboard, RedisClock, RedisDict, RedisLock,
                 agent_key, clock_key, current_action_key, decode_action,
-                encode_action, lock_key, transit_key,
+                encode_action, lock_key, plans_key, transit_key,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -772,6 +772,13 @@ class World:
             for agent_id, action in list(scheduler._current_action.items()):
                 doing[agent_id] = action
             scheduler._current_action = doing
+
+            # 规划:同样是真状态,同样搬走。它的值是 JSON 原生的(计划步骤列表),
+            # 不需要编解码。
+            plans = RedisDict(redis, plans_key(world_id))
+            for agent_id, plan in list(scheduler._plans.items()):
+                plans[agent_id] = plan
+            scheduler._plans = plans
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
@@ -1986,6 +1993,9 @@ class World:
             runtime=self._tool_runtime, agent_name=name,
         )
         with self._guard(), self.scheduler._lock:
+            # 先把别的进程写进日志、这个进程还没折进来的事件补上 —— 否则会拿着一份
+            # 过时的投影去判断"她买得起吗""他们认识吗"。
+            self.scheduler.catch_up_projection()
             result = tools_mod.call(context, verb, dict(params or {}))
         if not result.ok:
             logger.info("act(%s, %s) 没成:%s", agent_id, verb, result.error)

@@ -24,6 +24,34 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 规划进 Redis;而**投影不进**,它追赶(第四步)
+
+- `_plans` 是真状态,搬走,和前面几样同一个模式。
+- **`_memory_projection` 不搬。** 它是从事件日志折出来的**派生结构**,而日志本来就是
+  共享的。存一份派生数据的唯一后果,是多出一种"它和日志不一致"的坏法 —— 而这个仓库
+  最怕的正是那类。
+- 但**不搬不等于不管**:进程 A 记了一条 `payment`,进程 B 的投影里那笔钱还没动,
+  而 B 正是靠投影判断"她买得起吗""他们认识吗"。所以加了
+  `Scheduler.catch_up_projection()`:把别的进程写进日志、这个进程还没折进来的事件
+  补上,`act()` 在动手之前先调它。没有新事件时是纯读一次 db。
+
+### 在**真 Redis** 上验过(不只是 fakeredis)
+
+本机没有 `redis-server`,用 `redislite` 自带的真二进制(**Redis 6.2.14**)起了一个,
+17 条 Redis 测试全绿 —— fakeredis 与真 Redis 行为一致。外加两个真进程的完整故事:
+
+```
+[进程A] 跑到第 50 tick
+[进程B] 第 50 tick | 夏 在 cafe 精力 1.0 在做 sleep | 路上:否
+[进程A] 让她去工作室
+[进程B] 第 50 tick | 夏 在 cafe … | 路上:去workshop
+[进程A] 她到了
+[进程B] 第 53 tick | 夏 在 workshop … | 路上:否
+[进程C] 从 Redis 读她的打算: [{"kind":"walk",…},{"kind":"work",…}]
+```
+
+进程 B / C 里没有 World、没有调度器、没有世界文件 —— **只有一个 `redis://` URL**。
+
 ### Added —— 谁在路上、谁在干嘛,也进 Redis(第三步)
 
 `_transit`(在途)与 `_current_action`(当前动作)此前是纯内存的 dict。后果很具体:
