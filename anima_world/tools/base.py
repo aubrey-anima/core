@@ -133,6 +133,20 @@ class ToolSpec:
     params_schema: dict[str, Any]
     handler: ToolHandler
     surfaces: tuple[str, ...] = (CHAT,)
+    writes: tuple[str, ...] = ()
+    """**它把世界改在哪儿。** 每一项是一张表名,或 `events:<类型>`。
+
+    这个字段存在的理由是账面上的:这一版靠人肉找出了八处"声明了却没兑现" ——
+    `broadcast` 告诉她"世界里的人都能看到"而只写了一行日志、`walk_away` 隔着手机是
+    空动作、规律写 `world_x` 落到别人名下而仪表报成功。**每一个都是"能跑、不报错、
+    给错东西"**,而每一个都是玩到了才发现的。
+
+    声明之后这条就成了机器能验的:`tests/test_verb_writes.py` 逐个动词调一遍,
+    比对声明的地方到底变没变。CLAUDE.md 里"**她的选择必须在世界里兑现**"那条不变量,
+    从一句人得自己记住的话,变成一条会红的测试。
+
+    留空是**故意的空**,不是忘了填 —— 有测试盯着不许留空。
+    """
 
     def prompt_line(self) -> str:
         params = ", ".join(
@@ -151,6 +165,7 @@ def tool(
     *, id: str, kind: str, description: str,  # noqa: A002 - id 是这份契约里的字段名
     params: dict[str, Any] | None = None,
     surfaces: tuple[str, ...] = (CHAT,),
+    writes: tuple[str, ...] = (),
 ) -> Callable[[ToolHandler], ToolHandler]:
     """把一个函数登记成能力。重复登记同一个 id 是错,不是覆盖。"""
 
@@ -161,7 +176,7 @@ def tool(
         if unknown:
             raise ToolCallError(f"tool {id!r} 声明了不存在的面:{unknown}")
         _REGISTRY[id] = ToolSpec(
-            id=id, kind=kind, description=description,
+            id=id, kind=kind, description=description, writes=tuple(writes),
             params_schema=dict(params or {}), handler=handler,
             surfaces=tuple(surfaces),
         )

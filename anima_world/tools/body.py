@@ -47,6 +47,7 @@ def _do(ctx: ToolContext, kind: str, params: dict[str, Any]) -> ToolResult:
 
 @tool(
     id="walk",
+    writes=("events:travel",),
     kind="walk",
     description="走到某个地方去。**要花时间**,途中她在路上(不是瞬移)",
     params={"location": {"type": "string", "description": "去哪儿", "required": True}},
@@ -65,6 +66,7 @@ def walk(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="work",
+    writes=("events:state_change",),
     kind="work",
     description="在此刻所在的地方干活",
     params={},
@@ -77,6 +79,7 @@ def work(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="eat",
+    writes=("events:agent_action", "events:item_consume"),
     kind="eat",
     description="吃东西。**付钱是副作用**:没货没钱就降级成吃随身干粮,不会卡住",
     params={},
@@ -88,6 +91,7 @@ def eat(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="sleep",
+    writes=("events:state_change",),
     kind="sleep",
     description="睡觉",
     params={},
@@ -99,6 +103,7 @@ def sleep(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="talk_to",
+    writes=("events:agent_action", "events:memory_seed", "memories"),
     kind="chat",
     description="跟同在这儿的另一个角色搭话(对方不在这儿就不成)",
     params={"target": {"type": "string", "description": "跟谁", "required": True}},
@@ -121,6 +126,7 @@ def talk_to(ctx: ToolContext, params: dict) -> ToolResult:
 # 唯一的出口。
 @tool(
     id="wander",
+    writes=("events:agent_action",),
     kind="idle_wander",
     description="待着,什么也不特意做",
     params={},
@@ -132,6 +138,7 @@ def wander(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="seek_company",
+    writes=("events:agent_action",),
     kind="idle_social",
     description="想找个人待着 —— 不指定是谁,看这会儿谁在",
     params={},

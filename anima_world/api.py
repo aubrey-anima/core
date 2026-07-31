@@ -1946,6 +1946,8 @@ class World:
                     for key, meta in spec.params_schema.items()
                 },
                 "surfaces": list(spec.surfaces),
+                # 它把世界改在哪儿 —— 外面的进程不该靠猜
+                "writes": list(spec.writes),
             }
             for spec in specs
         ]

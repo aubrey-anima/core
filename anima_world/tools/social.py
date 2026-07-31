@@ -36,6 +36,7 @@ def _minutes(params: dict, key: str, default: float, ctx: ToolContext, cap_key: 
 
 @tool(
     id="mute",
+    writes=("agent_mutes", "events:state_change"),
     kind="mute",
     description="屏蔽这个人一段时间,期间他发来的消息一概不理",
     params={
@@ -72,6 +73,7 @@ def mute(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="end_conversation",
+    writes=("conversations",),
     kind="end",
     description="结束这次对话,但不屏蔽对方",
     params={"reason": {"type": "string", "description": "为什么"}},
@@ -85,6 +87,7 @@ def end_conversation(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="delay_reply",
+    writes=("agent_mutes", "agent_followups"),
     kind="delay",
     description="现在不方便说,等一会儿再回来找他",
     params={
@@ -114,6 +117,7 @@ def delay_reply(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="walk_away",
+    writes=("conversations", "events:travel"),
     kind="walk_away",
     description="话说到一半就走人:面对面就真的离开这里,隔着手机就是挂断",
     params={"to_location": {"type": "string", "description": "去哪儿(不填就随便走开)"}},
@@ -148,6 +152,7 @@ def walk_away(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="refuse_topic",
+    writes=("agent_refused_topics",),
     kind="topic_ban",
     description="以后不谈这个话题;对方再提就岔开",
     params={
@@ -169,6 +174,7 @@ def refuse_topic(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="broadcast",
+    writes=("events:agent_broadcast", "memories"),
     kind="broadcast",
     description="当众说一句话,这会儿在你身边的人都听得见,而且会记住",
     params={"text": {"type": "string", "description": "说什么", "required": True}},
@@ -225,6 +231,7 @@ def broadcast(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="wait_for_user",
+    writes=(),
     kind="yield",
     description="我说完了,轮到你 —— 停下等对方开口",
     params={},
@@ -236,6 +243,7 @@ def wait_for_user(ctx: ToolContext, params: dict) -> ToolResult:
 
 @tool(
     id="reach_out",
+    writes=("events:agent_hail",),
     kind="hail",
     description="主动去找一个此刻在场的人开口(只有定时轮次里用得上)",
     params={

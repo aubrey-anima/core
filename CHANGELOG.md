@@ -24,6 +24,24 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 每个动词声明它把世界改在哪儿,而且有测试验它真的改了
+
+CLAUDE.md 那条"**她的选择必须在世界里兑现**"此前是一句**人得自己记住**的话。这一版
+靠人肉找出了八处违反它的地方,每一处都是"能跑、不报错、给错东西",每一处都是玩到了
+才发现的 —— `broadcast` 声称"世界里的人都能看到"而只发了一行没人消费的日志、
+`walk_away` 对不在场的人是空动作、world-rules 写 `world_x` 落在别人名下而仪表报成功。
+
+- `ToolSpec.writes` 声明这个动词写哪些表 / 发哪些事件,`World.verbs()` 与
+  `contract --json` 都带出来 —— 外面的进程不该靠猜。
+- `tests/test_verb_writes.py` 在真世界里逐个动词调一遍,比对声明的地方**到底变没变**。
+  把 `broadcast` 退回"只发日志"这个真实发生过的 bug,现在当场红。
+- **空的 `writes` 不许留**,除非显式登记进 `CHANGES_NOTHING` 并写明理由(现在只有
+  `wait_for_user`:显式让位只改本轮流程,世界不变)。加一个动词而忘了声明,当场红。
+
+写这条测试时它**立刻自己挣了钱**:我按直觉填的 14 条声明里**五条是错的** ——
+`work` / `sleep` 发的是 `state_change` 不是 `agent_action`,`eat` 还会发 `payment` 与
+`item_consume`,`talk_to` 还会发 `memory_seed`。**它逼我去读实现,而不是照直觉写文档。**
+
 ### Added —— 过日子的动作成为一等动词(`body` 面)
 
 修的是一个此前没人注意到的割裂:**同一个人有两套能力,取决于谁在触发她**。聊天里她能
