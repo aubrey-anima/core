@@ -710,11 +710,24 @@ class World:
         beats_path: str | None = None,
         agents: int | None = None,
         force_mock_llm: bool = False,
+        redis: Any = None,
+        world_id: str = "world",
     ) -> "World":
         """打开(或创建)一个世界。
 
         空库首启时从 seed 播种(缺省用内置种子);已有库的 seed 会被忽略并
         警告。坏 beats 脚本在这里当场抛 BeatScriptError,不流到运行期。
+
+        `redis` 给了的话,**每个角色的黑板搬进 Redis**,这个进程不再持有它们
+        (`anima_world.redis_state`)。那 20 个键 —— 她在哪、在干嘛、饿不饿、打算做
+        什么 —— 此前是纯内存,于是两个进程各开同一个世界文件会读到同一份历史、
+        然后在各自内存里跑出**两个不同的世界**。搬走之后那一半不再是进程私有的。
+
+        `world_id` 进 Redis 键名:一个 Redis 实例上跑十个世界是常态,键撞车的后果是
+        两个世界的角色共用一个脑子。
+
+        ⚠️ 这是"全部状态进 Redis"的**第一步,不是全部**。时钟、在途集合、当前动作、
+        规划、记忆投影仍在进程里 —— 见 `docs/AGENT-RUNTIME.md`。
         """
         from anima_world.__main__ import build_serve_scheduler  # 延迟导入避免环
 
@@ -725,6 +738,15 @@ class World:
             beats_path=beats_path,
             force_mock_llm=force_mock_llm,
         )
+        if redis is not None:
+            from anima_world.redis_state import RedisBlackboard, agent_key
+
+            # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
+            # 跟过去,否则第一个 tick 她会以为自己没有性格。
+            for aid, brain in scheduler.agents.items():
+                board = RedisBlackboard(redis, agent_key(world_id, aid))
+                board.restore(brain.agent.blackboard.snapshot())
+                brain.agent.blackboard = board
         return cls(scheduler)
 
     def close(self, *, wait: bool = True) -> None:

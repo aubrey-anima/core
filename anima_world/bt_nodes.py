@@ -32,6 +32,11 @@ class Blackboard:
     def write(self, key: str, value: Any) -> None:
         self._data[key] = value
 
+    def snapshot(self) -> dict[str, Any]:
+        """整块拿走。**别去摸 `_data`** —— 黑板有可能不住在这个进程里
+        (`anima_world.redis_state.RedisBlackboard`),那时候 `_data` 不存在。"""
+        return dict(self._data)
+
     def __repr__(self) -> str:
         return f"Blackboard({self._data!r})"
 

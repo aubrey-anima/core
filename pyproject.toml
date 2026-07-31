@@ -35,7 +35,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "build>=1.2", "twine>=5.0"]
+# redis 是**可选**的:不给 `World.open(redis=…)` 的世界一行 Redis 代码都不碰,
+# 而"装上包就能跑一个世界"是这个引擎的底线 —— 不该为一个可选后端加一个必需的服务。
+redis = ["redis>=5.0"]
+dev = ["pytest>=8.0", "build>=1.2", "twine>=5.0", "redis>=5.0", "fakeredis[lua]>=2.20"]
 
 [project.urls]
 Homepage = "https://animametaverse.com"

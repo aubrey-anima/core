@@ -2216,7 +2216,7 @@ class Scheduler:
         an unlocked cross-thread read. The call site holds the scheduler
         lock, so this copy is consistent.
         """
-        return {"location": blackboard.read("loc"), "raw": dict(blackboard._data)}
+        return {"location": blackboard.read("loc"), "raw": blackboard.snapshot()}
 
     # ── World seed editing (M6) ─────────────────────────────────────────────
 
