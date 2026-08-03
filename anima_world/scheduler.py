@@ -1284,20 +1284,11 @@ class Scheduler:
         if brain is None or not item_id:
             return
         try:
-            row = self.conn.execute(
-                "SELECT restores FROM item_defs WHERE id = ?", (item_id,)
-            ).fetchone()
+            restores = self.economy_store.restores_of(item_id)
         except Exception:  # noqa: BLE001 - 一顿饭不值一次崩溃
             logger.warning("could not read item_defs for %r", item_id, exc_info=True)
             return
-        if row is None or not row[0]:
-            return
-        try:
-            restores = json.loads(row[0])
-        except (TypeError, ValueError):
-            logger.warning("item %r has unparseable restores %r", item_id, row[0])
-            return
-        if not isinstance(restores, dict):
+        if not restores:
             return
         bb = brain.agent.blackboard
         for need, amount in restores.items():

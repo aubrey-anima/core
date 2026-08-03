@@ -1293,6 +1293,18 @@ class RedisEconomyStore:
             "quantity": int(quantity), "price": float(price),
         })
 
+    def restores_of(self, item_id: str) -> dict[str, float]:
+        row = self._items.get(item_id) or {}
+        restores = row.get("restores")
+        if isinstance(restores, str):
+            import json
+
+            try:
+                restores = json.loads(restores)
+            except (TypeError, ValueError):
+                restores = {}
+        return dict(restores or {})
+
     def items(self) -> list[dict[str, Any]]:
         return sorted(self._items.all().values(), key=lambda r: str(r.get("id") or ""))
 

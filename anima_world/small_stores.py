@@ -123,6 +123,21 @@ class EconomyStore:
     def daily_price_pass(self, sales: dict[tuple[str, str], int]) -> None:
         economy_mod.daily_price_pass(self._conn, sales)
 
+    def restores_of(self, item_id: str) -> dict[str, float]:
+        """吃了它能恢复什么。**给 store 一个方法,而不是让调用方直查表** ——
+        直查的那一处会在换后端时静默失效:世界照跑,只是吃东西不再补需求了。"""
+        import json
+
+        row = self._conn.execute(
+            "SELECT restores FROM item_defs WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row is None or not row[0]:
+            return {}
+        try:
+            return dict(json.loads(row[0]) or {})
+        except (TypeError, ValueError):
+            return {}
+
     def items(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT id, name, kind, base_price, restores FROM item_defs ORDER BY id"
