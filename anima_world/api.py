@@ -985,6 +985,16 @@ class World:
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
             world._world_lock = RedisLock(redis, lock_key(world_id))
+
+            # **开机点名:这个 Redis 会不会把世界忘掉。**
+            # Redis 主要活在内存里,持久化是配置选项,而默认的 redis.conf 里 AOF
+            # 是关的。忘掉的样子不是报错,是"世界悄悄退回创世那一刻然后接着跑"。
+            from anima_world.redis_state import durability_warning
+
+            warning = durability_warning(redis)
+            if warning:
+                logger.warning("世界跑在 Redis 上,但 %s", warning)
+                world._durability_warning = warning
         return world
 
     def close(self, *, wait: bool = True) -> None:
@@ -2106,6 +2116,7 @@ class World:
 
     _world_lock: Any = None
     _sqlite_log: Any = None
+    _durability_warning: str | None = None
 
     def _guard(self) -> Any:
         """跨进程的世界锁;没配 Redis 时是个不做事的上下文。
@@ -2234,6 +2245,14 @@ class World:
         with self.scheduler._lock:
             queue = self.scheduler.agents[agent_id].agent.blackboard.read("intent.queue")
         return [dict(step) for step in (queue or [])]
+
+    def durability_warning(self) -> str | None:
+        """这个世界的存储会不会在重启后忘掉它。不会就是 None。
+
+        存在的理由是**降级不许无声**:Redis 主要活在内存里,而持久化是配置选项。
+        忘掉的样子不是报错,是世界悄悄退回创世那一刻然后接着跑。
+        """
+        return self._durability_warning
 
     def verbs(self, agent_id: str = "*", surface: str | None = None) -> list[dict[str, Any]]:
         """这个角色在某个面上能做什么 —— `act()` 的配套目录。

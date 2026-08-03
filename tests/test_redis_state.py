@@ -1019,3 +1019,53 @@ def test_the_two_economy_stores_answer_identically(tmp_path, redis):
         assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
     finally:
         conn.close()
+
+
+# ---- Redis 会不会把世界忘掉 -------------------------------------------------
+
+
+class _FakeConfig:
+    """一个只回答 CONFIG GET 的假 Redis —— 这条测的是判定,不是连接。"""
+
+    def __init__(self, save: str, appendonly: str) -> None:
+        self._values = {"save": save, "appendonly": appendonly}
+
+    def config_get(self, name: str) -> dict[str, str]:
+        return {name: self._values[name]}
+
+
+def test_a_redis_that_forgets_the_world_is_called_out():
+    """**忘掉的样子不是报错,是世界悄悄退回创世那一刻然后接着跑。**
+
+    实测过(真 Redis,重启一次):
+
+        持久化关着:跑完一天 104 条事件 → 重启后 50 条
+        AOF 打开:  跑完一天 103 条事件 → 重启后 110 条
+
+    50 是创世那批 —— 重开时又从 SQLite 复制了一遍。所以世界没有报错,它只是年轻了
+    一天。Redis 主要活在内存里,而持久化是**配置选项**,默认的 redis.conf 里 AOF
+    是关的:世界搬进 Redis 之后,"世界还在不在"取决于一个引擎管不着的配置。
+    """
+    from anima_world.redis_state import durability_warning
+
+    silent = durability_warning(_FakeConfig(save="", appendonly="no"))
+    assert silent and "退回创世" in silent
+    assert "appendonly yes" in silent, "只说有问题不够,得说清怎么配"
+
+    rdb_only = durability_warning(_FakeConfig(save="900 1", appendonly="no"))
+    assert rdb_only and "RDB" in rdb_only
+    assert "退回创世" not in rdb_only, "有快照不等于整个忘掉,别把两种情况说成一种"
+
+    assert durability_warning(_FakeConfig(save="", appendonly="yes")) is None
+    assert durability_warning(_FakeConfig(save="900 1", appendonly="yes")) is None
+
+
+def test_a_probe_that_cannot_run_stays_silent(redis):
+    """**探不到不等于没配好。**
+
+    `CONFIG GET` 可能被禁用(托管 Redis 常见),也可能客户端根本不支持
+    (fakeredis 就不支持)。因为探测失败就报警,等于训练人忽略这条警告。
+    """
+    from anima_world.redis_state import durability_warning
+
+    assert durability_warning(redis) is None

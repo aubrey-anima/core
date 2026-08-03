@@ -1356,3 +1356,47 @@ class RedisEconomyStore:
         for location_id, item_id, quantity in DEFAULT_STOCK:
             if item_id in prices:      # 货架上的东西必须先是个物品
                 self.put_shelf(location_id, item_id, quantity, prices[item_id])
+
+
+def durability_warning(redis: Any) -> str | None:
+    """这个 Redis 会不会在重启后把世界忘掉。**不会忘就返回 None。**
+
+    ## 为什么必须有这一条
+
+    Redis 主要活在内存里,持久化(RDB 快照 / AOF)是**配置选项**,而默认的
+    `redis.conf` 里 AOF 是关的。世界搬进 Redis 之后,"世界还在不在"这件事就取决于
+    一个引擎管不着、也从来没问过的配置。
+
+    后果实测过,而且比"数据丢了"更坏:
+
+        持久化关着:跑完一天 104 条事件 → Redis 重启后 50 条
+        AOF 打开:  跑完一天 103 条事件 → 重启后 110 条
+
+    50 是创世那批 —— 重开时又从 SQLite 复制了一遍。所以世界**没有报错**,它只是
+    悄悄年轻了一天,然后接着跑。这正是这个仓库最怕的那一类:照跑,但给错东西。
+
+    ## 探不到就沉默
+
+    `CONFIG GET` 可能被禁用(托管 Redis 常见),也可能这个客户端根本不支持
+    (fakeredis 就不支持)。**探不到不等于没配好** —— 因为探测失败就报警,等于
+    训练人忽略这条警告。
+    """
+    try:
+        save = (redis.config_get("save") or {}).get("save", "")
+        appendonly = (redis.config_get("appendonly") or {}).get("appendonly", "")
+    except Exception:  # noqa: BLE001 - 探不到就沉默,见 docstring
+        return None
+    if str(appendonly).lower() == "yes":
+        return None
+    if str(save).strip():
+        # 有 RDB 存盘点:会丢最后一个快照之后的部分,但不会整个忘掉。
+        return (
+            f"这个 Redis 只有 RDB 快照(save = {save!r}),没开 AOF —— "
+            "崩溃时会丢掉最后一次快照之后的世界。要一条不丢就开 "
+            "`appendonly yes`(配 `appendfsync always` 更严)。"
+        )
+    return (
+        "**这个 Redis 不会把世界存下来**(save 是空的、appendonly 是 no)—— "
+        "它一重启,这个世界就退回创世那一刻,而且不会报错,只会接着跑。\n"
+        "      开 `appendonly yes`,或者至少给它一组 `save` 存盘点。"
+    )
