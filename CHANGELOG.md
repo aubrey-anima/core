@@ -26,10 +26,36 @@ spot rather than silently written to.
 
 ### Added —— 随时间无限增长的那几样搬出内存(MySQL)
 
-`World.open(mysql=...)`:`events` / `memories` / `edges` / `conversations` / `messages`
+`World.open(mysql=...)`:`events` / `memories` / `conversations` / `messages`
 落到 MySQL,别的照旧在 Redis。可以只给 `mysql` 不给 `redis`。
 
-**分界线是增长性,不是冷热。** 世界搬进 Redis 之后实测一个三人世界:
+**分界线最终是"她带不带得进上下文"。** 这条判据走了三版:
+
+1. "这是不是世界" —— 拆不动转录(转录当然属于这个世界,只是不该在内存里)
+2. "随时间涨,还是随世界的规模涨" —— 拆得动了,而且量得出来
+3. **"进不进得了提示词"** —— Redis 装她带得进上下文的东西,而 LLM 的上下文本来
+   就有上限,两个"有上限"是同一个上限
+
+第三版最好用,因为它**可验**:分对了的话,提示词就不该随世界变老而增长。实测同一个
+角色跑到第 60 个世界日,后端涨了 61 倍而提示词纹丝不动:
+
+```
+ 世界日   提示词    MySQL 记忆   MySQL 事件
+   0天    2251字        10          50
+  60天    2272字       612        3264
+```
+
+`tests/test_bounded.py` 把这条钉住了(变异验证:把记忆检索的 k 拿掉,提示词
+2275→6546 字,当场红)。
+
+**顺着它改正了一张分错的表:`edges` 不进 MySQL。** 关系边有
+`UNIQUE(subject, predicate, object)`,谓词是闭集(`friendship` / `rivalry`,
+scheduler.py 里写死的两个),主宾都是 `agent:<id>` —— 上界 2×N²,**按世界的规模
+封顶,不按时间涨**。它一度被分进 MySQL,是照着"像不像历史"分的而不是照着判据。
+那个闭集是**承重的**:哪天让 LLM 自己造谓词,边就不再有界,这笔账要重算 ——
+`test_bounded.py` 盯着这个前提,而不是等它出事。
+
+原始的量:世界搬进 Redis 之后,一个三人世界:
 
 ```
  世界日     Redis 内存    增量      占大头

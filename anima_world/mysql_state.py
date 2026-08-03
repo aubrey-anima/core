@@ -42,7 +42,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # 只有这几样进 MySQL —— 判据是"随时间无限增长"。
-GROWS_FOREVER = ("events", "memories", "edges", "conversations", "messages")
+#
+# **`edges` 曾经在这个名单里,是错的。** 关系边有 `UNIQUE(subject, predicate, object)`,
+# 而谓词是闭集(`friendship` / `rivalry`,scheduler.py 里写死的两个),主宾都是
+# `agent:<id>` —— 上界是 2×N²,**按世界的规模封顶,不按时间涨**。它属于 Redis。
+# 判据是判据:分错一张表的代价是把一个有界的热读放进最慢的后端。
+#
+# ⚠️ 那个闭集是**承重的**:哪天让 LLM 自己造谓词,边就不再有上界,这条要重新算
+# (`tests/test_bounded.py` 盯着)。
+GROWS_FOREVER = ("events", "memories", "conversations", "messages")
 
 SCHEMA = {
     "events": """
@@ -104,17 +112,6 @@ SCHEMA = {
           intent_confidence DOUBLE,
           tool_calls        JSON,
           KEY idx_conversation (conversation_id)
-        ) CHARACTER SET utf8mb4
-    """,
-    "edges": """
-        CREATE TABLE IF NOT EXISTS `{prefix}edges` (
-          id               BIGINT AUTO_INCREMENT PRIMARY KEY,
-          subject          VARCHAR(128) NOT NULL,
-          predicate        VARCHAR(128) NOT NULL,
-          object           VARCHAR(128) NOT NULL,
-          source_event_seq BIGINT,
-          created_at       BIGINT NOT NULL DEFAULT 0,
-          UNIQUE KEY uniq_edge (subject, predicate, object)
         ) CHARACTER SET utf8mb4
     """,
 }
@@ -392,56 +389,6 @@ class MySQLMemoryStore:
 
     def anchors(self, agent_id: str) -> list[dict[str, Any]]:
         return [r for r in self.query(agent_id) if int(r.get("anchor") or 0)]
-
-
-class MySQLKnowledgeGraph:
-    """关系边。`(subject, predicate, object)` 唯一,**重复写不覆盖** ——
-    一条边的出处是它第一次被证实的那一刻(`INSERT IGNORE`)。"""
-
-    __slots__ = ("_conn", "_prefix")
-
-    def __init__(self, conn: Any, prefix: str = "") -> None:
-        self._conn = conn
-        self._prefix = prefix
-
-    @property
-    def _table(self) -> str:
-        return f"`{self._prefix}edges`"
-
-    _COLS = ("id", "subject", "predicate", "object", "source_event_seq", "created_at")
-
-    def add(self, subject: str, predicate: str, object: str,  # noqa: A002
-            source_event_seq: int | None = None, created_at: int = 0) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"INSERT IGNORE INTO {self._table}"
-                " (subject, predicate, object, source_event_seq, created_at)"
-                " VALUES (%s, %s, %s, %s, %s)",
-                (subject, predicate, object, source_event_seq, int(created_at)),
-            )
-        self._conn.commit()
-
-    def _select(self, where: str, params: tuple) -> list[dict[str, Any]]:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                f"SELECT {', '.join(self._COLS)} FROM {self._table}{where} ORDER BY id",
-                params,
-            )
-            return [dict(zip(self._COLS, row)) for row in cur.fetchall()]
-
-    def query(self, subject: str | None = None, predicate: str | None = None,
-              object: str | None = None) -> list[dict[str, Any]]:  # noqa: A002
-        parts, params = [], []
-        for column, value in (("subject", subject), ("predicate", predicate),
-                              ("object", object)):
-            if value is not None:
-                parts.append(f"{column} = %s")
-                params.append(value)
-        where = (" WHERE " + " AND ".join(parts)) if parts else ""
-        return self._select(where, tuple(params))
-
-    def query_by_event(self, event_seq: int) -> list[dict[str, Any]]:
-        return self._select(" WHERE source_event_seq = %s", (int(event_seq),))
 
 
 class MySQLChatStore:

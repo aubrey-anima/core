@@ -59,13 +59,13 @@ def mysql(request):
     conn = _connect()
     prefix = f"t{abs(hash(request.node.name)) % 100000}_"
     with conn.cursor() as cur:
-        for table in ("events", "memories", "edges"):
+        for table in ("events", "memories", "conversations", "messages"):
             cur.execute(f"DROP TABLE IF EXISTS `{prefix}{table}`")
     conn.commit()
     ensure_schema(conn, prefix)
     yield conn, prefix
     with conn.cursor() as cur:
-        for table in ("events", "memories", "edges"):
+        for table in ("events", "memories", "conversations", "messages"):
             cur.execute(f"DROP TABLE IF EXISTS `{prefix}{table}`")
     conn.commit()
     conn.close()
@@ -187,46 +187,9 @@ def test_all_three_memory_stores_answer_identically(tmp_path, mysql, redis):
         sqlite_conn.close()
 
 
-def test_all_three_graphs_answer_identically(tmp_path, mysql, redis):
-    """`(subject, predicate, object)` 唯一,**重复写不覆盖** —— 覆盖的话
-    `query_by_event` 会把边挂到错的事件上。"""
-    from anima_world.db import open_db
-    from anima_world.graph import KnowledgeGraph
-    from anima_world.mysql_state import MySQLKnowledgeGraph
-    from anima_world.redis_state import RedisKnowledgeGraph
-
-    conn, prefix = mysql
-    sqlite_conn = open_db(str(tmp_path / "w.db"))
-    try:
-        graphs = {
-            "sqlite": KnowledgeGraph(sqlite_conn),
-            "redis": RedisKnowledgeGraph(redis, "kg"),
-            "mysql": MySQLKnowledgeGraph(conn, prefix),
-        }
-        for graph in graphs.values():
-            graph.add("夏", "knows", "柔", source_event_seq=3, created_at=1)
-            graph.add("夏", "knows", "遥", source_event_seq=4, created_at=2)
-            graph.add("柔", "dislikes", "遥", source_event_seq=5, created_at=3)
-            graph.add("夏", "knows", "柔", source_event_seq=99, created_at=99)  # 重复
-
-        def shape(rows):
-            return [(r["subject"], r["predicate"], r["object"], r["source_event_seq"])
-                    for r in rows]
-
-        base = shape(graphs["sqlite"].query())
-        for name, graph in graphs.items():
-            assert shape(graph.query()) == base, name
-            for kwargs in ({"subject": "夏"}, {"predicate": "knows"}, {"object": "遥"}):
-                assert shape(graph.query(**kwargs)) == \
-                       shape(graphs["sqlite"].query(**kwargs)), (name, kwargs)
-            assert shape(graph.query_by_event(3)) == \
-                   shape(graphs["sqlite"].query_by_event(3)), name
-            assert graph.query_by_event(99) == [], (
-                f"{name}:重复那条把出处覆盖了 —— 边会挂到错的事件上"
-            )
-    finally:
-        sqlite_conn.close()
-
+# 关系图的互验在 `tests/test_redis_state.py`(SQLite ↔ Redis)—— `edges` 不进 MySQL:
+# 它有 `UNIQUE(subject, predicate, object)` 且谓词是闭集,上界 2×N²,按世界的规模
+# 封顶而不按时间涨。理由与那条闸门见 `tests/test_bounded.py`。
 
 def test_unicode_survives_the_round_trip(mysql):
     """世界是中文的。**建表字符集写错的后果是问号,而且不报错。**"""
@@ -255,7 +218,7 @@ def test_two_worlds_in_one_database_do_not_share_history(mysql):
         assert [e.type for e in MySQLEventLog(conn, other).replay()] == ["b"]
     finally:
         with conn.cursor() as cur:
-            for table in ("events", "memories", "edges"):
+            for table in ("events", "memories", "conversations", "messages"):
                 cur.execute(f"DROP TABLE IF EXISTS `{other}{table}`")
         conn.commit()
 

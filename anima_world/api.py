@@ -1022,8 +1022,7 @@ class World:
             # 装不下一个冷但无限的东西。
             if mysql is not None:
                 from anima_world.mysql_state import (
-                    MySQLChatStore, MySQLEventLog, MySQLKnowledgeGraph,
-                    MySQLMemoryStore, ensure_schema,
+                    MySQLChatStore, MySQLEventLog, MySQLMemoryStore, ensure_schema,
                 )
 
                 prefix = f"{world_id}_"
@@ -1053,15 +1052,6 @@ class World:
                             )
                 scheduler.memory_store = fresh_mem
 
-                fresh_graph = MySQLKnowledgeGraph(mysql, prefix)
-                if not fresh_graph.query():
-                    for edge in scheduler.knowledge_graph.query():
-                        fresh_graph.add(
-                            str(edge["subject"]), str(edge["predicate"]),
-                            str(edge["object"]), edge.get("source_event_seq"),
-                            int(edge.get("created_at") or 0),
-                        )
-                scheduler.knowledge_graph = fresh_graph
                 # 转录 —— **用户点名要在 MySQL 的那一样。**
                 # 它是所有表里最该离开内存的:一条消息几百字,只增不减,而世界
                 # 只在会话关闭时收一个摘要事件。放 Redis 等于用最贵的存储装最冷的数据。

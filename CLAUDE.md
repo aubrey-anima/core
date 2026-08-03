@@ -102,11 +102,21 @@ anima-world world import my.cyberworld --destination ./instances
   是同一条道理,而黑板曾经漏了这一条(第二个 `World.open` 会悄悄把她挪回 cafe,两边都不
   报错)。**记忆投影仍在进程里,是有意的**:派生数据存两份只会多一种不一致的坏法,重折
   廉价且必然正确(`catch_up_projection`)。
-- **给了 `mysql=` 的世界把无限增长的那几样放出内存**:`events` / `memories` / `edges` /
-  `conversations` / `messages`。**判据是增长性,不是冷热** —— 内存装得下一个热但有界的
-  东西,装不下一个冷但无限的东西。加新表时问一句:**它随时间涨,还是随世界的规模涨?**
-  随时间涨 → `mysql_state.GROWS_FOREVER`。⚠️ MySQL 连接**不能跨线程共享**
-  (`pymysql` 的 threadsafety 是 1,而引擎有线程池):用 `ThreadLocalConnection`。
+- **给了 `mysql=` 的世界把无限增长的那几样放出内存**:`events` / `memories` /
+  `conversations` / `messages`。**判据最终是"她带不带得进上下文"**:Redis 装的是
+  她此刻要带进提示词的东西,而 LLM 的上下文本来就有上限 —— 两个"有上限"是同一个上限。
+
+      进得了提示词的  →  必须有界  →  Redis
+      进不了提示词的  →  可以无限  →  MySQL(要用时按 k 取回来)
+
+  这条比"冷热"和"增长性"都好用,因为它**可验**:分对了的话提示词就不随世界变老而涨。
+  实测 60 世界日,后端涨 61 倍(事件 50→3264),提示词 2251→2272 字。
+  `tests/test_bounded.py` 是这道闸。加新表时问一句:**她会把它带进提示词吗?**
+  会 → 那它必须有界。⚠️ **`edges` 一度被分错**(照着"像不像历史"分的):它有
+  `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,**按世界的规模封顶** ——
+  它属于 Redis。而那个闭集是承重的,放开谓词就要重算这笔账。
+  ⚠️ MySQL 连接**不能跨线程共享**(`pymysql` 的 threadsafety 是 1,而引擎有线程池):
+  用 `ThreadLocalConnection`。
 - **LLM 的钥匙住在这台机器上,不住在世界里**(`machine_config`,`~/.anima-world/config.json`,
   0600)。解析顺序:环境变量 → 机器配置 → 世界配置(旧世界兼容,`doctor` 点名)→ 默认值。
   **人不手写环境变量**:`config set` 与 `World.config_set` 自动路由,`start` 的引导直接写它。
