@@ -452,3 +452,129 @@ class RedisEventLog:
             e for e in rows
             if (who is None or e.who == who) and (kind is None or e.type == kind)
         ]
+
+
+def stock_key(world_id: str, owner: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:stock:{owner}"
+
+
+def stock_owners_key(world_id: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:stock_owners"
+
+
+class RedisStockStore:
+    """世界的量住进 Redis。**每个 owner 一个 hash + 一个 owner 索引集合。**
+
+    索引那个集合不是可有可无:`owners(kind)` 与 `snapshot_kind(kind)` 要按前缀选
+    (`owner == kind` 或 `owner LIKE kind:%`),而在 Redis 里对应的就是"扫一遍键"。
+    `SCAN` 是 O(整个 keyspace) —— 一个 Redis 上跑十个世界的时候,别人的键也得扫。
+    所以自己维护一份 owner 名单。
+
+    **性能承诺跟着一起搬。** 这一层文档里写着"一万棵树跑一个世界日 1.4 秒",而那个
+    数字是改出来的不是天生的:第一版逐个 owner 查、逐个 commit,2000 棵树就到
+    72ms/tick。所以这里同样必须**按类批量取**(pipeline 一次问完)和**整轮一次写回**,
+    而不是逐个往返 —— 换了后端把那条承诺丢掉,和没搬一样糟。
+    """
+
+    __slots__ = ("_redis", "_world")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._redis = redis
+        self._world = world_id
+
+    # ── 读 ──────────────────────────────────────────────────────────────────
+
+    def get(self, owner: str, key: str, default: float = 0.0) -> float:
+        raw = self._redis.hget(stock_key(self._world, owner), key)
+        return default if raw is None else float((_loads(raw) or [default, 0])[0])
+
+    def of(self, owner: str) -> dict[str, float]:
+        return {k: v for k, (v, _t) in self.snapshot(owner).items()}
+
+    def snapshot(self, owner: str) -> dict[str, tuple[float, int]]:
+        raw = self._redis.hgetall(stock_key(self._world, owner)) or {}
+        out: dict[str, tuple[float, int]] = {}
+        for key, item in raw.items():
+            pair = _loads(item) or [0.0, 0]
+            out[key] = (float(pair[0]), int(pair[1]))
+        return out
+
+    def owners(self, kind: str | None = None) -> list[str]:
+        names = self._redis.smembers(stock_owners_key(self._world)) or set()
+        names = {n.decode() if isinstance(n, bytes) else n for n in names}
+        if kind is not None:
+            names = {n for n in names if n == kind or n.startswith(f"{kind}:")}
+        return sorted(names)
+
+    def snapshot_kind(self, kind: str) -> dict[str, dict[str, tuple[float, int]]]:
+        return self.snapshot_many(self.owners(kind))
+
+    def snapshot_many(self, owners: Any) -> dict[str, dict[str, tuple[float, int]]]:
+        owners = list(owners)
+        if not owners:
+            return {}
+        # **一次问完**:逐个 owner 一次往返,正是当年 72ms/tick 那个形状。
+        pipe = self._redis.pipeline()
+        for owner in owners:
+            pipe.hgetall(stock_key(self._world, owner))
+        out: dict[str, dict[str, tuple[float, int]]] = {}
+        for owner, raw in zip(owners, pipe.execute()):
+            values: dict[str, tuple[float, int]] = {}
+            for key, item in (raw or {}).items():
+                key = key.decode() if isinstance(key, bytes) else key
+                pair = _loads(item) or [0.0, 0]
+                values[key] = (float(pair[0]), int(pair[1]))
+            if values:
+                out[owner] = values
+        return out
+
+    # ── 写 ──────────────────────────────────────────────────────────────────
+
+    def set(self, owner: str, key: str, value: float, tick: int = 0) -> None:
+        self.set_many(owner, {key: value}, tick)
+
+    def set_many(self, owner: str, values: dict[str, float], tick: int = 0) -> None:
+        if not values:
+            return
+        pipe = self._redis.pipeline()
+        pipe.hset(
+            stock_key(self._world, owner),
+            mapping={k: _dumps([float(v), int(tick)]) for k, v in values.items()},
+        )
+        pipe.sadd(stock_owners_key(self._world), owner)
+        pipe.execute()
+
+    def write_round(self, pending: dict[str, dict[str, float]], tick: int) -> int:
+        """整轮一次写回 —— 逐个 owner 提交是当年 72ms/tick 的另一半原因。"""
+        if not pending:
+            return 0
+        pipe = self._redis.pipeline()
+        written = 0
+        touched: list[str] = []
+        for owner, values in pending.items():
+            if not values:
+                continue
+            pipe.hset(
+                stock_key(self._world, owner),
+                mapping={k: _dumps([float(v), int(tick)]) for k, v in values.items()},
+            )
+            touched.append(owner)
+            written += len(values)
+        # owner 名单**一次加完**:两千棵树两千次 SADD,是白花的两千条命令。
+        if touched:
+            pipe.sadd(stock_owners_key(self._world), *touched)
+        pipe.execute()
+        return written
+
+    def delete(self, owner: str, key: str | None = None) -> None:
+        if key is None:
+            pipe = self._redis.pipeline()
+            pipe.delete(stock_key(self._world, owner))
+            pipe.srem(stock_owners_key(self._world), owner)
+            pipe.execute()
+            return
+        self._redis.hdel(stock_key(self._world, owner), key)
+        # 最后一个键被删掉,这个 owner 就不该再出现在名单里 —— 否则
+        # `owners()` 会报出一个空壳,而调用方会以为那儿还有东西。
+        if not self._redis.hlen(stock_key(self._world, owner)):
+            self._redis.srem(stock_owners_key(self._world), owner)

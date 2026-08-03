@@ -440,3 +440,125 @@ def test_two_appenders_get_unique_increasing_seqs(redis):
     assert len(seqs) == 100
     assert len(set(seqs)) == 100, "有 seq 撞车了 —— 重放重建不出这个世界"
     assert sorted(seqs) == list(range(1, 101)), "seq 不连续 —— since_seq 分页会漏事件"
+
+
+# ---- 世界的量 ---------------------------------------------------------------
+
+
+def test_the_two_stock_stores_answer_identically(tmp_path, redis):
+    """两个实现互验 —— 量答错一次,规律就一路错下去,而且照跑。"""
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisStockStore
+    from anima_world.stocks import StockStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = StockStore(conn), RedisStockStore(redis, "cmp")
+        for store in (a, b):
+            store.set("tree:oak", "树高", 3.2, 10)
+            store.set_many("tree:oak", {"生长速度": 0.004, "最大树高": 12.0}, 10)
+            store.set("tree:elm", "树高", 5.0, 10)
+            store.set("agent:夏", "功力", 120.0, 3)
+            store.set("world", "季节", 2.0, 0)
+
+        assert a.get("tree:oak", "树高") == b.get("tree:oak", "树高")
+        assert a.get("tree:oak", "没有的", 7.0) == b.get("tree:oak", "没有的", 7.0) == 7.0
+        assert a.of("tree:oak") == b.of("tree:oak")
+        assert a.owners() == b.owners()
+        for kind in ("tree", "agent", "world", "mine"):
+            assert a.owners(kind) == b.owners(kind), kind
+            assert a.snapshot_kind(kind) == b.snapshot_kind(kind), kind
+        assert a.snapshot("tree:oak") == b.snapshot("tree:oak")
+        assert a.snapshot_many(["tree:oak", "world"]) == b.snapshot_many(["tree:oak", "world"])
+
+        pending = {"tree:oak": {"树高": 3.3}, "tree:elm": {"树高": 5.1}}
+        assert a.write_round(pending, 22) == b.write_round(pending, 22)
+        assert a.snapshot_kind("tree") == b.snapshot_kind("tree")
+
+        for store in (a, b):
+            store.delete("tree:elm", "树高")
+        assert a.owners() == b.owners(), "删光最后一个键之后,owner 名单对不上"
+        for store in (a, b):
+            store.delete("agent:夏")
+        assert a.owners() == b.owners()
+    finally:
+        conn.close()
+
+
+def test_the_rules_get_the_same_answer_on_either_store(tmp_path, redis):
+    """不只比接口,连**规律真跑一轮**的结果也比。
+
+    `dt` 从量自己的 `updated_tick` 算,所以 tick 有没有跟着值一起存对,决定了树长
+    多高。这条是接口比对看不出来的。
+    """
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisStockStore
+    from anima_world.rules import parse_rules
+    from anima_world.stocks import StockStore, evaluate_due
+
+    spec = [{
+        "id": "grow", "every": {"ticks": 12}, "for_each": {"kind": "tree"},
+        "set": {"树高": "min(树高 + 生长速度 * dt, 最大树高)"},
+    }]
+    rules = parse_rules(spec)
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        results = []
+        for store in (StockStore(conn), RedisStockStore(redis, "rules")):
+            store.set_many("tree:oak", {"树高": 3.2, "生长速度": 0.01, "最大树高": 12.0}, 0)
+            last_run: dict[str, int] = {}
+            for now in range(12, 289, 12):
+                evaluate_due(store, rules, now, last_run=last_run)
+            results.append(round(store.get("tree:oak", "树高"), 6))
+        assert results[0] == results[1], f"同一条规律两个后端长出不同的树:{results}"
+        assert results[0] > 3.2, "树根本没长,这条测试没在验它想验的"
+    finally:
+        conn.close()
+
+
+def test_the_stock_store_keeps_its_batching_promise(redis):
+    """**性能承诺跟着一起搬。**
+
+    这一层文档里写着"一万棵树跑一个世界日 1.4 秒",而那个数字是改出来的不是天生的:
+    第一版逐个 owner 查、逐个 commit,2000 棵树就到 72ms/tick。换了后端把那条承诺
+    丢掉,和没搬一样糟 —— 而且这次真丢过一回:`write_round` 里每个 owner 一次
+    `SADD`,两千棵树就是白花的两千条命令。
+
+    所以这条不测绝对时间(机器和后端都会变),测**命令条数**:批量取和整轮写都必须
+    是"一次问完",条数不该随 owner 数线性膨胀到不可接受。
+    """
+    from anima_world.redis_state import RedisStockStore
+
+    store = RedisStockStore(redis, "perf")
+    for i in range(200):
+        store.set_many(f"tree:t{i}", {"树高": 1.0, "生长速度": 0.01}, 0)
+
+    sent: list[str] = []
+    real_pipeline = redis.pipeline
+
+    def counting_pipeline(*a, **k):
+        pipe = real_pipeline(*a, **k)
+        real_execute = pipe.execute
+
+        def execute(*ea, **ek):
+            sent.append(len(getattr(pipe, "command_stack", []) or []))
+            return real_execute(*ea, **ek)
+
+        pipe.execute = execute
+        return pipe
+
+    redis.pipeline = counting_pipeline
+    try:
+        snap = store.snapshot_kind("tree")
+        assert len(snap) == 200
+        store.write_round({owner: {"树高": 2.0} for owner in snap}, 5)
+    finally:
+        redis.pipeline = real_pipeline
+
+    assert len(sent) == 2, f"批量取 + 整轮写应该各一次 pipeline,实际发了 {len(sent)} 次"
+    read_cmds, write_cmds = sent
+    assert read_cmds == 200, "批量取该是每个 owner 一条 HGETALL,一次问完"
+    # 200 条 HSET + **一条** SADD。每个 owner 一次 SADD 就是 400,那正是丢掉的那次。
+    assert write_cmds == 201, (
+        f"整轮写发了 {write_cmds} 条命令 —— owner 名单该一次加完,不是一个一条"
+    )

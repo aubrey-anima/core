@@ -742,7 +742,7 @@ class World:
             from anima_world.redis_state import (
                 RedisBlackboard, RedisClock, RedisDict, RedisLock,
                 agent_key, clock_key, current_action_key, decode_action,
-                encode_action, lock_key, plans_key, transit_key,
+                encode_action, lock_key, plans_key, transit_key, RedisStockStore,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -777,6 +777,16 @@ class World:
             for agent_id, plan in list(scheduler._plans.items()):
                 plans[agent_id] = plan
             scheduler._plans = plans
+
+            # 世界的量。**搬家要把已有的量带过去** —— 创世播下的树高、季节、
+            # 钱都在 SQLite 里,不带过去世界会从一张白纸重新开始。
+            if scheduler.stock_store is not None:
+                shelf = RedisStockStore(redis, world_id)
+                for owner in scheduler.stock_store.owners():
+                    snap = scheduler.stock_store.snapshot(owner)
+                    for key, (value, tick) in snap.items():
+                        shelf.set(owner, key, value, tick)
+                scheduler.stock_store = shelf
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。

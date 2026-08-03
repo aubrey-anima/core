@@ -24,6 +24,35 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 世界的量进 Redis(第六步),而性能承诺差点丢在路上
+
+`stocks` 是规律每次求值都要读、感知层也要读的那张表。搬法:**每个 owner 一个 hash +
+一个 owner 索引集合**。索引不是可有可无 —— `owners(kind)` / `snapshot_kind(kind)` 要
+按前缀选,而在 Redis 里对应的是"扫一遍键";`SCAN` 是 O(整个 keyspace),一个 Redis 上
+跑十个世界的时候连别人的键都得扫。
+
+**性能承诺跟着一起搬,而这次真丢过一回。** 这一层文档写着"一万棵树跑一个世界日
+1.4 秒",而那个数是改出来的:第一版逐个 owner 查、逐个 commit,2000 棵树就到
+72ms/tick。Redis 版第一稿在 `write_round` 里给**每个 owner 发一次 `SADD`** ——
+两千棵树就是白花的两千条命令,实测整轮写 661ms。改成一次加完之后:
+
+| 2000 棵树 | 批量取 | 整轮写 |
+|---|---|---|
+| SQLite(基准) | 5.3 ms | 3.7 ms |
+| **真 Redis 6.2** | **16.9 ms** | **10.2 ms** |
+| fakeredis | 35.2 ms | 40.1 ms |
+
+约 3 倍,不是当年那个 66 倍。而且**真 Redis 比 fakeredis 快一倍** —— 那 661ms 大半是
+fakeredis 的 Python 开销,不是协议开销。
+
+这条承诺现在钉成测试,而且**不测绝对时间**(机器和后端都会变),测**命令条数**:
+批量取 = 每个 owner 一条 HGETALL 一次问完;整轮写 = N 条 HSET **加一条** SADD。
+每个 owner 一条 SADD 就是 2N,那正是丢掉的那次。
+
+互验也升级了:除了逐个方法比对答案,还**让同一条规律在两个后端各跑一轮**,比最后
+那棵树长多高 —— `dt` 从量自己的 `updated_tick` 算,tick 有没有跟着值一起存对,
+接口比对是看不出来的。
+
 ### Changed —— `events` 表只剩一扇门;`RedisEventLog` 可以接管它(第五步)
 
 搬"唯一真相"那张表之前先发现一件事:**有 10 处直接写 SQL 读 `events`**,绕过了
