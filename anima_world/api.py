@@ -910,6 +910,11 @@ class World:
                 )
             world.chat_state = fresh_chat
             scheduler.chat_state = fresh_chat
+            # **聊天服务在构造时就拿走了旧的那个引用**,只换 world/scheduler 上的
+            # 属性它看不见 —— 于是 stance / 静音 / 拒谈会继续写进 SQLite,而这个
+            # 世界的别的东西全在 Redis。一半在这儿一半在那儿,而且不报错。
+            if world.chat_service is not None:
+                world.chat_service._state = fresh_chat
 
             # 最后六张:关系图 / 身体 / 小团体 / 反思水位 / 物品 / 货架。
             if scheduler.knowledge_graph is not None:

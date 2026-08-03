@@ -150,3 +150,36 @@ def test_the_file_becomes_an_honest_shell(world_on_redis):
     assert with_rows.get("events") == 0, "事件的旧副本还在 —— 手滑读一下就是另一个世界"
     assert with_rows.get("memories") == 0
     assert "db_meta" in leftover, "戳被一起清掉了"
+
+
+def test_chatting_does_not_leak_back_into_sqlite(tmp_path, redis):
+    """**换 store 时要连拿走了引用的人一起换。**
+
+    `ChatService` 在构造时就拿走了 `chat_state` 的引用,所以只换 `world` 和
+    `scheduler` 上的属性它看不见 —— 于是 stance / 静音 / 拒谈会继续写进 SQLite,
+    而这个世界的别的东西全在 Redis。**一半在这儿一半在那儿,而且不报错。**
+    """
+    import sqlite3
+
+    db = str(tmp_path / "chat.db")
+    w = World.open(db, force_mock_llm=True, redis=redis, world_id="chat")
+    try:
+        agent = sorted(w.scheduler.agents)[0]
+        # **走聊天服务手里那个引用**,不是 `w.chat_state` —— 后者早就换过了,
+        # 用它验等于绕开了要验的东西(我第一版就是这么写的,变异注入后照绿)。
+        service_state = w.chat_service.state
+        service_state.set_stance(agent, "p1", "test", tick=5)
+        service_state.refuse_topic(agent, "彩票")
+        service_state.set_quiet(agent, "p1", minutes=5)
+    finally:
+        w.close()
+
+    conn = sqlite3.connect(db)
+    try:
+        for table in ("agent_stance", "agent_refused_topics", "agent_mutes"):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, (
+                f"{table} 还在往 SQLite 写 —— 世界一半在这儿一半在 Redis"
+            )
+    finally:
+        conn.close()
+    assert redis.hlen("anima:chat:stance") == 1
