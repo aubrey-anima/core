@@ -19,7 +19,7 @@ from anima_world.agent import Agent
 from anima_world.beats import BeatScript, BeatScriptError, coerce_goals
 from anima_world.brain import Brain
 from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequence, Status, default_bt
-from anima_world.config_store import ConfigStore, load_or_create_key
+from anima_world.config_store import ConfigStore, load_or_create_key, has_keyfile
 from anima_world.config_store import seed_defaults as seed_config_defaults
 from anima_world.db import (
     offline_refusal,
@@ -784,7 +784,8 @@ def build_serve_scheduler(
         db_path_str = str(db_path)
         # M5: config/prompts share the same world.db connection; seeding is
         # idempotent (no-op past the first boot).
-        config_store = ConfigStore(conn, fernet_key=load_or_create_key(db_path), lock=shared_lock)
+        config_store = ConfigStore(conn, fernet_key=load_or_create_key(db_path, create=False),
+                                   lock=shared_lock, had_keyfile=has_keyfile(db_path))
         seed_config_defaults(config_store)
         # 种子自己带的开关(创世时一次,空库才认)。**必须在默认值之后**:种子是
         # 作者对这个世界的意见,默认值只是"没人说话时的样子"。
@@ -2216,7 +2217,8 @@ def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
     cfg_logger.setLevel(logging.ERROR)
     try:
         conn = open_db(db_path)
-        store = ConfigStore(conn, fernet_key=load_or_create_key(db_path), lock=threading.RLock())
+        store = ConfigStore(conn, fernet_key=load_or_create_key(db_path, create=False),
+                            lock=threading.RLock(), had_keyfile=has_keyfile(db_path))
         seed_config_defaults(store)
     finally:
         cfg_logger.setLevel(previous_level)
@@ -2358,11 +2360,25 @@ def run_config(args: argparse.Namespace) -> int:
             print(f"[config] {args.key} 需要 {meta.get('value_type')} 类型,"
                   f"{args.value!r} 不是。", file=sys.stderr)
             return 2
-        store.set(args.key, value)
+        # **人不该知道哪个键去哪儿。** `llm.*` 属于这台机器(你用哪家模型、哪把钥匙,
+        # 和"这个世界是什么样"无关),自动写进机器配置;别的写进世界。
+        from anima_world import machine_config
+
         shown = mask_secret(str(value)) if meta.get("is_secret") else value
+        if machine_config.is_machine_key(args.key):
+            path = machine_config.set_value(args.key, value)
+            print(f"{onboarding.green(onboarding.OK)} {args.key} = {shown}")
+            print(onboarding.dim(f"  写进了 {path}(0600) —— 这台机器上所有世界共用"))
+            print(onboarding.dim("  它**不进世界文件**:打包发出去的世界不该带着你的钥匙"))
+            env = machine_config.env_value(args.key)
+            if env is not None:
+                # 写了但不生效是最难查的一种,当场说破。
+                print(onboarding.yellow(
+                    f"  ⚠️ 但环境变量里也有 {args.key},而环境变量优先 —— 这次改动此刻不生效"
+                ))
+            return 0
+        store.set(args.key, value)
         print(f"{onboarding.green(onboarding.OK)} {args.key} = {shown}")
-        if meta.get("is_secret"):
-            print(onboarding.dim(f"  已加密写入 {args.db_path};密钥在 {args.db_path}.key —— 搬 db 必须带上"))
         return 0
     finally:
         conn.close()
@@ -2766,12 +2782,15 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print(f"  {onboarding.green(onboarding.OK)} 世界文件 {db_path}")
 
+    # keyfile 只对**旧世界**还有意义。`llm.api_key` 是唯一声明为密文的键,而它
+    # 已经归了机器配置 —— 新世界里一个 secret 都没有,所以既不生成 keyfile,
+    # 也不该为"没有 keyfile"报警告(那句话现在是错的:没有它什么也不会丢)。
     keyfile = Path(f"{db_path}.key")
     if keyfile.exists():
-        print(f"  {onboarding.green(onboarding.OK)} 密钥文件 {keyfile.name}(搬 db 时必须一起搬)")
-    else:
-        print(f"  {onboarding.yellow(onboarding.WARN)} 没有 {keyfile.name} —— 下次启动会新建一把,"
-              f"已加密的旧密钥将永久读不出来")
+        print(f"  {onboarding.yellow(onboarding.WARN)} 还有 {keyfile.name} —— "
+              f"1.3.0 之前的世界才需要它")
+        print(f"      {onboarding.dim('钥匙现在住在这台机器上,不在世界里;')}"
+              f"{onboarding.dim('世界里的密文搬走之后这个文件就可以删了')}")
 
     conn, store = _open_config_store(db_path)
     try:
@@ -2825,6 +2844,20 @@ def run_doctor(args: argparse.Namespace) -> int:
         # 背景槽:意图分类与自主决策是**便宜活**,而空着的背景槽会退回主模型。
         # 这不是坏配置,是个白花的钱 —— 而且分类那次往返**串在回复前面**,玩家等的
         # 是两次生成而不是一次。产物上看不出来(她照样回话),所以这里得点一句。
+        # **一个值从哪来,和它是什么一样重要。**
+        from anima_world import machine_config
+
+        where = store.provenance("llm.api_key")
+        if store.get("llm.api_key", default=""):
+            print(f"  {onboarding.green(onboarding.OK)} llm.api_key 来自{where}")
+            if where == "世界文件":
+                # 1.3.0 之前建的世界里真的有这一行。读得出来就照用,但要说清它该搬走:
+                # `.cyberworld` 是分发物,发出去的世界不该带着作者的钥匙。
+                print(f"  {onboarding.yellow(onboarding.WARN)} llm.api_key 还在"
+                      f"**世界文件**里 —— 它属于这台机器,不属于这个世界")
+                print(f"      {onboarding.dim('打包发出去的世界会带着你的钥匙。搬出来:')}")
+                print(f"      {onboarding.dim('anima-world config set llm.api_key sk-…')}")
+
         background = str(store.get("llm.background.model", default="") or "").strip()
         cheap_users = [
             (key, label) for key, label in (
@@ -2889,7 +2922,8 @@ def run_simulate(args: argparse.Namespace) -> int:
     if tier != "mock" and args.db_path is not None:
         conn = open_db(args.db_path)
         try:
-            preflight_store = ConfigStore(conn, fernet_key=load_or_create_key(args.db_path))
+            preflight_store = ConfigStore(conn, fernet_key=load_or_create_key(args.db_path, create=False),
+                                        had_keyfile=has_keyfile(args.db_path))
             seed_config_defaults(preflight_store)
             error = onboarding.probe_llm(preflight_store)
         finally:

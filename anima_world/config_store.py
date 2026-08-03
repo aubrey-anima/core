@@ -28,12 +28,31 @@ logger = logging.getLogger(__name__)
 _VALUE_TYPES = {"str", "int", "float", "bool"}
 
 
-def load_or_create_key(db_path: str | Path) -> bytes:
+def has_keyfile(db_path: str | Path) -> bool:
+    """这个世界原本有没有自己的密钥文件。
+
+    **判据不是密文长什么样,是这个世界有没有过 keyfile。** 没有 keyfile 就说明
+    它从来没存过真 secret(1.3.0 之后的世界都是这样),那么解不开只可能是解一个
+    创世播下的空串 —— 那不是丢钥匙,报警是假警报。
+    """
+    return Path(str(db_path) + ".key").exists() or bool(os.getenv("ANIMA_SETTINGS_KEY"))
+
+
+def load_or_create_key(db_path: str | Path, *, create: bool = True) -> bytes:
     """Resolve the Fernet key for secret config values.
 
     Precedence: `ANIMA_SETTINGS_KEY` env var > existing sibling keyfile >
     freshly generated keyfile. The keyfile is `<db_path>.key`, mode 0600,
     and MUST NOT be committed to version control (see `.gitignore`).
+
+    `create=False` 时:没有 keyfile 就**不造一个**,返回一把只活在内存里的临时密钥。
+
+    为什么要有这个开关 —— **世界里已经没有 secret 了。** `llm.api_key` 是唯一
+    声明为密文的键,而它归了机器配置(`machine_config`)。于是一个新世界不再需要
+    keyfile,而那条"**Fernet 密钥必须随 db 搬迁**,丢了就全线降级 Mock"的不变量
+    整个不需要成立 —— 那条链的根就是把一把 API key 存进了世界文件。
+
+    **旧世界照旧**:keyfile 还在就照读,里面那把旧钥匙解得开旧密文。
     """
     env_key = os.getenv("ANIMA_SETTINGS_KEY")
     if env_key:
@@ -42,6 +61,9 @@ def load_or_create_key(db_path: str | Path) -> bytes:
     if keyfile.exists():
         return keyfile.read_bytes()
     key = Fernet.generate_key()
+    if not create:
+        # 只活在这一个进程里:没有密文要存,也就没有东西需要下次解得开。
+        return key
     keyfile.write_bytes(key)
     keyfile.chmod(0o600)
     return key
@@ -118,10 +140,16 @@ class ConfigStore:
         conn: sqlite3.Connection,
         fernet_key: bytes | None = None,
         lock: Any | None = None,
+        had_keyfile: bool = True,
     ) -> None:
         self._conn = conn
         self._lock = lock if lock is not None else threading.RLock()
         self._fernet = Fernet(fernet_key) if fernet_key else None
+        # 这个世界原本有没有自己的密钥文件。没有就说明它从来没存过真 secret
+        # (1.3.0 之后的世界都是这样),那么"解不开"只可能是解一个创世播下的空串
+        # —— 报"你的钥匙丢了"是假警报,而假警报会让人学会忽略真警报。
+        # 缺省 True 是**保守的**:不知道来历就照旧报警,漏报比误报坏。
+        self._had_keyfile = had_keyfile
         self._cache: dict[str, Any] = {}
         self._meta: dict[str, dict[str, Any]] = {}
         # Secrets that are STORED but unreadable (almost always a lost keyfile).
@@ -150,22 +178,78 @@ class ConfigStore:
     def _decode(self, key: str, raw_value: str, value_type: str, is_secret: bool) -> Any:
         if is_secret:
             if self._fernet is None:
+                # 没有密钥又没有过 keyfile = 这个世界从来没存过真 secret(1.3.0 之后
+                # 都是这样)。那不是"读不出来",是"本来就没有" —— 报警是噪音,
+                # 而每次开机都来一遍的噪音会让人学会忽略真警告。
+                if not self._had_keyfile:
+                    return None
                 logger.warning("config %s is a secret but no encryption key is configured", key)
                 self._undecryptable.add(key)
                 return None
             try:
                 raw_value = self._fernet.decrypt(raw_value.encode()).decode()
             except InvalidToken:
+                # **解不开一个空值不算丢了钥匙。** 创世会给每个 secret 键播一行
+                # (加密过的空串),而新世界不再生成 keyfile —— 于是每次开机都会用
+                # 一把临时钥匙去解那个空串,解不开。报"你的钥匙丢了"是假警报,
+                # 而假警报会让人学会忽略真警报。
+                if not self._had_keyfile:
+                    return None
                 logger.warning("config %s could not be decrypted (missing/corrupted keyfile)", key)
                 self._undecryptable.add(key)
                 return None
         return _coerce(raw_value, value_type)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """解析顺序:**环境变量 → 机器配置 → 世界配置 → 默认值。**
+
+        `llm.*` 那几个属于**这台机器**,不属于任何世界(见 `machine_config`)——
+        你用哪家模型、哪把钥匙,和"这个世界是什么样"无关。世界配置排在倒数第二
+        只为向后兼容:1.3.0 之前建的世界里真的有那一行。
+        """
+        from anima_world import machine_config
+
+        if machine_config.is_machine_key(key):
+            found = machine_config.resolve(key)
+            if found is not None:
+                return self._coerce_like(key, found[0])
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
             return default
+
+    def _coerce_like(self, key: str, raw: Any) -> Any:
+        """机器配置里的值按这个键声明的类型强转 —— 环境变量一律是字符串。"""
+        meta = self._meta.get(key) or {}
+        declared = meta.get("value_type") or (_DEFAULTS.get(key, (None, "str"))[1])
+        try:
+            return coerce_to_declared_type(raw, str(declared))
+        except (TypeError, ValueError):
+            logger.warning("机器配置里的 %s 转不成 %s,按原样用:%r", key, declared, raw)
+            return raw
+
+    def world_value(self, key: str, default: Any = None) -> Any:
+        """**只看世界文件这一层**,不走解析顺序。
+
+        `get()` 会先问环境变量和机器配置,所以它回答不了"这个世界文件里有没有它"
+        —— 而那正是"钥匙泄漏没有"这个问题。诊断和测试要的是这个。
+        """
+        with self._lock:
+            return self._cache.get(key, default)
+
+    def provenance(self, key: str) -> str:
+        """这个值是从哪儿来的。**"为什么我改了配置没生效"几乎总是这个问题。**"""
+        from anima_world import machine_config
+
+        if machine_config.is_machine_key(key):
+            found = machine_config.resolve(key)
+            if found is not None:
+                return found[1]
+        # 空值不算"世界文件里有" —— 创世会给每个键播一行,包括加密过的空串。
+        # 拿"这一行存在"当"这儿有值",就会把每个没配过的键都报成来自世界文件。
+        if self.world_value(key) not in (None, ""):
+            return "世界文件"
+        return "默认值"
 
     def set(
         self,
@@ -307,6 +391,8 @@ _ENV_SEED = {
 
 
 def _seed_defaults(store: ConfigStore, *, category_filter: str | None = None) -> None:
+    from anima_world import machine_config   # 函数内 import:两边互相认识
+
     longcat_only = bool(os.getenv("LONGCAT_API_KEY")) and not (
         os.getenv("ANIMA_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     )
@@ -316,11 +402,16 @@ def _seed_defaults(store: ConfigStore, *, category_filter: str | None = None) ->
         if store.has(key):
             continue
         value = default
-        for env_name in _ENV_SEED.get(key, ()):
-            env_value = os.getenv(env_name)
-            if env_value:
-                value = env_value
-                break
+        # **`llm.*` 不从环境变量播进世界文件。** 那是把钥匙塞进分发物的那条路:
+        # 一个 `.cyberworld` 打包出去,里面就躺着作者的 key。它们归机器配置
+        # (`machine_config`),读的时候按 环境变量 → 机器配置 → 世界 → 默认值 解析,
+        # 所以这里播一份进去除了泄漏没有任何用处。
+        if not machine_config.is_machine_key(key):
+            for env_name in _ENV_SEED.get(key, ()):
+                env_value = os.getenv(env_name)
+                if env_value:
+                    value = env_value
+                    break
         if longcat_only and key == "llm.base_url" and not value:
             value = "https://api.longcat.chat/openai/v1"
         elif longcat_only and key == "llm.model" and value == default:

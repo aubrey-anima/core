@@ -277,10 +277,15 @@ def configure_llm_interactively(
         print()
         base_url, model = default_base, default_model
 
-    config_store.set("llm.api_key", api_key)
-    config_store.set("llm.base_url", base_url)
-    config_store.set("llm.model", model)
-    print(f"     {green(OK)} 已加密写入 {db_path}(密钥文件 {db_path}.key —— 搬 db 必须带上)")
+    # **写进这台机器,不写进世界。** 你用哪家模型、哪把钥匙,和"这个世界是什么样"
+    # 无关;而世界是要打包发出去的 —— 发出去的世界不该带着你的钥匙。
+    from anima_world import machine_config
+
+    machine_config.set_value("llm.api_key", api_key)
+    machine_config.set_value("llm.base_url", base_url)
+    machine_config.set_value("llm.model", model)
+    print(f"     {green(OK)} 写进了 {machine_config.config_path()}(0600)")
+    print(f"       {dim('这台机器上所有世界共用;世界文件里不会有它')}")
     print(f"       {dim(mask_secret(api_key))}  {dim(model)}  {dim(base_url)}")
     return True
 

@@ -2526,7 +2526,14 @@ class World:
         return default if store is None else store.get(key, default=default)
 
     def config_set(self, key: str, value: Any) -> None:
-        """按声明类型强转后写入,立即生效。未知键抛 KeyError。"""
+        """按声明类型强转后写入,立即生效。未知键抛 KeyError。
+
+        **`llm.*` 写进这台机器,不写进世界**(见 `machine_config`)—— 和
+        `anima-world config set` 同一条路由。两条门各走各的,只会让"我明明设了"
+        变成一个取决于你走哪扇门的问题。
+        """
+        from anima_world import machine_config
+
         store = self.scheduler.config_store
         if store is None or not store.has(key):
             raise KeyError(f"config key {key} not found")
@@ -2536,6 +2543,9 @@ class World:
         value = coerce_to_declared_type(value, meta["value_type"])
         if key == "scheduler.tick_rate" and not (0 < float(value) <= MAX_TICKS_PER_SECOND):
             raise ValueError(f"'{key}' must be > 0 and <= {MAX_TICKS_PER_SECOND}")
+        if machine_config.is_machine_key(key):
+            machine_config.set_value(key, value)
+            return
         store.set(key, value)
 
     def prompt_list(self) -> list[dict[str, Any]]:

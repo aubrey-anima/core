@@ -58,3 +58,21 @@ def bare_seed(tmp_path) -> str:
     path = tmp_path / "bare_seed.json"
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
     return str(path)
+
+@pytest.fixture(autouse=True)
+def _machine_config_stays_out_of_your_home(tmp_path_factory, monkeypatch):
+    """**测试永远不许碰真实的 `~/.anima-world/`。**
+
+    这条是踩出来的,而且踩得很难看:机器配置刚落地时没有隔离,于是一个测试把
+    `sk-typed-in` 写进了开发机的家目录,**别的测试读到它、真的去连了 OpenAI**,
+    十八条测试一起红。测试之间靠一个全局单例路径互相污染,而单看任何一条都看不出来。
+
+    `autouse` 而不是"记得加这个 fixture":需要人记住的隔离迟早会漏掉一处,
+    而漏掉的那一处会往真实家目录里写东西。
+    """
+    monkeypatch.setenv("ANIMA_WORLD_HOME", str(tmp_path_factory.mktemp("anima-home")))
+    # 环境里可能真的有这些(开发机上就有)—— 它们优先级最高,会盖掉测试的意图。
+    for name in ("ANIMA_LLM_API_KEY", "OPENAI_API_KEY", "LONGCAT_API_KEY",
+                 "ANIMA_LLM_BASE_URL", "OPENAI_BASE_URL",
+                 "ANIMA_LLM_MODEL", "OPENAI_MODEL"):
+        monkeypatch.delenv(name, raising=False)

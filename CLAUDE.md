@@ -95,10 +95,15 @@ anima-world world import my.cyberworld --destination ./instances
 - **一个运行中的世界独占它的 world.db**:世界的真相一半在内存(时钟/投影/锁/线程池),
   第二个进程绕过 `World` 直接写同一个 db 会立刻分叉。离线处置(打包/快进)在世界关闭
   后进行。**一个进程一个引擎版本;信任边界是进程边界**(`api.py` docstring 的三条纪律)。
-- **`world.db.key`(Fernet 密钥)必须随 db 搬迁** —— 丢了 `llm.api_key` 就解不开,全线降级 Mock。
-  降级本身是设计(世界照跑),但**不许无声**:`ConfigStore.undecryptable_secrets()` 区分"没配过"
-  与"读不出来",`build_serve_scheduler` 开机点名,`World.state()` 的
-  `runtime.llm.degraded_reason` 常驻(见 `tests/test_startup_diagnostics.py`)。
+- **LLM 的钥匙住在这台机器上,不住在世界里**(`machine_config`,`~/.anima-world/config.json`,
+  0600)。解析顺序:环境变量 → 机器配置 → 世界配置(旧世界兼容,`doctor` 点名)→ 默认值。
+  **人不手写环境变量**:`config set` 与 `World.config_set` 自动路由,`start` 的引导直接写它。
+  理由是 `.cyberworld` 是**分发物** —— 打包发出去的世界不该带着作者的钥匙;而 `llm.api_key`
+  又是唯一声明为密文的键,所以搬走之后**世界里一个 secret 都没有**,那条"Fernet 密钥必须随
+  db 搬迁、丢了全线降级 Mock"的老不变量整个不再需要:新世界不生成 `world.db.key`。
+  旧世界照旧能读,而**真丢了钥匙仍然报警**(`undecryptable_secrets()`;判据是"这个世界有没有
+  过 keyfile",缺省保守 —— 漏报比误报坏)。降级照旧不许无声:`World.state()` 的
+  `runtime.llm.degraded_reason` 常驻。
 - **scheduler 持有系统唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。
 - **聊天子系统与事件核解耦**:整场会话只在关闭时发一个事件。1.3.0 的 chat-agent 逐轮
   观测量(stance / intent / tool_call)因此**落在 `messages` 行上**,不是每轮一个事件 ——

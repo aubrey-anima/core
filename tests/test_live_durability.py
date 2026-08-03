@@ -65,7 +65,12 @@ def test_export_snapshot_while_running(tmp_path):
     assert secrets == 0, "分发包永远不含密文"
     with World.open(str(imported.path / "world.db"), force_mock_llm=True) as w2:
         assert w2.scheduler.clock == clock_at_export, "安静尾巴不许在导出里缩水"
-        assert not w2.config_get("llm.api_key"), "密钥不许跟着包旅行"
+        # 验**包里**有没有,而不是 `config_get` —— 后者现在会读到这台机器的配置
+        # (`machine_config`),而那不是包带来的。钥匙归机器之后,这条断言必须问得
+        # 更准:包里那一层有没有。
+        assert not w2.scheduler.config_store.world_value("llm.api_key"), (
+            "密钥不许跟着包旅行"
+        )
 
 
 def test_export_snapshot_uses_genesis_seed(tmp_path):
