@@ -1069,3 +1069,65 @@ def test_a_probe_that_cannot_run_stays_silent(redis):
     from anima_world.redis_state import durability_warning
 
     assert durability_warning(redis) is None
+
+
+def test_a_second_process_does_not_rewind_her(tmp_path, redis):
+    """**接上一个已经在跑的世界,不许把她按回原点。**
+
+    第二个 `World.open` 手里那份黑板是从 SQLite 读出来的**创世快照**。搬家时若
+    整份写回 Redis,她的位置就被悄悄倒带 —— 第一个进程眼里她在 home,第二个眼里
+    她在 cafe,**两边都不报错,两边都还在跑**。
+
+    时钟那边早就做对了(`RedisClock` 用 `setnx`,注释写着"重开一个世界不该把
+    时钟拨回去"),黑板是同一个道理,只是当时没连起来。这条把两处连起来。
+    """
+    from anima_world.api import World
+
+    db = str(tmp_path / "w.db")
+    first = World.open(db, force_mock_llm=True, redis=redis, world_id="rewind")
+    try:
+        agent = next(iter(first.state()["agents"]))
+        board = first.scheduler.agents[agent].agent.blackboard
+        origin = board.read("loc")
+        board.write("loc", "她后来去的地方")
+        board.write("state.status", "她后来的样子")
+
+        second = World.open(db, force_mock_llm=True, redis=redis, world_id="rewind")
+        try:
+            assert second.state()["agents"][agent].get("location") == "她后来去的地方", (
+                f"第二个进程把她倒带回了创世值 {origin!r}"
+            )
+            assert first.state()["agents"][agent].get("location") == "她后来去的地方", (
+                "第一个进程眼里的她也被改了 —— 比只倒带一边更糟"
+            )
+            board2 = second.scheduler.agents[agent].agent.blackboard
+            assert board2.read("state.status") == "她后来的样子"
+        finally:
+            second.close()
+    finally:
+        first.close()
+
+
+def test_moving_in_still_fills_keys_redis_never_had(tmp_path, redis):
+    """**保守的另一半**:不覆盖 ≠ 不填。
+
+    新版本引擎加了新的黑板键时,已经在跑的世界里没有它 —— 那一格必须补上,
+    否则"只填缺的"会退化成"什么都不填",她开机就少一样东西。
+    """
+    from anima_world.api import World
+    from anima_world.redis_state import RedisBlackboard, agent_key
+
+    db = str(tmp_path / "w.db")
+    first = World.open(db, force_mock_llm=True, redis=redis, world_id="fill")
+    agent = next(iter(first.state()["agents"]))
+    first.close()
+
+    raw = RedisBlackboard(redis, agent_key("fill", agent))
+    redis.hdel(raw._key, "loc")            # 假装这一格是新版本才有的
+    assert raw.read("loc") is None
+
+    second = World.open(db, force_mock_llm=True, redis=redis, world_id="fill")
+    try:
+        assert raw.read("loc"), "缺的那一格没补上 —— 她开机就没有位置"
+    finally:
+        second.close()

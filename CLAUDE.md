@@ -92,9 +92,21 @@ anima-world world import my.cyberworld --destination ./instances
 - **`start` 是人的门,`run`/`World.open` 是程序的门**:`start` 会引导配置 LLM、给新世界
   换成演示速度(1 tick/秒);`run` 和 `World.open` 一概不做。改 onboarding 时别把这
   两条路径搅在一起。
-- **一个运行中的世界独占它的 world.db**:世界的真相一半在内存(时钟/投影/锁/线程池),
+- **一个 SQLite 世界独占它的 world.db**:那种世界的真相一半在内存(时钟/投影/锁/线程池),
   第二个进程绕过 `World` 直接写同一个 db 会立刻分叉。离线处置(打包/快进)在世界关闭
   后进行。**一个进程一个引擎版本;信任边界是进程边界**(`api.py` docstring 的三条纪律)。
+- **给了 `redis=` 的世界不再独占**:运行时状态整个住进 Redis(黑板/时钟/在途/当前动作/
+  规划/需求/意图/关系图/姿态/量与规律),很多进程可以同时操作同一个世界,`act()`/`intend()`
+  在一把跨进程的世界锁下执行。**接上一个已经在跑的世界不许把她按回原点** —— 搬家只填
+  Redis 里还没有的键(逐键 `HSETNX`),整份写回等于拿创世快照倒带她;时钟那边的 `setnx`
+  是同一条道理,而黑板曾经漏了这一条(第二个 `World.open` 会悄悄把她挪回 cafe,两边都不
+  报错)。**记忆投影仍在进程里,是有意的**:派生数据存两份只会多一种不一致的坏法,重折
+  廉价且必然正确(`catch_up_projection`)。
+- **给了 `mysql=` 的世界把无限增长的那几样放出内存**:`events` / `memories` / `edges` /
+  `conversations` / `messages`。**判据是增长性,不是冷热** —— 内存装得下一个热但有界的
+  东西,装不下一个冷但无限的东西。加新表时问一句:**它随时间涨,还是随世界的规模涨?**
+  随时间涨 → `mysql_state.GROWS_FOREVER`。⚠️ MySQL 连接**不能跨线程共享**
+  (`pymysql` 的 threadsafety 是 1,而引擎有线程池):用 `ThreadLocalConnection`。
 - **LLM 的钥匙住在这台机器上,不住在世界里**(`machine_config`,`~/.anima-world/config.json`,
   0600)。解析顺序:环境变量 → 机器配置 → 世界配置(旧世界兼容,`doctor` 点名)→ 默认值。
   **人不手写环境变量**:`config set` 与 `World.config_set` 自动路由,`start` 的引导直接写它。
@@ -104,9 +116,15 @@ anima-world world import my.cyberworld --destination ./instances
   旧世界照旧能读,而**真丢了钥匙仍然报警**(`undecryptable_secrets()`;判据是"这个世界有没有
   过 keyfile",缺省保守 —— 漏报比误报坏)。降级照旧不许无声:`World.state()` 的
   `runtime.llm.degraded_reason` 常驻。
-- **scheduler 持有系统唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。
+- **scheduler 持有进程内唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。跨进程那把
+  是 `RedisLock`,**在它之外不是替代** —— RLock 还被 `threading.Condition` 用着(等规划落地),
+  而 Condition 要一把真线程锁。
 - **聊天子系统与事件核解耦**:整场会话只在关闭时发一个事件。1.3.0 的 chat-agent 逐轮
   观测量(stance / intent / tool_call)因此**落在 `messages` 行上**,不是每轮一个事件 ——
+  它们和消息同生共死,所以转录搬去 MySQL 时**跟着一起走**,不另造一张表(为它单独造表
+  等于让"她这一轮赌了气"和"她这一轮说了什么"住在两个后端上,再跨库 join)。
+  **写它的 SQL 住在表的主人那儿**(`ChatStore` / `MySQLChatStore`),`ChatStateStore` 只转发 ——
+  之前挂错了地方,于是 Redis 版一继承就带着一条指向 SQLite 连接的死路 ——
   issue #18/#16 的原文写的是"每轮发一个事件",那条被有意否决了(见 CHANGELOG 1.3.0
   末尾)。工具造成的**后果**(走开 / 广播 / 静音)照旧是世界事件:世界的历史只记世界里
   发生的事。

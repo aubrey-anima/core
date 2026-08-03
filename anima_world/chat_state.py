@@ -45,9 +45,11 @@ OVERRIDE_KINDS: dict[str, str] = {
 class ChatStateStore:
     """SQLite 后端的聊天当前值存储。所有访问经 `lock` 串行化。"""
 
-    def __init__(self, conn: sqlite3.Connection, lock: Any | None = None) -> None:
+    def __init__(self, conn: sqlite3.Connection, lock: Any | None = None,
+                 transcript: Any | None = None) -> None:
         self._conn = conn
         self._lock = lock if lock is not None else threading.RLock()
+        self._transcript = transcript
 
     @staticmethod
     def _now() -> int:
@@ -322,63 +324,32 @@ class ChatStateStore:
 
     # ── 消息行上的观测量 ────────────────────────────────────────────────────
 
+    # ── 一轮的观测量:转发给转录存储 ────────────────────────────────────
+    #
+    # 这两个碰的是 `messages` 表,不是这一层的五张表。SQL 住在 `ChatStore` 那边
+    # (**表在谁那儿,写它的 SQL 就在谁那儿**),这里只转发,于是 Redis 后端不必
+    # 重写、也不会继承到一条指向 SQLite 的死路。
+
+    @property
+    def transcript(self) -> Any:
+        """转录存储。子类可注入(Redis 世界的转录在 MySQL 或 SQLite 上)。"""
+        store = getattr(self, "_transcript", None)
+        if store is None:
+            from anima_world.chat_store import ChatStore
+
+            store = self._transcript = ChatStore(self._conn, self._lock)
+        return store
+
     def annotate_message(
         self, message_id: int, *, stance: str | None = None, intent: str | None = None,
         intent_confidence: float | None = None, tool_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         """把一轮的观测量写到消息行上。给出什么写什么,None 一律不动。"""
-        sets: list[str] = []
-        values: list[Any] = []
-        if stance is not None:
-            sets.append("stance = ?")
-            values.append(stance)
-        if intent is not None:
-            sets.append("intent = ?")
-            values.append(intent)
-        if intent_confidence is not None:
-            sets.append("intent_confidence = ?")
-            values.append(float(intent_confidence))
-        if tool_calls is not None:
-            sets.append("tool_calls = ?")
-            values.append(json.dumps(tool_calls, ensure_ascii=False))
-        if not sets:
-            return
-        values.append(int(message_id))
-        with self._lock:
-            self._conn.execute(
-                f"UPDATE messages SET {', '.join(sets)} WHERE id = ?", values
-            )
-            self._conn.commit()
+        self.transcript.annotate_message(
+            message_id, stance=stance, intent=intent,
+            intent_confidence=intent_confidence, tool_calls=tool_calls,
+        )
 
     def conversation_meta(self, conversation_id: int) -> dict[str, Any]:
         """一场会话的 stance / intent 分布 + 调过的工具 —— 关闭事件带的那份。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT role, stance, intent, tool_calls FROM messages "
-                "WHERE conversation_id = ? ORDER BY id",
-                (int(conversation_id),),
-            ).fetchall()
-        stances: dict[str, int] = {}
-        intents: dict[str, int] = {}
-        tools: list[str] = []
-        for role, stance_value, intent_value, tool_json in rows:
-            if stance_value:
-                stances[stance_value] = stances.get(stance_value, 0) + 1
-            if intent_value:
-                intents[intent_value] = intents.get(intent_value, 0) + 1
-            if tool_json:
-                try:
-                    for call in json.loads(tool_json) or []:
-                        name = (call or {}).get("tool")
-                        if name:
-                            tools.append(str(name))
-                except ValueError:
-                    logger.warning("消息 tool_calls 不是合法 JSON,跳过")
-        meta: dict[str, Any] = {}
-        if stances:
-            meta["stances"] = stances
-        if intents:
-            meta["intents"] = intents
-        if tools:
-            meta["tools_used"] = tools
-        return meta
+        return self.transcript.conversation_meta(conversation_id)

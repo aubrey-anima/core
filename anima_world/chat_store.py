@@ -9,9 +9,64 @@ only performs the row mutation.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def summarize_annotations(rows: list[tuple]) -> dict[str, Any]:
+    """`(role, stance, intent, tool_calls)` 的行 → 一场会话的 stance/intent 分布。
+
+    **后端无关,所以只写一遍。** 每个后端各写一份聚合的话,SQLite 世界和 MySQL
+    世界会给同一场对话算出不同的 meta —— 而两边都跑得动,只是答案不一样。
+    """
+    stances: dict[str, int] = {}
+    intents: dict[str, int] = {}
+    tools: list[str] = []
+    for _role, stance_value, intent_value, tool_json in rows:
+        if stance_value:
+            stances[stance_value] = stances.get(stance_value, 0) + 1
+        if intent_value:
+            intents[intent_value] = intents.get(intent_value, 0) + 1
+        if tool_json:
+            try:
+                for call in json.loads(tool_json) if isinstance(tool_json, str) else (tool_json or []):
+                    name = (call or {}).get("tool")
+                    if name:
+                        tools.append(str(name))
+            except ValueError:
+                logger.warning("消息 tool_calls 不是合法 JSON,跳过")
+    meta: dict[str, Any] = {}
+    if stances:
+        meta["stances"] = stances
+    if intents:
+        meta["intents"] = intents
+    if tools:
+        meta["tools_used"] = tools
+    return meta
+
+
+ANNOTATION_COLUMNS = ("stance", "intent", "intent_confidence", "tool_calls")
+
+
+def annotation_values(
+    stance: str | None, intent: str | None,
+    intent_confidence: float | None, tool_calls: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """给出什么写什么,None 一律不动 —— 各后端共用这一份取舍。"""
+    out: dict[str, Any] = {}
+    if stance is not None:
+        out["stance"] = stance
+    if intent is not None:
+        out["intent"] = intent
+    if intent_confidence is not None:
+        out["intent_confidence"] = float(intent_confidence)
+    if tool_calls is not None:
+        out["tool_calls"] = json.dumps(tool_calls, ensure_ascii=False)
+    return out
 
 
 class ChatStore:
@@ -217,3 +272,37 @@ class ChatStore:
                     (agent_id, player_id, k),
                 )
             return [row[0] for row in cur.fetchall()]
+
+    # ── 一轮的观测量(1.3.0 chat-agent)──────────────────────────────────────
+    #
+    # 这两个碰的是 `messages`,所以住在这儿而不是 `ChatStateStore` ——
+    # **表在谁那儿,写它的 SQL 就在谁那儿。** 之前那两个方法挂在 chat_state 上,
+    # 于是 Redis 版一继承就带着一条指向 SQLite 连接的死路,开了 stance 开关当场
+    # AttributeError。
+
+    def annotate_message(
+        self, message_id: int, *, stance: str | None = None, intent: str | None = None,
+        intent_confidence: float | None = None, tool_calls: list[dict[str, Any]] | None = None,
+    ) -> None:
+        values = annotation_values(stance, intent, intent_confidence, tool_calls)
+        if not values:
+            return
+        sets = ", ".join(f"{col} = ?" for col in values)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE messages SET {sets} WHERE id = ?",
+                (*values.values(), int(message_id)),
+            )
+            self._conn.commit()
+
+    def annotation_rows(self, conversation_id: int) -> list[tuple]:
+        with self._lock:
+            return list(self._conn.execute(
+                "SELECT role, stance, intent, tool_calls FROM messages "
+                "WHERE conversation_id = ? ORDER BY id",
+                (int(conversation_id),),
+            ).fetchall())
+
+    def conversation_meta(self, conversation_id: int) -> dict[str, Any]:
+        """一场会话的 stance / intent 分布 + 调过的工具 —— 关闭事件带的那份。"""
+        return summarize_annotations(self.annotation_rows(conversation_id))

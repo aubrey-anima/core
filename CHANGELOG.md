@@ -24,6 +24,78 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 随时间无限增长的那几样搬出内存(MySQL)
+
+`World.open(mysql=...)`:`events` / `memories` / `edges` / `conversations` / `messages`
+落到 MySQL,别的照旧在 Redis。可以只给 `mysql` 不给 `redis`。
+
+**分界线是增长性,不是冷热。** 世界搬进 Redis 之后实测一个三人世界:
+
+```
+ 世界日     Redis 内存    增量      占大头
+   1天        997 KB     +30 KB   events=18KB
+  20天       1228 KB    +129 KB   events=158KB memories=77KB
+```
+
+只有 `events` 与 `memories` 随时间线性增长 —— 20 天里占了内存增量的九成。每世界日
+13 KB,一千个世界跑一年 **4.6 GB 常驻**,而且永远不回落。别的东西随**世界的规模**
+有界(黑板每人 20 个键,地图创世后不动)。内存装得下一个热但有界的东西,装不下一个
+冷但无限的东西。
+
+分家后同一份负载:
+
+```
+ 世界日   Redis 增量   MySQL 事件
+   1天      +52 KB         105
+  20天      +70 KB        1085
+  40天      +70 KB        2067      ← Redis 不再涨
+```
+
+三十个聊天回合(60 条消息 2271 字):MySQL 收下全部,Redis +0 KB,SQLite +0 KB。
+
+**这是加法,不是格式变更。** SQLite 那边一列没动,不给 `mysql=` 的世界行为逐字不变,
+老引擎打开这个文件照样跑。`docs/DB-SPLIT.md` 原本把"转录搬出世界"排进 2.0.0(计划是
+删两张表);判据从"这是不是世界"换成"它增不增长"之后,答案变了 —— 不必删表,只需给它
+一个不在内存里的去处。
+
+四条纪律:
+
+- **跨实现互验**:同一份输入喂给 SQLite / Redis / MySQL 三个后端,**逐个问题比答案**。
+  这套在 Redis 那一轮抓出十来个只有对比才看得见的错。
+- **`ThreadLocalConnection`**:`pymysql` 的 threadsafety 是 1 —— 模块能多线程用,
+  **一条连接不行**,而引擎有线程池(叙事、规划)且它们都会记事件。共享一条连接的后果
+  不是慢,是协议帧交叉、连接当场作废。实测撞到过:世界跑到第 12 天崩在一条 INSERT 上。
+- **`events.seq` 不再保证连续**:MySQL 自增在事务回滚后留空洞,而 Redis 的 `RPUSH`
+  返回长度是连续的。`since_seq` 分页照旧正确,依赖连续性的代码会悄悄错 —— 目前没有。
+- **崩溃的伤面写成了测试**:写序是 Redis 先、MySQL 后,中间死掉 = 在途写下了而历史里
+  没有这趟。伤是"历史少一条"(重折出来的东西从此少算一次,不自愈),不是"她卡在路上"。
+
+### Fixed —— 第二个进程会把她按回原点
+
+`World.open(redis=...)` 搬家时把黑板**整份写回** Redis。而第二个进程手里那份是从
+SQLite 读出来的**创世快照** —— 于是它一开机就把她的位置倒带:第一个进程眼里她在 home,
+第二个眼里她在 cafe,**两边都不报错,两边都还在跑**。
+
+改成逐键 `HSETNX`(`RedisBlackboard.seed_missing`):只填 Redis 里还没有的键。时钟那边
+早就做对了(`RedisClock` 用 `setnx`,注释写着"重开一个世界不该把时钟拨回去"),黑板是
+同一个道理,只是当时没连起来。逐键而不是"整份看空不空",是为了新版本加的黑板键在老
+世界里还能补上。
+
+### Fixed —— Redis 世界开了 stance 开关会当场炸
+
+`annotate_message` / `conversation_meta` 挂在 `ChatStateStore` 上,而它们碰的是
+`messages` 表。`RedisChatStateStore` 一继承就带着一条指向 SQLite 连接的死路,
+于是 `chat.stance.enabled` 打开时 `AttributeError`。
+
+根因是 SQL 挂错了地方。**表在谁那儿,写它的 SQL 就在谁那儿** —— 两个方法移到
+`ChatStore` / `MySQLChatStore`,`ChatStateStore` 只转发。聚合逻辑
+(`summarize_annotations`)后端无关,所以只写一遍:每个后端各写一份的话,同一场对话
+会算出不同的 meta,而两边都跑得动。
+
+顺带钉住"换后端时攥着旧引用的人一个都不能漏"(`_rebind_chat_store` + 枚举持有者的
+测试)—— 这个坏法之前发生过一次:只改 `world.chat_state`,而 `ChatService` 构造时已经
+把它存进了自己的 `_state`,聊天照跑照写,写进了旧后端。
+
 ### Fixed —— Redis 活在内存里,而"世界还在不在"曾经取决于一个从没问过的配置
 
 **Redis 主要活在内存里**,持久化(RDB 快照 / AOF)是配置选项,默认的 `redis.conf`

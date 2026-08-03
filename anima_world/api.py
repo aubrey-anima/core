@@ -618,6 +618,26 @@ _MIGRATED_TABLES = (
 )
 
 
+def _rebind_chat_store(world: Any, store: Any) -> None:
+    """把转录存储换掉,**并且换掉每一个攥着旧引用的人**。
+
+    这是踩出来的:换后端时只改 `world.chat_state` 那一个字段,而 `ChatService`
+    在构造时把它存进了自己的 `_state`,于是聊天照跑、照写 —— 写进了旧后端。
+    **测试全绿,因为每个组件单看都对。** 转录这边攥着旧引用的有四处,少改一处
+    就是一半的聊天记录落在 SQLite、一半落在 MySQL。
+
+    `tests/test_mysql_state.py::test_swapping_the_transcript_rebinds_every_holder`
+    是这条的闸:它枚举持有者,漏一个就红。
+    """
+    world.chat_store = store
+    world.chat_service._store = store
+    world.session_manager._store = store
+    # chat_state 的 `annotate_message` 经 transcript 转发到 `messages` 表。
+    world.chat_state._transcript = store
+    # 会话关闭事件带的那份 meta 也是从转录里算的。
+    world.session_manager._meta_provider = world.chat_state.conversation_meta
+
+
 def _shed_migrated_rows(conn: Any) -> None:
     """把已经搬进 Redis 的表清空,让这个文件成为一个**诚实的空壳**(schema + 戳)。"""
     import sqlite3
@@ -738,6 +758,7 @@ class World:
         agents: int | None = None,
         force_mock_llm: bool = False,
         redis: Any = None,
+        mysql: Any = None,
         world_id: str = "world",
     ) -> "World":
         """打开(或创建)一个世界。
@@ -781,7 +802,9 @@ class World:
             # 跟过去,否则第一个 tick 她会以为自己没有性格。
             for aid, brain in scheduler.agents.items():
                 board = RedisBlackboard(redis, agent_key(world_id, aid))
-                board.restore(brain.agent.blackboard.snapshot())
+                # **只填缺的,不覆盖。** 手里这份是从 SQLite 读出来的创世快照;
+                # 接上一个已经在跑的世界时写回去,等于把她按回原点。
+                board.seed_missing(brain.agent.blackboard.snapshot())
                 brain.agent.blackboard = board
             # 时钟同理:先把 db 里恢复出来的那个值带过去,再交给 Redis 管。
             scheduler._clock_store = RedisClock(
@@ -887,7 +910,9 @@ class World:
 
             # 她和某个人之间的状态:意图 / 静音 / 拒谈 / 回头找你 / 玩家教的规则。
             # 这五样是**真世界状态**(她真的在不理你、真的拒绝谈那件事),搬。
-            fresh_chat = RedisChatStateStore(redis, world_id)
+            # 转录**不搬进 Redis**(它随时间无限增长,见 mysql_state.py);
+            # 但这一层要拿着它,否则 `annotate_message` 没有落脚的地方。
+            fresh_chat = RedisChatStateStore(redis, world_id, transcript=world.chat_store)
             old_chat = world.chat_state
             for agent_id in scheduler.agents:
                 for row in old_chat.stances(agent_id):
@@ -986,6 +1011,80 @@ class World:
             if getattr(world, "_sqlite_log", None) is not None:
                 _shed_migrated_rows(world._sqlite_log.conn)
                 stamp_storage(world._sqlite_log.conn, "redis", world_id)
+
+            # ── 随时间无限增长的那几样搬去 MySQL ──────────────────────────
+            #
+            # 实测:一个三人世界跑 20 天,Redis 内存增量的**九成**是 `events` 与
+            # `memories`。一年 4.7 MB/世界,一千个世界跑一年 4.6 GB **常驻**,
+            # 而且永远不回落。别的东西随世界规模有界,不随时间涨。
+            #
+            # **分界线是增长性,不是冷热** —— 内存装得下一个热但有界的东西,
+            # 装不下一个冷但无限的东西。
+            if mysql is not None:
+                from anima_world.mysql_state import (
+                    MySQLChatStore, MySQLEventLog, MySQLKnowledgeGraph,
+                    MySQLMemoryStore, ensure_schema,
+                )
+
+                prefix = f"{world_id}_"
+                ensure_schema(mysql, prefix)
+
+                fresh_log = MySQLEventLog(mysql, prefix)
+                if not fresh_log.max_seq():
+                    for e in scheduler.event_log.replay():
+                        fresh_log.append({
+                            "ts": e.ts, "type": e.type, "who": e.who,
+                            "loc": e.loc, "payload": e.payload,
+                        })
+                scheduler.event_log = fresh_log
+
+                fresh_mem = MySQLMemoryStore(mysql, prefix, scheduler.config_store)
+                if not any(fresh_mem.query(a) for a in scheduler.agents):
+                    for agent_id in scheduler.agents:
+                        for row in scheduler.memory_store.query(agent_id):
+                            fresh_mem.add(
+                                agent_id, tick=int(row.get("tick") or 0),
+                                kind=str(row.get("kind") or ""),
+                                summary=str(row.get("summary") or ""),
+                                importance=float(row.get("importance") or 0.5),
+                                anchor=bool(row.get("anchor")),
+                                event_seq=row.get("event_seq"),
+                                created_at=row.get("created_at"),
+                            )
+                scheduler.memory_store = fresh_mem
+
+                fresh_graph = MySQLKnowledgeGraph(mysql, prefix)
+                if not fresh_graph.query():
+                    for edge in scheduler.knowledge_graph.query():
+                        fresh_graph.add(
+                            str(edge["subject"]), str(edge["predicate"]),
+                            str(edge["object"]), edge.get("source_event_seq"),
+                            int(edge.get("created_at") or 0),
+                        )
+                scheduler.knowledge_graph = fresh_graph
+                # 转录 —— **用户点名要在 MySQL 的那一样。**
+                # 它是所有表里最该离开内存的:一条消息几百字,只增不减,而世界
+                # 只在会话关闭时收一个摘要事件。放 Redis 等于用最贵的存储装最冷的数据。
+                fresh_chat_store = MySQLChatStore(mysql, prefix, lock=scheduler._lock)
+                for agent_id in scheduler.agents:
+                    if fresh_chat_store.list_conversations(agent_id):
+                        continue
+                    for row in world.chat_store.list_conversations(agent_id):
+                        new_id = fresh_chat_store.start_conversation(
+                            agent_id, int(row.get("started_at") or 0),
+                            participants=row.get("participants"),
+                            location=row.get("location"),
+                            player_id=row.get("player_id"),
+                        )
+                        for msg in world.chat_store.messages_for(int(row["id"])):
+                            fresh_chat_store.add_message(
+                                new_id, str(msg["role"]), str(msg["content"]),
+                                int(msg.get("created_at") or 0))
+                        if row.get("status") == "closed":
+                            fresh_chat_store.close(
+                                new_id, row.get("summary") or "",
+                                int(row.get("closed_at") or 0))
+                _rebind_chat_store(world, fresh_chat_store)
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。

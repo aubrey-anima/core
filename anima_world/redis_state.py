@@ -93,8 +93,30 @@ class RedisBlackboard:
         return {k: _loads(v) for k, v in (self._redis.hgetall(self._key) or {}).items()}
 
     def restore(self, data: dict[str, Any]) -> None:
+        """整份写回。**覆盖** —— 这是 flush 的语义,不是搬家的语义。"""
         if data:
             self._redis.hset(self._key, mapping={k: _dumps(v) for k, v in data.items()})
+
+    def seed_missing(self, data: dict[str, Any]) -> int:
+        """只填 Redis 里还没有的键。返回填了几个。
+
+        **搬家用这个,不是 `restore`。** 第一个进程把创世值搬进来,后来的进程
+        接上一个已经在跑的世界 —— 它手里那份是从 SQLite 读出来的**创世快照**,
+        写回去等于把她按回原点。
+
+        这个坏法是真的:第二个 `World.open` 会把她的位置悄悄倒带回 cafe,而
+        第一个进程眼里她在 home。**两边都不报错,两边都还在跑。** 时钟那边用
+        `setnx` 早就做对了(注释写着"重开一个世界不该把时钟拨回去"),黑板是同一个
+        道理,只是当时没连起来。
+
+        逐键 `HSETNX` 而不是"整份看空不空":一个新版本引擎加了新的黑板键时,老
+        世界里没有它,该补上;而已经有的一个都不许动。
+        """
+        filled = 0
+        for key, value in (data or {}).items():
+            if self._redis.hsetnx(self._key, key, _dumps(value)):
+                filled += 1
+        return filled
 
     def __repr__(self) -> str:
         return f"RedisBlackboard({self._key!r})"
@@ -914,10 +936,14 @@ class RedisBTStore(_BTStore):
 class RedisChatStateStore(_ChatStateStore):
     """她和某个人之间的状态:意图 / 静音 / 拒谈 / 回头找你 / 玩家教的规则。
 
-    五张表五个 hash。**`annotate_message` 与 `conversation_meta` 不覆盖** ——
-    那两个碰的是 `messages` 表,属于 `ChatStore` 的地界;而按 `docs/DB-SPLIT.md`
-    的判断,转录本来就不该在世界里。等它整个搬走时再一起处理,现在硬塞进来只会
-    让这一层多背一个不属于它的表。
+    五张表五个 hash。**转录不在这五张里** —— `annotate_message` 与
+    `conversation_meta` 碰的是 `messages` 表,SQL 住在 `ChatStore` 那一族,这一层
+    只经 `transcript` 转发。
+
+    那个 `transcript` 参数不是可选的装饰:不传的话基类会去找 `self._conn`,而这里
+    根本没有 SQLite 连接 —— **开了 `chat.stance.enabled` 的 Redis 世界会当场
+    AttributeError**。这个洞真的存在过一版(我上一轮说"等转录搬走时再一起处理",
+    而"以后再说"在这里等于留了一条死路)。
 
     时间语义原样保住,两条都不能想当然:
 
@@ -929,10 +955,11 @@ class RedisChatStateStore(_ChatStateStore):
     版一样 —— 这不是优化,是"读到的就是此刻还成立的"。
     """
 
-    def __init__(self, redis: Any, world_id: str) -> None:
+    def __init__(self, redis: Any, world_id: str, transcript: Any | None = None) -> None:
         import threading
 
         self._lock = threading.RLock()
+        self._transcript = transcript
         self._stances = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:stance")
         self._quiet = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:mutes")
         self._topics = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:refused_topics")
