@@ -24,6 +24,36 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 记忆 / 提示词模板 / 可见性声明进 Redis(第七步)
+
+一次三张,共用一个新的 `RedisRows` 底座(行在一个 hash 里,主键当 field)。
+**底座只管纯 CRUD**:带条件的查询(记忆的三因子检索、事件的过滤分页)照旧各写各的 ——
+那些地方的语义差别正是它们存在的理由,套进通用查询层只会把语义磨平。
+
+- `RedisMemoryStore`:检索的打分本来就在 Python 里做(`score()`),SQL 只负责取行,
+  所以这一层不用重写检索。**排序键照抄** `ORDER BY tick DESC, id DESC` —— 创世注入的
+  记忆全是 `tick=0`,光靠 tick 分不出先后,而不确定的次序意味着**同一个世界在两台
+  机器上召回不同的记忆,而且不报错**。
+- `RedisPromptStore` / `RedisVisibilityStore`:纯 CRUD。
+
+**互验当场抓到三处我写错的地方**,而这三处单测各测各的绝对发现不了:
+
+1. 可见性声明的字段名我写成 `visible`,SQLite 版是 `visibility` —— 差一个字,
+   而 `visible` 是**种子**里那个字段的名字,所以看起来还挺对。
+2. 提示词的 `description` 没给时,SQLite 存的是 `None` 不是空串。
+3. 改模板时 SQLite **保留**原说明,我第一版把它抹掉了。
+
+顺带两处结构性修补:
+
+- 遗忘曲线的公式抽成 `memory_retrieval.decayed_strength()`,两个 store 共用。
+  同一条曲线存两份的后果不是崩,是**两个后端的角色以不同速度遗忘**,而两边都能跑。
+- `VisibilityStore.labels()` 补给了 SQLite 版 —— 我在 Redis 版先写了它,而
+  **接口不对等就不是替换**:少一个方法,调用方会在某条路上撞见 AttributeError,
+  而那条路多半是最少走的那条。
+
+真 Redis 上跑通一整个世界日:创世的 4 条记忆、31 个模板、3 条可见性声明、树高与季节
+全部搬家成功;跑完 102 条事件、树长到 3.204、她感知到季节与雨天数。
+
 ### Added —— 世界的量进 Redis(第六步),而性能承诺差点丢在路上
 
 `stocks` 是规律每次求值都要读、感知层也要读的那张表。搬法:**每个 owner 一个 hash +

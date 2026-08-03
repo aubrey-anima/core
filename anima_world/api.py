@@ -743,6 +743,7 @@ class World:
                 RedisBlackboard, RedisClock, RedisDict, RedisLock,
                 agent_key, clock_key, current_action_key, decode_action,
                 encode_action, lock_key, plans_key, transit_key, RedisStockStore,
+                RedisMemoryStore, RedisPromptStore, RedisVisibilityStore,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -787,6 +788,45 @@ class World:
                     for key, (value, tick) in snap.items():
                         shelf.set(owner, key, value, tick)
                 scheduler.stock_store = shelf
+
+            # 记忆 / 提示词模板 / 可见性声明。三样都**先把已有内容搬过去** ——
+            # 创世播下的记忆、内置的十几个模板、种子里的可见性声明,不带过去
+            # 世界会从一张白纸重开。
+            if scheduler.memory_store is not None:
+                fresh_mem = RedisMemoryStore(redis, world_id, scheduler.config_store)
+                for aid in scheduler.agents:
+                    for row in scheduler.memory_store.query(aid):
+                        fresh_mem.add(
+                            aid, tick=int(row.get("tick") or 0), kind=str(row.get("kind") or ""),
+                            summary=str(row.get("summary") or ""),
+                            importance=float(row.get("importance") or 0.5),
+                            anchor=bool(row.get("anchor")),
+                            event_seq=row.get("event_seq"),
+                            created_at=row.get("created_at"),
+                        )
+                scheduler.memory_store = fresh_mem
+
+            if scheduler.prompt_store is not None:
+                fresh_prompts = RedisPromptStore(redis, world_id)
+                for row in scheduler.prompt_store.list():
+                    fresh_prompts.set(
+                        str(row["name"]), str(row.get("template") or ""),
+                        row.get("description"),
+                    )
+                scheduler.prompt_store = fresh_prompts
+
+            if scheduler.visibility_store is not None:
+                fresh_vis = RedisVisibilityStore(redis, world_id)
+                for row in scheduler.visibility_store.declarations():
+                    fresh_vis.declare(
+                        str(row["kind"]), str(row["key"]), str(row["visibility"]),
+                        row.get("label"),
+                    )
+                for owner, label in scheduler.visibility_store.labels().items():
+                    where = scheduler.visibility_store.place_of(owner)
+                    if where:
+                        fresh_vis.place(owner, where, label)
+                scheduler.visibility_store = fresh_vis
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。

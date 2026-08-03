@@ -52,3 +52,16 @@ def score(
     importance = min(1.0, max(0.0, float(memory.get("importance") or 0.0)))
     relevance = similarity(query, str(memory.get("summary") or "")) if query else 0.0
     return w_recency * recency + w_importance * importance + w_relevance * relevance
+
+
+def decayed_strength(
+    strength: float, last_touch: int, now_tick: int, ticks_per_day: int
+) -> float:
+    """遗忘曲线(Ebbinghaus):**强度越高忘得越慢**。
+
+    抽出来是因为它有了第二个调用方(Redis 版的 memory store)。同一条曲线存两份
+    的后果不是崩,是**两个后端的角色以不同速度遗忘** —— 而两边都能跑。
+    """
+    span = max(1, int(ticks_per_day))
+    idle_days = max(0, int(now_tick) - int(last_touch)) / span
+    return float(strength) * (0.5 ** (idle_days / max(float(strength), 0.1)))

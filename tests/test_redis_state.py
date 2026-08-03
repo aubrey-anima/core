@@ -562,3 +562,101 @@ def test_the_stock_store_keeps_its_batching_promise(redis):
     assert write_cmds == 201, (
         f"整轮写发了 {write_cmds} 条命令 —— owner 名单该一次加完,不是一个一条"
     )
+
+
+# ---- 记忆 / 提示词模板 / 可见性 ---------------------------------------------
+
+
+def test_the_two_memory_stores_answer_identically(tmp_path, redis):
+    """记忆答错一次,她说出来的话就不是她该记得的事 —— 而且照跑。"""
+    from anima_world.db import open_db
+    from anima_world.memory_store import MemoryStore
+    from anima_world.redis_state import RedisMemoryStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        script = [
+            (0, "observation", "下雨了", 0.3),
+            (0, "observation", "他说了难听的话", 0.9),   # 同 tick:排序键必须再看 id
+            (10, "seed", "这家店是我盘下来的", 0.8),
+            (20, "observation", "卖出第一杯咖啡", 0.7),
+        ]
+        a, b = MemoryStore(conn), RedisMemoryStore(redis, "mem")
+        for store in (a, b):
+            for tick, kind, summary, importance in script:
+                store.add("夏", tick=tick, kind=kind, summary=summary, importance=importance)
+
+        def shape(rows):
+            return [(r["summary"], r["kind"], round(float(r["importance"]), 6)) for r in rows]
+
+        assert shape(a.query("夏")) == shape(b.query("夏")), "同 tick 时次序对不上"
+        assert shape(a.query("夏", kind="seed")) == shape(b.query("夏", kind="seed"))
+        assert shape(a.query("夏", min_importance=0.7)) == shape(b.query("夏", min_importance=0.7))
+        assert a.query("查无此人") == b.query("查无此人") == []
+
+        assert shape(a.retrieve("夏", now_tick=30, query="咖啡", k=2)) == \
+               shape(b.retrieve("夏", now_tick=30, query="咖啡", k=2))
+        # 检索是复习:两边加固的强度也要一样
+        assert [round(float(r["strength"]), 6) for r in a.query("夏")] == \
+               [round(float(r["strength"]), 6) for r in b.query("夏")]
+
+        for store in (a, b):
+            store.decay_pass("夏", now_tick=2000)
+        assert [round(float(r["strength"]), 6) for r in a.query("夏")] == \
+               [round(float(r["strength"]), 6) for r in b.query("夏")], "两个后端遗忘速度不同"
+
+        for store in (a, b):
+            store.set_anchor(2, True)
+        assert shape(a.anchors("夏")) == shape(b.anchors("夏"))
+    finally:
+        conn.close()
+
+
+def test_the_two_prompt_stores_answer_identically(tmp_path, redis):
+    from anima_world.db import open_db
+    from anima_world.prompt_store import PromptStore
+    from anima_world.redis_state import RedisPromptStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = PromptStore(conn), RedisPromptStore(redis, "pr")
+        for store in (a, b):
+            store.set("chat.x", "模板A", "说明")
+            store.set("chat.y", "模板B")
+            store.set("chat.x", "模板A2")          # 改内容不该把说明冲掉
+        for store in (a, b):
+            assert store.has("chat.x") and not store.has("没有的")
+            assert store.get("chat.x") == "模板A2"
+            assert store.get("没有的", "兜底") == "兜底"
+        assert [(r["name"], r["template"], r.get("description")) for r in a.list()] == \
+               [(r["name"], r["template"], r.get("description")) for r in b.list()]
+    finally:
+        conn.close()
+
+
+def test_the_two_visibility_stores_answer_identically(tmp_path, redis):
+    """**没声明 = 感知不到**那条默认值,换后端也必须原样保住。"""
+    from anima_world.db import open_db
+    from anima_world.perception import VisibilityStore
+    from anima_world.redis_state import RedisVisibilityStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = VisibilityStore(conn), RedisVisibilityStore(redis, "vis")
+        for store in (a, b):
+            store.declare("tree", "树高", "here", "门口那棵老橡树")
+            store.declare("world", "季节", "public")
+            store.declare("agent", "功力", "self")
+            store.place("tree:oak", "cafe", "老橡树")
+            store.place("mine:north", "hill")
+        assert a.declarations() == b.declarations()
+        assert a.rules_map() == b.rules_map()
+        assert a.at("cafe") == b.at("cafe")
+        assert a.at("没这个地方") == b.at("没这个地方") == {}
+        assert a.place_of("tree:oak") == b.place_of("tree:oak") == "cafe"
+        assert a.place_of("没这个东西") == b.place_of("没这个东西") is None
+        for store in (a, b):
+            with pytest.raises(ValueError):
+                store.declare("tree", "x", "乱写的档")
+    finally:
+        conn.close()

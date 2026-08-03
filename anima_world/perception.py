@@ -150,6 +150,18 @@ class VisibilityStore:
             ).fetchall()
         return {owner: label for owner, label in rows}
 
+    def labels(self) -> dict[str, str | None]:
+        """每个量的**所有**位置标签 —— 搬家(换后端)时要一次拿全。
+
+        补它是因为 Redis 版先有了它,而**接口不对等就不是替换**:少一个方法,
+        调用方就会在某条路上撞见 AttributeError,而那条路多半是最少走的那条。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT owner, label FROM stock_places"
+            ).fetchall()
+        return {str(owner): label for owner, label in rows}
+
     def place_of(self, owner: str) -> str | None:
         with self._lock:
             row = self._conn.execute(

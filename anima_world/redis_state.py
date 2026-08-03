@@ -578,3 +578,223 @@ class RedisStockStore:
         # `owners()` 会报出一个空壳,而调用方会以为那儿还有东西。
         if not self._redis.hlen(stock_key(self._world, owner)):
             self._redis.srem(stock_owners_key(self._world), owner)
+
+
+class RedisRows:
+    """一张表的行,住在一个 Redis hash 里。**给纯 CRUD 的 store 当底座。**
+
+    `field` 是主键(拼出来的),值是整行的 JSON。这解决的是样板:剩下的 store 大多
+    是"按主键存一行、按主键取一行、列全部",各写一遍 hget/hset/hgetall 只会让
+    每个实现各自带一份 JSON 解码的坑。
+
+    **不做成通用 ORM**:带条件的查询(记忆的三因子检索、事件的过滤分页)照旧各写
+    各的 —— 那些地方的语义差别正是它们存在的理由,套进一个通用查询层只会把语义磨平。
+    """
+
+    __slots__ = ("_redis", "_key")
+
+    def __init__(self, redis: Any, key: str) -> None:
+        self._redis = redis
+        self._key = key
+
+    def get(self, field: str) -> Any:
+        return _loads(self._redis.hget(self._key, field))
+
+    def put(self, field: str, row: Any) -> None:
+        self._redis.hset(self._key, field, _dumps(row))
+
+    def drop(self, field: str) -> int:
+        return int(self._redis.hdel(self._key, field) or 0)
+
+    def all(self) -> dict[str, Any]:
+        raw = self._redis.hgetall(self._key) or {}
+        return {
+            (k.decode() if isinstance(k, bytes) else k): _loads(v)
+            for k, v in raw.items()
+        }
+
+    def clear(self) -> None:
+        self._redis.delete(self._key)
+
+    def __len__(self) -> int:
+        return int(self._redis.hlen(self._key) or 0)
+
+
+class RedisPromptStore:
+    """提示词模板。**改完即生效**这条性质在多进程下反而更重要:
+
+    一个进程改了模板,别的进程下一次拼提示词就该用新的 —— 而不是各自记着自己那份,
+    于是同一个世界里两个角色按两套模板说话。
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:prompts")
+
+    def has(self, name: str) -> bool:
+        return self._rows.get(name) is not None
+
+    def get(self, name: str, default: str = "") -> str:
+        row = self._rows.get(name)
+        return default if row is None else str(row.get("template", default))
+
+    def set(self, name: str, template: str, description: str | None = None) -> None:
+        old = self._rows.get(name) or {}
+        self._rows.put(name, {
+            "name": name, "template": template,
+            # 没给过说明就是 None(SQLite 那列可空);给过之后再改模板要**保留**它 ——
+            # 这两条我都猜错过一次,互验当场抓到:改模板不该顺手抹掉说明。
+            "description": description if description is not None else old.get("description"),
+        })
+
+    def list(self) -> list[dict[str, Any]]:
+        return sorted(self._rows.all().values(), key=lambda r: str(r.get("name") or ""))
+
+
+class RedisVisibilityStore:
+    """可见性声明 + 量在哪儿。**没声明 = 感知不到**,那条默认值必须原样保住。"""
+
+    __slots__ = ("_rules", "_places")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rules = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:visibility")
+        self._places = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:stock_places")
+
+    def declare(self, owner_kind: str, key: str, visibility: str,
+                label: str | None = None) -> None:
+        from anima_world.perception import VISIBILITIES
+
+        if visibility not in VISIBILITIES:
+            raise ValueError(
+                f"不认识的可见档 {visibility!r};只有 {sorted(VISIBILITIES)}"
+            )
+        self._rules.put(f"{owner_kind}\x00{key}", {
+            # 字段名照 SQLite 版:`visibility`。种子里那个字段才叫 `visible` ——
+            # 两边差一个字,而互验之前谁都发现不了。
+            "kind": owner_kind, "key": key, "visibility": visibility, "label": label,
+        })
+
+    def declarations(self) -> list[dict[str, Any]]:
+        return sorted(
+            self._rules.all().values(),
+            key=lambda r: (str(r.get("kind") or ""), str(r.get("key") or "")),
+        )
+
+    def rules_map(self) -> dict[tuple[str, str], str]:
+        return {
+            (str(r["kind"]), str(r["key"])): str(r["visibility"])
+            for r in self._rules.all().values()
+        }
+
+    def place(self, owner: str, location: str, label: str | None = None) -> None:
+        self._places.put(owner, {"owner": owner, "location": location, "label": label})
+
+    def at(self, location: str) -> dict[str, str | None]:
+        return {
+            str(r["owner"]): r.get("label")
+            for r in self._places.all().values()
+            if r.get("location") == location
+        }
+
+    def place_of(self, owner: str) -> str | None:
+        row = self._places.get(owner)
+        return None if row is None else row.get("location")
+
+    def labels(self) -> dict[str, str | None]:
+        return {str(r["owner"]): r.get("label") for r in self._places.all().values()}
+
+
+class RedisMemoryStore:
+    """她记得什么。**行在一个 hash 里,按角色建索引集合。**
+
+    检索的打分(三因子:时近×重要×相关)本来就在 Python 里做 —— SQL 只负责把某个
+    角色的行取出来。所以这一层不用重写检索,只要把"取出来"换掉,`score()` 原样复用。
+
+    **次序必须确定。** SQLite 版特意写了 `ORDER BY tick DESC, id DESC`,理由写在那儿:
+    创世注入的记忆全是 `tick=0`,光靠 tick 分不出先后;而不确定的次序意味着**同一个
+    世界在两台机器上召回不同的记忆,而且不报错**。这里照抄那个排序键。
+    """
+
+    __slots__ = ("_redis", "_world", "_rows", "_config")
+
+    def __init__(self, redis: Any, world_id: str, config_store: Any = None) -> None:
+        self._redis = redis
+        self._world = world_id
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:memories")
+        self._config = config_store
+
+    def _next_id(self) -> int:
+        return int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:memories:id"))
+
+    def add(self, agent_id: str, tick: int, kind: str, summary: str,
+            importance: float = 0.5, anchor: bool = False,
+            event_seq: int | None = None, created_at: int | None = None,
+            source_ids: list[int] | None = None) -> int:
+        memory_id = self._next_id()
+        self._rows.put(str(memory_id), {
+            "id": memory_id, "agent_id": agent_id, "tick": int(tick), "kind": kind,
+            "summary": summary, "importance": float(importance), "anchor": int(bool(anchor)),
+            "event_seq": event_seq, "created_at": int(tick if created_at is None else created_at),
+            "source_ids": list(source_ids or []), "strength": 1.0,
+            "last_access": None, "access_count": 0,
+        })
+        return memory_id
+
+    def query(self, agent_id: str, kind: str | None = None,
+              min_importance: float | None = None) -> list[dict[str, Any]]:
+        rows = [
+            r for r in self._rows.all().values()
+            if r.get("agent_id") == agent_id
+            and (kind is None or r.get("kind") == kind)
+            and (min_importance is None or float(r.get("importance") or 0) >= min_importance)
+        ]
+        # 和 SQLite 版同一个排序键 —— 见类的说明:不确定的次序是一次静默的分叉。
+        rows.sort(key=lambda r: (int(r.get("tick") or 0), int(r.get("id") or 0)), reverse=True)
+        return rows
+
+    def retrieve(self, agent_id: str, *, now_tick: int, query: str | None = None,
+                 k: int = 5, ticks_per_day: int = 288,
+                 reinforce: bool = True) -> list[dict[str, Any]]:
+        from anima_world.memory_retrieval import HALF_LIFE_DAYS_DEFAULT, score
+
+        half_life = HALF_LIFE_DAYS_DEFAULT
+        if self._config is not None:
+            half_life = self._config.get("memory.half_life_days", default=half_life)
+        rows = self.query(agent_id=agent_id)
+        rows.sort(key=lambda m: -score(
+            m, now_tick=now_tick, query=query,
+            ticks_per_day=ticks_per_day, half_life_days=float(half_life),
+        ))
+        top = rows[: max(0, int(k))]
+        if top and reinforce:
+            # 检索就是复习 —— 加固是设计的一部分,不是副作用。
+            for m in top:
+                row = self._rows.get(str(m["id"])) or {}
+                row["strength"] = min(float(row.get("strength") or 1.0) + 0.3, 3.0)
+                row["last_access"] = int(now_tick)
+                row["access_count"] = int(row.get("access_count") or 0) + 1
+                self._rows.put(str(m["id"]), row)
+        return top
+
+    def decay_pass(self, agent_id: str, now_tick: int, ticks_per_day: int = 288) -> None:
+        from anima_world.memory_retrieval import decayed_strength
+
+        for row in self.query(agent_id=agent_id):
+            last = row.get("last_access")
+            last = int(row.get("tick") or 0) if last is None else int(last)
+            fresh = decayed_strength(
+                float(row.get("strength") or 1.0), last, int(now_tick), int(ticks_per_day),
+            )
+            if fresh != row.get("strength"):
+                row["strength"] = fresh
+                self._rows.put(str(row["id"]), row)
+
+    def set_anchor(self, memory_id: int, anchor: bool) -> None:
+        row = self._rows.get(str(memory_id))
+        if row is not None:
+            row["anchor"] = int(bool(anchor))
+            self._rows.put(str(memory_id), row)
+
+    def anchors(self, agent_id: str) -> list[dict[str, Any]]:
+        return [r for r in self.query(agent_id) if int(r.get("anchor") or 0)]

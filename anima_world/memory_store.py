@@ -17,7 +17,9 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from anima_world.memory_retrieval import HALF_LIFE_DAYS_DEFAULT, score
+from anima_world.memory_retrieval import (
+    HALF_LIFE_DAYS_DEFAULT, decayed_strength, score,
+)
 
 _DEFAULT_CAPACITY = 50
 
@@ -176,14 +178,10 @@ class MemoryStore:
                 " WHERE agent_id = ? AND anchor = 0",
                 (agent_id,),
             ).fetchall()
-            span = max(1, int(ticks_per_day))
-            updates = []
-            for memory_id, strength, last_touch in rows:
-                strength = float(strength)
-                idle_days = max(0, int(now_tick) - int(last_touch)) / span
-                updates.append(
-                    (strength * (0.5 ** (idle_days / max(strength, 0.1))), memory_id)
-                )
+            updates = [
+                (decayed_strength(strength, last_touch, now_tick, ticks_per_day), memory_id)
+                for memory_id, strength, last_touch in rows
+            ]
             if updates:
                 self._conn.executemany(
                     "UPDATE memories SET strength = ? WHERE id = ?", updates
