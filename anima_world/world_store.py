@@ -400,8 +400,10 @@ class BTStore:
         byte-for-byte the old `default_bt()` behavior). Empty-table-only,
         same contract as `LocationStore.seed_defaults`."""
         with self._lock:
-            (count,) = self._conn.execute("SELECT COUNT(*) FROM bt_actions").fetchone()
-            if not count:
+            # 走 `self.actions()` 而不是直接查表:这个方法要能在换了后端的子类上
+            # 照跑(`redis_state.RedisBTStore`)。父类里留一处直读,子类就得把整个
+            # 方法重写一遍 —— 而重写的那份迟早和这份不一样。
+            if not self.actions():
                 for loc in location_ids:
                     self.set_action(f"go_to_{loc}", "walk", {"location": loc})
                 for aid in agent_ids:
@@ -410,8 +412,7 @@ class BTStore:
                 self.set_action("go_sleep", "sleep", {})
                 self.set_action("idle_wander", "idle_wander", {})
                 self.set_action("idle_social", "idle_social", {})
-            (count,) = self._conn.execute("SELECT COUNT(*) FROM bt_nodes").fetchone()
-            if not count:
+            if not self._tree_rows("default"):
                 self.add_node("default", "root", "selector", parent=None, sort=0)
                 self.add_node("default", "idle_wander", "action", parent="root", sort=0)
 
@@ -428,10 +429,8 @@ class BTStore:
         if not nodes:
             return False
         with self._lock:
-            (count,) = self._conn.execute(
-                "SELECT COUNT(*) FROM bt_nodes WHERE tree = ?", (agent_id,)
-            ).fetchone()
-            if count:
+            # 走 `_tree_rows` 而不是直接查表 —— 见 `seed_defaults` 里那条注释。
+            if self._tree_rows(agent_id):
                 return True  # 已有树:视作"种子这条路走过了",别再叠 duties 上去
 
             planted = 0
@@ -474,10 +473,8 @@ class BTStore:
         i.e. today's idle-only behavior).
         """
         with self._lock:
-            (count,) = self._conn.execute(
-                "SELECT COUNT(*) FROM bt_nodes WHERE tree = ?", (agent_id,)
-            ).fetchone()
-            if count:
+            # 走 `_tree_rows` 而不是直接查表 —— 见 `seed_defaults` 里那条注释。
+            if self._tree_rows(agent_id):
                 return
 
             self.add_node(agent_id, "root", "selector", parent=None, sort=0)

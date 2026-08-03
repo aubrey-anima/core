@@ -24,6 +24,31 @@ spot rather than silently written to.
 
 ## [Unreleased]
 
+### Added —— 地图与行为树进 Redis(第八步):算出来的东西继承,不重写
+
+`LocationStore` 的 `tree()` / `absolute_xy()` / `distance()` 和 `BTStore` 的
+`build_tree()` / `action_table()` / `duty_windows()` **都只依赖别的方法** —— 它们是
+从行算出来的,不是存出来的。所以两个 Redis 版**继承**原类,只覆盖真正碰库的原语
+(`all` / `get` / `upsert`;`actions` / `set_action` / `add_node` / `_tree_rows`)。
+
+这不是省事:**地图的几何和树的组装不许有第二份**。父子链、相对坐标折算、距离公式
+再写一遍,迟早两个后端算出不同的路程;树组装错了不会崩,只会让她一整天站着不动。
+
+为了让继承真的成立,父类里三处**直读表**改成走可覆盖的方法(`seed_defaults` /
+`seed_tree` / `seed_duties` 里的 `SELECT COUNT(*)`)。父类留一处直读,子类就得把整个
+方法重写一遍,而重写的那份迟早和这份不一样 —— 和 `events` 那次是同一条教训。
+
+**互验又抓到两处**:
+
+1. 我把地图种子当成了**嵌套 `children`**,而真实形状是**扁平列表 + `parent` 字段**。
+   我照想象写了递归,结果只播出顶层那一个。顺带把拓扑排序也改成复用 SQLite 版那份
+   `_parents_first` —— 排序也不该有第二份。
+2. `get()` 返回的行少一个 `updated_at`。**行的形状不一样**,而调用方拿的是整行
+   dict —— 少一个键会在某条路上变成 KeyError 或静默的 `None`。
+
+真 Redis 上跑通:5 个地点、20 条动作、夏的 15 个树节点全部搬家成功,一个世界日
+101 条事件,整个世界 16 个 Redis 键。
+
 ### Added —— 记忆 / 提示词模板 / 可见性声明进 Redis(第七步)
 
 一次三张,共用一个新的 `RedisRows` 底座(行在一个 hash 里,主键当 field)。

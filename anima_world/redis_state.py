@@ -33,7 +33,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
+
+from anima_world.world_store import BTStore as _BTStore
+from anima_world.world_store import LocationStore as _LocationStore
 
 logger = logging.getLogger(__name__)
 
@@ -798,3 +802,109 @@ class RedisMemoryStore:
 
     def anchors(self, agent_id: str) -> list[dict[str, Any]]:
         return [r for r in self.query(agent_id) if int(r.get("anchor") or 0)]
+
+
+class RedisLocationStore(_LocationStore):
+    """地图。**只换存储,算出来的东西继承复用。**
+
+    `tree()` / `absolute_xy()` / `distance()` 已经只依赖 `all()` —— 它们是从行算出来
+    的,不是存出来的。所以这一层继承 `LocationStore` 并只覆盖三个真正碰库的方法:
+    `all` / `get` / `upsert`。
+
+    这不是省事,是**不许有第二份几何**:地图的父子链、相对坐标折算、距离公式再写一遍,
+    迟早两个后端算出不同的路程,而两边都跑得动。
+    """
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        # **有意不调父类 `__init__`**:那一支要一个 sqlite 连接,而这一层根本没有。
+        # 继承在这里只为了拿到那三个"从行算出来"的方法,不是为了拿它的状态。
+        # 但父类那些 seed_* 会用 `self._lock`,所以这个得有 —— 它只保护本进程内的
+        # 线程;跨进程那把在 `World` 上(`RedisLock`)。
+        import threading
+
+        self._lock = threading.RLock()
+        self._rows_store = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:locations")
+
+    def all(self) -> list[dict[str, Any]]:
+        return sorted(self._rows_store.all().values(), key=lambda r: str(r.get("id") or ""))
+
+    def get(self, loc_id: str) -> dict[str, Any] | None:
+        return self._rows_store.get(loc_id)
+
+    def upsert(self, loc_id: str, **fields: Any) -> None:
+        row = self._rows_store.get(loc_id) or {
+            "id": loc_id, "name": loc_id, "description": "", "kind": "point",
+            "parent": None, "x": None, "y": None, "w": None, "h": None,
+        }
+        row.update({k: v for k, v in fields.items()})
+        row["id"] = loc_id
+        # SQLite 版的行带 `updated_at`,少一列就是"行的形状不一样" —— 而调用方
+        # 拿到的是整行 dict,少一个键会在某条路上变成 KeyError 或静默的 None。
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._rows_store.put(loc_id, row)
+
+    def seed_defaults(self, entries: list[dict[str, Any]]) -> None:
+        """创世播地图。**已有地图就不动** —— 地图是运行数据,不许被今天的种子覆盖。
+
+        条目是**扁平列表 + `parent` 字段**,不是嵌套的 `children`(我第一版照想象
+        写了递归,互验当场抓到:只播出了顶层那一个)。父先于子的排序用 SQLite 版
+        那份 `_parents_first` —— 拓扑排序也不该有第二份。
+        """
+        from anima_world.world_store import _LOCATION_FIELDS, _parents_first
+
+        if self.all():
+            return
+        for entry in _parents_first(entries):
+            self.upsert(
+                str(entry["id"]),
+                **{f: entry[f] for f in _LOCATION_FIELDS if f in entry},
+            )
+
+
+class RedisBTStore(_BTStore):
+    """行为树与动作绑定表。**只覆盖四个碰库的原语,别的继承。**
+
+    `action_table()` / `build_tree()` / `seed_*` / `duty_windows()` 都建在
+    `actions` / `set_action` / `add_node` / `_tree_rows` 之上 —— 把它们重写一遍,
+    就等于让"这棵树怎么组装"有两份实现,而组装错的树不会崩,只会让她一整天站着不动。
+
+    为什么冷数据也要搬:**只要还有一张表留在 SQLite,你就仍然需要那个文件** ——
+    而这一整件事的目的正是让世界不再是一个文件。完整性比冷热重要。
+    """
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        # 有意不调父类 __init__(那一支要 sqlite 连接)。父类的 seed_* 会用
+        # `self._lock`,所以补一把 —— 它只保护本进程内的线程,跨进程那把在 `World` 上。
+        import threading
+
+        self._lock = threading.RLock()
+        self._actions = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:bt_actions")
+        self._nodes = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:bt_nodes")
+
+    def actions(self) -> list[dict[str, Any]]:
+        return sorted(
+            self._actions.all().values(), key=lambda r: str(r.get("node_id") or "")
+        )
+
+    def set_action(self, node_id: str, kind: str, params: dict[str, Any] | None = None) -> None:
+        self._actions.put(node_id, {
+            "node_id": node_id, "kind": kind, "params": dict(params or {}),
+        })
+
+    def add_node(self, tree: str, node_id: str, node_type: str, parent: str | None,
+                 sort: int = 0, params: dict[str, Any] | None = None) -> None:
+        self._nodes.put(f"{tree}\x00{node_id}", {
+            "tree": tree, "node_id": node_id, "type": node_type,
+            "parent": parent, "sort": int(sort), "params": dict(params or {}),
+        })
+
+    def _tree_rows(self, tree: str) -> list[dict[str, Any]]:
+        rows = [r for r in self._nodes.all().values() if r.get("tree") == tree]
+        # 和 SQLite 版一样按 sort 排。次序决定 Selector 的优先级 —— 排错了她会
+        # 先做该后做的事,而且不报错。
+        rows.sort(key=lambda r: int(r.get("sort") or 0))
+        return [
+            {"node_id": r["node_id"], "type": r["type"], "parent": r.get("parent"),
+             "sort": int(r.get("sort") or 0), "params": dict(r.get("params") or {})}
+            for r in rows
+        ]

@@ -744,6 +744,7 @@ class World:
                 agent_key, clock_key, current_action_key, decode_action,
                 encode_action, lock_key, plans_key, transit_key, RedisStockStore,
                 RedisMemoryStore, RedisPromptStore, RedisVisibilityStore,
+                RedisBTStore, RedisLocationStore,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -827,6 +828,32 @@ class World:
                     if where:
                         fresh_vis.place(owner, where, label)
                 scheduler.visibility_store = fresh_vis
+
+            # 地图与行为树。两样都是创世时写好、之后基本不动的配置,但**只要还有
+            # 一张表留在 SQLite,你就仍然需要那个文件** —— 而这一整件事的目的正是让
+            # 世界不再是一个文件。完整性比冷热重要。
+            if scheduler.location_store is not None:
+                fresh_loc = RedisLocationStore(redis, world_id)
+                for row in scheduler.location_store.all():
+                    fresh_loc.upsert(str(row["id"]), **{
+                        k: v for k, v in row.items() if k != "id"
+                    })
+                scheduler.location_store = fresh_loc
+
+            if scheduler.bt_store is not None:
+                fresh_bt = RedisBTStore(redis, world_id)
+                for row in scheduler.bt_store.actions():
+                    fresh_bt.set_action(
+                        str(row["node_id"]), str(row["kind"]), dict(row.get("params") or {})
+                    )
+                for tree in {"default", *scheduler.agents}:
+                    for node in scheduler.bt_store._tree_rows(tree):
+                        fresh_bt.add_node(
+                            tree, str(node["node_id"]), str(node["type"]),
+                            node.get("parent"), int(node.get("sort") or 0),
+                            dict(node.get("params") or {}),
+                        )
+                scheduler.bt_store = fresh_bt
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。

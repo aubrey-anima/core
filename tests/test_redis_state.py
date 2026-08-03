@@ -660,3 +660,90 @@ def test_the_two_visibility_stores_answer_identically(tmp_path, redis):
                 store.declare("tree", "x", "乱写的档")
     finally:
         conn.close()
+
+
+# ---- 地图 / 行为树 -----------------------------------------------------------
+
+
+def test_the_two_location_stores_answer_identically(tmp_path, redis):
+    """地图的几何**不许有第二份**:父子链、相对坐标折算、距离公式各写一遍,
+    迟早两个后端算出不同的路程,而两边都跑得动。所以 Redis 版继承那三个算出来的
+    方法,只覆盖真正碰库的 `all` / `get` / `upsert`。"""
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisLocationStore
+    from anima_world.world_store import LocationStore
+
+    # 扁平列表 + parent,不是嵌套 children —— 这是种子的真实形状
+    seed = [
+        {"id": "cafe", "kind": "point", "parent": "town", "x": 0.2, "y": 0.3},
+        {"id": "town", "kind": "region", "x": 0, "y": 0, "w": 1, "h": 1},
+        {"id": "home", "kind": "point", "parent": "town", "x": 0.8, "y": 0.7},
+    ]
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = LocationStore(conn), RedisLocationStore(redis, "loc")
+        for store in (a, b):
+            store.seed_defaults(seed)
+        assert [r["id"] for r in a.all()] == [r["id"] for r in b.all()]
+        # `updated_at` 是写入时刻,两边必然不同 —— 比其余所有列
+        drop = lambda r: {k: v for k, v in (r or {}).items() if k != "updated_at"}
+        assert drop(a.get("cafe")) == drop(b.get("cafe"))
+        assert "updated_at" in a.get("cafe") and "updated_at" in b.get("cafe"), (
+            "行的形状不一样 —— 调用方拿的是整行 dict,少一个键会变成静默的 None"
+        )
+        assert a.get("没这地方") == b.get("没这地方") is None
+        assert [(t["id"], [c["id"] for c in t.get("children", [])]) for t in a.tree()] == \
+               [(t["id"], [c["id"] for c in t.get("children", [])]) for t in b.tree()]
+        assert a.absolute_xy("cafe") == b.absolute_xy("cafe")
+        assert a.distance("cafe", "home") == b.distance("cafe", "home")
+        for store in (a, b):
+            store.seed_defaults([{"id": "别的", "kind": "point"}])
+        assert [r["id"] for r in a.all()] == [r["id"] for r in b.all()], (
+            "已有地图被今天的种子覆盖了 —— 地图是运行数据"
+        )
+    finally:
+        conn.close()
+
+
+def test_the_two_bt_stores_answer_identically(tmp_path, redis):
+    """树组装错了不会崩,只会让她一整天站着不动 —— 所以组装逻辑只能有一份。"""
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisBTStore
+    from anima_world.world_store import BTStore
+
+    duties = [
+        {"name": "open_cafe", "start": "07:30", "end": "08:00",
+         "kind": "walk", "params": {"location": "cafe"}},
+        {"name": "tend", "start": "08:00", "end": "18:30",
+         "kind": "work", "params": {"location": "cafe"}},
+    ]
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = BTStore(conn), RedisBTStore(redis, "bt")
+        for store in (a, b):
+            store.seed_defaults(["夏", "柔"], ["cafe", "home"])
+            store.seed_duties("夏", duties)
+            store.ensure_plan_node("夏")
+
+        def acts(store):
+            return [(r["node_id"], r["kind"], r.get("params")) for r in store.actions()]
+
+        def nodes(store, tree):
+            return [
+                (n["node_id"], n["type"], n["parent"], n["sort"], n["params"])
+                for n in store._tree_rows(tree)
+            ]
+
+        assert acts(a) == acts(b)
+        assert nodes(a, "default") == nodes(b, "default")
+        assert nodes(a, "夏") == nodes(b, "夏"), "同样的日课组装出不同的树"
+        assert a.duty_windows("夏") == b.duty_windows("夏")
+        assert type(a.build_tree("夏")).__name__ == type(b.build_tree("夏")).__name__
+        assert a.action_table().lookup("go_to_cafe") == b.action_table().lookup("go_to_cafe")
+        # 已有树不许被再播一次覆盖
+        for store in (a, b):
+            store.seed_duties("夏", [{"name": "别的", "start": "01:00", "end": "02:00",
+                                     "kind": "sleep", "params": {}}])
+        assert nodes(a, "夏") == nodes(b, "夏")
+    finally:
+        conn.close()
