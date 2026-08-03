@@ -602,6 +602,34 @@ class _ToolRuntime:
         return self._world.close_conversation(int(active["id"]))
 
 
+# 搬完之后要清掉的表。**搬家一直是复制,不是移动** —— 不清的话那个 .db 既不是完整
+# 的世界,也不是干净的空壳,而是**一份过时的副本**,而我们刚在它上面盖了"这里没数据"
+# 的戳。那个组合最危险:戳没撒谎(数据确实以 Redis 为准),但文件里躺着一份看起来
+# 很像真世界的旧数据,谁手滑读一下都会读出一个几小时前的世界。
+#
+# 不清的两张:`config`(还没搬,而且按 DB-SPLIT.md 它该搬**出**世界)与
+# `conversations` / `messages`(转录,同理)。`db_meta` 当然留 —— 戳就在那儿。
+_MIGRATED_TABLES = (
+    "events", "memories", "reflection_state", "edges", "stocks", "world_rules",
+    "stock_visibility", "stock_places", "agent_needs", "cliques",
+    "item_defs", "shop_stock", "locations", "bt_nodes", "bt_actions",
+    "prompt_templates", "agent_stance", "agent_mutes", "agent_refused_topics",
+    "agent_followups", "persona_overrides",
+)
+
+
+def _shed_migrated_rows(conn: Any) -> None:
+    """把已经搬进 Redis 的表清空,让这个文件成为一个**诚实的空壳**(schema + 戳)。"""
+    import sqlite3
+
+    for table in _MIGRATED_TABLES:
+        try:
+            conn.execute(f"DELETE FROM {table}")
+        except sqlite3.Error:  # noqa: PERF203 - 少一张表不该让开机失败
+            logger.debug("清空 %s 时跳过(这个世界没有这张表)", table)
+    conn.commit()
+
+
 class World:
     """一个打开的世界:时钟、状态、聊天、玩家、配置,全部函数化。
 
@@ -623,7 +651,7 @@ class World:
         # 聊天子系统:共享世界的 SQLite 连接与唯一锁。
         if scheduler.event_log is None:
             raise ValueError("World requires a persistent scheduler (event_log wired)")
-        conn = scheduler.event_log.conn
+        conn = scheduler.conn
         # 同步门面的异步工作全跑在这一条循环上(见 `_BridgeLoop`:一个跨循环复用的
         # HTTP 连接池是"每轮泄一条连接,某天忽然全炸"那种坏)。
         self._bridge = _BridgeLoop()
@@ -745,6 +773,8 @@ class World:
                 encode_action, lock_key, plans_key, transit_key, RedisStockStore,
                 RedisMemoryStore, RedisPromptStore, RedisVisibilityStore,
                 RedisBTStore, RedisLocationStore, RedisChatStateStore,
+                RedisEventLog, events_key, RedisKnowledgeGraph, RedisNeedsStore,
+                RedisCliqueStore, RedisReflectionStore, RedisEconomyStore,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -881,14 +911,76 @@ class World:
             world.chat_state = fresh_chat
             scheduler.chat_state = fresh_chat
 
+            # 最后六张:关系图 / 身体 / 小团体 / 反思水位 / 物品 / 货架。
+            if scheduler.knowledge_graph is not None:
+                fresh_graph = RedisKnowledgeGraph(redis, world_id)
+                for edge in scheduler.knowledge_graph.query():
+                    fresh_graph.add(
+                        str(edge["subject"]), str(edge["predicate"]), str(edge["object"]),
+                        edge.get("source_event_seq"), int(edge.get("created_at") or 0),
+                    )
+                scheduler.knowledge_graph = fresh_graph
+
+            if scheduler.needs_store is not None:
+                fresh_needs = RedisNeedsStore(redis, world_id)
+                for agent_id in scheduler.agents:
+                    fresh_needs.persist(agent_id, scheduler.needs_store.load(agent_id), 0)
+                scheduler.needs_store = fresh_needs
+
+            if scheduler.clique_store is not None:
+                fresh_cliques = RedisCliqueStore(redis, world_id)
+                rows = scheduler.clique_store.load()
+                if rows:
+                    fresh_cliques.store(
+                        [list(r["member_ids"]) for r in rows],
+                        int(rows[0].get("computed_tick") or 0),
+                    )
+                scheduler.clique_store = fresh_cliques
+
+            if scheduler.reflection_store is not None:
+                fresh_reflect = RedisReflectionStore(redis, world_id)
+                for agent_id in scheduler.agents:
+                    fresh_reflect.set(agent_id, scheduler.reflection_store.get(agent_id))
+                scheduler.reflection_store = fresh_reflect
+
+            if scheduler.economy_store is not None:
+                fresh_econ = RedisEconomyStore(redis, world_id)
+                for item in scheduler.economy_store.items():
+                    fresh_econ.put_item(
+                        str(item["id"]), str(item["name"]), str(item["kind"]),
+                        float(item["base_price"]), item.get("restores"),
+                    )
+                for shelf in scheduler.economy_store.shelves():
+                    fresh_econ.put_shelf(
+                        str(shelf["location_id"]), str(shelf["item_id"]),
+                        int(shelf["quantity"]), float(shelf["price"]),
+                    )
+                scheduler.economy_store = fresh_econ
+
+            # **事件日志 —— 唯一真相那张表。** 放在最后搬:上面那些 store 的搬家
+            # 都不发事件,而一旦换成 Redis 版,之后的每一条都进 Redis。
+            # 已有的历史要带过去,否则重放会重建出一个从头开始的世界。
+            if scheduler.event_log is not None:
+                fresh_log = RedisEventLog(redis, events_key(world_id))
+                if not fresh_log.max_seq():
+                    for e in scheduler.event_log.replay():
+                        fresh_log.append({
+                            "ts": e.ts, "type": e.type, "who": e.who,
+                            "loc": e.loc, "payload": e.payload,
+                        })
+                sqlite_log = scheduler.event_log
+                scheduler.event_log = fresh_log
+                world._sqlite_log = sqlite_log   # 盖戳还要用它那条连接
+
             # **在世界文件上盖个戳**:数据不在这儿了。
             # 离线命令(doctor / events export / report / 打包)是直接开这个文件的,
             # 读到的会是一张空表 —— 报"0 条事件",然后一切照跑。盖了戳它们就当场
             # 停下并说清去哪儿看,而不是给一个错的答案。
             from anima_world.db import stamp_storage
 
-            if scheduler.event_log is not None:
-                stamp_storage(scheduler.event_log.conn, "redis", world_id)
+            if getattr(world, "_sqlite_log", None) is not None:
+                _shed_migrated_rows(world._sqlite_log.conn)
+                stamp_storage(world._sqlite_log.conn, "redis", world_id)
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
@@ -940,12 +1032,12 @@ class World:
             with scheduler._lock:
                 target = sqlite3.connect(temp_db)
                 try:
-                    scheduler.event_log.conn.backup(target)
+                    scheduler.conn.backup(target)
                     target.execute("DELETE FROM config WHERE is_secret=1")
                     target.commit()
                 finally:
                     target.close()
-                genesis_row = scheduler.event_log.conn.execute(
+                genesis_row = scheduler.conn.execute(
                     "SELECT value FROM db_meta WHERE key='world_seed'"
                 ).fetchone()
             if seed_path is not None:
@@ -1173,10 +1265,9 @@ class World:
         """social-v5:小团体(friendship 连通分量,日切重算的派生缓存)。"""
         if self.scheduler.event_log is None:
             return []
-        from anima_world.cliques import load_cliques
 
         with self.scheduler._lock:
-            return load_cliques(self.scheduler.event_log.conn)
+            return self.scheduler.clique_store.load()
 
     def events(self, since_seq: int | None = None) -> list[dict[str, Any]]:
         """内存事件缓冲(**近期 200 条的窗口,不是历史**);全量历史用 `history()`。
@@ -2014,6 +2105,7 @@ class World:
                 self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
 
     _world_lock: Any = None
+    _sqlite_log: Any = None
 
     def _guard(self) -> Any:
         """跨进程的世界锁;没配 Redis 时是个不做事的上下文。
@@ -2335,7 +2427,7 @@ class World:
         if self.scheduler.event_log is None:
             return []
         with self.scheduler._lock:
-            rows = self.scheduler.event_log.conn.execute(
+            rows = self.scheduler.conn.execute(
                 "SELECT s.item_id, d.name, d.kind, s.price, s.quantity FROM shop_stock s"
                 " JOIN item_defs d ON d.id = s.item_id WHERE s.location_id = ?"
                 " ORDER BY s.item_id",
@@ -2384,7 +2476,7 @@ class World:
         if player is None:
             raise KeyError(f"player {player_id} not present")
         with self.scheduler._lock:
-            conn = self.scheduler.event_log.conn
+            conn = self.scheduler.conn
             row = conn.execute(
                 "SELECT price, quantity FROM shop_stock WHERE location_id = ? AND item_id = ?",
                 (location_id, item_id),

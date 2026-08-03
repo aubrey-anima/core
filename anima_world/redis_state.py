@@ -1143,3 +1143,216 @@ class RedisChatStateStore(_ChatStateStore):
 
     def clear_override(self, agent_id: str, player_id: str, kind: str) -> bool:
         return bool(self._overrides.drop(f"{agent_id}\x00{player_id}\x00{kind}"))
+
+
+class RedisKnowledgeGraph:
+    """关系图的边。`(subject, predicate, object)` 唯一 —— **重复写不覆盖**
+    (SQLite 那边是 `INSERT OR IGNORE`),所以第一次记下的 `source_event_seq`
+    与 `created_at` 说了算:一条边的出处是它第一次被证实的那一刻。"""
+
+    __slots__ = ("_rows", "_redis", "_world")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:edges")
+        self._redis = redis
+        self._world = world_id
+
+    def add(self, subject: str, predicate: str, object: str,  # noqa: A002 - 对齐既有签名
+            source_event_seq: int | None = None, created_at: int = 0) -> None:
+        field = f"{subject}\x00{predicate}\x00{object}"
+        if self._rows.get(field) is not None:
+            return                      # INSERT OR IGNORE:先到的那条说了算
+        self._rows.put(field, {
+            "id": int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:edges:id")),
+            "subject": subject, "predicate": predicate, "object": object,
+            "source_event_seq": source_event_seq, "created_at": int(created_at),
+        })
+
+    def query(self, subject: str | None = None, predicate: str | None = None,
+              object: str | None = None) -> list[dict[str, Any]]:  # noqa: A002
+        rows = [
+            r for r in self._rows.all().values()
+            if (subject is None or r["subject"] == subject)
+            and (predicate is None or r["predicate"] == predicate)
+            and (object is None or r["object"] == object)
+        ]
+        rows.sort(key=lambda r: int(r.get("id") or 0))
+        return rows
+
+    def query_by_event(self, event_seq: int) -> list[dict[str, Any]]:
+        rows = [
+            r for r in self._rows.all().values()
+            if r.get("source_event_seq") == event_seq
+        ]
+        rows.sort(key=lambda r: int(r.get("id") or 0))
+        return rows
+
+
+class RedisNeedsStore:
+    """她的身体。**结算曲线不重写** —— 那是世界的规则,只换存储。"""
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:needs")
+
+    def load(self, agent_id: str) -> dict[str, float]:
+        from anima_world.needs import NEEDS
+
+        row = self._rows.get(agent_id) or {}
+        values = {k: float(v) for k, v in row.items() if k in NEEDS}
+        for need in NEEDS:
+            values.setdefault(need, 1.0)      # 没记过就是满的,和 SQLite 版一样
+        return values
+
+    def persist(self, agent_id: str, values: dict[str, Any], tick: int) -> None:
+        from anima_world.needs import NEEDS
+
+        row = self._rows.get(agent_id) or {}
+        row.update({need: float(values.get(need, 1.0)) for need in NEEDS})
+        row["updated_tick"] = int(tick)
+        self._rows.put(agent_id, row)
+
+
+class RedisCliqueStore:
+    """小团体。派生缓存,写是**全量重写** —— 重算即真相。"""
+
+    __slots__ = ("_redis", "_key")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._redis = redis
+        self._key = f"{KEY_PREFIX}:{world_id}:cliques"
+
+    def store(self, groups: list[list[str]], tick: int) -> None:
+        pipe = self._redis.pipeline()
+        pipe.delete(self._key)
+        for index, members in enumerate(groups, start=1):
+            pipe.rpush(self._key, _dumps({
+                "id": index, "member_ids": list(members), "computed_tick": int(tick),
+            }))
+        pipe.execute()
+
+    def load(self) -> list[dict[str, Any]]:
+        return [_loads(x) for x in (self._redis.lrange(self._key, 0, -1) or [])]
+
+
+class RedisReflectionStore:
+    """反思水位。当前值,不是历史 —— 反思本身是 `memory_seed` 事件,重放能重建。"""
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:reflection")
+
+    def get(self, agent_id: str) -> float:
+        row = self._rows.get(agent_id) or {}
+        return float(row.get("accumulated") or 0.0)
+
+    def set(self, agent_id: str, value: float) -> None:
+        row = self._rows.get(agent_id) or {}
+        row["accumulated"] = float(value)
+        self._rows.put(agent_id, row)
+
+    def add(self, agent_id: str, amount: float) -> float:
+        fresh = self.get(agent_id) + float(amount)
+        self.set(agent_id, fresh)
+        return fresh
+
+    def reset(self, agent_id: str, tick: int) -> None:
+        self._rows.put(agent_id, {"accumulated": 0.0, "last_reflection_tick": int(tick)})
+
+
+class RedisEconomyStore:
+    """货架与物品。**价格漂移曲线不重写** —— 那是世界的规则,不是存储。
+
+    `daily_price_pass` 的算法留在 `economy.drift_price` 里,这里只负责把货架读出来、
+    算完写回去。两份漂移曲线的后果是两个后端的物价慢慢分家,而两边都跑得动。
+    """
+
+    __slots__ = ("_items", "_shelves")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._items = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:item_defs")
+        self._shelves = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:shop_stock")
+
+    @staticmethod
+    def _shelf_field(location_id: str, item_id: str) -> str:
+        return f"{location_id}\x00{item_id}"
+
+    def put_item(self, item_id: str, name: str, kind: str,
+                 base_price: float, restores: Any = None) -> None:
+        self._items.put(item_id, {
+            "id": item_id, "name": name, "kind": kind,
+            "base_price": float(base_price), "restores": restores,
+        })
+
+    def put_shelf(self, location_id: str, item_id: str,
+                  quantity: int, price: float) -> None:
+        self._shelves.put(self._shelf_field(location_id, item_id), {
+            "location_id": location_id, "item_id": item_id,
+            "quantity": int(quantity), "price": float(price),
+        })
+
+    def items(self) -> list[dict[str, Any]]:
+        return sorted(self._items.all().values(), key=lambda r: str(r.get("id") or ""))
+
+    def shelves(self) -> list[dict[str, Any]]:
+        return sorted(
+            self._shelves.all().values(),
+            key=lambda r: (str(r.get("location_id") or ""), str(r.get("item_id") or "")),
+        )
+
+    def cheapest_meal(self, location_id: str) -> dict[str, Any] | None:
+        by_id = {str(r["id"]): r for r in self._items.all().values()}
+        candidates = [
+            {"item_id": r["item_id"], "price": float(r["price"]),
+             "quantity": int(r["quantity"]), "name": by_id.get(str(r["item_id"]), {}).get("name")}
+            for r in self._shelves.all().values()
+            if r.get("location_id") == location_id and int(r.get("quantity") or 0) > 0
+            and by_id.get(str(r["item_id"]), {}).get("kind") == "consumable"
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda c: (c["price"], str(c["item_id"])))
+
+    def take_stock(self, location_id: str, item_id: str, qty: int = 1) -> bool:
+        field = self._shelf_field(location_id, item_id)
+        row = self._shelves.get(field)
+        if row is None or int(row.get("quantity") or 0) < int(qty):
+            return False
+        row["quantity"] = int(row["quantity"]) - int(qty)
+        self._shelves.put(field, row)
+        return True
+
+    def daily_price_pass(self, sales: dict[tuple[str, str], int]) -> None:
+        """日切:**补货 + 漂价**,不是只漂价。
+
+        我第一版只写了漂价,而且 `restocked` 传了 0、价格没四舍五入 —— 三处都错。
+        互验当场抓到:两个后端的货架数量和价格全都对不上。这正是"照直觉写"的代价,
+        而 `daily_price_pass` 这个名字本身也在误导(它其实是"日切")。
+        """
+        from anima_world.economy import MAX_STOCK, RESTOCK_PER_DAY, drift_price
+
+        by_id = {str(r["id"]): r for r in self._items.all().values()}
+        for field, row in self._shelves.all().items():
+            base = float(by_id.get(str(row["item_id"]), {}).get("base_price") or row["price"])
+            sold = int(sales.get((row["location_id"], row["item_id"]), 0))
+            row["quantity"] = min(MAX_STOCK, int(row["quantity"]) + RESTOCK_PER_DAY)
+            row["price"] = round(
+                drift_price(base, float(row["price"]), sold, RESTOCK_PER_DAY), 2
+            )
+            self._shelves.put(field, row)
+
+    def seed_defaults(self) -> None:
+        """创世播默认货架。**已有货架就不动** —— 和别的 seed_* 同一条规矩。"""
+        if self._items.all():
+            return
+        from anima_world.economy import DEFAULT_ITEMS, DEFAULT_STOCK
+
+        prices: dict[str, float] = {}
+        for item_id, name, kind, base_price, restores in DEFAULT_ITEMS:
+            self.put_item(item_id, name, kind, base_price, restores)
+            prices[item_id] = float(base_price)
+        for location_id, item_id, quantity in DEFAULT_STOCK:
+            if item_id in prices:      # 货架上的东西必须先是个物品
+                self.put_shelf(location_id, item_id, quantity, prices[item_id])

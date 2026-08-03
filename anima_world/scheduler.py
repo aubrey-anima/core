@@ -129,6 +129,21 @@ class Scheduler:
         self.narrative_provider = narrative_provider
         self.event_log = event_log
         self.db_path = db_path
+        # **世界的数据库连接归调度器,不归事件日志。**
+        # 此前二十多处写着 `event_log.conn` —— 把事件日志当成了整个世界的连接持有者。
+        # 那在事件日志换后端(住进 Redis)的那一刻整片崩掉,而崩的地方全是别的表:
+        # 需求、经济、关系图、聊天……它们和事件日志本来毫无关系。
+        self._conn = getattr(event_log, "conn", None) if event_log is not None else None
+        # 四张小表的缝(见 `small_stores`):需求 / 小团体 / 反思水位 / 经济。
+        # 它们此前是模块级函数直接吃连接,于是"换后端"无从下手 —— 没有可替换的东西。
+        from anima_world.small_stores import (
+            CliqueStore, EconomyStore, NeedsStore, ReflectionStore,
+        )
+
+        self.needs_store = NeedsStore(self._conn) if self._conn is not None else None
+        self.clique_store = CliqueStore(self._conn) if self._conn is not None else None
+        self.reflection_store = ReflectionStore(self._conn) if self._conn is not None else None
+        self.economy_store = EconomyStore(self._conn) if self._conn is not None else None
         self.narrative_history: list[str] = [] if narrative_provider else None
         # M4: memory/graph wiring is optional (mirrors narrative_provider) — a
         # bare Scheduler() behaves exactly as before. Duck-typed (`Any`) so
@@ -472,11 +487,7 @@ class Scheduler:
                 self.config_store.get("memory.reflection_threshold", default=threshold)
             )
         if agent_id not in self._reflection_watermark:
-            row = self.event_log.conn.execute(
-                "SELECT accumulated_importance FROM reflection_state WHERE agent_id = ?",
-                (agent_id,),
-            ).fetchone()
-            self._reflection_watermark[agent_id] = float(row[0]) if row else 0.0
+            self._reflection_watermark[agent_id] = self.reflection_store.get(agent_id)
         total = self._reflection_watermark[agent_id] + max(0.0, importance)
         if total < threshold:
             self._reflection_watermark[agent_id] = total
@@ -484,14 +495,7 @@ class Scheduler:
             return
         self._reflection_watermark[agent_id] = 0.0
         self._reflection_dirty.discard(agent_id)
-        conn = self.event_log.conn
-        conn.execute(
-            "INSERT INTO reflection_state (agent_id, accumulated_importance, last_reflection_tick)"
-            " VALUES (?, 0, ?) ON CONFLICT(agent_id) DO UPDATE SET"
-            " accumulated_importance = 0, last_reflection_tick = excluded.last_reflection_tick",
-            (agent_id, self.clock),
-        )
-        conn.commit()
+        self.reflection_store.reset(agent_id, self.clock)
         self._submit_reflection(agent_id)
 
     def catch_up_projection(self) -> int:
@@ -512,6 +516,12 @@ class Scheduler:
         project_events(fresh, base=self._memory_projection)
         self._projection_seq = max(int(e.seq or 0) for e in fresh)
         return len(fresh)
+
+    @property
+    def conn(self) -> Any:
+        """这个世界的 SQLite 连接(还没搬走的那些表用它)。**别再走 `event_log.conn`**
+        —— 事件日志可能根本不在 SQLite 上。"""
+        return self._conn
 
     def _clock_box(self) -> Any:
         """时钟那个盒子,没有就现造一个。
@@ -554,7 +564,7 @@ class Scheduler:
         if self.event_log is None:
             return
         try:
-            conn = self.event_log.conn
+            conn = self.conn
             conn.execute(
                 "INSERT INTO db_meta (key, value) VALUES ('clock', ?)"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -584,10 +594,10 @@ class Scheduler:
             return
         try:
             with self._lock:
-                self.event_log.conn.execute(
+                self.conn.execute(
                     "DELETE FROM db_meta WHERE key IN ('owner_pid', 'owner_host')"
                 )
-                self.event_log.conn.commit()
+                self.conn.commit()
         except Exception:  # noqa: BLE001 - 撤不掉标记不该拦住关停
             logger.warning("could not release the world ownership marker", exc_info=True)
 
@@ -596,12 +606,12 @@ class Scheduler:
             return
         try:
             with self._lock:
-                self.event_log.conn.execute(
+                self.conn.execute(
                     "INSERT INTO db_meta (key, value) VALUES (?, ?)"
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (key, value),
                 )
-                self.event_log.conn.commit()
+                self.conn.commit()
         except Exception:  # noqa: BLE001 - 一个提示标记永远不该是致命的
             logger.warning("could not write db_meta %r", key, exc_info=True)
 
@@ -615,7 +625,7 @@ class Scheduler:
         if self.event_log is None:
             return
         try:
-            row = self.event_log.conn.execute(
+            row = self.conn.execute(
                 "SELECT value FROM db_meta WHERE key = 'clock'"
             ).fetchone()
         except Exception:  # noqa: BLE001 - fall back to the event-derived clock
@@ -633,15 +643,10 @@ class Scheduler:
         if self.event_log is None or not self._reflection_dirty:
             return
         try:
-            conn = self.event_log.conn
             for agent_id in self._reflection_dirty:
-                conn.execute(
-                    "INSERT INTO reflection_state (agent_id, accumulated_importance)"
-                    " VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET"
-                    " accumulated_importance = excluded.accumulated_importance",
-                    (agent_id, float(self._reflection_watermark.get(agent_id, 0.0))),
+                self.reflection_store.set(
+                    agent_id, float(self._reflection_watermark.get(agent_id, 0.0))
                 )
-            conn.commit()
             self._reflection_dirty.clear()
         except Exception:  # noqa: BLE001 - a watermark checkpoint is never fatal
             logger.warning("reflection watermark checkpoint failed", exc_info=True)
@@ -998,7 +1003,7 @@ class Scheduler:
 
             try:
                 groups = cliques_mod.compute_cliques(self.knowledge_graph.query())
-                cliques_mod.store_cliques(self.event_log.conn, groups, now_tick)
+                self.clique_store.store(groups, now_tick)
             except Exception:  # noqa: BLE001 - a derived cache must not stop the day
                 logger.warning("clique recompute failed", exc_info=True)
 
@@ -1019,13 +1024,13 @@ class Scheduler:
         loc = agent.blackboard.read("loc") or agent.location
         if not loc:
             return
-        meal = economy.cheapest_meal(self.event_log.conn, loc)
+        meal = self.economy_store.cheapest_meal(loc)
         if meal is None:
             return
         balance = self._memory_projection.balances.get(agent.id, 0.0)
         if balance < meal["price"]:
             return
-        if not economy.take_stock(self.event_log.conn, loc, meal["item_id"]):
+        if not self.economy_store.take_stock(loc, meal["item_id"]):
             return
         self._shop_sales[(loc, meal["item_id"])] = (
             self._shop_sales.get((loc, meal["item_id"]), 0) + 1
@@ -1068,7 +1073,7 @@ class Scheduler:
                                 "worked_ticks": worked},
                 })
         try:
-            economy.daily_price_pass(self.event_log.conn, self._shop_sales)
+            self.economy_store.daily_price_pass(self._shop_sales)
         except Exception:  # noqa: BLE001 - a broken shelf must not stop the day
             logger.warning("daily price pass failed", exc_info=True)
         self._shop_sales.clear()
@@ -1160,7 +1165,7 @@ class Scheduler:
         agent_id = brain.agent.id
         if bb.read("need.energy") is None:
             values = (
-                needs_mod.load(self.event_log.conn, agent_id)
+                self.needs_store.load(agent_id)
                 if self.event_log is not None
                 else {n: 1.0 for n in needs_mod.NEEDS}
             )
@@ -1186,7 +1191,7 @@ class Scheduler:
                 continue
             values = {n: bb.read(f"need.{n}") for n in needs_mod.NEEDS}
             try:
-                needs_mod.persist(self.event_log.conn, agent_id, values, self.clock)
+                self.needs_store.persist(agent_id, values, self.clock)
             except Exception:  # noqa: BLE001 - a checkpoint is best-effort
                 logger.warning("needs persist failed for %s", agent_id, exc_info=True)
 
@@ -1279,7 +1284,7 @@ class Scheduler:
         if brain is None or not item_id:
             return
         try:
-            row = self.event_log.conn.execute(
+            row = self.conn.execute(
                 "SELECT restores FROM item_defs WHERE id = ?", (item_id,)
             ).fetchone()
         except Exception:  # noqa: BLE001 - 一顿饭不值一次崩溃

@@ -838,3 +838,184 @@ def test_the_two_chat_state_stores_answer_identically(tmp_path, redis):
         )
     finally:
         conn.close()
+
+
+# ---- 事件日志真的接上了吗 ---------------------------------------------------
+
+
+def test_a_redis_world_actually_writes_its_events_to_redis(tmp_path, redis):
+    """**这条测试是为了一个我真犯过的错。**
+
+    `RedisEventLog` 写完、跨实现互验过、在真 Redis 上跑过 —— 然后我忘了在
+    `World.open` 里接上它。于是"唯一真相"那张表继续全写进 SQLite,而我还以为它搬完了。
+    做了、测了、但没兑现,而且一切照跑 —— 正是这一整轮反复在抓的形状,我自己犯了一次。
+
+    所以不能只测那个类,要测**这个世界的事件到底落在哪儿**。
+    """
+    import sqlite3
+
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    db = str(tmp_path / "w.db")
+    w = World.open(db, force_mock_llm=True, redis=redis, world_id="ev")
+    try:
+        assert isinstance(w.scheduler.event_log, RedisEventLog), (
+            "世界跑在 Redis 上,事件日志却还是 SQLite 的 —— 写了没接"
+        )
+        before_sqlite = sqlite3.connect(db).execute(
+            "SELECT count(*) FROM events"
+        ).fetchone()[0]
+        before_redis = int(redis.llen(events_key("ev")) or 0)
+        assert before_redis >= before_sqlite, "已有历史没带过去,重放会重建出另一个世界"
+
+        w.tick(288)
+
+        after_sqlite = sqlite3.connect(db).execute(
+            "SELECT count(*) FROM events"
+        ).fetchone()[0]
+        after_redis = int(redis.llen(events_key("ev")) or 0)
+        assert after_redis > before_redis, "跑了一天,Redis 里一条新事件都没有"
+        assert after_sqlite == before_sqlite, (
+            f"跑起来之后还在往 SQLite 写事件({before_sqlite} → {after_sqlite})"
+        )
+    finally:
+        w.close()
+
+
+# ---- 最后六张表 -------------------------------------------------------------
+
+
+def test_the_two_knowledge_graphs_answer_identically(tmp_path, redis):
+    """`(subject, predicate, object)` 唯一,**重复写不覆盖** —— 一条边的出处是它
+    第一次被证实的那一刻。覆盖的话,`query_by_event` 会把边挂到错的事件上。"""
+    from anima_world.db import open_db
+    from anima_world.graph import KnowledgeGraph
+    from anima_world.redis_state import RedisKnowledgeGraph
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = KnowledgeGraph(conn), RedisKnowledgeGraph(redis, "kg")
+        for store in (a, b):
+            store.add("夏", "knows", "柔", source_event_seq=3, created_at=1)
+            store.add("夏", "knows", "遥", source_event_seq=4, created_at=2)
+            store.add("柔", "dislikes", "遥", source_event_seq=5, created_at=3)
+            store.add("夏", "knows", "柔", source_event_seq=99, created_at=99)  # 重复
+
+        def shape(rows):
+            return [(r["subject"], r["predicate"], r["object"], r["source_event_seq"])
+                    for r in rows]
+
+        assert shape(a.query()) == shape(b.query())
+        assert shape(a.query(subject="夏")) == shape(b.query(subject="夏"))
+        assert shape(a.query(predicate="knows")) == shape(b.query(predicate="knows"))
+        assert shape(a.query(object="遥")) == shape(b.query(object="遥"))
+        assert shape(a.query_by_event(3)) == shape(b.query_by_event(3))
+        assert shape(a.query_by_event(99)) == shape(b.query_by_event(99)) == [], (
+            "重复那条把出处覆盖了 —— 边会挂到错的事件上"
+        )
+    finally:
+        conn.close()
+
+
+def test_the_two_needs_stores_answer_identically(tmp_path, redis):
+    """没记过就是满的 —— 那条默认值不能丢,否则新角色一出生就在饿。"""
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisNeedsStore
+    from anima_world.small_stores import NeedsStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = NeedsStore(conn), RedisNeedsStore(redis, "nd")
+        assert a.load("没记过的人") == b.load("没记过的人")
+        assert all(v == 1.0 for v in a.load("没记过的人").values())
+        for store in (a, b):
+            store.persist("夏", {"hunger": 0.3, "energy": 0.8}, 42)
+        assert a.load("夏") == b.load("夏")
+    finally:
+        conn.close()
+
+
+def test_the_two_clique_stores_answer_identically(tmp_path, redis):
+    """派生缓存,写是全量重写 —— 上一轮的小团体不许留在这一轮里。"""
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisCliqueStore
+    from anima_world.small_stores import CliqueStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = CliqueStore(conn), RedisCliqueStore(redis, "cq")
+        for store in (a, b):
+            store.store([["夏", "柔"], ["遥"]], 5)
+        assert [(r["member_ids"], r["computed_tick"]) for r in a.load()] == \
+               [(r["member_ids"], r["computed_tick"]) for r in b.load()]
+        for store in (a, b):
+            store.store([["夏", "遥"]], 9)
+        assert len(a.load()) == len(b.load()) == 1, "全量重写没生效,旧的小团体留下了"
+    finally:
+        conn.close()
+
+
+def test_the_two_reflection_stores_answer_identically(tmp_path, redis):
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisReflectionStore
+    from anima_world.small_stores import ReflectionStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = ReflectionStore(conn), RedisReflectionStore(redis, "rf")
+        assert a.get("没记过") == b.get("没记过") == 0.0
+        for store in (a, b):
+            store.add("夏", 0.4)
+            store.add("夏", 0.3)
+        assert round(a.get("夏"), 6) == round(b.get("夏"), 6)
+        for store in (a, b):
+            store.set("柔", 1.25)
+            store.reset("夏", 9)
+        assert a.get("夏") == b.get("夏") == 0.0
+        assert a.get("柔") == b.get("柔") == 1.25
+    finally:
+        conn.close()
+
+
+def test_the_two_economy_stores_answer_identically(tmp_path, redis):
+    """**价格漂移曲线不许有第二份** —— 两份曲线的后果是两个后端的物价慢慢分家,
+    而两边都跑得动。所以 Redis 版复用 `economy.drift_price`。"""
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisEconomyStore
+    from anima_world.small_stores import EconomyStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = EconomyStore(conn), RedisEconomyStore(redis, "ec")
+        for store in (a, b):
+            store.seed_defaults()
+
+        def shape_items(rows):
+            return [(r["id"], r["name"], r["kind"], r["base_price"]) for r in rows]
+
+        def shape_shelves(rows):
+            return [(r["location_id"], r["item_id"], r["quantity"], round(r["price"], 6))
+                    for r in rows]
+
+        assert shape_items(a.items()) == shape_items(b.items())
+        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
+        assert a.cheapest_meal("cafe") == b.cheapest_meal("cafe")
+        assert a.cheapest_meal("没这地方") == b.cheapest_meal("没这地方") is None
+
+        for store in (a, b):
+            assert store.take_stock("cafe", "coffee") is True
+            assert store.take_stock("cafe", "coffee", 9999) is False
+            assert store.take_stock("cafe", "没这东西") is False
+        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
+
+        for store in (a, b):
+            store.daily_price_pass({("cafe", "coffee"): 9})
+        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves()), (
+            "两个后端的物价分家了 —— 漂移曲线有两份"
+        )
+        # 再播一次不该覆盖已有货架
+        for store in (a, b):
+            store.seed_defaults()
+        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
+    finally:
+        conn.close()

@@ -116,3 +116,37 @@ def test_packaging_refuses_to_ship_an_empty_shell(world_on_redis, tmp_path):
     assert done.returncode != 0
     assert not out.exists(), "空壳包已经产出来了 —— 它会被发出去"
     assert "redis" in (done.stdout + done.stderr)
+
+
+def test_the_file_becomes_an_honest_shell(world_on_redis):
+    """**搬家一直是复制,不是移动。**
+
+    不清的话那个 `.db` 既不是完整的世界,也不是干净的空壳,而是**一份过时的副本** ——
+    而我们刚在它上面盖了"这里没数据"的戳。那个组合最危险:戳没撒谎(数据确实以
+    Redis 为准),但文件里躺着一份看起来很像真世界的旧数据,谁手滑读一下都会读出
+    一个几小时前的世界。
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(world_on_redis)
+    try:
+        names = [
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        with_rows = {
+            name: conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
+            for name in names
+        }
+        leftover = {n: c for n, c in with_rows.items() if c}
+    finally:
+        conn.close()
+
+    # `db_meta` 留着(戳就在那儿);`config` 有意不搬(按 DB-SPLIT.md 它该搬**出**世界)
+    assert set(leftover) <= {"db_meta", "config"}, (
+        f"这些表还留着过时的副本:{sorted(set(leftover) - {'db_meta', 'config'})}"
+    )
+    assert with_rows.get("events") == 0, "事件的旧副本还在 —— 手滑读一下就是另一个世界"
+    assert with_rows.get("memories") == 0
+    assert "db_meta" in leftover, "戳被一起清掉了"
