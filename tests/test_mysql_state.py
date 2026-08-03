@@ -448,3 +448,50 @@ def test_a_crash_between_the_two_backends_does_not_strand_her(tmp_path, mysql, r
             other.close()
     finally:
         world.close()
+
+
+def test_redis_keeps_no_stale_copy_of_what_mysql_owns(tmp_path, mysql, redis):
+    """**两份真相里有一份不会更新,是这个仓库最怕的坏法。**
+
+    搬家分两步:先整个搬进 Redis,再把无限增长的那几样接到 MySQL。第二步只换掉
+    store 对象 —— 第一步写进 Redis 的那份**留在原地,而且冻在创世那一刻**。
+
+    引擎自己不读它(store 已经是 MySQL 版了),所以全量测试一片绿。但 Redis 的全部
+    意义是"另一个只有 Redis 连接的进程读得到这个世界" —— 那个进程读到的会是一个
+    从创世起什么都没发生过的世界。实测过:MySQL 289 条事件,Redis 那份停在 50 条。
+
+    两条一起验:MySQL 接手的表不往 Redis 搬,而且**上一次只用 Redis 时留下的那份
+    要删掉**(一个世界可能先只用 Redis 跑过,后来才接上 MySQL)。
+    """
+    from anima_world.api import World
+    from anima_world.mysql_state import GROWS_FOREVER, ensure_schema
+    from anima_world.redis_state import KEY_PREFIX
+
+    conn, prefix = mysql
+    ensure_schema(conn, prefix)
+    db = str(tmp_path / "w.db")
+
+    # 先只用 Redis 跑一段 —— 于是 Redis 里真的有一份 events / memories
+    redis_only = World.open(db, force_mock_llm=True, redis=redis, world_id="stale")
+    try:
+        redis_only.tick(288)
+        assert redis.llen(f"{KEY_PREFIX}:stale:events") > 0, "这条测试的前提没建立起来"
+    finally:
+        redis_only.close()
+
+    # 再接上 MySQL
+    world = World.open(db, force_mock_llm=True, redis=redis, mysql=conn, world_id="stale")
+    try:
+        world.tick(288)
+        assert world.scheduler.event_log.count() > 0
+
+        leftovers = [
+            key for key in redis.keys(f"{KEY_PREFIX}:stale:*")
+            if key.rsplit(":", 1)[-1].split(":")[0] in GROWS_FOREVER
+        ]
+        assert not leftovers, (
+            f"Redis 里躺着 MySQL 才有权威的那几样:{leftovers} —— "
+            f"只有 Redis 连接的进程会读到一个冻住的世界"
+        )
+    finally:
+        world.close()

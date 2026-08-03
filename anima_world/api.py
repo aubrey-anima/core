@@ -618,6 +618,41 @@ _MIGRATED_TABLES = (
 )
 
 
+def _goes_to_mysql(table: str, mysql: Any) -> bool:
+    """这张表会不会被 MySQL 接手 —— **接手的话就别往 Redis 搬。**
+
+    搬进去再被换掉,留下的是一份**冻在创世的旧拷贝**:引擎自己不读它(store 已经
+    换成 MySQL 版),但 Redis 的全部意义是"另一个只有 Redis 连接的进程读得到这个
+    世界" —— 那个进程读到的会是一个从创世起什么都没发生过的世界。实测:MySQL 289
+    条事件,Redis 那份停在 50 条,而且永远不再长。
+
+    两份真相里有一份不会更新,是这个仓库最怕的坏法:两边都读得出来,只是一边是错的。
+    """
+    from anima_world.mysql_state import GROWS_FOREVER
+
+    return mysql is not None and table in GROWS_FOREVER
+
+
+def _drop_stale_redis_copies(redis: Any, world_id: str) -> list[str]:
+    """删掉上一次"只有 Redis"时留下的那份拷贝。
+
+    一个世界可能先只用 Redis 跑过,后来才接上 MySQL —— 那时 Redis 里已经有
+    events / memories 了。不删的话它会一直躺在那儿冒充这个世界的历史。
+    删之前 MySQL 那边已经从 SQLite 补齐了全量,所以这不是丢数据。
+    """
+    from anima_world.redis_state import KEY_PREFIX, events_key
+
+    doomed = [
+        events_key(world_id),
+        f"{KEY_PREFIX}:{world_id}:memories",
+        f"{KEY_PREFIX}:{world_id}:memories:id",
+    ]
+    dropped = [key for key in doomed if redis.delete(key)]
+    if dropped:
+        logger.info("删掉 Redis 里冻住的旧拷贝(这些表归 MySQL 了):%s", dropped)
+    return dropped
+
+
 def _rebind_chat_store(world: Any, store: Any) -> None:
     """把转录存储换掉,**并且换掉每一个攥着旧引用的人**。
 
@@ -846,7 +881,7 @@ class World:
             # 记忆 / 提示词模板 / 可见性声明。三样都**先把已有内容搬过去** ——
             # 创世播下的记忆、内置的十几个模板、种子里的可见性声明,不带过去
             # 世界会从一张白纸重开。
-            if scheduler.memory_store is not None:
+            if scheduler.memory_store is not None and not _goes_to_mysql("memories", mysql):
                 fresh_mem = RedisMemoryStore(redis, world_id, scheduler.config_store)
                 for aid in scheduler.agents:
                     for row in scheduler.memory_store.query(aid):
@@ -990,7 +1025,7 @@ class World:
             # **事件日志 —— 唯一真相那张表。** 放在最后搬:上面那些 store 的搬家
             # 都不发事件,而一旦换成 Redis 版,之后的每一条都进 Redis。
             # 已有的历史要带过去,否则重放会重建出一个从头开始的世界。
-            if scheduler.event_log is not None:
+            if scheduler.event_log is not None and not _goes_to_mysql("events", mysql):
                 fresh_log = RedisEventLog(redis, events_key(world_id))
                 if not fresh_log.max_seq():
                     for e in scheduler.event_log.replay():
@@ -1027,6 +1062,8 @@ class World:
 
                 prefix = f"{world_id}_"
                 ensure_schema(mysql, prefix)
+                if redis is not None:
+                    _drop_stale_redis_copies(redis, world_id)
 
                 fresh_log = MySQLEventLog(mysql, prefix)
                 if not fresh_log.max_seq():

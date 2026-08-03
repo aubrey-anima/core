@@ -741,6 +741,39 @@ from anima_world.api import World
 | `world.intent(agent_id)` | 她此刻还打算做的事(队首是下一步) |
 | `world.verbs(agent_id="*", surface=None)` | 她能做什么 —— `act()` 的配套目录,逐条带 `id` / `kind` / `description` / `params` / `surfaces`。给了能力却不给目录等于没给 |
 
+#### Redis 里到底有什么(键前缀 `anima:<world_id>:`)
+
+一个三人世界、开关全开,实测 18 类键。**每一样都有界** —— 这不是巧合,是判据:
+进得了提示词的必须有界(见上)。
+
+| 键 | 类型 | 装什么 | 界在哪 |
+|---|---|---|---|
+| `agent:<角色>` × N | hash | **黑板**:她在哪 / 在干嘛 / 饿不饿 / 性格 / 打算做什么 | 每人 16–17 个键 |
+| `clock` | string | 世界时钟 —— **只能有一个答案** | 1 |
+| `doing` | hash | 每个人此刻的动作 | 角色数 |
+| `transit` | hash | 谁在路上(起点 / 终点 / 到达 tick) | 角色数 |
+| `plans` / `intent` | hash | 空闲规划的步骤 / 她自己刚决定要走的几步 | 角色数 |
+| `needs` | hash | energy / hunger / social 的水位 | 角色数 |
+| `bt_nodes` / `bt_actions` | hash | 行为树的结构与叶子动作 | 创世后基本不动 |
+| `locations` | hash | 地图 | 地点数 |
+| `item_defs` / `shop_stock` | hash | 物品定义 / 货架 | 物品数 |
+| `stock:<实体>` / `stock_owners` / `stock_places` | hash·set | **世界的量**(树高 / 季节 …)+ 谁有量 / 量在哪 | 有量的实体数 |
+| `prompts` | hash | 提示词模板 | 模板数(31) |
+| `visibility` | hash | 感知声明 —— 哪些量她看得见 | 量的种类数 |
+| `reflection` | hash | 反思水位线 | 角色数 |
+| `kg` | hash | 关系边 | **2×N²**(谓词是闭集) |
+| `stance` / `mutes` / `refused_topics` / `followups` / `overrides` | hash | 她对谁什么姿态 / 静音了谁 / 拒谈什么 / 到点回来敲门 / 玩家教的规则 | 角色×对方 |
+| `cliques` | hash | 小团体 | 角色数 |
+| `lock` | string | 跨进程的世界锁 | 1 |
+
+⚠️ **给了 `mysql=` 之后,`events` / `memories` 这两个键不该存在**。它们曾经存在过:
+搬家先整个搬进 Redis、再把这几样接到 MySQL,而第二步只换 store 对象 —— 第一步写进
+Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那份停在 50 条,再跑
+五天还是 50)。引擎自己不读它,所以全量测试一片绿;但**只有 Redis 连接的那个进程会
+读到一个什么都没发生过的世界**。现在既不搬也会清掉旧的,`tests/test_mysql_state.py`
+验的是末态。
+
+
 `act()` 是"现在做这一件事",`intend()` 是"接下来这几步"。区别不是语法糖:一个 LLM
 驱动的进程**不该一步一次网络往返地编排走路** —— 那又贵又编得烂。**队列空的世界行为
 逐字不变**(意图节点此时 FAILURE),所以这一层是纯加法。
