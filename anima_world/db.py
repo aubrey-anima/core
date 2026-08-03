@@ -417,6 +417,55 @@ def _check_and_stamp_format(conn: sqlite3.Connection) -> None:
         )
 
 
+# 世界的数据到底住在哪儿。**这个戳存在的唯一理由是不许离线命令撒谎。**
+#
+# 世界可以跑在 Redis 上(`World.open(redis=…)`),那时候这个 SQLite 文件只是个空壳:
+# 事件、记忆、量全在 Redis 里。而 `doctor` / `events export` / `report` / 打包这些
+# 命令是**离线看文件**的 —— 它们会读到一张空表,报"0 条事件",然后一切照跑。
+#
+# 那正是这个仓库最怕的那类坏,所以世界一旦搬去 Redis 就在这儿盖个戳,离线命令读到
+# 它就**当场拒绝并说清去哪儿看**,而不是给一个错的答案。
+STORAGE_KEY = "storage_backend"
+STORAGE_WORLD_KEY = "storage_world_id"
+
+
+def stamp_storage(conn: sqlite3.Connection, backend: str, world_id: str) -> None:
+    """记下"这个世界的数据不在这个文件里"。"""
+    conn.executemany(
+        "INSERT INTO db_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [(STORAGE_KEY, backend), (STORAGE_WORLD_KEY, world_id)],
+    )
+    conn.commit()
+
+
+def read_storage(conn: sqlite3.Connection) -> tuple[str, str] | None:
+    """`(后端, world_id)`;没盖过戳就是 None(数据就在这个文件里)。"""
+    try:
+        rows = dict(conn.execute("SELECT key, value FROM db_meta").fetchall())
+    except sqlite3.Error:
+        return None
+    backend = rows.get(STORAGE_KEY)
+    if not backend or backend == "sqlite":
+        return None
+    return (str(backend), str(rows.get(STORAGE_WORLD_KEY) or ""))
+
+
+def offline_refusal(conn: sqlite3.Connection) -> str | None:
+    """离线命令该不该拒绝,以及拒绝时对人说的那句话。"""
+    where = read_storage(conn)
+    if where is None:
+        return None
+    backend, world_id = where
+    return (
+        f"这个世界的数据在 {backend} 里(world_id={world_id!r}),不在这个文件里 —— "
+        f"这个 .db 只是个空壳。离线命令读它只会得到一个空世界,所以这里当场停下,"
+        f"而不是给你一个错的答案。\n"
+        f"      要看这个世界,连上那个 {backend} 起一个进程:"
+        f"World.open(db_path, redis=…, world_id={world_id!r})"
+    )
+
+
 def read_schema_revision(conn: sqlite3.Connection) -> int:
     """这个库的加法修订号。没有戳 = 1.2.x 或更早写的,读作 1。"""
     try:

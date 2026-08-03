@@ -486,6 +486,14 @@ def _snapshot_database(source_path: Path, target_path: Path) -> None:
     source = sqlite3.connect(f"file:{source_path.resolve()}?mode=ro", uri=True, timeout=30)
     target = sqlite3.connect(target_path)
     try:
+        # **打包一个空壳比打包失败坏得多。** 世界跑在别的后端上时(Redis),这个文件
+        # 里只有 schema 没有数据 —— `backup()` 会照样成功,产出一个能装能开、但里面
+        # 什么都没有的 .cyberworld,而它会被发给别人。当场拒。
+        from anima_world.db import offline_refusal
+
+        refusal = offline_refusal(source)
+        if refusal is not None:
+            raise PackageValidationError(f"打不成包:{refusal}")
         source.backup(target)
         has_config = target.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='config'"

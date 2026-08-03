@@ -22,6 +22,7 @@ from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequen
 from anima_world.config_store import ConfigStore, load_or_create_key
 from anima_world.config_store import seed_defaults as seed_config_defaults
 from anima_world.db import (
+    offline_refusal,
     DB_FORMAT_VERSION,
     MIN_SUPPORTED_DB_FORMAT,
     SCHEMA_REVISION,
@@ -2456,6 +2457,10 @@ def run_events(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        refusal = offline_refusal(conn)
+        if refusal is not None:
+            print(f"[events] {refusal}", file=sys.stderr)
+            return 2
         try:
             rows = conn.execute(
                 "SELECT seq, ts, type, who, loc, payload FROM events ORDER BY seq ASC"
@@ -2530,6 +2535,10 @@ def run_report(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        refusal = offline_refusal(conn)
+        if refusal is not None:
+            print(f"[report] {refusal}", file=sys.stderr)
+            return 2
         try:
             rows = conn.execute(
                 "SELECT seq, ts, type, who, loc, payload FROM events ORDER BY seq ASC"
@@ -2783,6 +2792,10 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"  {onboarding.green(onboarding.OK)} schema 修订 {revision}"
                   f"(本引擎写到 {SCHEMA_REVISION})")
 
+        refusal = offline_refusal(conn)
+        if refusal is not None:
+            print(f"  {onboarding.red(onboarding.BAD)} {refusal}")
+            return 1
         events, = conn.execute("SELECT COUNT(*) FROM events").fetchone()
         agents, = conn.execute(
             "SELECT COUNT(DISTINCT who) FROM events WHERE type='agent_join'"

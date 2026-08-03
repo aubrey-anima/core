@@ -881,6 +881,15 @@ class World:
             world.chat_state = fresh_chat
             scheduler.chat_state = fresh_chat
 
+            # **在世界文件上盖个戳**:数据不在这儿了。
+            # 离线命令(doctor / events export / report / 打包)是直接开这个文件的,
+            # 读到的会是一张空表 —— 报"0 条事件",然后一切照跑。盖了戳它们就当场
+            # 停下并说清去哪儿看,而不是给一个错的答案。
+            from anima_world.db import stamp_storage
+
+            if scheduler.event_log is not None:
+                stamp_storage(scheduler.event_log.conn, "redis", world_id)
+
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
             world._world_lock = RedisLock(redis, lock_key(world_id))
