@@ -747,3 +747,94 @@ def test_the_two_bt_stores_answer_identically(tmp_path, redis):
         assert nodes(a, "夏") == nodes(b, "夏")
     finally:
         conn.close()
+
+
+# ---- 她和某个人之间的状态 ---------------------------------------------------
+
+
+def test_the_two_chat_state_stores_answer_identically(tmp_path, redis):
+    """五张表一次比完,重点盯**时间语义** —— 那是最容易想当然搬错的地方。
+
+    - 静音用**墙钟**:玩家那侧的"五分钟"是真的五分钟,而世界时钟可能是演示速度
+      (1 tick/秒),用 tick 会让"五分钟别理我"变成不到一分钟
+    - 回头找你用 **tick**:那是世界内部的约定,和墙钟无关
+    - 过期的**读到就清**:读到的必须是此刻还成立的
+    """
+    from anima_world.chat_state import ChatStateStore
+    from anima_world.db import open_db
+    from anima_world.redis_state import RedisChatStateStore
+
+    conn = open_db(str(tmp_path / "w.db"))
+    try:
+        a, b = ChatStateStore(conn), RedisChatStateStore(redis, "cs")
+        now = 1_700_000_000
+
+        for store in (a, b):
+            store.set_stance("夏", "p1", "test", tick=5)
+            store.set_stance("夏", "p2", "avoid", declared=False, tick=6)
+            store.set_quiet("夏", "p1", kind="mute", minutes=5, reason="越界", now=now)
+            store.set_quiet("夏", "p2", kind="delay", minutes=10, now=now)
+            store.refuse_topic("夏", "彩票", now=now)
+            store.refuse_topic("夏", "前任", minutes=30, now=now)
+            store.add_followup("夏", "p1", due_tick=10, reason="等会儿说")
+            store.add_followup("柔", "p1", due_tick=5)
+            store.set_override("夏", "p1", "address_form", "叫我阿檀")
+
+        def drop_at(rows):
+            return [{k: v for k, v in r.items() if k != "updated_at"} for r in rows]
+
+        assert drop_at([a.stance("夏", "p1")]) == drop_at([b.stance("夏", "p1")])
+        assert a.stance("夏", "没这人") == b.stance("夏", "没这人") is None
+        assert drop_at(a.stances("夏")) == drop_at(b.stances("夏"))
+
+        assert a.quiet_until("夏", "p1", now=now) == b.quiet_until("夏", "p1", now=now)
+        assert a.mutes(now=now) == b.mutes(now=now)
+        assert a.mutes("夏", now=now) == b.mutes("夏", now=now)
+        # 墙钟:6 分钟后 mute 该过期,delay 还在
+        later = now + 6 * 60
+        assert a.quiet_until("夏", "p1", now=later) == b.quiet_until("夏", "p1", now=later) is None
+        assert a.mutes(now=later) == b.mutes(now=later)
+        assert len(a.mutes(now=later)) == 1, "过期清扫没生效,这条测试没在验它想验的"
+
+        assert a.refused_topics("夏", now=now) == b.refused_topics("夏", now=now)
+        assert a.topics_hit_by("夏", "彩票中了吗", now=now) == \
+               b.topics_hit_by("夏", "彩票中了吗", now=now) == ["彩票"]
+        # 31 分钟后带期限那条过期
+        gone = now + 31 * 60
+        assert a.refused_topics("夏", now=gone) == b.refused_topics("夏", now=gone)
+        assert len(a.refused_topics("夏", now=gone)) == 1
+
+        # tick,不是墙钟
+        assert a.due_followups(10) == b.due_followups(10)
+        assert a.due_followups(4) == b.due_followups(4) == []
+        assert a.pending_followups("夏") == b.pending_followups("夏")
+        for store in (a, b):
+            store.mark_followup_fired(1, 11)
+        assert a.pending_followups() == b.pending_followups()
+
+        assert drop_at(a.overrides("夏", "p1")) == drop_at(b.overrides("夏", "p1"))
+        assert a.clear_override("夏", "p1", "address_form") == \
+               b.clear_override("夏", "p1", "address_form") is True
+        assert a.clear_override("夏", "p1", "address_form") == \
+               b.clear_override("夏", "p1", "address_form") is False
+
+        for store in (a, b):
+            with pytest.raises(ValueError):
+                store.set_stance("夏", "p1", "并不存在的意图")
+            with pytest.raises(ValueError):
+                store.set_override("夏", "p1", "并不存在的规则", "x")
+            with pytest.raises(ValueError):
+                store.set_quiet("夏", "p1", kind="乱写", minutes=1)
+
+        # 放在最后,免得给上面那些计数断言塞进额外的行:同一对 (角色, 玩家) 上
+        # 同时有 mute 和 delay 时,**取最晚那条** —— 取最早的话,她会在还该沉默
+        # 的时候开口。前面那组每对只有一条,分不出最早和最晚。
+        for store in (a, b):
+            store.set_quiet("柔", "p9", kind="mute", minutes=2, now=now)
+            store.set_quiet("柔", "p9", kind="delay", minutes=20, now=now)
+        assert a.quiet_until("柔", "p9", now=now) == b.quiet_until("柔", "p9", now=now)
+        assert a.quiet_until("柔", "p9", now=now)["kind"] == "delay", (
+            "同一对上有两条时没取最晚的 —— 她会在还该沉默的时候开口"
+        )
+    finally:
+        conn.close()

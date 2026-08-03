@@ -744,7 +744,7 @@ class World:
                 agent_key, clock_key, current_action_key, decode_action,
                 encode_action, lock_key, plans_key, transit_key, RedisStockStore,
                 RedisMemoryStore, RedisPromptStore, RedisVisibilityStore,
-                RedisBTStore, RedisLocationStore,
+                RedisBTStore, RedisLocationStore, RedisChatStateStore,
             )
 
             # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
@@ -854,6 +854,32 @@ class World:
                             dict(node.get("params") or {}),
                         )
                 scheduler.bt_store = fresh_bt
+
+            # 她和某个人之间的状态:意图 / 静音 / 拒谈 / 回头找你 / 玩家教的规则。
+            # 这五样是**真世界状态**(她真的在不理你、真的拒绝谈那件事),搬。
+            fresh_chat = RedisChatStateStore(redis, world_id)
+            old_chat = world.chat_state
+            for agent_id in scheduler.agents:
+                for row in old_chat.stances(agent_id):
+                    fresh_chat.set_stance(
+                        agent_id, str(row["target"]), str(row["stance"]),
+                        declared=bool(row["declared"]), tick=int(row["updated_tick"]),
+                    )
+                for row in old_chat.refused_topics(agent_id):
+                    fresh_chat.refuse_topic(agent_id, str(row["keyword"]))
+            for row in old_chat.mutes():
+                fresh_chat.set_quiet(
+                    str(row["agent_id"]), str(row["player_id"]), kind=str(row["kind"]),
+                    minutes=max(0.0, row["seconds_left"] / 60.0), reason=row.get("reason"),
+                )
+            for row in old_chat.pending_followups():
+                fresh_chat.add_followup(
+                    str(row["agent_id"]), str(row["player_id"]),
+                    due_tick=int(row["due_tick"]), kind=str(row["kind"]),
+                    reason=row.get("reason"),
+                )
+            world.chat_state = fresh_chat
+            scheduler.chat_state = fresh_chat
 
             # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
             # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。

@@ -36,6 +36,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from anima_world.chat_state import ChatStateStore as _ChatStateStore
 from anima_world.world_store import BTStore as _BTStore
 from anima_world.world_store import LocationStore as _LocationStore
 
@@ -908,3 +909,237 @@ class RedisBTStore(_BTStore):
              "sort": int(r.get("sort") or 0), "params": dict(r.get("params") or {})}
             for r in rows
         ]
+
+
+class RedisChatStateStore(_ChatStateStore):
+    """她和某个人之间的状态:意图 / 静音 / 拒谈 / 回头找你 / 玩家教的规则。
+
+    五张表五个 hash。**`annotate_message` 与 `conversation_meta` 不覆盖** ——
+    那两个碰的是 `messages` 表,属于 `ChatStore` 的地界;而按 `docs/DB-SPLIT.md`
+    的判断,转录本来就不该在世界里。等它整个搬走时再一起处理,现在硬塞进来只会
+    让这一层多背一个不属于它的表。
+
+    时间语义原样保住,两条都不能想当然:
+
+    - **静音用墙钟,不用 tick。** 玩家那一侧的"五分钟"是真的五分钟,而世界时钟可能
+      是演示速度(1 tick/秒)。用 tick 会让"五分钟别理我"在演示速度下变成不到一分钟。
+    - **回头找你用 tick。** 那是世界内部的约定(到第几 tick 回来敲门),和墙钟无关。
+
+    过期的顺手清掉:`quiet_until` / `refused_topics` 读的时候会删掉过期行,和 SQLite
+    版一样 —— 这不是优化,是"读到的就是此刻还成立的"。
+    """
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        import threading
+
+        self._lock = threading.RLock()
+        self._stances = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:stance")
+        self._quiet = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:mutes")
+        self._topics = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:refused_topics")
+        self._followups = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:followups")
+        self._overrides = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:overrides")
+        self._redis = redis
+        self._world = world_id
+
+    # ── 关系性意图 ──────────────────────────────────────────────────────────
+
+    def stance(self, agent_id: str, target_id: str) -> dict[str, Any] | None:
+        row = self._stances.get(f"{agent_id}\x00{target_id}")
+        if row is None:
+            return None
+        return {
+            "stance": row["stance"], "declared": bool(row["declared"]),
+            "updated_tick": int(row.get("updated_tick") or 0),
+            "updated_at": int(row.get("updated_at") or 0),
+        }
+
+    def set_stance(self, agent_id: str, target_id: str, stance: str, *,
+                   declared: bool = True, tick: int = 0) -> None:
+        from anima_world import stance as stance_mod
+
+        if not stance_mod.is_stance(stance):
+            raise ValueError(f"unknown stance {stance!r}")
+        self._stances.put(f"{agent_id}\x00{target_id}", {
+            "agent_id": agent_id, "target": target_id, "stance": stance,
+            "declared": 1 if declared else 0, "updated_tick": int(tick),
+            "updated_at": self._now(),
+        })
+
+    def stances(self, agent_id: str) -> list[dict[str, Any]]:
+        rows = [r for r in self._stances.all().values() if r.get("agent_id") == agent_id]
+        rows.sort(key=lambda r: str(r.get("target") or ""))
+        return [
+            {"target": r["target"], "stance": r["stance"], "declared": bool(r["declared"]),
+             "updated_tick": int(r.get("updated_tick") or 0),
+             "updated_at": int(r.get("updated_at") or 0)}
+            for r in rows
+        ]
+
+    # ── 静音 / 等会儿再说 ───────────────────────────────────────────────────
+
+    def set_quiet(self, agent_id: str, player_id: str, *, kind: str = "mute",
+                  minutes: float, reason: str | None = None,
+                  now: int | None = None) -> int:
+        if kind not in ("mute", "delay"):
+            raise ValueError(f"unknown quiet kind {kind!r}")
+        base = self._now() if now is None else int(now)
+        expires = base + int(max(0.0, float(minutes)) * 60)
+        self._quiet.put(f"{agent_id}\x00{player_id}\x00{kind}", {
+            "agent_id": agent_id, "player_id": player_id, "kind": kind,
+            "expires_at": expires, "reason": reason, "created_at": base,
+        })
+        return expires
+
+    def _sweep_quiet(self, moment: int) -> list[dict[str, Any]]:
+        alive = []
+        for field, row in self._quiet.all().items():
+            if int(row.get("expires_at") or 0) <= moment:
+                self._quiet.drop(field)      # 过期的顺手清掉 —— 和 SQLite 版一样
+            else:
+                alive.append(row)
+        return alive
+
+    def quiet_until(self, agent_id: str, player_id: str, *,
+                    now: int | None = None) -> dict[str, Any] | None:
+        moment = self._now() if now is None else int(now)
+        mine = [
+            r for r in self._sweep_quiet(moment)
+            if r.get("agent_id") == agent_id and r.get("player_id") == player_id
+        ]
+        if not mine:
+            return None
+        row = max(mine, key=lambda r: int(r["expires_at"]))   # 最晚的那条
+        return {
+            "kind": row["kind"], "expires_at": int(row["expires_at"]),
+            "reason": row.get("reason"),
+            "seconds_left": max(0, int(row["expires_at"]) - moment),
+        }
+
+    def clear_quiet(self, agent_id: str, player_id: str, *, kind: str | None = None) -> None:
+        for field, row in self._quiet.all().items():
+            if row.get("agent_id") != agent_id or row.get("player_id") != player_id:
+                continue
+            if kind is None or row.get("kind") == kind:
+                self._quiet.drop(field)
+
+    def mutes(self, agent_id: str | None = None, *,
+              now: int | None = None) -> list[dict[str, Any]]:
+        moment = self._now() if now is None else int(now)
+        rows = [
+            r for r in self._quiet.all().values()
+            if int(r.get("expires_at") or 0) > moment
+            and (agent_id is None or r.get("agent_id") == agent_id)
+        ]
+        rows.sort(key=lambda r: int(r["expires_at"]))
+        return [
+            {"agent_id": r["agent_id"], "player_id": r["player_id"], "kind": r["kind"],
+             "expires_at": int(r["expires_at"]), "reason": r.get("reason"),
+             "seconds_left": max(0, int(r["expires_at"]) - moment)}
+            for r in rows
+        ]
+
+    # ── 拒谈的话题 ──────────────────────────────────────────────────────────
+
+    def refuse_topic(self, agent_id: str, keyword: str, *,
+                     minutes: float | None = None, now: int | None = None) -> None:
+        keyword = (keyword or "").strip()
+        if not keyword:
+            raise ValueError("keyword is required")
+        base = self._now() if now is None else int(now)
+        expires = None if minutes is None else base + int(max(0.0, float(minutes)) * 60)
+        self._topics.put(f"{agent_id}\x00{keyword}", {
+            "agent_id": agent_id, "keyword": keyword,
+            "expires_at": expires, "created_at": base,
+        })
+
+    def refused_topics(self, agent_id: str, *,
+                       now: int | None = None) -> list[dict[str, Any]]:
+        moment = self._now() if now is None else int(now)
+        rows = []
+        for field, row in self._topics.all().items():
+            expires = row.get("expires_at")
+            if expires is not None and int(expires) <= moment:
+                self._topics.drop(field)
+                continue
+            if row.get("agent_id") == agent_id:
+                rows.append(row)
+        rows.sort(key=lambda r: str(r.get("keyword") or ""))
+        return [
+            {"keyword": r["keyword"],
+             "expires_at": None if r.get("expires_at") is None else int(r["expires_at"])}
+            for r in rows
+        ]
+
+    # ── 回头找你 ────────────────────────────────────────────────────────────
+
+    def add_followup(self, agent_id: str, player_id: str, *, due_tick: int,
+                     kind: str = "delayed_reply", reason: str | None = None,
+                     created_tick: int = 0) -> int:
+        followup_id = int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:followups:id"))
+        self._followups.put(str(followup_id), {
+            "id": followup_id, "agent_id": agent_id, "player_id": player_id,
+            "due_tick": int(due_tick), "kind": kind, "reason": reason,
+            "created_tick": int(created_tick), "fired_tick": None,
+        })
+        return followup_id
+
+    @staticmethod
+    def _followup_view(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]), "agent_id": row["agent_id"],
+            "player_id": row["player_id"], "due_tick": int(row["due_tick"]),
+            "kind": row["kind"], "reason": row.get("reason"),
+        }
+
+    def due_followups(self, tick: int) -> list[dict[str, Any]]:
+        rows = [
+            r for r in self._followups.all().values()
+            if r.get("fired_tick") is None and int(r.get("due_tick") or 0) <= int(tick)
+        ]
+        rows.sort(key=lambda r: (int(r["due_tick"]), int(r["id"])))
+        return [self._followup_view(r) for r in rows]
+
+    def mark_followup_fired(self, followup_id: int, tick: int) -> None:
+        row = self._followups.get(str(followup_id))
+        if row is not None:
+            row["fired_tick"] = int(tick)
+            self._followups.put(str(followup_id), row)
+
+    def pending_followups(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        rows = [
+            r for r in self._followups.all().values()
+            if r.get("fired_tick") is None
+            and (agent_id is None or r.get("agent_id") == agent_id)
+        ]
+        rows.sort(key=lambda r: (int(r["due_tick"]), int(r["id"])))
+        return [self._followup_view(r) for r in rows]
+
+    # ── 玩家教过的规则 ──────────────────────────────────────────────────────
+
+    def set_override(self, agent_id: str, player_id: str, kind: str, value: str) -> None:
+        from anima_world.chat_state import OVERRIDE_KINDS
+
+        if kind not in OVERRIDE_KINDS:
+            raise ValueError(f"unknown override kind {kind!r}")
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("override value is required")
+        self._overrides.put(f"{agent_id}\x00{player_id}\x00{kind}", {
+            "agent_id": agent_id, "player_id": player_id, "kind": kind,
+            "value": value, "updated_at": self._now(),
+        })
+
+    def overrides(self, agent_id: str, player_id: str) -> list[dict[str, Any]]:
+        rows = [
+            r for r in self._overrides.all().values()
+            if r.get("agent_id") == agent_id and r.get("player_id") == player_id
+        ]
+        rows.sort(key=lambda r: str(r.get("kind") or ""))
+        return [
+            {"kind": r["kind"], "value": r["value"],
+             "updated_at": int(r.get("updated_at") or 0)}
+            for r in rows
+        ]
+
+    def clear_override(self, agent_id: str, player_id: str, kind: str) -> bool:
+        return bool(self._overrides.drop(f"{agent_id}\x00{player_id}\x00{kind}"))
