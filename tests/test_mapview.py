@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from anima_world.mapview import (
@@ -460,3 +462,150 @@ def test_the_anchor_is_not_reported_as_a_move():
     assert "自 家" in text, f"锚点没被标成「来处」:{text!r}"
     assert "230" not in text, f"窗口之前的那一步被当成这天的位移报出来了:{text!r}"
     assert "510" in text
+
+
+# ── 连上一个活着的世界 ──────────────────────────────────────────────────────
+
+
+def test_the_world_id_comes_from_the_stamp():
+    """**默认从 db 自己的戳里读,不让人手抄。**
+
+    人手抄一个 id 是必然会错的那种事,而这里错了不响 —— 错法有多难看见,见
+    `test_a_world_id_that_contradicts_the_stamp_is_refused`。
+    """
+    from anima_world.__main__ import map_world_id
+
+    assert map_world_id(None, ("redis", "live")) == "live"
+    # 和戳一致时显式给也行(照抄一遍不算错)
+    assert map_world_id("live", ("redis", "live")) == "live"
+    assert map_world_id(None, None) is None, "没戳又没给,就该说不知道,而不是编一个"
+    # 和戳**对不上**时不许照着连 —— 见下一条
+
+
+def test_without_redis_a_moved_world_still_refuses(tmp_path):
+    """加了 `--redis` 这条路之后,**不给 `--redis` 时那道拒绝不许松掉**。
+
+    松掉的后果是回到原点:读一个空壳,得到一张空地图。
+    """
+    fakeredis = pytest.importorskip("fakeredis")
+
+    from anima_world.api import World
+
+    db_path = str(tmp_path / "w.db")
+    redis = fakeredis.FakeStrictRedis(decode_responses=True)
+    with World.open(db_path, force_mock_llm=True, redis=redis, world_id="gone") as world:
+        world.tick(10)
+
+    done = _cli("--db-path", db_path)
+    assert done.returncode == 2
+    assert "redis" in done.stderr
+    assert "--redis" in done.stderr, "拒绝了,却没告诉人该怎么连上去"
+
+
+_REDIS_URL = os.environ.get("ANIMA_TEST_REDIS")
+
+
+@pytest.mark.skipif(not _REDIS_URL, reason="没有 ANIMA_TEST_REDIS(形如 redis://127.0.0.1:6379)")
+def test_the_cli_reads_a_live_world_from_another_process(tmp_path):
+    """**另一个进程读到的必须是「此刻」,不是一份快照。**
+
+    这条是那十一步搬进 Redis 换来的东西的验收:世界活在 A 进程里,B 进程只有一个
+    Redis 连接,而它看到的是同一个世界的现在。此前 B 只能读到一份历史,然后在
+    自己内存里跑出另一个世界。
+
+    `--watch` 没有它就是半废的:能盯的只有一个不动的世界。
+    """
+    import json
+
+    redis_mod = pytest.importorskip("redis")
+
+    from anima_world.api import World
+
+    world_id = f"t{abs(hash(tmp_path.name)) % 100000}"
+    client = redis_mod.Redis.from_url(_REDIS_URL, decode_responses=True)
+    for key in client.keys(f"anima:{world_id}:*"):
+        client.delete(key)
+
+    db_path = str(tmp_path / "w.db")
+    world = World.open(db_path, force_mock_llm=True, redis=client, world_id=world_id)
+    try:
+        world.tick(288)
+        clock_here = world.scheduler.clock
+
+        # world_id 不给 —— 它该从这个 db 的戳里自己读出来
+        done = _cli("--db-path", db_path, "--redis", _REDIS_URL, "--json")
+        assert done.returncode == 0, done.stderr
+        seen = json.loads(done.stdout)
+        assert seen["clock"] == clock_here, (
+            f"另一个进程读到的时钟是 {seen['clock']},而世界在 {clock_here} —— "
+            f"它读的不是这个活世界"
+        )
+        assert seen["places"], "地图是空的 —— 多半是 world_id 没对上"
+        assert seen["standing"] or seen["travelling"], "一个人都没有"
+
+        # 再推一段,B 进程必须跟着看见
+        world.tick(60)
+        again = json.loads(
+            _cli("--db-path", db_path, "--redis", _REDIS_URL, "--json").stdout
+        )
+        assert again["clock"] == world.scheduler.clock > clock_here, (
+            "世界往前走了,而另一个进程还停在老地方 —— 它读到的是快照不是此刻"
+        )
+    finally:
+        world.close()
+        for key in client.keys(f"anima:{world_id}:*"):
+            client.delete(key)
+
+
+def test_a_world_id_that_contradicts_the_stamp_is_refused():
+    """**抄错 world_id 的样子比「报错」坏得多,也比「空地图」坏得多。**
+
+    实测:给一个不存在的 world_id,`World.open` 会拿这个 db 当创世输入,在 Redis 上
+    **建出一个全新的世界** —— 于是你看到的是一张排版正常、三个人各就各位、时钟 0 的
+    地图。它读起来像"这个世界还没开始跑",而不是"你看错世界了"。顺带还在 Redis 里
+    留下一份垃圾。
+
+    人手抄一个 id 是**必然会错**的那种事,而这里错了不响。所以对不上就停下。
+    """
+    from anima_world.__main__ import MapWorldIdMismatch, map_world_id
+
+    with pytest.raises(MapWorldIdMismatch) as caught:
+        map_world_id("抄错的", ("redis", "真的那个"))
+    said = str(caught.value)
+    assert "真的那个" in said and "抄错的" in said, "拒绝了却没说清是哪两个对不上"
+    assert "不给 --world-id" in said, "说了问题没说怎么办"
+
+    # 没戳的 db 上,显式给的照旧算数 —— 那是唯一能指明世界的办法
+    assert map_world_id("我说了算", None) == "我说了算"
+
+
+@pytest.mark.skipif(not _REDIS_URL, reason="没有 ANIMA_TEST_REDIS")
+def test_the_cli_refuses_a_contradicting_world_id(tmp_path):
+    """上一条走 CLI 那条真路。"""
+    redis_mod = pytest.importorskip("redis")
+
+    from anima_world.api import World
+
+    client = redis_mod.Redis.from_url(_REDIS_URL, decode_responses=True)
+    db_path = str(tmp_path / "w.db")
+    world_id = f"t{abs(hash(tmp_path.name)) % 100000}b"
+    bogus = "根本没有这个世界"
+    # **先清干净。** 这条验的是"拒绝之前一个键都没建",而上一次跑(或一次注入变异
+    # 的验证)可能真的建出来过 —— 那时这条会因为别人留下的垃圾而红,查起来很难看。
+    for key in client.keys(f"anima:{bogus}:*"):
+        client.delete(key)
+    world = World.open(db_path, force_mock_llm=True, redis=client, world_id=world_id)
+    try:
+        world.tick(60)
+        done = _cli("--db-path", db_path, "--redis", _REDIS_URL,
+                    "--world-id", bogus, "--json")
+        assert done.returncode == 2, f"照着抄错的 id 连上去了:\n{done.stdout[:300]}"
+        assert bogus in done.stderr and world_id in done.stderr
+        assert not client.keys(f"anima:{bogus}:*"), (
+            "拒绝之前已经在 Redis 上把那个假世界建出来了"
+        )
+    finally:
+        world.close()
+        for prefix in (world_id, bogus):
+            for key in client.keys(f"anima:{prefix}:*"):
+                client.delete(key)

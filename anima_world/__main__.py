@@ -149,6 +149,10 @@ def _build_parser() -> argparse.ArgumentParser:
                            metavar="秒", help="跟着时钟重画(默认每 2 秒);Ctrl-C 停")
     world_map.add_argument("--width", type=int, default=None, help="画布宽(默认按终端)")
     world_map.add_argument("--height", type=int, default=None, help="画布高")
+    world_map.add_argument("--redis", default=None, metavar="URL",
+                           help="连上一个跑在 Redis 上的活世界(如 redis://127.0.0.1:6379)")
+    world_map.add_argument("--world-id", default=None,
+                           help="Redis 里的世界 id;不给就从这个 db 的戳里读")
     world_map.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
     prompt = sub.add_parser(
@@ -1829,6 +1833,35 @@ def _print_roster(world: Any, db_path: str) -> None:
           f"{'' if db_path == onboarding.DEFAULT_DB_PATH else f' --db-path {db_path}'}\n")
 
 
+class MapWorldIdMismatch(ValueError):
+    """`--world-id` 和这个 db 自己的戳对不上。"""
+
+
+def map_world_id(explicit: str | None, stamped: tuple[str, str] | None) -> str | None:
+    """连 Redis 时用哪个 world_id。**默认从 db 自己的戳里读,对不上就拒绝。**
+
+    那个戳是这个世界搬走时自己记下的(`db_meta.storage_world_id`)。
+
+    **抄错的样子比"报错"坏得多,也比"空地图"坏得多。** 实测:给一个不存在的
+    world_id,`World.open` 会拿这个 db 当创世输入,在 Redis 上**建出一个全新的
+    世界** —— 于是你看到的是一张排版正常、三个人各就各位、时钟 0 的地图。它读起来
+    像"这个世界还没开始跑",而不是"你看错世界了"。顺带还在 Redis 里留下一份垃圾。
+
+    所以对不上就当场停下。人手抄一个 id 是**必然会错**的那种事,而这里错了不响。
+    """
+    if explicit and stamped and explicit != stamped[1]:
+        raise MapWorldIdMismatch(
+            f"--world-id 给的是 {explicit!r},而这个 db 自己的戳说它搬去了 "
+            f"{stamped[1]!r}。照给的那个连上去,会拿这个 db 在 Redis 上**建出一个"
+            f"全新的世界** —— 你会看到一张排版正常、时钟 0、所有人各就各位的地图,"
+            f"看不出哪里不对。\n"
+            f"      不给 --world-id 就好:它会从这个 db 的戳里读。"
+        )
+    if explicit:
+        return explicit
+    return stamped[1] if stamped else None
+
+
 def _map_frame(world: Any, args: argparse.Namespace) -> str:
     """一帧:地图 + 图例。`--watch` 每次重跑它。
 
@@ -1903,8 +1936,10 @@ def run_map(args: argparse.Namespace) -> int:
         args.from_tick = (args.day - 1) * ticks_per_day
         args.to_tick = args.day * ticks_per_day
 
-    # **搬走了的世界不许假装还在这儿。** 直接读这个 .db 会得到一张空地图,
-    # 而空地图看上去就像"这个世界没有地方",不像"你读错了文件"。
+    # 搬走了的世界:要么连上去,要么当场停下 —— 直接读这个 .db 会得到一张空地图,
+    # 而空地图看上去像"这个世界没有地方",不像"你读错了文件"。
+    from anima_world.db import read_storage
+
     try:
         probe = open_db(args.db_path)
     except DBFormatError as exc:
@@ -1912,14 +1947,38 @@ def run_map(args: argparse.Namespace) -> int:
         return 2
     try:
         refusal = offline_refusal(probe)
+        stamped = read_storage(probe)
     finally:
         probe.close()
-    if refusal:
+
+    redis_client = None
+    world_id = args.world_id
+    if args.redis:
+        try:
+            import redis as redis_mod
+        except ImportError:
+            print("[map] 要连 Redis 得先装:pip install redis", file=sys.stderr)
+            return 2
+        redis_client = redis_mod.Redis.from_url(args.redis, decode_responses=True)
+        try:
+            world_id = map_world_id(args.world_id, stamped)
+        except MapWorldIdMismatch as exc:
+            print(f"[map] {exc}", file=sys.stderr)
+            return 2
+        if world_id is None:
+            print("[map] 这个 db 上没有 Redis 的戳,请给 --world-id。", file=sys.stderr)
+            return 2
+    elif refusal:
         print(f"[map] {refusal}", file=sys.stderr)
+        print("      或者:map --redis redis://… (world_id 会自动从这个 db 的戳里读)",
+              file=sys.stderr)
         return 2
 
     try:
-        world = World.open(args.db_path)
+        if redis_client is not None:
+            world = World.open(args.db_path, redis=redis_client, world_id=world_id)
+        else:
+            world = World.open(args.db_path)
     except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
         print(f"[map] {exc}", file=sys.stderr)
         return 2
