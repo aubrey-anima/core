@@ -53,6 +53,17 @@ def _connect():
 
 
 @pytest.fixture()
+def mysql_factory():
+    """**开 World 的测试用这个,不要用裸连接。**
+
+    `pymysql` 的 threadsafety 是 1,而这个引擎有线程池。裸连接大多数时候相安无事,
+    某次在负载下炸成 `read of closed file` —— 一个离原因很远、看不出是并发的报错。
+    这条 fixture 存在就是为了不让测试自己踩那个坑,然后把竞态当成"偶发"。
+    """
+    return _connect
+
+
+@pytest.fixture()
 def mysql(request):
     from anima_world.mysql_state import ensure_schema
 
@@ -377,7 +388,9 @@ def test_one_connection_per_thread(mysql):
 # ── 跨两个后端的一致性 ─────────────────────────────────────────────────────
 
 
-def test_a_crash_between_the_two_backends_does_not_strand_her(tmp_path, mysql, redis):
+def test_a_crash_between_the_two_backends_does_not_strand_her(
+    tmp_path, mysql, mysql_factory, redis
+):
     """**一个动作横跨两个后端,而崩溃不挑时候。**
 
     分家之后一次 `walk` 要写两个地方:在途状态进 Redis,`travel` 事件进 MySQL。
@@ -392,28 +405,31 @@ def test_a_crash_between_the_two_backends_does_not_strand_her(tmp_path, mysql, r
     "她卡住了"或"两个进程看到不同的世界"。判据变了要当场知道。
     """
     from anima_world.api import World
-    from anima_world.mysql_state import MySQLEventLog, ensure_schema
-
-    conn, prefix = mysql
-    ensure_schema(conn, prefix)
-
-    class _Dying(MySQLEventLog):
-        __slots__ = ()
-        dead = False
-
-        def append(self, event):
-            if type(self).dead:
-                raise RuntimeError("进程在这里死了")
-            return super().append(event)
 
     world = World.open(str(tmp_path / "w.db"), force_mock_llm=True,
-                       redis=redis, mysql=conn, world_id="crash")
+                       redis=redis, mysql=mysql_factory, world_id="crash")
     try:
         agent = next(iter(world.state()["agents"]))
         here = world.state()["agents"][agent].get("location")
         dest = next(loc["id"] for loc in world.state()["locations"]
                     if loc["id"] != here and loc["kind"] == "point")
-        world.scheduler.event_log = _Dying(conn, prefix)
+
+        # **包住世界自己那条日志**,而不是另建一个指向别的表的。
+        # 另建的那种"也能通过",但它验的不是这个世界真正走的那条路。
+        real_log = world.scheduler.event_log
+
+        class _Dying:
+            dead = False
+
+            def __getattr__(self, name):
+                return getattr(real_log, name)
+
+            def append(self, event):
+                if _Dying.dead:
+                    raise RuntimeError("进程在这里死了")
+                return real_log.append(event)
+
+        world.scheduler.event_log = _Dying()
         before = world.scheduler.event_log.count()
 
         _Dying.dead = True
@@ -441,7 +457,7 @@ def test_a_crash_between_the_two_backends_does_not_strand_her(tmp_path, mysql, r
 
         # 边界二:两个进程看到的是同一个世界(在途在 Redis 上,不在进程内存里)。
         other = World.open(str(tmp_path / "w.db"), force_mock_llm=True,
-                           redis=redis, mysql=conn, world_id="crash")
+                           redis=redis, mysql=mysql_factory, world_id="crash")
         try:
             assert other.state()["agents"][agent].get("location") == dest
         finally:
@@ -450,7 +466,9 @@ def test_a_crash_between_the_two_backends_does_not_strand_her(tmp_path, mysql, r
         world.close()
 
 
-def test_redis_keeps_no_stale_copy_of_what_mysql_owns(tmp_path, mysql, redis):
+def test_redis_keeps_no_stale_copy_of_what_mysql_owns(
+    tmp_path, mysql, mysql_factory, redis
+):
     """**两份真相里有一份不会更新,是这个仓库最怕的坏法。**
 
     搬家分两步:先整个搬进 Redis,再把无限增长的那几样接到 MySQL。第二步只换掉
@@ -480,7 +498,8 @@ def test_redis_keeps_no_stale_copy_of_what_mysql_owns(tmp_path, mysql, redis):
         redis_only.close()
 
     # 再接上 MySQL
-    world = World.open(db, force_mock_llm=True, redis=redis, mysql=conn, world_id="stale")
+    world = World.open(db, force_mock_llm=True, redis=redis, mysql=mysql_factory,
+                       world_id="stale")
     try:
         world.tick(288)
         assert world.scheduler.event_log.count() > 0

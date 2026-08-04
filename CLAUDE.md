@@ -115,8 +115,9 @@ anima-world world import my.cyberworld --destination ./instances
   会 → 那它必须有界。⚠️ **`edges` 一度被分错**(照着"像不像历史"分的):它有
   `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,**按世界的规模封顶** ——
   它属于 Redis。而那个闭集是承重的,放开谓词就要重算这笔账。
-  ⚠️ MySQL 连接**不能跨线程共享**(`pymysql` 的 threadsafety 是 1,而引擎有线程池):
-  用 `ThreadLocalConnection`。
+  ⚠️ **`mysql=` 传工厂,别传裸连接**(`mysql=lambda: pymysql.connect(...)`,引擎自动
+  包成每线程一条):`pymysql` 的 threadsafety 是 1 而引擎有线程池,共用一条会让协议帧
+  交叉、连接作废 —— **而且不是必现**,所以开机时当场点名,不指望人记得。
 - **LLM 的钥匙住在这台机器上,不住在世界里**(`machine_config`,`~/.anima-world/config.json`,
   0600)。解析顺序:环境变量 → 机器配置 → 世界配置(旧世界兼容,`doctor` 点名)→ 默认值。
   **人不手写环境变量**:`config set` 与 `World.config_set` 自动路由,`start` 的引导直接写它。

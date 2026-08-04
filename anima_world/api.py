@@ -1063,8 +1063,12 @@ class World:
             # 装不下一个冷但无限的东西。
             if mysql is not None:
                 from anima_world.mysql_state import (
-                    MySQLChatStore, MySQLEventLog, MySQLMemoryStore, ensure_schema,
+                    MySQLChatStore, MySQLEventLog, MySQLMemoryStore, as_connection,
+                    ensure_schema,
                 )
+
+                # 工厂 → 每线程一条;裸连接 → 能用但当场点名(见 `as_connection`)。
+                mysql = as_connection(mysql)
 
                 prefix = f"{world_id}_"
                 ensure_schema(mysql, prefix)

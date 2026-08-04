@@ -161,6 +161,36 @@ class ThreadLocalConnection:
             self._local.conn = None
 
 
+def as_connection(mysql: Any) -> Any:
+    """把调用方给的东西变成"每线程一条连接"。
+
+    收三种:
+
+    - **可调用对象**(推荐):`lambda: pymysql.connect(...)` —— 自动包成
+      `ThreadLocalConnection`,每个线程按需要自己建一条。
+    - 已经是 `ThreadLocalConnection`:原样用。
+    - **一条裸连接**:能用,但**当场大声警告**。`pymysql` 的 threadsafety 是 1,
+      而这个引擎有线程池(叙事、规划),它们都会记事件 —— 两个线程的协议帧交叉,
+      连接就废了。
+
+    裸连接为什么必须点名:它**不是必现**。大多数 tick 相安无事,某天在负载下炸成
+    `InterfaceError: (0, '')` 或 `ValueError: read of closed file` —— 一个离原因
+    很远、看不出是并发的报错。实测同一份代码跑两次:一次好的,一次崩在第 12 个
+    世界日的一条 INSERT 上。**这种"大多数时候没事"正是最该在开机时说破的。**
+    """
+    if mysql is None or isinstance(mysql, ThreadLocalConnection):
+        return mysql
+    if callable(mysql) and not hasattr(mysql, "cursor"):
+        return ThreadLocalConnection(mysql)
+    logger.warning(
+        "mysql= 收到一条裸连接。引擎有线程池,而 pymysql 的 threadsafety 是 1 —— "
+        "多个线程共用一条连接会让协议帧交叉,连接当场作废(症状是 "
+        "InterfaceError (0, '') 或 read of closed file,而且**不是必现**)。"
+        "改传一个工厂:World.open(..., mysql=lambda: pymysql.connect(...))"
+    )
+    return mysql
+
+
 def ensure_schema(conn: Any, prefix: str = "") -> None:
     """建表。`prefix` 让一个库上跑多个世界 —— 撞表的后果是两个世界共用一段历史。"""
     with conn.cursor() as cur:
