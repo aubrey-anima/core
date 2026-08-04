@@ -133,6 +133,24 @@ def _build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--name", default=None, help="你在角色眼里的称呼(默认「访客」)")
     chat.add_argument("--list", action="store_true", dest="list_only", help="只列出角色名册就退出")
 
+    world_map = sub.add_parser(
+        "map", help="把地图画出来 —— 谁在哪、这段时间里谁去了哪儿",
+    )
+    world_map.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    world_map.add_argument("--agent", action="append", default=None,
+                           help="只看这几个人(可重复);不给就是全部")
+    world_map.add_argument("--day", type=int, default=None,
+                           help="只看第几个世界日(1 起)。和 --from/--to 二选一")
+    world_map.add_argument("--from", dest="from_tick", type=int, default=None, help="起始 tick")
+    world_map.add_argument("--to", dest="to_tick", type=int, default=None, help="结束 tick")
+    world_map.add_argument("--now", action="store_true",
+                           help="只画此刻:谁站在哪、谁在路上,不画轨迹")
+    world_map.add_argument("--watch", nargs="?", type=float, const=2.0, default=None,
+                           metavar="秒", help="跟着时钟重画(默认每 2 秒);Ctrl-C 停")
+    world_map.add_argument("--width", type=int, default=None, help="画布宽(默认按终端)")
+    world_map.add_argument("--height", type=int, default=None, help="画布高")
+    world_map.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
+
     prompt = sub.add_parser(
         "prompt", help="看一眼某个角色此刻收到的提示词 —— 逐块带来源,并说明少了哪块、为什么",
     )
@@ -1811,6 +1829,126 @@ def _print_roster(world: Any, db_path: str) -> None:
           f"{'' if db_path == onboarding.DEFAULT_DB_PATH else f' --db-path {db_path}'}\n")
 
 
+def _map_frame(world: Any, args: argparse.Namespace) -> str:
+    """一帧:地图 + 图例。`--watch` 每次重跑它。
+
+    **和 `--json` 共用 `World.map_data()`** —— 观察窗另写一遍取数就会撒谎
+    (`debug_prompt` 与真聊天共用 `prompt_blocks` 是同一条理由)。
+    """
+    import shutil
+
+    from anima_world.mapview import (
+        DEFAULT_HEIGHT, DEFAULT_WIDTH, MapPlace, Track, legend, markers_for, render,
+    )
+
+    data = world.map_data(
+        from_tick=args.from_tick, to_tick=args.to_tick, agents=args.agent
+    )
+    places = [MapPlace(**place) for place in data["places"]]
+    tracks = [] if args.now else [
+        Track(
+            agent=t["agent"],
+            points=[(p["tick"], p["place"]) for p in t["points"]],
+            anchor=next((p["place"] for p in t["points"] if p.get("before")), None),
+        )
+        for t in data["tracks"]
+    ]
+    known = {t.agent for t in tracks} | {
+        a for group in data["standing"].values() for a in group
+    } | {str(t["agent"]) for t in data["travelling"]}
+    markers = markers_for(known)
+
+    term = shutil.get_terminal_size((DEFAULT_WIDTH + 6, DEFAULT_HEIGHT + 10))
+    width = args.width or max(30, min(DEFAULT_WIDTH, term.columns - 6))
+    height = args.height or DEFAULT_HEIGHT
+
+    if not places:
+        return "  这个世界还没有地图(locations 表是空的)。"
+
+    lines = [render(places, tracks=tracks, marks=data["standing"],
+                    markers=markers, width=width, height=height)]
+    lines.append("")
+    span = "此刻" if args.now else (
+        f"tick {args.from_tick if args.from_tick is not None else 0}"
+        f"~{args.to_tick if args.to_tick is not None else data['clock']}"
+    )
+    lines.append(f"  世界时钟 {data['clock']}  ·  {span}")
+    for line in legend(tracks, places, markers=markers, standing=data["standing"],
+                       travelling=data["travelling"], show_hops=not args.now):
+        lines.append(f"  {line}")
+    if not args.now and not any(t.points for t in tracks):
+        lines.append("  (这段时间里没人挪过窝)")
+    return "\n".join(lines)
+
+
+def run_map(args: argparse.Namespace) -> int:
+    """`anima-world map` —— 把地图画出来,看得见她今天去了哪儿。
+
+    为什么值得一道命令:位移这件事此前只在事件日志里躺着。**看不见的东西没人会
+    去查** —— 而"她走了"到底有没有在世界里兑现,是 1.3.0 那批 issue 的病本身。
+
+    渲染是赠品,`--json` 才是契约:创作台 / 网站 / 运维台照那份数据自己画。
+    """
+    from anima_world.api import World
+    from anima_world.db import offline_refusal, open_db
+
+    if args.day is not None and (args.from_tick is not None or args.to_tick is not None):
+        print("[map] --day 和 --from/--to 二选一。", file=sys.stderr)
+        return 2
+    if args.day is not None:
+        if args.day < 1:
+            print("[map] --day 从 1 起。", file=sys.stderr)
+            return 2
+        ticks_per_day = 288
+        args.from_tick = (args.day - 1) * ticks_per_day
+        args.to_tick = args.day * ticks_per_day
+
+    # **搬走了的世界不许假装还在这儿。** 直接读这个 .db 会得到一张空地图,
+    # 而空地图看上去就像"这个世界没有地方",不像"你读错了文件"。
+    try:
+        probe = open_db(args.db_path)
+    except DBFormatError as exc:
+        print(f"[map] {exc}", file=sys.stderr)
+        return 2
+    try:
+        refusal = offline_refusal(probe)
+    finally:
+        probe.close()
+    if refusal:
+        print(f"[map] {refusal}", file=sys.stderr)
+        return 2
+
+    try:
+        world = World.open(args.db_path)
+    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        print(f"[map] {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.as_json:
+            print(json.dumps(
+                world.map_data(from_tick=args.from_tick, to_tick=args.to_tick,
+                               agents=args.agent),
+                ensure_ascii=False, indent=2,
+            ))
+            return 0
+        if args.watch is None:
+            print(_map_frame(world, args))
+            return 0
+        # watch:清屏重画。**不推时钟** —— 这道命令只看,推时钟的是 run/simulate。
+        try:
+            while True:
+                sys.stdout.write("\033[H\033[2J")
+                print(_map_frame(world, args))
+                print(f"\n  (每 {args.watch:g} 秒重画;Ctrl-C 停。这道命令不推时钟)")
+                sys.stdout.flush()
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print()
+            return 0
+    finally:
+        world.close()
+
+
 def run_prompt(args: argparse.Namespace) -> int:
     """`anima-world prompt` —— 她此刻收到的提示词,逐块摊开。
 
@@ -3163,6 +3301,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_doctor(args)
     if args.command == "prompt":
         return run_prompt(args)
+    if args.command == "map":
+        return run_map(args)
     if args.command == "chat":
         return run_chat(args)
     if args.command == "run":

@@ -2418,6 +2418,117 @@ class World:
             for spec in specs
         ]
 
+    def map_data(
+        self,
+        *,
+        from_tick: int | None = None,
+        to_tick: int | None = None,
+        agents: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """地图 + 此刻谁在哪 + 这段时间里谁去了哪儿。
+
+        `anima-world map` 与任何宿主渲染器**共用这一份** —— 观察窗另写一遍拼装就会
+        撒谎(这条在提示词那一层踩过,`debug_prompt` 与真聊天共用 `prompt_blocks`
+        是同一个理由)。
+
+        几何是**绝对**画布坐标(0~1),已经换算好:库里存的是相对父级的
+        (`w=0.55` 是父级宽度的 55%),照原始值画出来的图每个东西都在错的地方,
+        而且什么都不会报错。换算在 `LocationStore.absolute_xy` / `absolute_box`。
+
+        - `places`:`id` / `name` / `kind` / `x` / `y`(+ region 的 `w` / `h`)
+        - `standing`:`{place_id: [角色…]}` —— 此刻站在那儿的人
+        - `travelling`:此刻在路上的人(`from` / `to` / `arrive_at`)。**路上的人
+          不站在任何地方**,漏了这一层会让她在图上凭空消失半段路。
+        - `tracks`:`[{agent, points: [{tick, place}]}]`,只认**到达**
+          (`location_join`);起程不算 —— 她可能走到一半被打断。
+        - `clock`:此刻第几 tick
+
+        不给 tick 范围就是整段历史。给了 `agents` 就只算这几个人的轨迹。
+        """
+        from anima_world.mapview import tracks_from_events
+
+        scheduler = self.scheduler
+        store = scheduler.location_store
+        places: list[dict[str, Any]] = []
+        if store is not None:
+            for row in store.all():
+                loc_id = str(row["id"])
+                origin = store.absolute_xy(loc_id)
+                if origin is None:
+                    continue          # 放不下的地点画不出来,但不该让整张图挂掉
+                entry: dict[str, Any] = {
+                    "id": loc_id,
+                    "name": str(row.get("name") or loc_id),
+                    "kind": str(row.get("kind") or "point"),
+                    "x": origin[0],
+                    "y": origin[1],
+                }
+                box = store.absolute_box(loc_id)
+                if box is not None:
+                    entry["w"], entry["h"] = box[2], box[3]
+                places.append(entry)
+
+        standing: dict[str, list[str]] = {}
+        travelling: list[dict[str, Any]] = []
+        for agent_id in sorted(scheduler.agents):
+            if agents is not None and agent_id not in agents:
+                continue
+            trip = scheduler._transit.get(agent_id)
+            if trip:
+                travelling.append({
+                    "agent": agent_id, "from": trip.get("from"), "to": trip.get("to"),
+                    "arrive_at": int(trip.get("arrive_at") or 0),
+                })
+                continue
+            board = scheduler.agents[agent_id].agent.blackboard
+            here = board.read("loc")
+            if here:
+                standing.setdefault(str(here), []).append(agent_id)
+
+        all_events = scheduler.event_log.replay() if scheduler.event_log is not None else []
+        events = list(all_events)
+        if from_tick is not None:
+            events = [e for e in events if int(e.ts) >= from_tick]
+        if to_tick is not None:
+            events = [e for e in events if int(e.ts) <= to_tick]
+
+        # **窗口之前她在哪,得带进来。** 只取窗口内的点,那么起点在窗口之前的人
+        # 就只剩一个孤点 —— 画不出线,看上去像"她这天没动"。而 `--day N` 恰恰是
+        # 最常用的看法:实测第 2 天,三个人里两个的起点在第 1 天。
+        # 锚点标 `before`,图例说"自 X"而不是假装那也是这天的一次位移。
+        anchors: dict[str, tuple[int, str]] = {}
+        if from_tick is not None:
+            for track in tracks_from_events(
+                [e for e in all_events if int(e.ts) < from_tick], agents=agents
+            ):
+                if track.points:
+                    anchors[track.agent] = track.points[-1]
+
+        tracks = []
+        for track in tracks_from_events(events, agents=agents):
+            points = [
+                {"tick": tick, "place": place} for tick, place in track.points
+            ]
+            anchor = anchors.pop(track.agent, None)
+            if anchor is not None:
+                points.insert(0, {"tick": anchor[0], "place": anchor[1], "before": True})
+            tracks.append({"agent": track.agent, "points": points})
+        # 窗口内一步没动的人也要有条目(带着她窗口之前的位置)—— 否则"她这天
+        # 待在家里"看起来像"没有这个人"
+        for agent_id, anchor in sorted(anchors.items()):
+            tracks.append({
+                "agent": agent_id,
+                "points": [{"tick": anchor[0], "place": anchor[1], "before": True}],
+            })
+
+        return {
+            "clock": scheduler.clock,
+            "places": places,
+            "standing": standing,
+            "travelling": travelling,
+            "tracks": tracks,
+        }
+
     def autonomy_stats(self) -> dict[str, Any]:
         """定时轮次到底跑没跑、做没做。
 

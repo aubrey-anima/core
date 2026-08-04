@@ -22,6 +22,54 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 `db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
 spot rather than silently written to.
 
+## [Unreleased]
+
+### Added —— 地图和轨迹能看见了(`anima-world map`)
+
+位移这件事此前只在事件日志里躺着 —— 一行 `state_change/location_join`,谁也不会去翻。
+而**看不见的东西没人会去查**:"她走了"到底有没有在世界里兑现,正是 1.3.0 那批 issue
+的病本身;1.3 开发期四个 bug 有三个在提示词那一层,同样因为它此前不可见。
+
+```
+anima-world map --db-path w.db              # 地图 + 全程轨迹 + 此刻谁在哪
+anima-world map --db-path w.db --day 2      # 只看第 2 个世界日
+anima-world map --db-path w.db --now        # 只画此刻
+anima-world map --db-path w.db --watch      # 每 2 秒重画(不推时钟)
+anima-world map --db-path w.db --json       # 给别的仓库渲染
+```
+
+**渲染是赠品,`--json` 才是契约。** 本包无 HTTP、无 HTML —— 终端那张图只是让你现在
+就能看见;`World.map_data()` 那份数据才是给创作台 / 网站 / 运维台的出口,而 CLI 与
+宿主**共用同一份**(观察窗另写一遍取数就会撒谎,和 `debug_prompt` 共用
+`prompt_blocks` 是同一条理由)。
+
+#### 四件差点画错的事,共同点是「画错了不会报错,只会好看地骗人」
+
+- **几何是相对父级的**(nested-map D2):`w=0.55` 的 region 占的是父级宽度的 55%,
+  不是画布的 55%。照原始 `x/y/w/h` 画出来的图看上去完全合理 —— 只是每个东西都在错的
+  地方(实测内置种子 workshop 原始 `x=0.78`,绝对 `0.482`)。新增
+  `LocationStore.absolute_box()` 补上 region 的绝对矩形,`map_data` 交出来的一律是
+  绝对坐标。
+- **中文是双宽字符。** 这个引擎的世界是中文的:地点叫「咖啡店」,角色叫「夏」。
+  按字符个数排版,一个中文标签就把整条边框往右推两格 —— 而框线是这张图唯一的结构。
+  画布改成按**显示宽度**记账,轨迹记号也换成单宽字符(第一版用中文首字画线)。
+- **两个人走同一条路**,后画的把先画的整条盖掉,那个人就从图上消失了。重合处标 `#`。
+- **在路上的人不站在任何地方。** 漏了 `travelling` 这一层,她会在图上凭空消失半段路。
+
+- **窗口之前她在哪,得带进来。** 只取窗口内的点,起点在窗口之前的人就只剩一个孤点,
+  画不出线 —— 看上去像「她这天没动」,而 `--day N` 恰恰是最常用的看法(实测第 2 天,
+  三个人里两个是这样)。锚点带 `before: true`,图例说「自 X」,不假装那是这天的一次位移。
+
+另外两条小的:`--now` 不再说「没动过」(只看此刻时,**没去看不等于没动**);
+轨迹只认**到达**(`location_join`),起程不算 —— 她可能走到一半被打断,而画一条没
+走完的线等于说她到了。
+
+世界搬去 Redis / MySQL 之后这道命令**当场拒绝**,不给一张空地图(和 `doctor` /
+`events export` 同一条纪律)。`tests/test_mapview.py` 25 条,每条都验过注入 bug 会红。
+
+已按纪律在 `docs/FOR-STUDIO.md` 记了一笔(§3.6)——**加了 CLI 出口就去那份文档里记**,
+上次没记回执让创作台的 P1 白等了几天。
+
 ## [1.4.0] — 2026-08-03
 
 **世界可以不再住在一个进程里。** 这一版把运行时状态整个搬进 Redis(十一步)、

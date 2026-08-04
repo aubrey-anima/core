@@ -149,6 +149,35 @@ class LocationStore:
             parent = prow["parent"]
         return None  # deeper than the cap — dirty data, degrade
 
+    def absolute_box(self, loc_id: str) -> tuple[float, float, float, float] | None:
+        """一个 region 在世界画布上的绝对矩形 `(x, y, w, h)`,0~1。
+
+        **`w` / `h` 和 `x` / `y` 一样是相对父级的**(nested-map D2):一个
+        `w=0.55` 的 region 占的是父级宽度的 55%,不是画布的 55%。照原始值画出来的
+        图看上去完全合理 —— 只是每个东西都在错的地方,而且没有任何东西会报错。
+
+        点没有矩形(`_validate` 拒绝给 point 写 w/h),返回 None。
+        """
+        rows = {r["id"]: r for r in self.all()}
+        row = rows.get(loc_id)
+        if row is None or row.get("w") is None or row.get("h") is None:
+            return None
+        origin = self.absolute_xy(loc_id)
+        if origin is None:
+            return None
+        w, h = float(row["w"]), float(row["h"])
+        parent = row["parent"]
+        for _ in range(_MAX_TREE_DEPTH):
+            if parent is None:
+                return (origin[0], origin[1], w, h)
+            prow = rows.get(parent)
+            if prow is None or prow.get("w") is None or prow.get("h") is None:
+                return None
+            w *= float(prow["w"])
+            h *= float(prow["h"])
+            parent = prow["parent"]
+        return None
+
     def distance(self, a: str, b: str) -> float | None:
         """Straight-line distance across the canvas between two locations.
 

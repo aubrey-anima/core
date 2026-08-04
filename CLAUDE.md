@@ -77,6 +77,10 @@ anima-world prompt --db-path w.db --agent 夏   # 她收到的提示词,逐块�
 # 提示词是这套东西最不可见又最容易出错的一层(1.3 四个 bug 有三个在这儿)。
 # 它和真聊天共用 `ChatService.prompt_blocks` —— **调试视图另写一遍拼装就会撒谎**。
 
+anima-world map --db-path w.db --day 2 --agent 夏   # 地图 + 谁去了哪儿;--now 只看此刻
+# 位移此前只在事件日志里躺着,而看不见的东西没人会去查。**渲染是赠品,`--json` 才是
+# 契约** —— 本包无 HTML,好看的图归创作台/网站。四件差点画错的事见 `mapview.py`。
+
 # 给部署/脚本用的
 anima-world run --db-path saves/world.db               # 前台宿主,Ctrl-C 停
 anima-world simulate --db-path w.db --ticks 288        # 无头快进
@@ -192,6 +196,11 @@ anima-world world import my.cyberworld --destination ./instances
   但**引擎默认值仍然全关** —— 分工是"引擎默认值 = 没人说话时的样子,内置种子 =
   这个世界的作者的意见"。所以验"开关默认关"的测试必须用 `conftest.py` 的
   `bare_seed`(把橱窗剥回毛坯),拿橱窗去验默认值等于在验橱窗的布置。
+- **画图只画到终端**(`anima-world map`,1.4.0):地图与轨迹的**数据出口**
+  (`World.map_data()` / `map --json`)是契约,终端那张字符画是赠品。要 SVG/网页
+  归宿主。三件差点画错的事:几何是**相对父级**的(照原始值画,每个东西都在错的
+  地方而且不报错)、**中文是双宽字符**(按字符个数排版会把边框推歪)、两个人走同
+  一条路时后画的会把先画的抹掉。共同点是**画错了不会报错,只会好看地骗人**。
 - **本包无 HTTP、无 HTML、无创作代码**。曾经的 FastAPI web 层(`anima_world/world/`,
   三组 REST API + membership claim 鉴权)已在纯库化改造中整体移除 —— 需要网络暴露的话,
   由宿主应用自己包一层,不归引擎管。`anima_world/author/` 也已删除,

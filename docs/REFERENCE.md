@@ -567,6 +567,30 @@ seen["absent"]        # {块名: 为什么没出现} —— 照着这句话就�
 seen["system"]        # 并起来的整段,和真聊天送进 LLM 的逐字相同
 ```
 
+### `anima-world map` —— 把地图画出来,看得见她今天去了哪儿
+
+位移这件事此前只在事件日志里躺着,而**看不见的东西没人会去查**。"她走了"到底有没有
+在世界里兑现,正是 1.3.0 那批 issue 的病本身。
+
+```bash
+anima-world map --db-path w.db                    # 地图 + 全程轨迹 + 此刻谁在哪
+anima-world map --db-path w.db --day 2            # 只看第 2 个世界日
+anima-world map --db-path w.db --agent 夏 --agent 柔   # 只看这几个人
+anima-world map --db-path w.db --now              # 只画此刻,不画轨迹
+anima-world map --db-path w.db --watch            # 每 2 秒重画(不推时钟)
+anima-world map --db-path w.db --json             # 给别的仓库渲染
+```
+
+**渲染是赠品,`--json` 才是契约。** 本包无 HTTP、无 HTML —— 终端这张图只是让你现在
+就能看见;要好看的图,创作台 / 网站 / 运维台照 `map_data` 那份数据自己画。
+
+三件差点画错的事,都写在 `anima_world/mapview.py` 的模块 docstring 里:几何是相对
+父级的、中文是双宽字符、两个人走同一条路时后画的会把先画的抹掉。共同点是**画错了
+不会报错,只会好看地骗人** —— `tests/test_mapview.py` 逐条盯着。
+
+⚠️ 世界搬去 Redis / MySQL 之后,这道命令**当场拒绝**而不是给你一张空地图
+(和 `doctor` / `events export` 同一条纪律)。
+
 三条设计,每条都有代价换来的理由:
 
 1. **它不撒谎。** 块来自 `ChatService.prompt_blocks` —— 和真聊天**同一个函数**。
@@ -736,6 +760,7 @@ from anima_world.api import World
 | `World.open(db_path, *, mysql=None, …)` | 给了 `mysql`,**她带不进上下文的那几样搬去 MySQL**:`events` / `memories` / `conversations` / `messages`。判据是**进不进得了提示词** —— Redis 装她此刻要带进提示词的东西,而 LLM 的上下文本来就有上限,两个"有上限"是同一个;进不了提示词的可以无限,要用时按 k 取回来。分对了的话**提示词不随世界变老而涨**(实测 60 世界日:后端涨 61 倍,提示词 2251→2272 字;`tests/test_bounded.py` 是闸)。⚠️ `edges` **不在这里**:它有 `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,按世界的规模封顶 —— 实测一个三人世界跑 20 天,Redis 内存增量的九成是 events + memories(每世界日 13 KB;一千个世界跑一年 **4.6 GB 常驻**,永不回落),而黑板/地图/行为树随**世界的规模**有界。分家后同一份负载:20→40 世界日 Redis **一个字节没涨**,三十个聊天回合(60 条消息)Redis +0 KB。可以只给 `mysql` 不给 `redis`。⚠️ **传一个工厂,不要传裸连接**:`mysql=lambda: pymysql.connect(...)`(引擎自动包成每线程一条)。`pymysql` 的 threadsafety 是 1 而引擎有线程池 —— 共用一条连接会让协议帧交叉、连接当场作废,症状是 `InterfaceError (0, '')` 或 `read of closed file`,**而且不是必现**(大多数 tick 相安无事,某次在负载下才炸,报错离原因很远)。给裸连接照旧能开,但开机时会点名 |
 | — | `events.seq` 的**连续性**在 MySQL 上不成立(自增在事务回滚后留空洞),Redis 版靠 `RPUSH` 返回长度是连续的。`since_seq` 分页照旧正确(它问的是"比这个大的"),但任何依赖 seq 连续的代码会悄悄错 —— 目前没有,写新代码时别引入 |
 | — | **一个动作横跨两个后端,而崩溃不挑时候**。写序是 Redis 先、MySQL 后,所以中间死掉的样子是:在途状态写下了,而历史里没有这趟。伤面是**历史少一条**(从事件重折的东西从此少算一次,不会自愈),不是"她卡在路上"——在途带着到达 tick,时钟一到照样落地。`tests/test_mysql_state.py` 把这个伤面钉住了,判据变了会当场红 |
+| `world.map_data(from_tick=None, to_tick=None, agents=None)` | **地图 + 此刻谁在哪 + 这段时间里谁去了哪儿。** `anima-world map` 与任何宿主渲染器共用这一份 —— 观察窗另写一遍取数就会撒谎。四块:`places`(`id`/`name`/`kind`/`x`/`y`,region 另带 `w`/`h`)、`standing`(`{地点: [角色…]}`)、`travelling`(此刻在路上的人,`from`/`to`/`arrive_at`)、`tracks`(`[{agent, points:[{tick, place}]}]`)。⚠️ **几何是绝对画布坐标**(0~1),已换算好:库里存的是**相对父级**的(`w=0.55` 是父级宽度的 55%),照原始值画出来的图每个东西都在错的地方而且什么都不报错(实测 workshop 原始 `x=0.78`,绝对 `0.482`)。⚠️ **在路上的人不站在任何地方** —— 只看 `standing` 会让她在图上凭空消失半段路。`tracks` 只认**到达**(`location_join`),起程不算:她可能走到一半被打断,而画一条没走完的线等于说她到了。给了 `from_tick` 时,每条轨迹的第一个点是**窗口之前她在哪**(带 `before: true`)—— 不带的话起点在窗口之前的人只剩一个孤点、画不出线,看上去像「她这天没动」(实测第 2 天,三个人里两个是这样) |
 | `world.durability_warning()` | 这个世界的存储会不会在重启后忘掉它,不会就是 `None`。**Redis 主要活在内存里**,持久化是配置选项而默认 AOF 是关的 —— 忘掉的样子不是报错,是世界悄悄退回创世那一刻然后接着跑(实测:跑完一天 104 条事件,重启后 50 条)。探不到就沉默(`CONFIG GET` 可能被禁用) |
 | `world.intend(agent_id, steps)` | **告诉她接下来打算做什么** —— 一串过日子的动作(`[{"verb","params"}]`),世界替她走完脚步。传 `None` / `[]` 取消。**调用即设定意图,不是执行到底**:立刻返回,之后每个 tick 由仲裁器在 [身体 → 她刚决定的 → 排班 → 空闲规划 → 兜底] 之间挑,所以饿到紧急线她会**先去吃再回来接着走**,路上被叫住也能被打断。一步真生效了队列才往前走一格 |
 | `world.intent(agent_id)` | 她此刻还打算做的事(队首是下一步) |

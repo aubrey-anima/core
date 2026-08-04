@@ -65,10 +65,10 @@ anima-world chat --db-path w.db --agent 昀 --message "十九年前那份报告�
 
 ---
 
-## 1. 现在 CLI 上有什么(13 个子命令)
+## 1. 现在 CLI 上有什么(14 个子命令)
 
 ```
-start  config  doctor  chat  prompt  run  simulate  events  report  validate  play  contract  world
+start  config  doctor  chat  prompt  map  run  simulate  events  report  validate  play  contract  world
 ```
 
 按你们用得上的顺序:
@@ -81,6 +81,7 @@ start  config  doctor  chat  prompt  run  simulate  events  report  validate  pl
 | `report --json` | 读一个跑过的世界出摘要 | 同上,事后再问一次 |
 | `chat --agent X` | 本地试聊(免 claim) | B3 性格试镜 |
 | `prompt --agent X` | **看她收到的提示词,逐块带来源** | 1.3.0 新增,见 §3 |
+| `map [--json]` | **地图 + 谁在哪 + 谁去了哪儿** | 1.4.0 新增,见 §3.6 —— `--json` 出数据,你们自己渲染 |
 | `world export/import` | `.cyberworld` 打包 | 出厂 |
 | `events export` | 事件流 JSONL | 连续性通路(只导出,不重放) |
 | `doctor` | 体检 | 装完 core 自检 |
@@ -281,6 +282,46 @@ anima-world prompt --db-path w.db --agent 夏 --json          # 给程序
 **这可能是"好玩分"的第五维:提示词体检。**
 
 ---
+
+### 3.6 地图和轨迹能看见了(`anima-world map`,1.4.0)
+
+位移此前只在事件日志里躺着 —— 一行 `state_change/location_join`,谁也不会去翻。
+
+```bash
+anima-world map --db-path w.db --day 2 --agent 夏     # 给人看
+anima-world map --db-path w.db --json                 # 给你们渲染
+```
+
+`--json` 出四块,几何**已经换算成绝对画布坐标**(0~1):
+
+```json
+{
+  "clock": 288,
+  "places":     [{"id":"cafe","name":"咖啡店","kind":"point","x":0.2606,"y":0.3362},
+                 {"id":"harbor_st","name":"港街","kind":"region","x":0.122,"y":0.1472,
+                  "w":0.462,"h":0.42}],
+  "standing":   {"home": ["夏","柔","遥"]},
+  "travelling": [{"agent":"夏","from":"cafe","to":"home","arrive_at":312}],
+  "tracks":     [{"agent":"夏","points":[{"tick":90,"place":"cafe"},
+                                        {"tick":230,"place":"home"}]}]
+}
+```
+
+**你们渲染时有三个坑,我们已经替你们踩过了:**
+
+1. **别读 `locations` 表的原始 `x/y/w/h`。** 那是**相对父级**的
+   (`w=0.55` 占的是父级宽度的 55%),照它画出来的图看上去完全合理 —— 只是每个东西
+   都在错的地方,而且什么都不会报错(实测 workshop 原始 `x=0.78`,绝对 `0.482`)。
+   `map --json` 交出来的已经换算好了,直接用。
+2. **`travelling` 不能不看。** 在路上的人**不站在任何地方** —— 只画 `standing`
+   会让她在图上凭空消失半段路,而位移正是你们要看的东西。
+3. **`tracks` 只记到达。** 起程不算:她可能走到一半被打断,而画一条没走完的线
+   等于说她到了。
+4. **看某一天时,第一个点带 `"before": true`** —— 那是窗口**之前**她在哪。
+   要连线就得有它(否则起点在前一天的人只剩一个孤点),但别把它当成这天的一次
+   位移:画成「自 X」。实测第 2 天,三个人里两个的起点在第 1 天。
+
+终端那张图是赠品(本包无 HTTP、无 HTML),你们不必照抄它的样子。
 
 ## 4. 旧特性速查(1.0 ~ 1.2,你们大概已经在用)
 
