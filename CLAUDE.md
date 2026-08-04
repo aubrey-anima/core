@@ -126,6 +126,18 @@ anima-world world import my.cyberworld --destination ./instances
   旧世界照旧能读,而**真丢了钥匙仍然报警**(`undecryptable_secrets()`;判据是"这个世界有没有
   过 keyfile",缺省保守 —— 漏报比误报坏)。降级照旧不许无声:`World.state()` 的
   `runtime.llm.degraded_reason` 常驻。
+- **世界文件里只存作者动过的**(1.4.0):创世**不播**引擎默认值,读的时候按
+  环境变量 → 机器配置 → 世界文件 → `_DEFAULTS` 解析,`config list` / `prompt_list`
+  每行带 `source`。理由是播下去的那份是**创世那天的快照**:引擎把 `chat.recall_k`
+  从 3 改成 99,已有的世界一个都吃不到,而 `config list` 看上去一模一样。
+  于是 `config` 表里剩下的就是作者的意见(内置种子的世界 = 8 行,毛坯 = 0 行),
+  `prompt_templates` 是 0 行。两个连带纪律:
+  - **判据是"引擎声明过什么",不是"表里有没有行"** —— `has` / `meta` / `list` / `set`
+    四个都要回落。`set` 曾经漏了:一个新世界的表是空的,于是
+    `set("llm.api_key", …)` 拿不到 `is_secret`,**密钥明文写进世界文件而且一声不吭**。
+  - **搬进 Redis 时只搬作者动过的**:`list()` 是合并视图,整份搬过去等于把刚拆掉的
+    快照在 Redis 里原样重建(实测 31 条默认模板全进了 Redis)。
+  `tests/test_config_provenance.py` 是这几条的闸。
 - **scheduler 持有进程内唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。跨进程那把
   是 `RedisLock`,**在它之外不是替代** —— RLock 还被 `threading.Condition` 用着(等规划落地),
   而 Condition 要一把真线程锁。
@@ -187,9 +199,17 @@ anima-world world import my.cyberworld --destination ./instances
 
 ## 当前状态
 
-**1.3.0(db 格式 1,schema 加法修订 3)。** PyPI 上已发布到 1.1.1;1.2.0 与 1.3.0 尚未
-推 tag。版本规则由 `tests/test_version_contract.py` 机器强制。原路线图(docs/ROADMAP.md)的
-2.0–5.0 四大机制已并入首发,全部带默认关闭的开关:
+**1.4.0(db 格式 1,schema 加法修订 3)。** PyPI 上已发布到 1.3.0(tag `v1.3.0`)。
+版本规则由 `tests/test_version_contract.py` 机器强制。
+
+1.4.0 是**纯加法**:一张 SQLite 表都没动,db 格式与 schema 修订都不变,不给
+`redis=` / `mysql=` 的世界行为逐字不变。它加的是"世界可以不住在一个进程里" ——
+运行时状态整个进 Redis(十一步),随时间无限增长的那几样进 MySQL,外面的进程有了
+改变世界的入口(`World.act()` / `World.intend()` / `body` 面的动词)。分家的判据是
+**"她带不带得进上下文"**:进得了提示词的必须有界(Redis),进不了的可以无限
+(MySQL,按 k 取回来)—— 这条可验,`tests/test_bounded.py` 是闸。
+
+原路线图(docs/ROADMAP.md)的 2.0–5.0 四大机制已并入首发,全部带默认关闭的开关:
 
 - **记忆 2.0**(常开):三因子检索、反思、遗忘曲线
 - **需求系统** `needs.enabled`:energy/hunger/social 曲线驱动行为树紧急带

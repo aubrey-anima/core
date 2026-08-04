@@ -848,7 +848,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 
 | 函数 | 说明 |
 |---|---|
-| `world.config_list(category=None, mask=True)` | 全部配置(secret 默认打码为 `前3***后4`) |
+| `world.config_list(category=None, mask=True)` | 全部配置(secret 默认打码为 `前3***后4`);每行带 `source`:`默认值` / `世界文件` / `环境变量` / `机器配置 <路径>` |
 | `world.config_get(key, default=None)` / `world.config_set(key, value)` | 读/写;写按声明类型强转、立即生效;未知键 KeyError,secret 空值 / 非法 tick_rate 抛 ValueError |
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
 
@@ -1088,6 +1088,17 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 `anima-world config list` / `world.config_list()` 可见,全部支持热更新。
 
+**世界文件里只存作者动过的**(1.4.0)。创世不再播默认值,读的时候按
+**环境变量 → 机器配置 → 世界文件 → 引擎默认值**解析,`source` 那一栏告诉你这一次
+走到了哪层。两个后果:
+
+- 引擎改进过的默认值,**已有的世界也吃得到** —— 此前世界文件把创世那天的默认值冻死了,
+  而且无声(两个世界行为不同,`config list` 看上去一模一样)
+- 表里剩下的就是**作者的意见**,一眼可见
+
+取舍是真实的:需要在两个引擎版本上行为一致的场合,把值显式写进种子的 `config` 块 ——
+那本来就是作者的意见。
+
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `llm.api_key` | str(secret) | 空 | LLM API key,Fernet 加密存储;空 = Mock 降级 |
@@ -1129,7 +1140,10 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 ## 7. 提示词模板
 
-`world.prompt_list()` 可见、`prompt_set` 可改、live 生效。清单:
+`world.prompt_list()` 可见、`prompt_set` 可改、live 生效。和配置同一条规矩(1.4.0):
+**世界文件里只存作者改写过的**,`prompt_list()` 每行带 `source`(`默认值` / `世界文件`),
+于是引擎改进过的措辞已有的世界也吃得到 —— 此前那 31 行里作者动过的是 **0** 行,
+全是创世那天的引擎快照。清单:
 
 `chat.system_persona`(角色人设)· `chat.memory_block` / `chat.world_memory_block` /
 `chat.presence_block` / `chat.relation_block`(四个 grounding 块)· `chat.session_summary`
@@ -1201,7 +1215,9 @@ stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身
 {"config": {"needs.enabled": true, "economy.enabled": true, "autonomy.interval_ticks": 48}}
 ```
 
-**创世时一次,空库才认** —— 和其它 seed_defaults 同一条契约。已有的世界不认:那些
+**创世时一次,空库才认** —— 和其它创世播种同一条契约。1.4.0 之后它是 `config` 表里
+**唯一**的来源:引擎默认值不再播进世界文件,所以表里剩下的就是这个世界的作者决定了
+什么(见 §6 开头)。已有的世界不认:那些
 开关此时是**运行数据**(作者可能早就 `config set` 改过),拿今天的种子回头覆盖它们,
 等于让一次重启悄悄改掉一个跑了半年的世界的行为。
 

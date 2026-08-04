@@ -27,12 +27,11 @@ def world(tmp_path):
     the db through `load_or_create_key`, and a mismatch here would put every
     test into the "lost keyfile" branch instead of the one it means to check.
     """
-    from anima_world.config_store import load_or_create_key, seed_defaults
+    from anima_world.config_store import load_or_create_key
 
     db = tmp_path / "w.db"
     conn = open_db(db)
     store = ConfigStore(conn, fernet_key=load_or_create_key(db))
-    seed_defaults(store)
     yield db, store, conn
     conn.close()
 
@@ -82,12 +81,9 @@ def test_status_ok_masks_the_key(world):
 def test_status_tells_a_lost_keyfile_apart_from_an_unset_key(tmp_path):
     """The two states are indistinguishable through `get()` and have opposite
     fixes — restore a file vs. go get a key."""
-    from anima_world.config_store import seed_defaults
-
     db = tmp_path / "w.db"
     conn = open_db(db)
     store = ConfigStore(conn, fernet_key=Fernet.generate_key())
-    seed_defaults(store)
     store.set("llm.api_key", "sk-real")
     conn.close()
 

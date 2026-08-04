@@ -119,15 +119,22 @@ def test_an_env_var_that_would_shadow_the_write_is_called_out(tmp_path, monkeypa
 
 def test_an_old_world_still_reads_but_gets_called_out(tmp_path):
     """1.3.0 之前建的世界里真的有那一行 —— 读得出来就照用,同时说清它该搬走。"""
-    from anima_world.config_store import ConfigStore
+    from anima_world.config_store import ConfigStore, load_or_create_key
     from anima_world.db import open_db
 
     db = str(tmp_path / "old.db")
     conn = open_db(db)
     try:
-        ConfigStore(conn).set("llm.api_key", "sk-旧世界里的")
+        # **老世界里那一行是密文**,不是明文:创世播默认值时带着 `is_secret=True`,
+        # 而那时每个世界都有 keyfile。用明文建这个"老世界"曾经也能通过 ——
+        # 只因为 `set()` 拿不到元数据就当普通值存;那个洞已经堵上(元数据回落到
+        # 引擎的声明),而这条测试的 setup 也就必须跟着变忠实。
+        ConfigStore(conn, fernet_key=load_or_create_key(db)).set(
+            "llm.api_key", "sk-旧世界里的"
+        )
     finally:
         conn.close()
+    assert (tmp_path / "old.db.key").exists(), "老世界该有 keyfile,不然这条没在验它想验的"
 
     w = World.open(db, force_mock_llm=True)
     try:

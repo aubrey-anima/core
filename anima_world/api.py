@@ -897,7 +897,13 @@ class World:
 
             if scheduler.prompt_store is not None:
                 fresh_prompts = RedisPromptStore(redis, world_id)
+                # **只搬作者动过的。** `list()` 返回的是合并视图(引擎声明的 31 条
+                # 加上世界里多出来的),整份搬过去等于把刚从 SQLite 拆掉的默认值
+                # 快照在 Redis 里原样重建 —— 改进过的模板从此又到不了这个世界,
+                # 而且照样无声(DB-SPLIT.md 移动 1 要拆的正是这个)。
                 for row in scheduler.prompt_store.list():
+                    if row.get("source") != "世界文件":
+                        continue
                     fresh_prompts.set(
                         str(row["name"]), str(row.get("template") or ""),
                         row.get("description"),

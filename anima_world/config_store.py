@@ -201,11 +201,17 @@ class ConfigStore:
         return _coerce(raw_value, value_type)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """解析顺序:**环境变量 → 机器配置 → 世界配置 → 默认值。**
+        """解析顺序:**环境变量 → 机器配置 → 世界配置 → 引擎默认值。**
 
         `llm.*` 那几个属于**这台机器**,不属于任何世界(见 `machine_config`)——
         你用哪家模型、哪把钥匙,和"这个世界是什么样"无关。世界配置排在倒数第二
         只为向后兼容:1.3.0 之前建的世界里真的有那一行。
+
+        最后一层是 `_DEFAULTS`,**不是调用方传的 `default`** —— 引擎声明过的键
+        以引擎的声明为准。调用方那个 `default=` 只在键根本没被声明时才轮得到,
+        今天它们全是死参数,而且已经有两个和 `_DEFAULTS` 对不上
+        (`llm.timeout` 20 vs 30、`scheduler.tick_rate` 1.0 vs 1/300)——
+        让它们生效等于给同一个键留两份真相。
         """
         from anima_world import machine_config
 
@@ -216,7 +222,8 @@ class ConfigStore:
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
-            return default
+        declared = _DEFAULTS.get(key)
+        return declared[0] if declared is not None else default
 
     def _coerce_like(self, key: str, raw: Any) -> Any:
         """机器配置里的值按这个键声明的类型强转 —— 环境变量一律是字符串。"""
@@ -260,8 +267,17 @@ class ConfigStore:
         is_secret: bool | None = None,
         description: str | None = None,
     ) -> None:
+        # **元数据回落到引擎的声明,不只看已有的行。**
+        #
+        # 创世不再播默认值之后,一个新世界的 `config` 表是空的 —— 于是
+        # `set("llm.api_key", "sk-…")` 拿不到任何元数据,`is_secret` 缺省成 False,
+        # 密钥**明文写进世界文件,而且一声不吭**。这正是 `.cyberworld` 是分发物那条
+        # 纪律要防的事,而移动 1 把它的地基抽掉了。
+        #
+        # 判据是"引擎声明过什么",不是"表里有没有行" —— 和 `has` / `meta` / `list`
+        # 同一条。`meta()` 已经会回落,这里用它。
+        existing = self.meta(key)
         with self._lock:
-            existing = self._meta.get(key)
             if existing is not None:
                 value_type = existing["value_type"] if value_type is None else value_type
                 category = existing["category"] if category is None else category
@@ -311,31 +327,58 @@ class ConfigStore:
             return sorted(self._undecryptable)
 
     def has(self, key: str) -> bool:
+        """这个键**存在** —— 世界文件里有一行,或者引擎声明过它。
+
+        创世不再播默认值之后,"表里没有"不等于"没这个键";拿行的存在当键的存在,
+        一个新世界里 `config get chat.recall_k` 会说"没有这个配置项"。
+        问"作者动过没有"用 `provenance()`。
+        """
         with self._lock:
-            return key in self._meta
+            if key in self._meta:
+                return True
+        return key in _DEFAULTS
 
     def meta(self, key: str) -> dict[str, Any] | None:
         with self._lock:
             meta = self._meta.get(key)
-            return dict(meta) if meta is not None else None
+            if meta is not None:
+                return dict(meta)
+        declared = _DEFAULTS.get(key)
+        if declared is None:
+            return None
+        _, value_type, category, is_secret, description = declared
+        return {
+            "value_type": value_type,
+            "category": category,
+            "is_secret": is_secret,
+            "description": description,
+        }
 
     def list(self, category: str | None = None) -> list[dict[str, Any]]:
+        """全部的键 —— 引擎声明的加上世界文件里多出来的,每一行带 `source`。
+
+        `source` 是移动 1 兑现出来的那半:世界文件里只剩作者动过的之后,
+        "这个值是谁定的"才第一次答得上来。
+        """
         with self._lock:
-            items = []
-            for key, meta in self._meta.items():
-                if category is not None and meta["category"] != category:
-                    continue
-                items.append(
-                    {
-                        "key": key,
-                        "value": self._cache.get(key),
-                        "value_type": meta["value_type"],
-                        "category": meta["category"],
-                        "is_secret": meta["is_secret"],
-                        "description": meta["description"],
-                    }
-                )
-            return items
+            extra = [key for key in self._meta if key not in _DEFAULTS]
+        items = []
+        for key in list(_DEFAULTS) + extra:
+            meta = self.meta(key) or {}
+            if category is not None and meta["category"] != category:
+                continue
+            items.append(
+                {
+                    "key": key,
+                    "value": self.get(key),
+                    "value_type": meta["value_type"],
+                    "category": meta["category"],
+                    "is_secret": meta["is_secret"],
+                    "description": meta["description"],
+                    "source": self.provenance(key),
+                }
+            )
+        return items
 
 
 # key -> (default value, value_type, category, is_secret, description)
@@ -382,61 +425,13 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "social.enabled": (False, "bool", "social", False, "Gossip propagation and clique detection"),
 }
 
-# env vars consulted only during first-boot seeding of llm.* keys (design.md D5)
-_ENV_SEED = {
-    "llm.api_key": ("ANIMA_LLM_API_KEY", "OPENAI_API_KEY", "LONGCAT_API_KEY"),
-    "llm.base_url": ("ANIMA_LLM_BASE_URL", "OPENAI_BASE_URL"),
-    "llm.model": ("ANIMA_LLM_MODEL", "OPENAI_MODEL"),
-}
-
-
-def _seed_defaults(store: ConfigStore, *, category_filter: str | None = None) -> None:
-    from anima_world import machine_config   # 函数内 import:两边互相认识
-
-    longcat_only = bool(os.getenv("LONGCAT_API_KEY")) and not (
-        os.getenv("ANIMA_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-    )
-    for key, (default, value_type, category, is_secret, description) in _DEFAULTS.items():
-        if category_filter is not None and category != category_filter:
-            continue
-        if store.has(key):
-            continue
-        value = default
-        # **`llm.*` 不从环境变量播进世界文件。** 那是把钥匙塞进分发物的那条路:
-        # 一个 `.cyberworld` 打包出去,里面就躺着作者的 key。它们归机器配置
-        # (`machine_config`),读的时候按 环境变量 → 机器配置 → 世界 → 默认值 解析,
-        # 所以这里播一份进去除了泄漏没有任何用处。
-        if not machine_config.is_machine_key(key):
-            for env_name in _ENV_SEED.get(key, ()):
-                env_value = os.getenv(env_name)
-                if env_value:
-                    value = env_value
-                    break
-        if longcat_only and key == "llm.base_url" and not value:
-            value = "https://api.longcat.chat/openai/v1"
-        elif longcat_only and key == "llm.model" and value == default:
-            value = "LongCat-2.0"
-        store.set(
-            key,
-            value,
-            value_type=value_type,
-            category=category,
-            is_secret=is_secret,
-            description=description,
-        )
-
-
-def seed_defaults(store: ConfigStore) -> None:
-    """Idempotently seed any config key that doesn't already have a row.
-
-    `llm.*` keys prefer an existing env var over the hardcoded default; every
-    other key seeds straight from its hardcoded default. Once a row exists,
-    this is a no-op for that key on every subsequent call — the DB value
-    always wins from then on (design.md D5).
-    """
-    _seed_defaults(store)
-
-
-def seed_llm_defaults(store: ConfigStore) -> None:
-    """Seed only platform-owned LLM settings into an independent database."""
-    _seed_defaults(store, category_filter="llm")
+# **创世不播默认值**(DB-SPLIT.md 移动 1)。播下去的那 36 行看着无害,坏处要过一个
+# 版本才显形:引擎把 `chat.recall_k` 从 3 改成 99,已有的世界一个都吃不到,而
+# `config list` 看上去一模一样 —— 照跑,但给的不是你以为的东西。
+#
+# 于是表里剩下的就是**作者的意见**,别的现场从 `_DEFAULTS` 取。这是加法兼容:
+# 老引擎打开一个 `config` 空表的世界,会照它自己那套播回默认值再照常运行。
+#
+# 代价是真实的:今天"表里有一行"意味着值锁死了,对**可复现性**有好处 —— 同一个
+# 世界文件在两个引擎版本上行为一致。需要可复现的场合,把值显式写进种子的
+# `config` 块即可,那本来就是作者的意见。

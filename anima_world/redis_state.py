@@ -660,11 +660,15 @@ class RedisPromptStore:
         self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:prompts")
 
     def has(self, name: str) -> bool:
-        return self._rows.get(name) is not None
+        from anima_world.prompt_store import _DEFAULTS
+
+        return self._rows.get(name) is not None or name in _DEFAULTS
 
     def get(self, name: str, default: str = "") -> str:
+        from anima_world.prompt_store import resolve
+
         row = self._rows.get(name)
-        return default if row is None else str(row.get("template", default))
+        return resolve(name, None if row is None else str(row.get("template", "")), default)
 
     def set(self, name: str, template: str, description: str | None = None) -> None:
         old = self._rows.get(name) or {}
@@ -676,7 +680,9 @@ class RedisPromptStore:
         })
 
     def list(self) -> list[dict[str, Any]]:
-        return sorted(self._rows.all().values(), key=lambda r: str(r.get("name") or ""))
+        from anima_world.prompt_store import merged_listing
+
+        return merged_listing(self._rows.all())
 
 
 class RedisVisibilityStore:

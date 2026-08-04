@@ -5,7 +5,7 @@
 
 四条纪律,每条都有理由:
 
-- **创世时一次,空库才认** —— 和其它 seed_defaults 同一条契约
+- **创世时一次,空库才认** —— 和其它创世播种同一条契约
 - **未知键跳过不拒绝** —— 种子会比引擎活得久
 - **密文键一律拒绝** —— 种子是分发物,不许携带 API key
 - **跳过绝不无声** —— 作者以为点亮了、实际没有,是这个仓库最在意的那类错
@@ -17,17 +17,15 @@ import json
 import pytest
 
 from anima_world.api import World
-from anima_world.config_store import ConfigStore, load_or_create_key, seed_defaults
+from anima_world.config_store import ConfigStore, load_or_create_key
 from anima_world.db import open_db
 from anima_world.world_seed import apply_seed_config
 
 
 def _store(tmp_path) -> ConfigStore:
-    # 要有真的 Fernet 密钥:播默认值时要写 `llm.api_key` 这个密文键。
+    # 要有真的 Fernet 密钥:密文键写进来时要用得上。
     path = str(tmp_path / "cfg.db")
-    store = ConfigStore(open_db(path), fernet_key=load_or_create_key(path))
-    seed_defaults(store)
-    return store
+    return ConfigStore(open_db(path), fernet_key=load_or_create_key(path))
 
 
 def _seed(tmp_path, config: dict, name: str = "s.json") -> str:

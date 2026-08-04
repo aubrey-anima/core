@@ -20,7 +20,6 @@ from anima_world.beats import BeatScript, BeatScriptError, coerce_goals
 from anima_world.brain import Brain
 from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequence, Status, default_bt
 from anima_world.config_store import ConfigStore, load_or_create_key, has_keyfile
-from anima_world.config_store import seed_defaults as seed_config_defaults
 from anima_world.db import (
     offline_refusal,
     DB_FORMAT_VERSION,
@@ -45,7 +44,6 @@ from anima_world.narrative import (
 from anima_world.planner import Planner, SyncLLM
 from anima_world.projection import project_events
 from anima_world.prompt_store import PromptStore
-from anima_world.prompt_store import seed_defaults as seed_prompt_defaults
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
 from anima_world.world_store import BTStore, LocationStore
@@ -782,20 +780,18 @@ def build_serve_scheduler(
         _store_genesis_seed(conn, world_seed)  # 空库首启才写,出生证明随 db 走
         event_log = EventLog(conn)
         db_path_str = str(db_path)
-        # M5: config/prompts share the same world.db connection; seeding is
-        # idempotent (no-op past the first boot).
+        # M5: config/prompts share the same world.db connection. **不播默认值** ——
+        # 世界文件里只存作者动过的,别的现场从引擎取(DB-SPLIT.md 移动 1)。
         config_store = ConfigStore(conn, fernet_key=load_or_create_key(db_path, create=False),
                                    lock=shared_lock, had_keyfile=has_keyfile(db_path))
-        seed_config_defaults(config_store)
-        # 种子自己带的开关(创世时一次,空库才认)。**必须在默认值之后**:种子是
-        # 作者对这个世界的意见,默认值只是"没人说话时的样子"。
+        # 种子自己带的开关(创世时一次,空库才认)—— 现在它是 `config` 表里唯一的来源:
+        # 表里剩下的就是"这个世界的作者决定了什么"。
         _apply_seed_config_at_genesis(conn, config_store, world_seed)
         # An explicitly-mocked run is not "degraded", and `start` reports the
         # same thing far better in its own banner (llm_warning=False).
         if llm_warning and not force_mock_llm:
             _warn_if_llm_degraded(config_store, db_path)
         prompt_store = PromptStore(conn, lock=shared_lock)
-        seed_prompt_defaults(prompt_store)
         # M4: memory/graph share the same world.db connection.
         # llm-relationship-judge code review #1: every store on this shared
         # connection serializes on shared_lock — MemoryStore was the one
@@ -2219,7 +2215,6 @@ def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
         conn = open_db(db_path)
         store = ConfigStore(conn, fernet_key=load_or_create_key(db_path, create=False),
                             lock=threading.RLock(), had_keyfile=has_keyfile(db_path))
-        seed_config_defaults(store)
     finally:
         cfg_logger.setLevel(previous_level)
     return conn, store
@@ -2333,7 +2328,9 @@ def run_config(args: argparse.Namespace) -> int:
                 value = mask_secret(row["value"] or "") if row["is_secret"] else row["value"]
                 if row["is_secret"] and not row["value"]:
                     value = onboarding.dim("(未设置)")
-                print(f"  {row['key']:<{width}}  {value}")
+                # 来源和值一样要紧:"为什么我改了配置没生效"几乎总是这个问题,而
+                # 世界文件里现在只剩作者动过的,所以这一栏第一次答得上来。
+                print(f"  {row['key']:<{width}}  {value}  {onboarding.dim(row['source'])}")
                 if row["description"]:
                     print(f"  {' ' * width}  {onboarding.dim(row['description'])}")
             return 0
@@ -2917,14 +2914,13 @@ def run_simulate(args: argparse.Namespace) -> int:
     # Preflight BEFORE building the scheduler (code review Round 1 #4): first
     # boot genesis-seeds the capability catalog through the LLM, so aborting
     # after construction would leave a fresh DB permanently seeded with the
-    # broken-key fallback catalog. Opening the DB + seeding config here is
-    # idempotent with what build_serve_scheduler does right after.
+    # broken-key fallback catalog. Opening the DB here is idempotent with what
+    # build_serve_scheduler does right after.
     if tier != "mock" and args.db_path is not None:
         conn = open_db(args.db_path)
         try:
             preflight_store = ConfigStore(conn, fernet_key=load_or_create_key(args.db_path, create=False),
                                         had_keyfile=has_keyfile(args.db_path))
-            seed_config_defaults(preflight_store)
             error = onboarding.probe_llm(preflight_store)
         finally:
             conn.close()

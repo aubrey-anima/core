@@ -315,11 +315,14 @@ class PromptStore:
 
     def has(self, name: str) -> bool:
         with self._lock:
-            return name in self._cache
+            if name in self._cache:
+                return True
+        return name in _DEFAULTS
 
     def get(self, name: str, default: str = "") -> str:
         with self._lock:
-            return self._cache.get(name, default)
+            stored = self._cache.get(name)
+        return resolve(name, stored, default)
 
     def set(self, name: str, template: str, description: str | None = None) -> None:
         check_renders(name, template)
@@ -340,16 +343,48 @@ class PromptStore:
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [
-                {"name": name, "template": template, "description": self._descriptions.get(name)}
+            stored = {
+                name: {"template": template, "description": self._descriptions.get(name)}
                 for name, template in self._cache.items()
-            ]
+            }
+        return merged_listing(stored)
 
 
-def seed_defaults(store: PromptStore) -> None:
-    """Idempotently seed the four default templates from their previously
-    hardcoded wording. A no-op for any name that already has a row."""
+# **创世不播默认模板**(DB-SPLIT.md 移动 1)。播下去的 31 行里作者动过的是 **0** 行,
+# 全是引擎快照 —— 于是改进过的措辞已有的世界一句都吃不到,而且无声。
+# 表里剩下的就是作者改写过的那几条,别的现场从 `_DEFAULTS` 取。
+
+
+def resolve(name: str, stored: str | None, default: str = "") -> str:
+    """行里有 → 行里的;没有 → 引擎当前的默认模板;都没有 → 调用方的 `default`。
+
+    SQLite 与 Redis 两个实现共用这一份 —— 回落规则写两遍就会有两种回落。
+    """
+    if stored is not None:
+        return stored
+    entry = _DEFAULTS.get(name)
+    return entry[0] if entry is not None else default
+
+
+def merged_listing(stored: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """引擎声明的模板加上世界里多出来的,每一行带 `source`。"""
+    items: list[dict[str, Any]] = []
     for name, (template, description) in _DEFAULTS.items():
-        if store.has(name):
-            continue
-        store.set(name, template, description=description)
+        row = stored.get(name)
+        items.append({
+            "name": name,
+            "template": template if row is None else str(row.get("template", template)),
+            # 说明描述的是**这个槽位**而不是里面的值:作者改写模板时不必也写一份说明,
+            # 写了就用他的。
+            "description": (row.get("description") if row else None) or description,
+            "source": "默认值" if row is None else "世界文件",
+        })
+    for name in sorted(k for k in stored if k not in _DEFAULTS):
+        row = stored[name]
+        items.append({
+            "name": name,
+            "template": str(row.get("template", "")),
+            "description": row.get("description"),
+            "source": "世界文件",
+        })
+    return items

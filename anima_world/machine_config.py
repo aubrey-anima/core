@@ -136,4 +136,24 @@ def resolve(key: str) -> tuple[Any, str] | None:
     values = load()
     if key in values and values[key] not in (None, ""):
         return (values[key], f"机器配置 {config_path()}")
-    return None
+    return _longcat_companion(key)
+
+
+# 只给了 `LONGCAT_API_KEY` 时,端点和模型名跟着走 —— longcat 的钥匙配 OpenAI 的
+# 端点,一次也用不出去。这两条此前长在**创世播种**里,于是只有新建的世界吃得到:
+# 一个已经存在的世界加上 LONGCAT_API_KEY,base_url 仍是空,照跑但一次都打不通。
+# 哪家的 key 本来就是机器的事,所以它归这一层。
+_LONGCAT_COMPANIONS = {
+    "llm.base_url": "https://api.longcat.chat/openai/v1",
+    "llm.model": "LongCat-2.0",
+}
+
+
+def _longcat_companion(key: str) -> tuple[Any, str] | None:
+    if key not in _LONGCAT_COMPANIONS:
+        return None
+    if not os.environ.get("LONGCAT_API_KEY"):
+        return None
+    if os.environ.get("ANIMA_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        return None
+    return (_LONGCAT_COMPANIONS[key], "LONGCAT_API_KEY 的配套默认值")
