@@ -14,6 +14,10 @@ README 讲的是"会记住你的角色",但一个世界之所以像世界,是因
 """
 from __future__ import annotations
 
+import json
+
+from _worldfile import open_world_at
+
 import time
 
 import pytest
@@ -47,7 +51,7 @@ def _run_until_relations(world, *, max_days: int = 6) -> dict[tuple[str, str], f
 
 
 def test_two_npcs_who_share_a_room_every_afternoon_form_a_relationship(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         relations = _run_until_relations(world)
         assert relations, (
             "跑了好几个世界日,NPC 之间一条关系都没有 —— 演示世界里没有人真的开口"
@@ -56,7 +60,7 @@ def test_two_npcs_who_share_a_room_every_afternoon_form_a_relationship(tmp_path)
 
 def test_the_demo_world_puts_two_people_in_the_same_room_on_purpose(tmp_path):
     """前提检查:如果这两个人根本碰不到面,上面那条测的就不是同一件事。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         together = False
         for _ in range(A_DAY * 2):
             world.tick(1)
@@ -77,12 +81,14 @@ def test_a_named_chat_duty_is_what_makes_the_judge_fire(tmp_path):
     这不是实现细节,是 REFERENCE §2.9 明写的边界 —— 演示世界必须站在能兑现标题的
     那一侧。
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         # 只看**作息表的叶子**(`<duty>_do`)。动作表里本来就有 `chat_with_<某人>`
         # 供 planner 挑,但没有 key 就没有 planner —— 而没有 key 是默认状态。
-        duty_leaves = world.scheduler.event_log.conn.execute(
-            "SELECT node_id, kind, params FROM bt_actions WHERE node_id LIKE '%\\_do' ESCAPE '\\'"
-        ).fetchall()
+        duty_leaves = [
+            (r["node_id"], r["kind"], json.dumps(r.get("params") or {}, ensure_ascii=False))
+            for r in world.scheduler.bt_store.actions()
+            if str(r["node_id"]).endswith("_do")
+        ]
         assert duty_leaves, "演示世界一条作息都没有?"
         chats = [(n, p) for n, k, p in duty_leaves if k == "chat"]
         assert chats, (

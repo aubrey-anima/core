@@ -9,6 +9,7 @@ Pure-Python BT with 4 node types:
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, ClassVar
@@ -140,6 +141,64 @@ class TimeWindow(Node):
         else:  # wraps past midnight
             inside = now >= self.start_min or now < self.end_min
         return Status.SUCCESS if inside else Status.FAILURE
+
+
+COMPARISONS: dict[str, Callable[[float, float], bool]] = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "==": operator.eq,
+    "!=": operator.ne,
+}
+
+
+@dataclass
+class StockCondition(Node):
+    """世界的量到了某个数 —— 于是排班能按量分支(而不只是按钟点)。
+
+    "八点到六点半照看店里"是钟点排班能表达的全部,而人不是那样活的:面粉见底了
+    才去进货,树长到够高了才去收,钱不够了才去多做一天工。`TimeWindow` 表达不了
+    这一类,`Condition` 只能比黑板上的相等 —— 于是"按世界的状态决定"这件事在树里
+    整个缺席,只能靠一个 LLM 规划器去补,而那条路又贵又不该管这么钝的事。
+
+    **只读黑板。** 量由调度器每 tick settle 到 `stock.<owner>.<key>`,和 `need.*`
+    同一条路子 —— 这个模块不认得任何存储,也不认得 Redis。
+
+    **而 settle 那一步会先过一遍感知**(`perception.why_not_perceivable`):她感知
+    不到的量不会出现在黑板上,于是这里 FAILURE。这条是有意的:一条读得到"暗中的
+    恨意"或"隔着半个地图那棵树的高度"的排班,等于让她**用她不可能知道的事做决定**。
+    那和角色随口说出矿的确切储量是同一种破戏,只是这次破在行为上 —— 连一行提示词
+    都不留,只有一个"她怎么就突然动身了"。
+
+    量还没 settle 上来(这一层没开、第一个 tick 之前、她此刻感知不到)一律 FAILURE
+    而不是抛 —— 和 `TimeWindow` / `NeedAction` 同一条:一棵树绝不能因为读不到数据
+    就炸掉,这才使得"加了这个叶子的世界"和"没加的世界"逐 tick 一样。
+
+    `owner` 写 `self` 指她自己(settle 时解析成 `agent:<id>`)—— 作者写树的时候
+    并不知道这棵树会挂到谁身上。
+    """
+
+    owner: str
+    key: str
+    op: str
+    value: float
+    name: ClassVar[str] = "stock_condition"
+
+    def __post_init__(self) -> None:
+        if self.op not in COMPARISONS:
+            # 当场抛,不要默默 FAILURE:一个打错的比较符会让这条分支**永不触发**,
+            # 而世界照跑、日志干净、作者以为自己写对了。
+            raise ValueError(
+                f"stock_condition 不认识的比较符 {self.op!r} —— 只认 {list(COMPARISONS)}"
+            )
+
+    def tick(self, blackboard: Blackboard) -> Status:
+        current = blackboard.read(f"stock.{self.owner}.{self.key}")
+        if not isinstance(current, (int, float)) or isinstance(current, bool):
+            return Status.FAILURE
+        ok = COMPARISONS[self.op](float(current), float(self.value))
+        return Status.SUCCESS if ok else Status.FAILURE
 
 
 @dataclass

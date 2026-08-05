@@ -1,21 +1,21 @@
-"""PromptStore: named prompt templates as data (M5).
+"""提示词模板即数据(M5):默认模板、回落规则与保存前渲染校验。
 
-Chat/narrative prompt wording used to be Python string literals in
-`chat_service.py`, `chat_session.py`, and `narrative.py`. It now lives in the
-`prompt_templates` table and is read live at the point each prompt is built,
-so an admin editing it via `World.prompt_set` takes effect on the next call with
-no process restart (design.md D3). Saves are validated against a
-representative set of the variables the corresponding call site actually
-passes (design.md D7) so a typo can't silently break live chat/narrative —
-storing only the current value, no history (design.md Non-Goals).
+Chat/narrative 的提示词措辞曾是散在 `chat_service.py` / `chat_session.py` /
+`narrative.py` 里的字符串字面量;现在按名字存进世界,拼提示词时现读,
+管理员经 `World.prompt_set` 改完下一次调用即生效,无需重启(design.md D3)。
+保存前按调用点真实传入的实参集合试渲染(design.md D7),打错占位符在保存时
+报错,而不是在她开口那一刻静默丢块;只存当前值,不存历史。
+
+这个模块是**后端无关的那一半**:`_DEFAULTS`(引擎当前的默认模板)、
+`resolve`(回落规则)、`merged_listing`(带 `source` 的合并视图)、
+`check_renders`(渲染校验)。存储在
+`anima_world.redis_state.RedisPromptStore`;SQLite 版 `PromptStore` 已随
+world.db 层退役。
 """
 
 from __future__ import annotations
 
-import sqlite3
 import string
-import threading
-from datetime import datetime, timezone
 from typing import Any
 
 from anima_world.planner import _DEFAULT_PROMPT as _PLANNER_FREETIME
@@ -290,66 +290,6 @@ def check_renders(name: str, template: str) -> None:
         ) from exc
 
 
-class PromptStore:
-    """SQLite-backed, in-memory-cached store for named prompt templates.
-
-    Mirrors `ConfigStore`'s cache/lock pattern; `lock` defaults to its own
-    RLock but the web server passes the scheduler's shared lock since the
-    connection is shared across threads.
-    """
-
-    def __init__(self, conn: sqlite3.Connection, lock: Any | None = None) -> None:
-        self._conn = conn
-        self._lock = lock if lock is not None else threading.RLock()
-        self._cache: dict[str, str] = {}
-        self._descriptions: dict[str, str | None] = {}
-        self._hydrate()
-
-    def _hydrate(self) -> None:
-        with self._lock:
-            cur = self._conn.execute("SELECT name, template, description FROM prompt_templates")
-            rows = cur.fetchall()
-        for name, template, description in rows:
-            self._cache[name] = template
-            self._descriptions[name] = description
-
-    def has(self, name: str) -> bool:
-        with self._lock:
-            if name in self._cache:
-                return True
-        return name in _DEFAULTS
-
-    def get(self, name: str, default: str = "") -> str:
-        with self._lock:
-            stored = self._cache.get(name)
-        return resolve(name, stored, default)
-
-    def set(self, name: str, template: str, description: str | None = None) -> None:
-        check_renders(name, template)
-        with self._lock:
-            if description is None:
-                description = self._descriptions.get(name)
-            updated_at = datetime.now(timezone.utc).isoformat()
-            self._conn.execute(
-                "INSERT INTO prompt_templates (name, template, description, updated_at) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(name) DO UPDATE SET "
-                "template=excluded.template, description=excluded.description, updated_at=excluded.updated_at",
-                (name, template, description, updated_at),
-            )
-            self._conn.commit()
-            self._cache[name] = template
-            self._descriptions[name] = description
-
-    def list(self) -> list[dict[str, Any]]:
-        with self._lock:
-            stored = {
-                name: {"template": template, "description": self._descriptions.get(name)}
-                for name, template in self._cache.items()
-            }
-        return merged_listing(stored)
-
-
 # **创世不播默认模板**(DB-SPLIT.md 移动 1)。播下去的 31 行里作者动过的是 **0** 行,
 # 全是引擎快照 —— 于是改进过的措辞已有的世界一句都吃不到,而且无声。
 # 表里剩下的就是作者改写过的那几条,别的现场从 `_DEFAULTS` 取。
@@ -358,7 +298,7 @@ class PromptStore:
 def resolve(name: str, stored: str | None, default: str = "") -> str:
     """行里有 → 行里的;没有 → 引擎当前的默认模板;都没有 → 调用方的 `default`。
 
-    SQLite 与 Redis 两个实现共用这一份 —— 回落规则写两遍就会有两种回落。
+    所有存储实现共用这一份 —— 回落规则写两遍就会有两种回落。
     """
     if stored is not None:
         return stored

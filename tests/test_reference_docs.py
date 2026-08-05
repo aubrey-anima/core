@@ -139,19 +139,16 @@ def test_the_contract_tool_catalog_says_which_surface_each_tool_is_on():
     assert "chat" in by_id["walk_away"]
 
 
-@pytest.mark.parametrize("number", ["format_version", "schema_revision"])
-def test_the_contract_numbers_match_the_code(number):
-    """跨仓库那三个数由 `contract --json` 传出去,运维台镜像读的就是它。"""
+def test_the_contract_storage_section_matches_the_code():
+    """跨仓库的存储契约由 `contract --json` 传出去,运维台镜像读的就是它。"""
     import json
     import subprocess
     import sys
-
-    from anima_world.db import DB_FORMAT_VERSION, SCHEMA_REVISION
 
     done = subprocess.run(
         [sys.executable, "-m", "anima_world", "contract", "--json"],
         capture_output=True, text=True,
     )
-    payload = json.loads(done.stdout)["db"]
-    expected = {"format_version": DB_FORMAT_VERSION, "schema_revision": SCHEMA_REVISION}
-    assert payload[number] == expected[number]
+    payload = json.loads(done.stdout)["storage"]
+    assert payload["backend"] == "redis"
+    assert payload["key_prefix"] == "anima:{world_id}:"

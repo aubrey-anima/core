@@ -25,8 +25,8 @@ from anima_world.world_time import MINUTES_PER_DAY
 
 # Where `start`/`config`/`doctor` look when nobody says otherwise. Also the
 # test for "did the user name their own world?" — pasted fix commands only
-# need `--db-path` when the answer is yes.
-DEFAULT_DB_PATH = "saves/world.db"
+# need `--world-id` when the answer is yes.
+DEFAULT_WORLD_ID = "world"
 
 # ── output helpers ───────────────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ class LLMStatus:
         return self.state != "ok"
 
 
-def llm_status(config_store: Any | None, db_path: str | Path | None = None) -> LLMStatus:
+def llm_status(config_store: Any | None, world_id: str | None = None) -> LLMStatus:
     """Classify the LLM configuration into the three states that matter.
 
     `unset` and `unreadable` both read as "no key" everywhere downstream and
@@ -113,16 +113,7 @@ def llm_status(config_store: Any | None, db_path: str | Path | None = None) -> L
     # degraded and the next doctor run printing this very same advice.
     # str(): callers hand this in as either a Path or a str, and a Path never
     # compares equal to the default string.
-    where = f" --db-path {db_path}" if db_path and str(db_path) != DEFAULT_DB_PATH else ""
-
-    undecryptable = getattr(config_store, "undecryptable_secrets", None)
-    if callable(undecryptable) and "llm.api_key" in undecryptable():
-        keyfile = f"{db_path}.key" if db_path else "<db>.key"
-        return LLMStatus(
-            state="unreadable",
-            summary=f"llm.api_key 解不开 —— {keyfile} 多半没跟着 db 一起搬过来",
-            fix=f"补回 keyfile,或 anima-world config set llm.api_key sk-…{where}",
-        )
+    where = f" --world-id {world_id}" if world_id and str(world_id) != DEFAULT_WORLD_ID else ""
 
     from anima_world.config_store import mask_secret
 
@@ -232,7 +223,6 @@ def can_prompt() -> bool:
 
 def configure_llm_interactively(
     config_store: Any,
-    db_path: str | Path,
     *,
     input_fn: Callable[[str], str] | None = None,
     secret_input_fn: Callable[[str], str] | None = None,

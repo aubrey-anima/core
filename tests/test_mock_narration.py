@@ -9,6 +9,8 @@ README 展示的也正是那一幕。所以这不是降级路径上的边角料,
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import json
 import subprocess
 import sys
@@ -45,7 +47,7 @@ def test_every_action_kind_the_engine_emits_has_a_template():
 
 def test_templates_come_from_the_prompt_store_and_are_read_live(tmp_path):
     """模板住在 prompt_store,`prompt_set` 立刻生效 —— 与 llm.* 同一条 live-read 规矩。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         provider = MockNarrativeProvider(prompt_store=world.scheduler.prompt_store)
         assert provider.describe({"kind": "sleep", "params": {}}, "夏", {}) == "夏睡下了"
         world.prompt_set("narrative.mock.sleep", "{agent} 打烊回家了")
@@ -67,7 +69,7 @@ def test_a_seed_can_ship_narration_that_sounds_like_its_world(tmp_path):
     seed_path = tmp_path / "seed.json"
     seed_path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
 
-    with World.open(str(tmp_path / "w.db"), seed_path=str(seed_path),
+    with open_world_at(str(tmp_path / "w.db"), seed_path=str(seed_path),
                     force_mock_llm=True) as world:
         provider = MockNarrativeProvider(prompt_store=world.scheduler.prompt_store)
         assert provider.describe({"kind": "sleep", "params": {}}, "Ada", {}) == \
@@ -93,7 +95,7 @@ def test_a_failing_llm_falls_back_to_the_worlds_own_templates(tmp_path):
     seed_path = tmp_path / "seed.json"
     seed_path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
 
-    with World.open(str(tmp_path / "w.db"), seed_path=str(seed_path),
+    with open_world_at(str(tmp_path / "w.db"), seed_path=str(seed_path),
                     force_mock_llm=True) as world:
         def _explode(*_args, **_kwargs):
             raise TimeoutError("provider is down")
@@ -118,14 +120,14 @@ _RETIRED_ENGLISH = (
 
 def test_the_first_screen_speaks_the_worlds_language(tmp_path):
     """端到端:没配 key 跑一段,叙事里不该再冒出英文动词。"""
+    from _worldfile import redis_for
+
     db = tmp_path / "w.db"
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "simulate", "--db-path", str(db),
-         "--ticks", "300", "--llm", "mock"],
-        capture_output=True, text=True,
-    )
+    redis_for(db)   # CLI 与 open_world_at 用同一个客户端
+    result = run_cli("simulate", "--world-id", "w",
+         "--ticks", "300", "--llm", "mock")
     assert result.returncode == 0, result.stderr
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         lines = [entry["text"] for entry in world.state()["narrative_log"]]
     assert lines, "跑 300 tick 总该有叙事"
     for line in lines:

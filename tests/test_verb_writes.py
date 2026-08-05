@@ -25,7 +25,8 @@ CLAUDE.md 有一条硬不变量:
 """
 from __future__ import annotations
 
-import sqlite3
+from _worldfile import open_world_at
+
 
 import pytest
 
@@ -40,9 +41,13 @@ CHANGES_NOTHING = {
 }
 
 
+# 橱窗世界里那棵树 —— `interact` 要有个真东西可碰。
+_TREE = "tree:harbor_oak"
+
+
 @pytest.fixture()
 def world(tmp_path):
-    w = World.open(str(tmp_path / "world.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "world.db"), force_mock_llm=True)
     w.config_set("chat.tools.enabled", True)
     w.tick(50)
     yield w
@@ -64,9 +69,15 @@ def _bring_together(world: World, mover: str, where: str) -> bool:
 
 def _snapshot(world: World, places: tuple[str, ...]) -> dict[str, object]:
     """世界在这些地方现在是什么样。表数行数,事件数那个类型的条数。"""
-    path = getattr(world.scheduler, "db_path", None)
-    assert path, "拿不到世界文件路径 —— 这条测试没在验它想验的"
-    conn = sqlite3.connect(str(path))
+    # 逻辑表名 → Redis 键(world.db 退役后动词的 writes 声明仍用表名说话)。
+    redis = world.scheduler.redis
+    wid = world.scheduler.world_id
+    hash_of = {
+        "agent_mutes": "mutes", "agent_followups": "followups",
+        "agent_refused_topics": "refused_topics", "agent_stance": "stance",
+        "persona_overrides": "overrides", "conversations": "conversations",
+        "messages": "messages", "memories": "memories", "edges": "edges",
+    }
     out: dict[str, object] = {}
     for place in places:
         if place.startswith("events:"):
@@ -74,9 +85,14 @@ def _snapshot(world: World, places: tuple[str, ...]) -> dict[str, object]:
             out[place] = sum(
                 1 for e in world.history(limit=5000)["events"] if e["type"] == kind
             )
+        elif place == "stocks":
+            # 量不是"一张表"(每个 owner 一个 hash),而且**数行数在这儿会假绿**:
+            # 照料一棵树改的是已有的那个值,行数一行没多。所以这一项比的是值本身。
+            store = world.scheduler.stock_store
+            out[place] = {owner: store.of(owner) for owner in sorted(store.owners())}
         else:
-            out[place] = conn.execute(f"SELECT count(*) FROM {place}").fetchone()[0]
-    conn.close()
+            assert place in hash_of, f"不认识的落点 {place} —— 给它指一个 Redis 键"
+            out[place] = int(redis.hlen(f"anima:{wid}:{hash_of[place]}") or 0)
     return out
 
 
@@ -91,6 +107,10 @@ def _setup_for(world: World, verb: str) -> tuple[dict, dict]:
         world.player_move("p1", here)
     if verb in ("mute", "delay_reply", "walk_away", "end_conversation", "refuse_topic"):
         world.player_move("p1", here)
+    if verb == "interact":
+        # 在场是这个动词的前提(隔着半个地图照料不到),所以先把她挪到树那儿去。
+        where = world.scheduler.visibility_store.place_of(_TREE)
+        assert _bring_together(world, agent, where), "没能把她挪到树那儿"
 
     params: dict = {
         "broadcast": {"text": "明天上午店里休息"},
@@ -100,6 +120,7 @@ def _setup_for(world: World, verb: str) -> tuple[dict, dict]:
         "refuse_topic": {"keyword": "彩票"},
         "walk": {"location": next(p for p in world._tool_runtime.point_ids() if p != here)},
         "reach_out": {"player_id": "p1", "text": "在吗"},
+        "interact": {"target": _TREE, "verb": "tend"},
     }.get(verb, {})
     surface = next(iter(tools_mod.get(verb).surfaces))
     return params, {"surface": surface, "player_id": "p1"}

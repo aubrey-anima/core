@@ -10,6 +10,8 @@ dogfooding 里 200+ 条聊天暴露的病:她的**关系性意图完全平坦** 
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -44,7 +46,7 @@ class ScriptedLLM:
 
 
 def _world(tmp_path, *replies: str, stance: bool = True) -> tuple[World, ScriptedLLM]:
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     llm = ScriptedLLM(*replies)
     world.chat_service._llm = llm
     world.config_set("chat.stance.enabled", stance)
@@ -156,10 +158,7 @@ def test_a_stance_declared_by_the_model_is_stored_on_the_message_row(tmp_path):
             meta=meta,
         )
 
-        rows = world.scheduler.event_log.conn.execute(
-            "SELECT role, stance FROM messages WHERE conversation_id = ? ORDER BY id",
-            (conversation_id,),
-        ).fetchall()
+        rows = world.chat_store.annotation_rows(conversation_id)
         assert ("assistant", "avoid") in [(r[0], r[1]) for r in rows]
 
         # 而整场会话的分布随关闭时那**一个** conversation 事件出去。
@@ -190,10 +189,8 @@ def test_a_stance_she_never_chose_is_not_written_onto_the_message_row(tmp_path):
              {"role": "assistant", "content": reply}],
             meta=meta,
         )
-        rows = world.scheduler.event_log.conn.execute(
-            "SELECT stance FROM messages WHERE conversation_id = ?", (conversation_id,),
-        ).fetchall()
-        assert all(row[0] is None for row in rows)
+        rows = world.chat_store.annotation_rows(conversation_id)
+        assert all(row[1] is None for row in rows)
 
         closing = next(
             event for event in world.events()
@@ -227,12 +224,14 @@ def test_the_legacy_send_path_also_strips_the_markers(tmp_path):
         reply = asyncio.run(_run())
         assert "〔" not in reply and "stance" not in reply, reply
 
-        rows = world.scheduler.event_log.conn.execute(
-            "SELECT role, content, stance FROM messages ORDER BY id"
-        ).fetchall()
-        stored = next(row for row in rows if row[0] == "assistant")
-        assert "〔" not in stored[1], f"标记被存进了消息表:{stored[1]!r}"
-        assert stored[2] == "please"
+        stored = None
+        for aid in world.scheduler.agents:
+            for conv in world.chat_store.list_conversations(aid):
+                for msg in world.chat_store.messages_for(int(conv["id"])):
+                    if msg["role"] == "assistant":
+                        stored = msg
+        assert stored is not None
+        assert "〔" not in stored["content"], f"标记被存进了消息表:{stored['content']!r}"
         assert world.stance("夏", "p1")["stance"] == "please"
 
 

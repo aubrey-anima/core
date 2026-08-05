@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import json
 import subprocess
 import sys
@@ -22,7 +24,7 @@ from anima_world.sim_report import REPORT_FORMAT_VERSION
 
 
 def test_fast_forward_advances_the_clock_and_says_how_it_went(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         before = world.scheduler.clock
         outcome = world.fast_forward(300)
 
@@ -34,14 +36,14 @@ def test_fast_forward_advances_the_clock_and_says_how_it_went(tmp_path):
 
 def test_fast_forward_can_be_told_not_to_wait_at_all(tmp_path):
     """`plan_wait_cap<=0` 是显式的"不等",不是"planner 死了"。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         outcome = world.fast_forward(100, plan_wait_cap=0)
         assert outcome["planner_gave_up"] is False
         assert outcome["exhausted_days"] == 0
 
 
 def test_report_reads_the_world_the_host_just_ran(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.fast_forward(288 * 2)
         report = world.report()
 
@@ -55,7 +57,7 @@ def test_report_reads_the_world_the_host_just_ran(tmp_path):
 
 def test_report_covers_a_player_conversation_without_exploding(tmp_path):
     """聊过天的世界:墙钟事件不该把摘要撑爆,也不该被吞掉。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.fast_forward(50)
         reply = world.chat_reply("夏", [{"role": "user", "content": "在吗"}],
                                  player_id="p1", display_name="阿檀")
@@ -71,15 +73,12 @@ def test_report_covers_a_player_conversation_without_exploding(tmp_path):
 def test_the_cli_and_the_facade_share_one_fast_forward(tmp_path):
     """两条快进路径必须是同一份实现 —— 否则它们会慢慢长出不同的行为。"""
     db = tmp_path / "cli.db"
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "simulate", "--db-path", str(db),
-         "--ticks", "120", "--llm", "mock", "--report", str(tmp_path / "r.json")],
-        capture_output=True, text=True,
-    )
+    result = run_cli("simulate", "--world-id", "w",
+         "--ticks", "120", "--llm", "mock", "--report", str(tmp_path / "r.json"))
     assert result.returncode == 0, result.stderr
     cli_report = json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))
 
-    with World.open(str(tmp_path / "api.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "api.db"), force_mock_llm=True) as world:
         world.fast_forward(120)
         api_report = world.report()
 

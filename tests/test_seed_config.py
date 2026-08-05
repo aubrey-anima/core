@@ -12,20 +12,24 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 
 import pytest
 
 from anima_world.api import World
-from anima_world.config_store import ConfigStore, load_or_create_key
-from anima_world.db import open_db
+from anima_world.config_store import ConfigStore
 from anima_world.world_seed import apply_seed_config
 
 
 def _store(tmp_path) -> ConfigStore:
-    # 要有真的 Fernet 密钥:密文键写进来时要用得上。
-    path = str(tmp_path / "cfg.db")
-    return ConfigStore(open_db(path), fernet_key=load_or_create_key(path))
+    import fakeredis
+
+    from anima_world.redis_state import RedisConfigBackend
+
+    return ConfigStore(RedisConfigBackend(
+        fakeredis.FakeStrictRedis(decode_responses=True), "t"))
 
 
 def _seed(tmp_path, config: dict, name: str = "s.json") -> str:
@@ -40,7 +44,7 @@ def _seed(tmp_path, config: dict, name: str = "s.json") -> str:
 
 
 def test_a_seed_can_light_up_a_flag_at_genesis(tmp_path):
-    with World.open(str(tmp_path / "w.db"),
+    with open_world_at(str(tmp_path / "w.db"),
                     seed_path=_seed(tmp_path, {"needs.enabled": True}),
                     force_mock_llm=True) as world:
         assert world.config_get("needs.enabled") is True
@@ -50,7 +54,7 @@ def test_values_are_coerced_to_the_declared_type(tmp_path):
     """种子是 JSON,作者会写 "true" / "72" 这种字符串。按声明类型强转,
     和 `World.config_set` 共用同一份规则 —— 否则 db 里存一个、内存里是另一个。"""
     path = _seed(tmp_path, {"needs.enabled": "true", "autonomy.interval_ticks": "36"})
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         assert world.config_get("needs.enabled") is True
         assert world.config_get("autonomy.interval_ticks") == 36
 
@@ -60,11 +64,11 @@ def test_an_existing_world_is_never_rewritten_by_todays_seed(tmp_path):
     拿今天的种子回头覆盖,等于让一次重启悄悄改掉一个跑了半年的世界的行为。"""
     db = str(tmp_path / "w.db")
     path = _seed(tmp_path, {"needs.enabled": True})
-    with World.open(db, seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(db, seed_path=path, force_mock_llm=True) as world:
         assert world.config_get("needs.enabled") is True
         world.config_set("needs.enabled", False)     # 作者后来自己关掉了
 
-    with World.open(db, seed_path=path, force_mock_llm=True) as reopened:
+    with open_world_at(db, seed_path=path, force_mock_llm=True) as reopened:
         assert reopened.config_get("needs.enabled") is False, "种子把作者的决定覆盖了"
 
 
@@ -120,5 +124,5 @@ def test_skipped_keys_are_named_in_the_log(tmp_path, caplog):
     """跳过绝不无声:作者以为点亮了、实际没有,正是最难查的那类错。"""
     path = _seed(tmp_path, {"a.flag.from.the.future": True})
     with caplog.at_level("WARNING"):
-        World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True).close()
+        open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True).close()
     assert any("a.flag.from.the.future" in record.getMessage() for record in caplog.records)

@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -23,7 +25,7 @@ from anima_world.needs import URGENT
 
 @pytest.fixture()
 def world(tmp_path):
-    w = World.open(str(tmp_path / "world.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "world.db"), force_mock_llm=True)
     w.tick(50)
     yield w
     w.close()

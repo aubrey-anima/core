@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 import logging
-import sqlite3
 import sys
 import time
 import threading
@@ -19,21 +19,10 @@ from anima_world.agent import Agent
 from anima_world.beats import BeatScript, BeatScriptError, coerce_goals
 from anima_world.brain import Brain
 from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequence, Status, default_bt
-from anima_world.config_store import ConfigStore, load_or_create_key, has_keyfile
-from anima_world.db import (
-    offline_refusal,
-    DB_FORMAT_VERSION,
-    MIN_SUPPORTED_DB_FORMAT,
-    SCHEMA_REVISION,
-    DBFormatError,
-    open_db,
-    read_schema_revision,
-)
-from anima_world.events import EventLog
+from anima_world.config_store import ConfigStore
 from anima_world import tools as chat_tools
-from anima_world.graph import KnowledgeGraph
 from anima_world.locations import DEFAULT_POINTS
-from anima_world.memory_store import MemoryDescriptor, MemoryStore
+from anima_world.memory_store import MemoryDescriptor
 from anima_world.memory_triggers import TriggerEngine
 from anima_world.llm_client import MockLLMClient, create_llm_client_from_config
 from anima_world.narrative import (
@@ -43,16 +32,93 @@ from anima_world.narrative import (
 )
 from anima_world.planner import Planner, SyncLLM
 from anima_world.projection import project_events
-from anima_world.prompt_store import PromptStore
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
-from anima_world.world_store import BTStore, LocationStore
 from anima_world.rules import parse_rules
 from anima_world.world_seed import WorldSeedError, apply_seed_config
 from anima_world.world_seed import world_seed_errors as _world_seed_errors
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
+DEFAULT_WORLD_ID = "world"
+
+
+def _redis_url_default() -> str:
+    return os.environ.get("ANIMA_REDIS_URL", DEFAULT_REDIS_URL)
+
+
+def _world_id_default() -> str:
+    return os.environ.get("ANIMA_WORLD_ID", DEFAULT_WORLD_ID)
+
+
+def _add_world_args(p: argparse.ArgumentParser, *, suppress: bool = False,
+                    mysql: bool = True) -> None:
+    """每个碰世界的子命令共用的三个参数。世界文件退役后,世界 = Redis 上的一个前缀。
+
+    `suppress=True` 给嵌套子命令的叶子用(config set 那组):叶子的解析结果会盖掉
+    组一级的 namespace,普通默认值会把组上给的 --redis 抹成默认 —— SUPPRESS 让
+    "没写"就是"不出现",组一级的值得以幸存(world.db 时代 --db-path 的同一个坑)。
+    """
+    default = argparse.SUPPRESS if suppress else None
+    p.add_argument("--redis", default=default, metavar="URL",
+                   help="世界所在的 Redis(默认 $ANIMA_REDIS_URL 或 redis://127.0.0.1:6379/0)")
+    p.add_argument("--world-id", default=default,
+                   help="世界的名字,进 Redis 键前缀(默认 $ANIMA_WORLD_ID 或 world)")
+    if mysql:
+        p.add_argument("--mysql", default=default, metavar="DSN",
+                       help="可选:无限增长的历史归 MySQL(mysql://user:pass@host:3306/db)")
+
+
+def _connect_redis(url: str | None):
+    try:
+        import redis as redis_mod
+    except ImportError:
+        print("要连世界得先装 redis:pip install anima-world[redis]", file=sys.stderr)
+        raise SystemExit(2) from None
+    resolved = url or _redis_url_default()
+    client = redis_mod.Redis.from_url(resolved, decode_responses=True)
+    try:
+        client.ping()
+    except Exception as exc:  # noqa: BLE001 - 连不上要说人话
+        print(f"连不上 Redis({resolved}):{exc}", file=sys.stderr)
+        print("世界现在住在 Redis 里 —— 先起一个:docker run -p 6379:6379 redis "
+              "--appendonly yes", file=sys.stderr)
+        raise SystemExit(2) from None
+    return client
+
+
+def _mysql_factory(dsn: str | None):
+    """DSN → 连接工厂。**返回工厂而不是连接**:pymysql threadsafety=1 而引擎有
+    线程池,裸连接会让协议帧交叉 —— 引擎按每线程一条包装工厂。"""
+    if not dsn:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(dsn)
+    if parsed.scheme not in ("mysql", "mysql+pymysql"):
+        print(f"--mysql 只认 mysql:// DSN,收到:{dsn}", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        import pymysql
+    except ImportError:
+        print("要用 MySQL 得先装 pymysql:pip install pymysql", file=sys.stderr)
+        raise SystemExit(2) from None
+    return lambda: pymysql.connect(
+        host=parsed.hostname or "127.0.0.1", port=parsed.port or 3306,
+        user=parsed.username or "root", password=parsed.password or "",
+        database=(parsed.path or "/").lstrip("/") or None, charset="utf8mb4",
+    )
+
+
+def _world_args(args: argparse.Namespace) -> tuple[Any, str, Any]:
+    """(redis, world_id, mysql工厂)。放一个函数里,免得十个命令各解析各的。"""
+    redis = _connect_redis(getattr(args, "redis", None))
+    world_id = getattr(args, "world_id", None) or _world_id_default()
+    mysql = _mysql_factory(getattr(args, "mysql", None))
+    return redis, world_id, mysql
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -70,8 +136,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--version", action="version",
         version=(
             f"anima-world {__version__}"
-            f"  (db format {DB_FORMAT_VERSION}, 支持到 {MIN_SUPPORTED_DB_FORMAT}"
-            f";包格式 {PACKAGE_FORMAT_VERSION})"
+            f"  (存储:redis;包格式 {PACKAGE_FORMAT_VERSION})"
         ),
     )
     sub = parser.add_subparsers(dest="command")
@@ -80,7 +145,7 @@ def _build_parser() -> argparse.ArgumentParser:
     start = sub.add_parser(
         "start", help="创建并启动一个世界(引导配置 LLM,前台运行)—— 从这里开始"
     )
-    start.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置(不存在就新建)")
+    _add_world_args(start)
     start.add_argument("--seed", default=None, help="世界种子 JSON(只对新建的世界生效)")
     start.add_argument("--beats", default=None, help="节拍脚本 JSON")
     start.add_argument("--no-input", action="store_true", help="不要交互提问(CI / 脚本)")
@@ -90,25 +155,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     config_cmd = sub.add_parser("config", help="读写世界配置(LLM 密钥、时钟快慢…),不用 curl")
-    config_cmd.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    _add_world_args(config_cmd)
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
 
     def _config_leaf(name: str, help_text: str) -> argparse.ArgumentParser:
-        """A config leaf that also takes --db-path.
+        """A config leaf that also takes the world args.
 
         Registered on the leaf as well as the group because every other
-        command takes `--db-path` trailing (`doctor … --db-path w.db`), and
+        command takes `--world-id` trailing (`doctor … --world-id w`), and
         argparse stops honouring the group's copy once a leaf's positionals
         have been consumed. Without this, the habit that works everywhere
-        else dies on `config set k v --db-path w.db` with a bare top-level
+        else dies on `config set k v --world-id w` with a bare top-level
         usage error. Both positions now mean the same thing; the leaf wins
         when given twice, which is the one the user typed last.
         """
         leaf = config_sub.add_parser(name, help=help_text)
         # SUPPRESS, not None: a subparser writes its defaults onto the SAME
-        # namespace, so a plain default would blank out the group's --db-path
+        # namespace, so a plain default would blank out the group's --world-id
         # whenever the leaf's copy is omitted.
-        leaf.add_argument("--db-path", default=argparse.SUPPRESS, help="世界文件位置")
+        _add_world_args(leaf, suppress=True)
         return leaf
 
     config_list = _config_leaf("list", "列出全部配置(密钥自动打码)")
@@ -120,11 +185,11 @@ def _build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("value")
 
     doctor = sub.add_parser("doctor", help="体检:世界文件、密钥、LLM 连通性、时钟快慢")
-    doctor.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    _add_world_args(doctor)
     doctor.add_argument("--skip-probe", action="store_true", help="不要真的调用一次 LLM")
 
     chat = sub.add_parser("chat", help="和世界里的一个角色对话 —— 说完就落进世界的历史")
-    chat.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    _add_world_args(chat)
     chat.add_argument(
         "--agent", default=None,
         help="要找谁说话(角色 id);不给就列出这个世界住着谁",
@@ -136,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
     world_map = sub.add_parser(
         "map", help="把地图画出来 —— 谁在哪、这段时间里谁去了哪儿",
     )
-    world_map.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    _add_world_args(world_map)
     world_map.add_argument("--agent", action="append", default=None,
                            help="只看这几个人(可重复);不给就是全部")
     world_map.add_argument("--day", type=int, default=None,
@@ -149,16 +214,12 @@ def _build_parser() -> argparse.ArgumentParser:
                            metavar="秒", help="跟着时钟重画(默认每 2 秒);Ctrl-C 停")
     world_map.add_argument("--width", type=int, default=None, help="画布宽(默认按终端)")
     world_map.add_argument("--height", type=int, default=None, help="画布高")
-    world_map.add_argument("--redis", default=None, metavar="URL",
-                           help="连上一个跑在 Redis 上的活世界(如 redis://127.0.0.1:6379)")
-    world_map.add_argument("--world-id", default=None,
-                           help="Redis 里的世界 id;不给就从这个 db 的戳里读")
     world_map.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
     prompt = sub.add_parser(
         "prompt", help="看一眼某个角色此刻收到的提示词 —— 逐块带来源,并说明少了哪块、为什么",
     )
-    prompt.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="世界文件位置")
+    _add_world_args(prompt)
     prompt.add_argument("--agent", default=None, help="看谁的(角色 id);不给就列出名册")
     prompt.add_argument("--player-id", default="cli", help="以谁的身份跟她说话")
     prompt.add_argument("--name", default=None, help="你在她眼里的称呼")
@@ -169,10 +230,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     prompt.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
+    ontology_cmd = sub.add_parser(
+        "ontology", help="世界里有哪些种类的东西、身上有哪些量、能对它们做什么",
+    )
+    _add_world_args(ontology_cmd)
+    ontology_cmd.add_argument("--kind", default=None, help="只看这一类(如 tree)")
+    ontology_cmd.add_argument("--builtin", action="store_true",
+                              help="连内置种类一起列(agent / location / world / player)")
+    ontology_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
+
     run = sub.add_parser(
         "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
     )
-    run.add_argument("--db-path", default=onboarding.DEFAULT_DB_PATH, help="SQLite world DB path")
+    _add_world_args(run)
     run.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
     run.add_argument(
         "--beats", default=None,
@@ -187,7 +257,7 @@ def _build_parser() -> argparse.ArgumentParser:
     simulate = sub.add_parser(
         "simulate", help="Fast-forward a world headlessly (no sleep, no onboarding)"
     )
-    simulate.add_argument("--db-path", required=True, help="SQLite world DB path")
+    _add_world_args(simulate)
     simulate.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
     simulate.add_argument(
         "--agents", type=int, default=None,
@@ -225,13 +295,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     events_commands = events_cmd.add_subparsers(dest="events_command", required=True)
     events_export = events_commands.add_parser("export", help="导出成 JSONL")
-    events_export.add_argument("--db-path", default="world.db")
+    _add_world_args(events_export)
     events_export.add_argument("--output", required=True, help="写到文件;`-` = stdout")
 
     report_cmd = sub.add_parser(
         "report", help="对着一个 world.db 出运行摘要 —— 只读,不跑世界"
     )
-    report_cmd.add_argument("--db-path", default="world.db")
+    _add_world_args(report_cmd)
     report_cmd.add_argument("--json", action="store_true", help="机器可读输出")
     report_cmd.add_argument("--output", help="写到文件(缺省打到 stdout)")
 
@@ -252,7 +322,7 @@ def _build_parser() -> argparse.ArgumentParser:
     play = sub.add_parser(
         "play", help="在活着的世界里说话 —— 时钟一边走,你一边聊"
     )
-    play.add_argument("--db-path", default="world.db")
+    _add_world_args(play)
     play.add_argument("--agent", help="先跟谁说话(缺省是名册里第一个)")
     play.add_argument("--name", help="你在这个世界里叫什么(缺省「访客」)")
     play.add_argument("--player-id", default="p1")
@@ -268,13 +338,14 @@ def _build_parser() -> argparse.ArgumentParser:
     world = sub.add_parser("world", help="Export or import portable world data packages")
     world_commands = world.add_subparsers(dest="world_command", required=True)
     world_export = world_commands.add_parser("export", help="Export a .cyberworld package")
-    world_export.add_argument("--db-path", default=None, help="SQLite world DB (required for snapshot)")
-    world_export.add_argument("--seed", required=True, help="World seed JSON path")
+    _add_world_args(world_export)
+    world_export.add_argument("--seed", default=None,
+                              help="World seed JSON(缺省用世界自己的创世出生证明)")
     world_export.add_argument("--beats", default=None, help="Optional beats JSON path")
     world_export.add_argument("--output", required=True, help="Output .cyberworld path")
-    world_export.add_argument("--world-id", required=True, help="Stable lowercase world lineage id")
+    world_export.add_argument("--package-id", required=True,
+                              help="包的世系 id(小写;--world-id 是源世界在 Redis 上的名字)")
     world_export.add_argument("--name", "--title", required=True, help="World display name")
-    world_export.add_argument("--mode", choices=("snapshot", "template"), default="snapshot")
     world_export.add_argument("--summary", default="")
     world_export.add_argument("--genre", default="")
     world_export.add_argument("--setting", default="")
@@ -289,12 +360,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     world_import = world_commands.add_parser("import", help="Import a .cyberworld package")
     world_import.add_argument("package", help="Package archive path")
-    world_import.add_argument(
-        "--destination",
-        default="saves/operator/instances",
-        help="Instances root the imported world lands under (default: the project-local "
-        "operator instances dir; pass an absolute path for a backend-managed root)",
-    )
+    _add_world_args(world_import)
 
     return parser
 
@@ -604,30 +670,21 @@ def _planner_situation(scheduler: Any, agent_id: str) -> dict[str, Any]:
     return ctx
 
 
-def _warn_if_llm_degraded(config_store: ConfigStore, db_path: str | Path) -> None:
+def _warn_if_llm_degraded(config_store: ConfigStore, world_id: str) -> None:
     """Say out loud, at boot, that this world will run on the Mock LLM.
 
-    An unset key and an unreadable one both read as "unset" downstream, and the
-    result is a world that boots fine, ticks fine, and produces nothing but
-    template text — the failure mode `onboarding.probe_llm` exists to stop for
-    `simulate`. `serve` cannot borrow that check (a world image that refuses to
-    start is worse than a degraded one), so it warns instead. `start` reports
-    the same thing in its banner and turns this off.
+    A world that boots fine, ticks fine, and produces nothing but template
+    text is the failure mode `onboarding.probe_llm` exists to stop for
+    `simulate`. `run` cannot borrow that check (a world that refuses to
+    start is worse than a degraded one), so it warns instead. `start`
+    reports the same thing in its banner and turns this off.
     """
-    if "llm.api_key" in config_store.undecryptable_secrets():
-        logger.warning(
-            "llm.api_key cannot be decrypted — the keyfile %s.key most likely did not travel "
-            "with this database. Narrative, free-time planner and relationship judge all "
-            "degrade to Mock. Restore the keyfile, or write a new key with "
-            "anima-world config set llm.api_key sk-… .",
-            db_path,
-        )
-    elif not (config_store.get("llm.api_key", default="") or ""):
+    if not (config_store.get("llm.api_key", default="") or ""):
         logger.warning(
             "llm.api_key is not configured — narrative, free-time planner and relationship "
-            "judge degrade to Mock (the world still runs, but its text is templated and its "
-            "agents have no plans). Set it with `anima-world config set llm.api_key sk-…`, or seed it from "
-            "ANIMA_LLM_API_KEY before the database is first created."
+            "judge degrade to Mock (world %s still runs, but its text is templated and its "
+            "agents have no plans). Set it with `anima-world config set llm.api_key sk-…`.",
+            world_id,
         )
 
 
@@ -690,45 +747,32 @@ def _bt_for(loc: str) -> Selector:
     )
 
 
-def _store_genesis_seed(conn: Any, world_seed: dict[str, Any] | None) -> None:
-    """Record the seed that is about to populate a FRESH database (1.0.2).
+def _store_genesis_seed(meta: Any, world_seed: dict[str, Any] | None) -> None:
+    """Record the seed that is about to populate a FRESH world (1.0.2).
 
-    Empty-db-only, the same contract as every seed_defaults: an existing
-    world's provenance must never be rewritten to whatever today's seed is.
-    Live export (`World.export_snapshot`) reads this back so a snapshot
-    always carries its true birth certificate. Pre-1.0.2 databases simply
-    lack the row — export falls back to the bundled seed and says so.
+    调用方已经判过"这是个空世界"(fresh_world);这里再守一遍"已有出生证明就
+    不改写" —— an existing world's provenance must never be rewritten to
+    whatever today's seed is. Live export reads this back so a snapshot
+    always carries its true birth certificate.
     """
     if world_seed is None:
         return
-    (events,) = conn.execute("SELECT COUNT(*) FROM events").fetchone()
-    (locations,) = conn.execute("SELECT COUNT(*) FROM locations").fetchone()
-    if events or locations:
+    if meta.get("world_seed") is not None:
         return
-    conn.execute(
-        "INSERT INTO db_meta (key, value) VALUES ('world_seed', ?)"
-        " ON CONFLICT(key) DO NOTHING",
-        (json.dumps(world_seed, ensure_ascii=False),),
-    )
-    conn.commit()
+    meta.put("world_seed", world_seed)
 
 
 def _apply_seed_config_at_genesis(
-    conn: Any, config_store: Any, world_seed: dict[str, Any] | None
+    config_store: Any, world_seed: dict[str, Any] | None
 ) -> None:
-    """种子的 `config` 块 —— **只对空库生效**,和其它 seed_defaults 同一条契约。
+    """种子的 `config` 块 —— **只对空世界生效**(调用方以 fresh_world 把关)。
 
     已有的世界不认:那些开关此时是**运行数据**(作者可能早就 `config set` 改过),
     拿今天的种子回头覆盖它们,等于让一次重启悄悄改掉一个跑了半年的世界的行为。
-
-    跳过的键会逐条 warning 点名 —— 作者以为点亮了、实际没点亮,正是这个仓库最
+    跳过的键逐条 warning 点名 —— 作者以为点亮了、实际没点亮,正是这个仓库最
     在意的那类错。
     """
     if world_seed is None:
-        return
-    (events,) = conn.execute("SELECT COUNT(*) FROM events").fetchone()
-    (locations,) = conn.execute("SELECT COUNT(*) FROM locations").fetchone()
-    if events or locations:
         return
     report = apply_seed_config(config_store, world_seed)
     for key, reason in report["skipped"]:
@@ -742,54 +786,43 @@ def _apply_seed_config_at_genesis(
 
 
 def build_serve_scheduler(
+    world_id: str,
+    redis: Any,
+    mysql: Any = None,
     n_agents: int | None = None,
-    db_path: str | Path | None = None,
     seed_path: str | Path | None = None,
     force_mock_llm: bool = False,
     mock_narrative: bool = False,
     beats_path: str | Path | None = None,
     llm_warning: bool = True,
 ) -> Scheduler:
-    """Build the default M3 web-chat world.
+    """Build a world that lives in Redis (+ MySQL for the unbounded four).
 
-    n_agents=None (novel-benchmark-loop): register the seed file's full
-    roster instead of being capped at the old hardcoded default of 3 — a
-    benchmark microworld's agent count shouldn't be silently truncated.
-    seed_path (novel-benchmark-loop): override which seed file is consulted
-    at first boot; only ever read against a fresh (empty) database, same as
-    the bundled file (M6 D7) — an existing DB's events remain the sole
-    source of truth regardless of what --seed points at.
-    force_mock_llm (novel-benchmark-loop): `simulate --no-llm` threads this
-    through narrative/planner/capability-catalog construction so a
-    fast-forward run makes zero network calls even when a real key is
-    configured — a post-hoc swap after construction is too late for the
-    capability catalog, which is generated synchronously at first boot.
-    mock_narrative (sim-ff-usability): `simulate --llm planner` mocks ONLY
-    the narrative provider — hundreds of duty transitions × one real LLM
-    call each is what made a 30-world-day run undrainable — while the
-    planner and capability catalog stay on the configured stack.
-    beats_path (beat-director): authored beat script; loading is STRICT
-    (BeatScriptError propagates and fails startup: --beats is an explicit
-    opt-in and an authoring error should surface at load, not mid-run).
-    seed_path: same rule, same reason (WorldSeedError). Only the BUNDLED seed
-    degrades to hardcoded defaults — an authored seed that quietly became the
-    built-in demo world could never be corrected afterwards, since a seed is
-    read once into an empty database.
+    world.db 退役(1.5.0):世界的名字是 `world_id`,家是 `redis`。创世 =
+    种子直接写进各 Redis store,而且沿用搬家时代的那条纪律 —— **只填缺,
+    不覆盖**(每个 seed 函数都是空 store 才播;接一个在跑的世界不许把她按回
+    原点)。给了 `mysql=` 的世界,随时间无限增长的四样(events / memories /
+    conversations / messages)归 MySQL,判据照旧是"她带不带得进上下文"。
+
+    seed_path: authored seed; loading is STRICT (WorldSeedError propagates
+    and fails startup). Only the BUNDLED seed degrades to hardcoded defaults.
+    beats_path: same rule (BeatScriptError). force_mock_llm / mock_narrative:
+    unchanged from the world.db era — threaded through construction because a
+    post-hoc swap is too late for the capability catalog.
     """
+    from anima_world.mysql_state import GROWS_FOREVER
+    from anima_world.redis_state import (
+        RedisBTStore, RedisChatStore, RedisClock, RedisConfigBackend, RedisDict,
+        RedisEconomyStore, RedisEventLog, RedisKnowledgeGraph, RedisLocationStore,
+        RedisMemoryStore, RedisNeedsStore, RedisCliqueStore, RedisPromptStore,
+        RedisOntologyStore, RedisReflectionStore, RedisRulesStore, RedisStockStore,
+        RedisVisibilityStore,
+        clock_key, current_action_key, decode_action, encode_action, events_key,
+        drop_stale_copies_for_mysql, durability_warning, meta_rows, plans_key, transit_key,
+    )
+
     beat_script = BeatScript.load(beats_path) if beats_path is not None else None
-    event_log = None
-    db_path_str = None
-    memory_store = None
-    knowledge_graph = None
-    trigger_engine = None
-    config_store = None
-    prompt_store = None
-    # M5: created up front so ConfigStore/PromptStore (built before the
-    # Scheduler exists) share the same RLock the Scheduler uses to guard the
-    # connection, instead of racing it with their own private lock.
     shared_lock = threading.RLock()
-    location_store = None
-    bt_store = None
     world_seed = (
         _load_world_seed(seed_path, authored=True)
         if seed_path is not None
@@ -797,46 +830,66 @@ def build_serve_scheduler(
     )
     if n_agents is None:
         n_agents = len(world_seed["agents"]) if world_seed is not None else len(CHARACTER_ROSTER)
-    if db_path is not None:
-        conn = open_db(db_path)
-        _store_genesis_seed(conn, world_seed)  # 空库首启才写,出生证明随 db 走
-        event_log = EventLog(conn)
-        db_path_str = str(db_path)
-        # M5: config/prompts share the same world.db connection. **不播默认值** ——
-        # 世界文件里只存作者动过的,别的现场从引擎取(DB-SPLIT.md 移动 1)。
-        config_store = ConfigStore(conn, fernet_key=load_or_create_key(db_path, create=False),
-                                   lock=shared_lock, had_keyfile=has_keyfile(db_path))
-        # 种子自己带的开关(创世时一次,空库才认)—— 现在它是 `config` 表里唯一的来源:
-        # 表里剩下的就是"这个世界的作者决定了什么"。
-        _apply_seed_config_at_genesis(conn, config_store, world_seed)
-        # An explicitly-mocked run is not "degraded", and `start` reports the
-        # same thing far better in its own banner (llm_warning=False).
-        if llm_warning and not force_mock_llm:
-            _warn_if_llm_degraded(config_store, db_path)
-        prompt_store = PromptStore(conn, lock=shared_lock)
-        # M4: memory/graph share the same world.db connection.
-        # llm-relationship-judge code review #1: every store on this shared
-        # connection serializes on shared_lock — MemoryStore was the one
-        # exception (private RLock guarding nothing), and the judge pool
-        # made web-thread query vs worker-thread append collisions routine.
-        memory_store = MemoryStore(conn, config_store=config_store, lock=shared_lock)
-        knowledge_graph = KnowledgeGraph(conn)
-        trigger_engine = TriggerEngine(config_store=config_store)
-        # World definition data (the map, the action table, BT shape) lives in
-        # tables; seeded once from world_seed.json, DB rows win thereafter.
-        location_store = LocationStore(conn, lock=shared_lock)
-        bt_store = BTStore(conn, lock=shared_lock)
-        _seed_world_defs(location_store, bt_store, world_seed)
-        # economy-v4: default items + cafe shelf, empty-table-only (authored
-        # rows always win). Costless while economy.enabled stays off.
-        # #12: the seed's own material layer goes in FIRST, precisely so the
-        # demo items find a non-empty table and stand down — order is the
-        # whole mechanism here, not an accident.
-        from anima_world.economy import seed_defaults as seed_economy_defaults
 
-        with shared_lock:
-            _seed_material_layer(conn, world_seed)
-            seed_economy_defaults(conn)
+    warning = durability_warning(redis)
+    if warning:
+        logger.warning(warning)
+
+    mysql_conn = None
+    mysql_prefix = ""
+    if mysql is not None:
+        from anima_world.mysql_state import as_connection, ensure_schema
+
+        mysql_conn = as_connection(mysql)
+        mysql_prefix = f"{world_id}_"
+        ensure_schema(mysql_conn, mysql_prefix)
+
+    meta = meta_rows(redis, world_id)
+    # 事件日志 —— 唯一真相。MySQL 接手时 Redis 里不留拷贝(两份真相里一份不更新,
+    # 是这个仓库最怕的坏法)。
+    if mysql_conn is not None and "events" in GROWS_FOREVER:
+        from anima_world.mysql_state import MySQLEventLog
+
+        event_log = MySQLEventLog(mysql_conn, mysql_prefix)
+        drop_stale_copies_for_mysql(redis, world_id)
+    else:
+        event_log = RedisEventLog(redis, events_key(world_id))
+
+    config_store = ConfigStore(RedisConfigBackend(redis, world_id), lock=shared_lock)
+    trigger_engine = TriggerEngine(config_store=config_store)
+    prompt_store = RedisPromptStore(redis, world_id)
+    if mysql_conn is not None and "memories" in GROWS_FOREVER:
+        from anima_world.mysql_state import MySQLMemoryStore
+
+        memory_store = MySQLMemoryStore(mysql_conn, mysql_prefix, config_store)
+    else:
+        memory_store = RedisMemoryStore(redis, world_id, config_store)
+    knowledge_graph = RedisKnowledgeGraph(redis, world_id)
+    location_store = RedisLocationStore(redis, world_id)
+    bt_store = RedisBTStore(redis, world_id)
+    stock_store = RedisStockStore(redis, world_id)
+    visibility_store = RedisVisibilityStore(redis, world_id)
+    rules_store = RedisRulesStore(redis, world_id)
+    ontology_store = RedisOntologyStore(redis, world_id)
+    economy_store = RedisEconomyStore(redis, world_id)
+
+    # 创世判定:这个 world_id 下还什么都没有。判据和 world.db 时代逐字同构
+    # (没有事件、没有地图 = 空世界),只是问的是 store 而不是表。
+    fresh_world = event_log.count() == 0 and not location_store.all()
+    if fresh_world:
+        _store_genesis_seed(meta, world_seed)  # 出生证明随世界走
+        # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
+        # 剩下的行就是"这个世界的作者决定了什么"。
+        _apply_seed_config_at_genesis(config_store, world_seed)
+    if llm_warning and not force_mock_llm:
+        _warn_if_llm_degraded(config_store, world_id)
+    _seed_world_defs(location_store, bt_store, world_seed)
+    # economy-v4: default items + cafe shelf, empty-store-only (authored
+    # rows always win). #12: the seed's own material layer goes in FIRST,
+    # precisely so the demo items find a non-empty store and stand down.
+    with shared_lock:
+        _seed_material_layer(economy_store, world_seed)
+        economy_store.seed_defaults()
     # llm-relationship-judge: judge only exists with a config store (it needs
     # the live llm.* stack); --no-llm gives it a mock client whose garbage
     # reply degrades every verdict to None — chat then simply produces no
@@ -910,7 +963,8 @@ def build_serve_scheduler(
         relationship_judge=relationship_judge,
         reflector=reflector,
         event_log=event_log,
-        db_path=db_path_str,
+        world_id=world_id,
+        meta_store=meta,
         memory_store=memory_store,
         knowledge_graph=knowledge_graph,
         trigger_engine=trigger_engine,
@@ -924,19 +978,47 @@ def build_serve_scheduler(
     # world-rules:存量的持久层 + 世界的规律。规律从种子播进 `world_rules` 表
     # (空库一次,之后表里的行说了算——和地图/行为树同一条契约),坏规律在这里
     # 就当场抛 RuleError,不流到运行期。
-    if conn is not None:
-        from anima_world.perception import VisibilityStore
-        from anima_world.stocks import StockStore
-
-        scheduler.stock_store = StockStore(conn, lock=shared_lock)
-        scheduler.visibility_store = VisibilityStore(conn, lock=shared_lock)
-        with shared_lock:
-            _seed_stocks(conn, world_seed, scheduler.stock_store)
-            _seed_world_rules(conn, world_seed)
-            _seed_stock_visibility(conn, world_seed, scheduler.visibility_store)
-            _seed_stock_places(conn, world_seed, scheduler.visibility_store)
-            scheduler.world_rules = _load_world_rules(conn)
-            _warn_unresolved_rule_names(conn, scheduler.world_rules)
+    # World.__init__(转录)与外部动词要用到的连接随调度器走。
+    scheduler.redis = redis
+    scheduler.mysql_conn = mysql_conn
+    scheduler.mysql_prefix = mysql_prefix
+    # 时钟第一个接上:后面的 load_persisted_events 会拿事件 ts 和它取 max。
+    # setnx 只填缺 —— 重开一个世界不许把时钟拨回去。
+    scheduler._clock_store = RedisClock(redis, clock_key(world_id), initial=0)
+    # 在途 / 当前动作 / 规划:真状态,全进程可见。
+    scheduler._transit = RedisDict(redis, transit_key(world_id))
+    scheduler._current_action = RedisDict(
+        redis, current_action_key(world_id), encode=encode_action, decode=decode_action,
+    )
+    scheduler._plans = RedisDict(redis, plans_key(world_id))
+    # 需求 / 小团体 / 反思水位 / 经济。
+    scheduler.needs_store = RedisNeedsStore(redis, world_id)
+    scheduler.clique_store = RedisCliqueStore(redis, world_id)
+    scheduler.reflection_store = RedisReflectionStore(redis, world_id)
+    scheduler.economy_store = economy_store
+    # 量与规律。
+    scheduler.stock_store = stock_store
+    scheduler.visibility_store = visibility_store
+    with shared_lock:
+        _seed_world_rules(rules_store, world_seed)
+        _seed_stock_visibility(world_seed, visibility_store)
+        _seed_stock_places(world_seed, visibility_store)
+        _seed_ontology(ontology_store, world_seed, fresh_world=fresh_world)
+        scheduler.world_rules = _load_world_rules(rules_store)
+        # 本体的解析在规律之后:它要拿规律去查引用。声明过种类的世界从此走闸,
+        # 没声明的照旧走警告 —— 那条警告只对后者还有意义。
+        scheduler.ontology_store = ontology_store
+        scheduler.ontology = _load_ontology(
+            ontology_store, scheduler.world_rules, location_store, economy_store
+        )
+        # 种子的显式值先落(它此刻仍是空库,"空库一次"那条守得住),声明的默认值
+        # 后面**只填缺** —— 反过来的话作者写的 3.2 会被声明的 1.0 盖掉。
+        # 而它现在拿得到本体了,于是"写了一个没声明过的量"这件事走得了闸。
+        _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology)
+        if scheduler.ontology is None:
+            _warn_unresolved_rule_names(stock_store, scheduler.world_rules)
+        else:
+            _apply_ontology(scheduler.ontology, stock_store, visibility_store)
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -948,12 +1030,12 @@ def build_serve_scheduler(
         # does nothing — the event log and the definition tables are the running
         # world's only source of truth from genesis onward.
         logger.warning(
-            "--seed %s was NOT applied: this database already holds %d event(s), and a seed "
-            "file is only ever read into an empty one. Its own roster and world state come "
-            "from its event log, so it does not need one. Point --db-path at a fresh file to "
+            "--seed %s was NOT applied: world %r already holds %d event(s), and a seed "
+            "file is only ever read into an empty world. Its own roster and world state come "
+            "from its event log, so it does not need one. Point --world-id at a fresh name to "
             "author against this seed, or edit the live world through World.config_set / "
-            "World.prompt_set and the locations/bt_nodes tables.",
-            seed_path, len(persisted),
+            "World.prompt_set and the locations / bt_nodes stores.",
+            seed_path, world_id, len(persisted),
         )
     boot_projection = scheduler._memory_projection
     scheduler.bt_store = bt_store
@@ -1045,6 +1127,16 @@ def build_serve_scheduler(
         scheduler.load_persisted_events(persisted)
         if memory_store is not None and trigger_engine is not None:
             _rebuild_memories(memory_store, trigger_engine, persisted)
+    # 黑板最后才搬进 Redis —— 必须晚于事件重放。**只填缺,不覆盖**:手里这份是
+    # 创世/重放拼出来的快照,而 Redis 里已有的值是这个世界**更新的现在**;反过来
+    # 排序(先接再重放)会让重放把别的进程刚写的位置盖回创世值 —— 第二个
+    # World.open 悄悄把她挪回 cafe,两边都不报错,黑板漏的正是这一条。
+    from anima_world.redis_state import RedisBlackboard, agent_key
+
+    for aid, brain in scheduler.agents.items():
+        board = RedisBlackboard(redis, agent_key(world_id, aid))
+        board.seed_missing(brain.agent.blackboard.snapshot())
+        brain.agent.blackboard = board
     return scheduler
 
 
@@ -1163,70 +1255,83 @@ def _rebuild_memories(
 
 
 
-def _seed_stocks(conn: Any, world_seed: dict[str, Any] | None, store: Any) -> None:
+def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
+                 *, ontology: Any = None) -> None:
     """种子里的初始存量(`"stocks": [{"owner": …, "values": {…}}]`)。空库一次。
 
     坏条目逐条丢弃 —— 和种子里其它可选字段同一条宽容原则(规律本身不是这样:
     那是世界的物理法则,坏一条就整体拒绝,见 `_seed_world_rules`)。
+
+    **声明过种类的世界例外:量名走闸,拼错当场开不了机。** 这一条和
+    `_load_ontology` 的"声明本身就是开关"逐字同构 —— 一个不写 `kinds` 的世界里,
+    owner 和量名都是任意字符串,引擎无从判断 `树髙` 是笔误还是作者新造的量;
+    一旦他写下 `kinds`,他就是在说"我已经声明了这个世界有什么"。
+
+    不吼一声而放行的样子是这个仓库最怕的那种:`树髙` 安静地建成第二个量,
+    `树高` 停在声明的默认值上,规律照跑、日志干净,而作者要到某天发现那棵树
+    三个月没长过才知道。
     """
     if world_seed is None:
         return
-    (existing,) = conn.execute("SELECT COUNT(*) FROM stocks").fetchone()
-    if existing:
+    if store.owners():
         return
+    problems: list[str] = []
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stocks")):
         owner = str(entry.get("owner") or "").strip()
         values = entry.get("values")
         if not owner or not isinstance(values, dict):
             logger.warning("world_seed stocks[%s] 缺 owner 或 values;跳过", index)
             continue
+        declared = ontology.declared_quantities(owner) if ontology is not None else None
         clean: dict[str, float] = {}
         for key, raw in values.items():
+            name = str(key)
+            if declared and name not in declared:
+                problems.append(
+                    f"stocks[{index}] 给 {owner} 写了「{name}」,而它所属的种类没有"
+                    f"声明过这个量;声明过的是 {sorted(declared)}"
+                )
+                continue
             try:
-                clean[str(key)] = float(raw)
+                clean[name] = float(raw)
             except (TypeError, ValueError):
                 logger.warning(
                     "world_seed stocks[%s] 的 %s 不是数(%r);跳过这一项", index, key, raw
                 )
         if clean:
             store.set_many(owner, clean, tick=0)
+    if problems:
+        from anima_world.ontology import OntologyError
+
+        raise OntologyError(problems)
 
 
-def _seed_world_rules(conn: Any, world_seed: dict[str, Any] | None) -> None:
-    """种子里的规律 → `world_rules` 表。空库一次,之后表里的行说了算。
+def _seed_world_rules(rules_store: Any, world_seed: dict[str, Any] | None) -> None:
+    """种子里的规律 → `:world_rules`。空的一次,之后那里的行说了算。
 
     **坏规律整体拒绝**(`RuleError`),不逐条丢弃:规律是这个世界的物理法则,
     少一条不是"少一点内容",是这个世界从此算错。宁可开不了机。
     """
     if world_seed is None:
         return
-    (existing,) = conn.execute("SELECT COUNT(*) FROM world_rules").fetchone()
-    if existing:
+    if len(rules_store):
         return
     entries = world_seed.get("rules")
     if not entries:
         return
     parse_rules(entries)   # 校验在这里,坏了当场抛
-    stamp = datetime.now(timezone.utc).isoformat()
-    for entry in entries:
-        conn.execute(
-            "INSERT INTO world_rules (id, definition, updated_at) VALUES (?, ?, ?)"
-            " ON CONFLICT(id) DO NOTHING",
-            (str(entry.get("id")), json.dumps(entry, ensure_ascii=False), stamp),
-        )
-    conn.commit()
+    rules_store.seed(entries, datetime.now(timezone.utc).isoformat())
 
 
-def _load_world_rules(conn: Any) -> list[Any]:
-    """从表里读出规律并编译。表被人手改坏了也当场报错,不带着坏规律开机。"""
-    rows = conn.execute("SELECT definition FROM world_rules ORDER BY id").fetchall()
-    if not rows:
+def _load_world_rules(rules_store: Any) -> list[Any]:
+    """从 store 读出规律并编译。被人手改坏了也当场报错,不带着坏规律开机。"""
+    definitions = rules_store.definitions()
+    if not definitions:
         return []
-    return parse_rules([json.loads(row[0]) for row in rows])
+    return parse_rules(definitions)
 
 
-
-def _warn_unresolved_rule_names(conn: Any, rules: list[Any]) -> None:
+def _warn_unresolved_rule_names(stock_store: Any, rules: list[Any]) -> None:
     """规律读了一个它**够不着**的量 —— 开机时点名。
 
     只警告不拒绝:量可以在世界跑起来之后才被创建(种一棵树),所以这不能是错误。
@@ -1240,12 +1345,12 @@ def _warn_unresolved_rule_names(conn: Any, rules: list[Any]) -> None:
     from anima_world.rules import BUILTIN_NAMES, WORLD_PREFIX, missing_names
     from anima_world.stocks import owner_kind
 
-    rows = conn.execute("SELECT owner, key FROM stocks").fetchall()
     by_owner: dict[str, set[str]] = {}
     by_kind: dict[str, set[str]] = {}
-    for owner, key in rows:
-        by_owner.setdefault(owner, set()).add(key)
-        by_kind.setdefault(owner_kind(owner), set()).add(key)
+    for owner in stock_store.owners():
+        for key in stock_store.snapshot(owner):
+            by_owner.setdefault(owner, set()).add(key)
+            by_kind.setdefault(owner_kind(owner), set()).add(key)
 
     # 世界的量只能带前缀读到 —— 这正是那个事故的要害。
     globals_ = {f"{WORLD_PREFIX}{key}" for key in by_kind.get("world", set())}
@@ -1267,7 +1372,86 @@ def _warn_unresolved_rule_names(conn: Any, rules: list[Any]) -> None:
             )
 
 
-def _seed_stock_places(conn: Any, world_seed: dict[str, Any] | None, store: Any) -> None:
+def _seed_ontology(
+    ontology_store: Any, world_seed: dict[str, Any] | None, *, fresh_world: bool
+) -> None:
+    """种子里的本体(`"kinds"` / `"entities"`)→ `:kinds` / `:entities`。**只在创世。**
+
+    别的种子段落用的是"表空了就播",这一段不能 —— 一个创世时没有本体的世界,它的
+    本体表**永远是空的**,于是下次用默认种子重开就会被硬塞进一个 `tree` 种类,
+    连带它的规律闸,而那些东西和这个世界毫无关系(轻则多一棵树,重则开不了机)。
+    本体是"这个世界有什么"的定义:它和世界同生,不能事后嫁接。
+
+    **坏声明整体拒绝**(`OntologyError`),和规律同一条理由:少一条不是"少一点
+    内容",是这个世界从此有一部分东西静默地不存在。
+    """
+    from anima_world.ontology import parse_entities, parse_kinds
+
+    if world_seed is None or not fresh_world or len(ontology_store):
+        return
+    kinds = world_seed.get("kinds") or []
+    entities = world_seed.get("entities") or []
+    if not kinds and not entities:
+        return
+    parse_entities(entities, parse_kinds(kinds))   # 校验在这里,坏了当场抛
+    ontology_store.seed(kinds, entities, datetime.now(timezone.utc).isoformat())
+
+
+def _load_ontology(
+    ontology_store: Any, rules: list[Any], location_store: Any, economy_store: Any = None
+) -> Any:
+    """读出本体并解析全部引用。**没声明过种类的世界跳过这一整层。**
+
+    "声明本身就是开关"和认知层逐字同构:一个不写 `kinds` 的世界照旧靠
+    `_warn_unresolved_rule_names` 那条**警告**过日子(量可以在世界跑起来之后才被
+    创建,所以没有声明时那只能是建议)。一旦作者写下 `kinds`,他就是在说
+    "我已经声明了这个世界有什么" —— 于是同一件事从建议升级成闸:
+    `for_each: {"kind": "trees"}` 当场开不了机,而不是安静地一条都不跑。
+    """
+    if not len(ontology_store):
+        return None
+    locations = [str(row.get("id")) for row in (location_store.all() or ())]
+    # 物品定义是**闭集**(只在创世从种子里播,`seed_authored` / `seed_defaults`),
+    # 所以能力里的 `have_园艺剪` 查得起来 —— 拼错一个字的后果是那道门永远关着,
+    # 而世界照跑、日志干净,正是这一层存在的理由。
+    items = [str(row.get("id")) for row in (economy_store.items() if economy_store else ())]
+    return ontology_store.load(rules=rules, locations=locations, items=items)
+
+
+def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any) -> None:
+    """把本体声明兑现成量、可见性、位置。**三样都只填缺,不覆盖。**
+
+    每次开机都跑,不只创世 —— 它表达的是一条不变量:**一个实体存在,它声明过的量
+    就存在**。整份写回则会把长了三十天的树倒带回幼苗(创世那条纪律踩过两次)。
+    """
+    from anima_world.ontology import seed_quantities, visibility_declarations
+
+    for entity in ontology.entities.values():
+        # **逐个量填,不是逐个实体填。** 按实体跳的话,种子里给某棵树写了一个
+        # `树高` 就会让它声明过的其余量(`最大树高` / `生长速度`)一个都不落地 ——
+        # 于是 `tend` 的条件 `树高 < 最大树高` 求不出值、生长规律算不动,而两件事
+        # 都只是安静地不发生。
+        have = stock_store.of(entity.id)
+        missing = {
+            key: value for key, value in seed_quantities(ontology, entity).items()
+            if key not in have
+        }
+        if missing:
+            stock_store.set_many(entity.id, missing, tick=0)
+
+    declared = visibility_store.rules_map()
+    for kind, key, visibility, label in visibility_declarations(ontology):
+        if (kind, key) not in declared:
+            visibility_store.declare(kind, key, visibility, label)
+
+    for entity in ontology.entities.values():
+        # `here` 档靠它才成立:没有位置的东西永远不在任何地方,于是"在场可见"
+        # 等于"永远看不见"。
+        if entity.location and visibility_store.place_of(entity.id) is None:
+            visibility_store.place(entity.id, entity.location, entity.name)
+
+
+def _seed_stock_places(world_seed: dict[str, Any] | None, store: Any) -> None:
     """种子里"这个东西在哪"(`"stock_places": [...]`)。空表一次。
 
     `here` 档的可见性靠它才成立 —— 没有它,一棵树永远不在任何地方,于是"在场可见"
@@ -1275,8 +1459,7 @@ def _seed_stock_places(conn: Any, world_seed: dict[str, Any] | None, store: Any)
     """
     if world_seed is None:
         return
-    (existing,) = conn.execute("SELECT COUNT(*) FROM stock_places").fetchone()
-    if existing:
+    if store.labels():
         return
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stock_places")):
         owner = str(entry.get("owner") or "").strip()
@@ -1287,7 +1470,7 @@ def _seed_stock_places(conn: Any, world_seed: dict[str, Any] | None, store: Any)
         store.place(owner, location, entry.get("label"))
 
 
-def _seed_stock_visibility(conn: Any, world_seed: dict[str, Any] | None, store: Any) -> None:
+def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> None:
     """种子里的可见性声明(`"stock_visibility": [...]`)。空表一次。
 
     **声明本身就是这一层的开关** —— 没声明过任何东西的世界,角色感知不到任何量,
@@ -1296,8 +1479,7 @@ def _seed_stock_visibility(conn: Any, world_seed: dict[str, Any] | None, store: 
     """
     if world_seed is None:
         return
-    (existing,) = conn.execute("SELECT COUNT(*) FROM stock_visibility").fetchone()
-    if existing:
+    if store.declarations():
         return
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stock_visibility")):
         kind = str(entry.get("kind") or "").strip()
@@ -1503,7 +1685,7 @@ def _material_qty(item: dict[str, Any], where: str) -> int | None:
     return qty
 
 
-def _seed_material_layer(conn: Any, world_seed: dict[str, Any] | None) -> None:
+def _seed_material_layer(store: Any, world_seed: dict[str, Any] | None) -> None:
     """物质层的创世入口:物品定义与店铺货架(#12)。
 
     economy/needs 从首发起就有机制,却是唯一一个没有创世入口的子系统 ——
@@ -1520,7 +1702,7 @@ def _seed_material_layer(conn: Any, world_seed: dict[str, Any] | None) -> None:
     """
     if world_seed is None:
         return
-    from anima_world.economy import ITEM_KINDS, seed_authored
+    from anima_world.economy import ITEM_KINDS
 
     defined: dict[str, tuple[str, str, str, float, dict[str, Any]]] = {}
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "items")):
@@ -1577,7 +1759,7 @@ def _seed_material_layer(conn: Any, world_seed: dict[str, Any] | None) -> None:
 
     if not defined and not stock:
         return  # 种子没碰物质层:内置演示物品照常出场
-    seed_authored(conn, list(defined.values()), stock)
+    store.seed_authored(list(defined.values()), stock)
 
 
 def _money_for(agent_id: str, world_seed: dict[str, Any] | None) -> float:
@@ -1743,6 +1925,29 @@ def _seed_capability_catalog(
         })
 
 
+def _world_exists(redis: Any, world_id: str) -> bool:
+    """这个 Redis 上有没有叫这个名字的世界 —— 前缀下有任何键就算有。"""
+    from anima_world.redis_state import KEY_PREFIX
+
+    for _ in redis.scan_iter(match=f"{KEY_PREFIX}:{world_id}:*", count=10):
+        return True
+    return False
+
+
+def _require_existing_world(redis: Any, world_id: str, cmd: str) -> bool:
+    """只读命令不许**创建**世界。
+
+    抄错 world_id 的样子比报错坏得多(commit 5ce6aed 的教训原样成立):打开一个
+    不存在的名字会当场创世,你看到的是一张排版正常、时钟 0、所有人各就各位的
+    世界 —— 读起来像"还没开始跑",不像"你看错世界了"。顺带还留下一堆垃圾键。
+    """
+    if _world_exists(redis, world_id):
+        return True
+    print(f"[{cmd}] 这个 Redis 上没有叫 {world_id!r} 的世界。", file=sys.stderr)
+    print(f"      新建世界用:anima-world start --world-id {world_id}", file=sys.stderr)
+    return False
+
+
 def _run_world_foreground(world: Any, *, quiet: bool = False) -> None:
     """Drive an opened World in the foreground until SIGINT/SIGTERM.
 
@@ -1792,27 +1997,29 @@ def run_run(args: argparse.Namespace) -> int:
     """Foreground world host: open, let the clock run, Ctrl-C to stop."""
     from anima_world.api import World
 
+    redis, world_id, mysql = _world_args(args)
     try:
         world = World.open(
-            args.db_path, seed_path=args.seed, beats_path=args.beats, agents=args.agents
+            world_id, redis=redis, mysql=mysql,
+            seed_path=args.seed, beats_path=args.beats, agents=args.agents,
         )
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[run] {exc}", file=sys.stderr)
         return 2
     roster = "、".join(brain.agent.name for brain in world.scheduler.agents.values())
-    print(f"[run] {args.db_path}  {len(world.scheduler.agents)} 个角色:{roster}")
+    print(f"[run] {world_id}  {len(world.scheduler.agents)} 个角色:{roster}")
     print("[run] 时钟已启动,Ctrl-C 停止(嵌入用法见 anima_world.api.World)")
     _run_world_foreground(world, quiet=args.quiet)
-    print("[run] 世界已停下,快照已保存。")
+    print("[run] 世界已停下。")
     return 0
 
 
-def _print_roster(world: Any, db_path: str) -> None:
+def _print_roster(world: Any, world_id: str) -> None:
     """这个世界住着谁 —— 一个 .cyberworld 至今没有办法自报家门(#6)。"""
     state = world.state()
     agents = state.get("agents", {})
     now = state.get("world_time", {})
-    print(f"\n  {onboarding.bold(db_path)}  第{now.get('day', 0)}天 "
+    print(f"\n  {onboarding.bold(world_id)}  第{now.get('day', 0)}天 "
           f"{now.get('hour', 0):02d}:{now.get('minute', 0):02d}\n")
     if not agents:
         print("  这个世界还没有住人。\n")
@@ -1830,36 +2037,7 @@ def _print_roster(world: Any, db_path: str) -> None:
         print(f"    {_pad(agent_id, 12)}{_pad(info.get('name', agent_id), 16)}"
               f"{_pad('@' + str(where), 14)}{tail}{away}")
     print(f"\n  找谁说话:{onboarding.bold(f'anima-world chat --agent {next(iter(agents))}')}"
-          f"{'' if db_path == onboarding.DEFAULT_DB_PATH else f' --db-path {db_path}'}\n")
-
-
-class MapWorldIdMismatch(ValueError):
-    """`--world-id` 和这个 db 自己的戳对不上。"""
-
-
-def map_world_id(explicit: str | None, stamped: tuple[str, str] | None) -> str | None:
-    """连 Redis 时用哪个 world_id。**默认从 db 自己的戳里读,对不上就拒绝。**
-
-    那个戳是这个世界搬走时自己记下的(`db_meta.storage_world_id`)。
-
-    **抄错的样子比"报错"坏得多,也比"空地图"坏得多。** 实测:给一个不存在的
-    world_id,`World.open` 会拿这个 db 当创世输入,在 Redis 上**建出一个全新的
-    世界** —— 于是你看到的是一张排版正常、三个人各就各位、时钟 0 的地图。它读起来
-    像"这个世界还没开始跑",而不是"你看错世界了"。顺带还在 Redis 里留下一份垃圾。
-
-    所以对不上就当场停下。人手抄一个 id 是**必然会错**的那种事,而这里错了不响。
-    """
-    if explicit and stamped and explicit != stamped[1]:
-        raise MapWorldIdMismatch(
-            f"--world-id 给的是 {explicit!r},而这个 db 自己的戳说它搬去了 "
-            f"{stamped[1]!r}。照给的那个连上去,会拿这个 db 在 Redis 上**建出一个"
-            f"全新的世界** —— 你会看到一张排版正常、时钟 0、所有人各就各位的地图,"
-            f"看不出哪里不对。\n"
-            f"      不给 --world-id 就好:它会从这个 db 的戳里读。"
-        )
-    if explicit:
-        return explicit
-    return stamped[1] if stamped else None
+          f"{'' if world_id == _world_id_default() else f' --world-id {world_id}'}\n")
 
 
 def _map_frame(world: Any, args: argparse.Namespace) -> str:
@@ -1923,7 +2101,6 @@ def run_map(args: argparse.Namespace) -> int:
     渲染是赠品,`--json` 才是契约:创作台 / 网站 / 运维台照那份数据自己画。
     """
     from anima_world.api import World
-    from anima_world.db import offline_refusal, open_db
 
     if args.day is not None and (args.from_tick is not None or args.to_tick is not None):
         print("[map] --day 和 --from/--to 二选一。", file=sys.stderr)
@@ -1936,50 +2113,12 @@ def run_map(args: argparse.Namespace) -> int:
         args.from_tick = (args.day - 1) * ticks_per_day
         args.to_tick = args.day * ticks_per_day
 
-    # 搬走了的世界:要么连上去,要么当场停下 —— 直接读这个 .db 会得到一张空地图,
-    # 而空地图看上去像"这个世界没有地方",不像"你读错了文件"。
-    from anima_world.db import read_storage
-
-    try:
-        probe = open_db(args.db_path)
-    except DBFormatError as exc:
-        print(f"[map] {exc}", file=sys.stderr)
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "map"):
         return 2
     try:
-        refusal = offline_refusal(probe)
-        stamped = read_storage(probe)
-    finally:
-        probe.close()
-
-    redis_client = None
-    world_id = args.world_id
-    if args.redis:
-        try:
-            import redis as redis_mod
-        except ImportError:
-            print("[map] 要连 Redis 得先装:pip install redis", file=sys.stderr)
-            return 2
-        redis_client = redis_mod.Redis.from_url(args.redis, decode_responses=True)
-        try:
-            world_id = map_world_id(args.world_id, stamped)
-        except MapWorldIdMismatch as exc:
-            print(f"[map] {exc}", file=sys.stderr)
-            return 2
-        if world_id is None:
-            print("[map] 这个 db 上没有 Redis 的戳,请给 --world-id。", file=sys.stderr)
-            return 2
-    elif refusal:
-        print(f"[map] {refusal}", file=sys.stderr)
-        print("      或者:map --redis redis://… (world_id 会自动从这个 db 的戳里读)",
-              file=sys.stderr)
-        return 2
-
-    try:
-        if redis_client is not None:
-            world = World.open(args.db_path, redis=redis_client, world_id=world_id)
-        else:
-            world = World.open(args.db_path)
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[map] {exc}", file=sys.stderr)
         return 2
     try:
@@ -2008,6 +2147,104 @@ def run_map(args: argparse.Namespace) -> int:
         world.close()
 
 
+def run_ontology(args: argparse.Namespace) -> int:
+    """`anima-world ontology` —— 这个世界里有哪些东西,以及**能对它们做什么**。
+
+    为什么值得一道命令:量和规律此前在 CLI 上完全没有出口(`docs/FOR-STUDIO.md`
+    原话:"没有任何 CLI 能读一个世界当前的量或规律")。而创作台那侧的判据是
+    **有没有 CLI 出口** —— 库里有而命令行上没有,对不 import 本包的它等于不存在。
+
+    最要紧的一栏是**能力**:`stocks` 只给得出数字,而数字不告诉你 `tend` 这个词
+    存不存在。猜一份动词表出来是这一层最容易犯的错 —— 猜错了不报错,按钮点下去
+    才发现世界不认。
+
+    渲染是赠品,`--json` 才是契约(和 `map` 同一条)。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "ontology"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[ontology] {exc}", file=sys.stderr)
+        return 2
+    try:
+        kinds = world.kinds()
+        entities = world.entities(args.kind)
+    finally:
+        world.close()
+
+    if args.kind is not None:
+        kinds = [k for k in kinds if k["id"] == args.kind]
+        if not kinds:
+            print(f"[ontology] 这个世界里没有声明过 {args.kind!r} 这一类。", file=sys.stderr)
+            return 2
+    elif not args.builtin:
+        # 内置四类(agent/location/world/player)照例没有量也没有能力,列出来只是噪音。
+        # **但 `agent` 可以声明量**(她的体力/手艺),而那些量正是 `requires` /
+        # `costs` 里 `me_*` 的出处 —— 藏起来的话,读的人看得见"她付 体力 - 10"
+        # 却查不到"体力"是什么、默认多少。
+        kinds = [k for k in kinds if not k["builtin"] or k["quantities"]]
+
+    if args.as_json:
+        print(json.dumps({"kinds": kinds, "entities": entities},
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    if not kinds:
+        print(f"{world_id}:这个世界没有声明过任何种类。")
+        print("(在种子的 kinds / entities 两段里声明;见 docs/REFERENCE.md §2.9.6)")
+        return 0
+
+    # 量名和实体名基本都是中文,而中文占两格 —— 按字符个数补空格会把每一栏推歪。
+    from anima_world.mapview import display_width
+
+    def pad(text: str, width: int) -> str:
+        return text + " " * max(1, width - display_width(text))
+
+    by_kind: dict[str, list[dict[str, Any]]] = {}
+    for entity in entities:
+        by_kind.setdefault(entity["kind"], []).append(entity)
+
+    print(f"{world_id}:{len(kinds)} 类 / {len(entities)} 个\n")
+    for kind in kinds:
+        hint = "  —— 角色身上的量,能力用 me_ 读它" if kind["builtin"] else ""
+        print(f"■ {kind['id']}  {kind['gloss']}{hint}".rstrip())
+        for q in kind["quantities"]:
+            unit = f" {q['unit']}" if q["unit"] else ""
+            print(f"    量   {pad(q['label'], 14)}默认 {q['default']:g}{unit}"
+                  f"   她感知得到:{q['visibility']}")
+        for a in kind["affordances"]:
+            gate = ("  仅当 " + " 且 ".join(a["conditions"])) if a["conditions"] else ""
+            deed = "改变世界" if a["changes_world"] else "只是看看"
+            print(f"    能力 {pad(a['verb'], 14)}{deed}{gate}")
+            for setter in a["sets"]:
+                print(f"         → {setter}")
+            # 关于她的那一半单独一行,不和上面的效果混在一起 —— 混了的话读的人
+            # 看不出"树高 +0.3"和"体力 -10"落在两个不同的东西身上。
+            for requirement in a.get("requires") or ():
+                print(f"         她得 {requirement}")
+            for charge in a.get("costs") or ():
+                print(f"         她付 {charge}")
+            for item_id, count in sorted((a.get("consumes") or {}).items()):
+                # 花掉的东西自带一道"你得有" —— 这里连着说出来,不然读的人会以为
+                # 少写了一条 requires,然后照着补一遍。
+                print(f"         她花掉 {item_id} × {count}(得先有这么多)")
+        if not kind["builtin"]:
+            # 内置种类没有实例住在本体里(角色在投影里),那条上限对它没有意义。
+            print(f"    同一个地方最多带 {kind['budget']} 个进提示词")
+        for entity in by_kind.get(kind["id"], []):
+            values = "  ".join(f"{k}={v:g}" for k, v in entity["values"].items())
+            where = entity["location"] or "不在任何地方"
+            print(f"    · {pad(entity['id'], 22)}{entity['name']}  @{where}")
+            if values:
+                print(f"      {values}")
+        print()
+    return 0
+
+
 def run_prompt(args: argparse.Namespace) -> int:
     """`anima-world prompt` —— 她此刻收到的提示词,逐块摊开。
 
@@ -2019,19 +2256,22 @@ def run_prompt(args: argparse.Namespace) -> int:
     """
     from anima_world.api import World
 
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "prompt"):
+        return 2
     try:
-        world = World.open(args.db_path)
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[prompt] {exc}", file=sys.stderr)
         return 2
     try:
         roster = world.state().get("agents", {})
         if args.agent is None:
-            _print_roster(world, args.db_path)
+            _print_roster(world, world_id)
             return 0
         if args.agent not in roster:
             print(f"[prompt] 这个世界里没有 {args.agent!r}。", file=sys.stderr)
-            _print_roster(world, args.db_path)
+            _print_roster(world, world_id)
             return 2
         seen = world.debug_prompt(
             args.agent,
@@ -2081,20 +2321,23 @@ def run_chat(args: argparse.Namespace) -> int:
     """
     from anima_world.api import World
 
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "chat"):
+        return 2
     try:
-        world = World.open(args.db_path)
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[chat] {exc}", file=sys.stderr)
         return 2
 
     try:
         roster = world.state().get("agents", {})
         if args.list_only or args.agent is None:
-            _print_roster(world, args.db_path)
+            _print_roster(world, world_id)
             return 0
         if args.agent not in roster:
             print(f"[chat] 这个世界里没有 {args.agent!r}。", file=sys.stderr)
-            _print_roster(world, args.db_path)
+            _print_roster(world, world_id)
             return 2
 
         agent_id = args.agent
@@ -2232,11 +2475,13 @@ def run_play(args: argparse.Namespace) -> int:
     """
     from anima_world.api import AgentUnavailable, World
 
+    redis, world_id, mysql = _world_args(args)
     try:
         world = World.open(
-            args.db_path, seed_path=args.seed, beats_path=args.beats, agents=args.agents
+            world_id, redis=redis, mysql=mysql,
+            seed_path=args.seed, beats_path=args.beats, agents=args.agents,
         )
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[play] {exc}", file=sys.stderr)
         return 2
 
@@ -2254,7 +2499,7 @@ def run_play(args: argparse.Namespace) -> int:
         display_name = args.name or "访客"
         world.start_clock()
         degraded = world.state().get("runtime", {}).get("llm", {}).get("degraded_reason")
-        print(onboarding.rule(f"{args.db_path} —— 时钟在走"))
+        print(onboarding.rule(f"{world_id} —— 时钟在走"))
         if degraded:
             print(f"  {onboarding.yellow('这个世界正跑在 Mock 上')}({degraded})——回复会是模板。")
             logging.getLogger("anima_world.relationship_judge").setLevel(logging.ERROR)
@@ -2295,7 +2540,7 @@ def run_play(args: argparse.Namespace) -> int:
             if line in ("/quit", "/q", "/exit"):
                 break
             if line == "/who":
-                _print_roster(world, args.db_path)
+                _print_roster(world, world_id)
                 continue
             if line.startswith("/at "):
                 target = line[4:].strip()
@@ -2354,67 +2599,46 @@ def run_play(args: argparse.Namespace) -> int:
         world.close()
 
 
-def _live_owner(db_path: str | Path) -> tuple[str, str] | None:
-    """这个 db 上有没有"正被谁跑着"的戳。读不出来就当没有 —— 这是提示不是锁。"""
+def _live_owner(redis: Any, world_id: str) -> tuple[str, str] | None:
+    """这个世界的 `:meta` 上有没有"正被谁跑着"的戳。读不出来就当没有 —— 提示不是锁。"""
+    from anima_world.redis_state import meta_rows
+
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.Error:
+        meta = meta_rows(redis, world_id)
+        pid = meta.get("owner_pid")
+        host = meta.get("owner_host")
+    except Exception:  # noqa: BLE001 - 提示读不出来不该拦人
         return None
-    try:
-        rows = dict(conn.execute(
-            "SELECT key, value FROM db_meta WHERE key IN ('owner_pid', 'owner_host')"
-        ).fetchall())
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.close()
-    pid, host = rows.get("owner_pid"), rows.get("owner_host")
-    return (pid, host or "?") if pid else None
+    return (str(pid), str(host or "?")) if pid else None
 
 
-def _warn_if_live(db_path: str | Path) -> None:
+def _warn_if_live(redis: Any, world_id: str) -> None:
     """对一个正在跑的世界动手之前,说一声。
 
-    `config set` 会开自己的连接写 config 表并打印"已保存",而运行中那个世界的
-    `ConfigStore` 缓存不会重读 —— **你以为改了,其实没改**,直到下次重启才突然生效,
-    那时你早忘了自己改过什么。
-
     只提示不拒绝:进程崩掉标记就陈旧,拿陈旧标记去拒绝操作,等于在真出事那天把人
-    挡在门外。
+    挡在门外。Redis 时代 `config set` 写的行,运行中的进程**同样不会重读**
+    (ConfigStore 有内存缓存)—— 要下次重启才生效,这一点和 world.db 时代一样。
     """
-    owner = _live_owner(db_path)
+    owner = _live_owner(redis, world_id)
     if owner is None:
         return
     pid, host = owner
     print(
         f"  {onboarding.yellow('这个世界正被 pid ' + str(pid) + ' @ ' + str(host) + ' 跑着')}"
-        f" —— 写进去的东西那个进程不会重读,要下次重启才生效;"
-        f"两个进程同时写同一个 world.db 会让两边分叉。",
+        f" —— 写进去的配置那个进程不会重读,要下次重启才生效。",
         file=sys.stderr,
     )
 
 
-def _open_config_store(db_path: str | Path) -> tuple[Any, ConfigStore]:
-    """Open a world's config, creating the database if it isn't there yet.
+def _open_config_store(redis: Any, world_id: str) -> ConfigStore:
+    """Open a world's config without standing up a whole scheduler.
 
-    Shared by `start` / `config` / `doctor`, all of which need to read or write
-    settings without standing up a whole scheduler.
-
-    ConfigStore logs a raw warning per unreadable secret while it hydrates.
-    That is right for `serve`, where nothing else would say it, and wrong here:
-    these three commands report the same condition properly a moment later, so
-    the raw line would just land above their output as noise.
+    Shared by `start` / `config` / `doctor`。Redis 时代没有"要不要建文件"的
+    问题:`:config` 是个 hash,读写它不会创造世界。
     """
-    cfg_logger = logging.getLogger("anima_world.config_store")
-    previous_level = cfg_logger.level
-    cfg_logger.setLevel(logging.ERROR)
-    try:
-        conn = open_db(db_path)
-        store = ConfigStore(conn, fernet_key=load_or_create_key(db_path, create=False),
-                            lock=threading.RLock(), had_keyfile=has_keyfile(db_path))
-    finally:
-        cfg_logger.setLevel(previous_level)
-    return conn, store
+    from anima_world.redis_state import RedisConfigBackend
+
+    return ConfigStore(RedisConfigBackend(redis, world_id), lock=threading.RLock())
 
 
 def _print_llm_line(status: Any, *, indent: str = "  ") -> None:
@@ -2433,22 +2657,22 @@ def run_start(args: argparse.Namespace) -> int:
     """
     from anima_world.api import World
 
-    db_path = Path(args.db_path)
-    is_new_world = not db_path.exists()
+    redis, world_id, mysql = _world_args(args)
+    is_new_world = not _world_exists(redis, world_id)
     # Every pasteable hint below has to point at THIS world; without it the
-    # reader's `config set` silently builds a second one at the default path.
-    where = "" if args.db_path == onboarding.DEFAULT_DB_PATH else f" --db-path {args.db_path}"
+    # reader's `config set` cheerfully writes into the default-named one.
+    where = "" if world_id == _world_id_default() else f" --world-id {world_id}"
 
     print(onboarding.rule("ANIMA 世界引擎"))
 
     # ① LLM — first, because it decides what kind of world you get.
-    conn, config_store = _open_config_store(db_path)
-    status = onboarding.llm_status(config_store, db_path)
+    config_store = _open_config_store(redis, world_id)
+    status = onboarding.llm_status(config_store, world_id)
     print(f"\n  {onboarding.bold('① LLM')}")
     if status.degraded and not args.no_input and onboarding.can_prompt():
         _print_llm_line(status, indent="     ")
-        if onboarding.configure_llm_interactively(config_store, db_path):
-            status = onboarding.llm_status(config_store, db_path)
+        if onboarding.configure_llm_interactively(config_store):
+            status = onboarding.llm_status(config_store, world_id)
             error = onboarding.probe_llm(config_store)
             if error is None:
                 print(f"     {onboarding.green(onboarding.OK)} 连通性测试通过")
@@ -2457,11 +2681,11 @@ def run_start(args: argparse.Namespace) -> int:
                 print(f"       {onboarding.dim('世界照常启动;改好后用 anima-world doctor 复测')}")
         else:
             print(f"     {onboarding.dim('跳过 —— 这个世界会用 Mock 跑(文本是模板,agent 没有空闲计划)')}")
-            print(f"       {onboarding.dim('随时可配:anima-world config set llm.api_key sk-…' + where)}")
+            print(f"       {onboarding.dim('随时可配:anima-world config set llm.api_key sk-…')}")
     else:
         _print_llm_line(status, indent="     ")
 
-    # ② The world file, and how fast its clock runs.
+    # ② The world, and how fast its clock runs.
     print(f"\n  {onboarding.bold('② 世界')}")
     if is_new_world and not args.real_time:
         # The packaged default is real time (1 tick / 5 real minutes), which
@@ -2470,18 +2694,18 @@ def run_start(args: argparse.Namespace) -> int:
         config_store.set("scheduler.tick_rate", 1.0)
     tick_rate = config_store.get("scheduler.tick_rate", default=1.0)
     minutes_per_tick = config_store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK)
-    conn.close()
 
-    print(f"     {onboarding.green(onboarding.OK)} {'新建' if is_new_world else '沿用'} {db_path}")
+    print(f"     {onboarding.green(onboarding.OK)} {'新建' if is_new_world else '沿用'} {world_id}"
+          f"{onboarding.dim('(住在 ' + (getattr(args, 'redis', None) or _redis_url_default()) + ')')}")
     print(f"     {onboarding.dim('时钟:' + onboarding.human_tick_rate(tick_rate, int(minutes_per_tick)))}")
     if is_new_world and not args.real_time:
         print(f"     {onboarding.dim('想要真实时间:anima-world config set scheduler.tick_rate 0.00333' + where)}")
 
     try:
-        world = World.open(str(db_path), seed_path=args.seed, beats_path=args.beats)
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
-        what = ("节拍脚本" if isinstance(exc, BeatScriptError)
-                else "世界文件" if isinstance(exc, DBFormatError) else "世界种子")
+        world = World.open(world_id, redis=redis, mysql=mysql,
+                           seed_path=args.seed, beats_path=args.beats)
+    except (BeatScriptError, WorldSeedError) as exc:
+        what = "节拍脚本" if isinstance(exc, BeatScriptError) else "世界种子"
         print(f"\n  {onboarding.red(onboarding.BAD)} {what}有问题:\n{exc}", file=sys.stderr)
         return 2
     print(f"     {onboarding.green(onboarding.OK)} {len(world.scheduler.agents)} 个角色就位:"
@@ -2489,30 +2713,30 @@ def run_start(args: argparse.Namespace) -> int:
 
     # ③ Let it live. The engine is a library — this process is the world's
     #    host; anything else (a site, a tool) imports anima_world.api and
-    #    holds its own World. Authoring lives in the studio, a separate
-    #    program, because a world is pinned to one engine version.
+    #    holds its own World.
     print(f"\n  {onboarding.bold('③ 运行')}")
     print(f"     {onboarding.dim('世界在本进程里运行,叙事会打印在下面;停止:Ctrl-C')}")
     print(f"     {onboarding.dim('程序里用:from anima_world.api import World; World.open(…)')}")
     print(f"     {onboarding.dim('体检:anima-world doctor   改配置:anima-world config list')}\n")
 
     _run_world_foreground(world)
-    print("\n  世界已停下,快照已保存。下次接着跑:"
-          f"anima-world start --db-path {db_path}\n")
+    print("\n  世界已停下(状态都在 Redis 里)。下次接着跑:"
+          f"anima-world start{where}\n")
     return 0
 
 
 def run_config(args: argparse.Namespace) -> int:
-    """Read/write world settings without curl — including the encrypted ones."""
+    """Read/write world settings without curl."""
     from anima_world.config_store import mask_secret
 
-    if not Path(args.db_path).exists() and args.config_command != "set":
-        print(f"[config] 还没有这个世界:{args.db_path}\n"
+    redis, world_id, _ = _world_args(args)
+    if args.config_command != "set" and not _world_exists(redis, world_id):
+        print(f"[config] 还没有 {world_id!r} 这个世界。\n"
               f"         先跑一次 anima-world start 创建它。", file=sys.stderr)
         return 2
     if args.config_command == "set":
-        _warn_if_live(args.db_path)
-    conn, store = _open_config_store(args.db_path)
+        _warn_if_live(redis, world_id)
+    store = _open_config_store(redis, world_id)
     try:
         if args.config_command == "list":
             rows = store.list(category=args.category)
@@ -2575,7 +2799,7 @@ def run_config(args: argparse.Namespace) -> int:
         print(f"{onboarding.green(onboarding.OK)} {args.key} = {shown}")
         return 0
     finally:
-        conn.close()
+        pass
 
 
 def _coerce_config_value(raw: str, value_type: str) -> Any:
@@ -2645,6 +2869,17 @@ _EVENTS_NOT_INCLUDED = (
 )
 
 
+def _open_event_log(redis: Any, world_id: str, mysql: Any):
+    """只读命令直开事件日志:mysql 给了就读 MySQL(那才是真相),否则读 Redis。"""
+    if mysql is not None:
+        from anima_world.mysql_state import MySQLEventLog, as_connection
+
+        return MySQLEventLog(as_connection(mysql), f"{world_id}_")
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    return RedisEventLog(redis, events_key(world_id))
+
+
 def run_events(args: argparse.Namespace) -> int:
     """把事件日志导成 JSONL:一行一个事件,不依赖 db 格式。
 
@@ -2656,36 +2891,18 @@ def run_events(args: argparse.Namespace) -> int:
     """
     import anima_world
 
-    db_path = Path(args.db_path)
-    if not db_path.exists():
-        print(f"[events] 没有这个世界:{db_path}", file=sys.stderr)
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "events"):
         return 2
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.Error as exc:
-        print(f"[events] 打不开:{exc}", file=sys.stderr)
-        return 2
-
-    try:
-        refusal = offline_refusal(conn)
-        if refusal is not None:
-            print(f"[events] {refusal}", file=sys.stderr)
-            return 2
-        try:
-            rows = conn.execute(
-                "SELECT seq, ts, type, who, loc, payload FROM events ORDER BY seq ASC"
-            ).fetchall()
-        except sqlite3.Error as exc:
-            print(f"[events] 这不像一个 anima 世界:{exc}", file=sys.stderr)
-            return 2
-    finally:
-        conn.close()
+    log = _open_event_log(redis, world_id, mysql)
+    events = log.replay()
+    rows = [(e.seq, e.ts, e.type, e.who, e.loc, json.dumps(e.payload, ensure_ascii=False))
+            for e in events]
 
     header = {
         "kind": "anima-events",
         "stream_format_version": 1,
         "engine_version": anima_world.__version__,
-        "db_format_version": DB_FORMAT_VERSION,
         "events": len(rows),
         # 这两条是这份制品最重要的内容。
         "replayable": False,
@@ -2717,64 +2934,31 @@ def run_events(args: argparse.Namespace) -> int:
 
 
 def run_report(args: argparse.Namespace) -> int:
-    """对着一个已经存在的 world.db 出摘要。**只读,不跑世界,不建任何东西。**
+    """对着一个已经存在的世界出摘要。**只读,不推时钟,不建任何东西。**
 
-    `simulate --report` 只在你自己跑这一趟时给得出摘要;一个已经存在的世界(玩家跑
-    出来的、别人给你的、从 `.cyberworld` 导进来的)此前只能自己写 Python。而事件
-    日志是唯一真相、`sim_report` 是纯函数 —— 这本来就该是一条只读命令。
-
-    ⚠️ 刻意**不用 `open_db`**:路径打错会当场建一个空 world.db,然后喜气洋洋地报告
-    "0 事件、世界健康"。也刻意不碰 `load_or_create_key`(它会顺手在旁边生成一把
-    `.key`)。所以这里直接开 `mode=ro` 的 URI 连接。
+    事件日志是唯一真相、`sim_report` 是纯函数 —— 这本来就该是一条只读命令。
+    只读纪律的新形态:不存在的 world_id 当场退 2(打开会创世,见
+    `_require_existing_world`)。
 
     ⚠️ 对着一个**正在跑**的世界读到的是某个瞬间的快照,而且尾巴可能缺(叙事与判定
     在线程池上)。摘要里会写明这一点。
     """
-    from anima_world.events import Event
+    from anima_world.redis_state import RedisClock, clock_key
     from anima_world.sim_report import build_run_report
     from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
-    db_path = Path(args.db_path)
-    if not db_path.exists():
-        print(f"[report] 没有这个世界:{db_path}", file=sys.stderr)
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "report"):
         return 2
+    log = _open_event_log(redis, world_id, mysql)
+    events = log.replay()
+    store = _open_config_store(redis, world_id)
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.Error as exc:
-        print(f"[report] 打不开:{exc}", file=sys.stderr)
-        return 2
-
-    try:
-        refusal = offline_refusal(conn)
-        if refusal is not None:
-            print(f"[report] {refusal}", file=sys.stderr)
-            return 2
-        try:
-            rows = conn.execute(
-                "SELECT seq, ts, type, who, loc, payload FROM events ORDER BY seq ASC"
-            ).fetchall()
-            clock_row = conn.execute(
-                "SELECT value FROM db_meta WHERE key = 'clock'"
-            ).fetchone()
-            mpt_row = conn.execute(
-                "SELECT value FROM config WHERE key = 'world.minutes_per_tick'"
-            ).fetchone()
-            owner = _live_owner(db_path)
-        except sqlite3.Error as exc:
-            print(f"[report] 这不像一个 anima 世界:{exc}", file=sys.stderr)
-            return 2
-    finally:
-        conn.close()
-
-    events = [Event.from_row(row) for row in rows]
-    try:
-        mpt = int(float(mpt_row[0])) if mpt_row else DEFAULT_MINUTES_PER_TICK
+        mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
     except (TypeError, ValueError):
         mpt = DEFAULT_MINUTES_PER_TICK
-    try:
-        clock = int(clock_row[0]) if clock_row else 0
-    except (TypeError, ValueError):
-        clock = 0
+    clock = RedisClock(redis, clock_key(world_id)).get()
+    owner = _live_owner(redis, world_id)
 
     report = build_run_report(events, ticks=clock, minutes_per_tick=mpt)
     if owner is not None:
@@ -2792,7 +2976,7 @@ def run_report(args: argparse.Namespace) -> int:
         return 0
 
     world = report["world"]
-    print(onboarding.rule(f"{db_path} —— 跑了 {world['days']} 个世界日"))
+    print(onboarding.rule(f"{world_id} —— 跑了 {world['days']} 个世界日"))
     if owner is not None:
         print(f"  {onboarding.yellow('注意')}:这个世界正被 pid {owner[0]} 跑着,"
               f"下面是某个瞬间的快照,尾巴可能还没落盘。")
@@ -2893,14 +3077,13 @@ def contract_payload() -> dict[str, Any]:
     return {
         "operation": "contract",
         "engine_version": anima_world.__version__,
-        # 主版本 = db 格式(可挂载性)。两者相等即"硬不兼容",挂错卷当场拒绝。
-        # `schema_revision` 是**加法修订**:纯新增的表/可空列跟着次版本号走,不改
-        # 可挂载性。镜像端要读它 —— 否则一个 1.3 的世界在 1.2 引擎上"照跑",而
-        # stance / 静音 / 拒谈话题整套缺席,谁也看不出来。
-        "db": {
-            "format_version": DB_FORMAT_VERSION,
-            "min_supported": MIN_SUPPORTED_DB_FORMAT,
-            "schema_revision": SCHEMA_REVISION,
+        # world.db 退役(2.0):世界住 Redis,键前缀就是"格式"。镜像端此前读
+        # `db.*` —— 那一节没有了,读到缺键就该知道要对齐这一版。
+        "storage": {
+            "backend": "redis",
+            "key_prefix": "anima:{world_id}:",
+            "mysql_tables": ["events", "memories", "conversations", "messages"],
+            "mysql_table_prefix": "{world_id}_",
         },
         # 她能调的能力**全目录**(声明在代码,`@tool` 登记)。宿主要显示"她走开了"
         # 之类的事件,得先知道有哪些能力会产生它们。
@@ -2946,10 +3129,10 @@ def run_contract(args: argparse.Namespace) -> int:
         return 0
 
     print(onboarding.rule(f"anima-world {payload['engine_version']} 的对外契约"))
-    print(f"  db 格式        {payload['db']['format_version']}"
-          f"(支持到 {payload['db']['min_supported']};主版本号 = db 格式)")
-    print(f"  schema 修订    {payload['db']['schema_revision']}   "
-          f"加法修订(新表/新可空列),跟次版本号走,不改可挂载性")
+    print(f"  存储           {payload['storage']['backend']}   "
+          f"键前缀 {payload['storage']['key_prefix']}")
+    print(f"  MySQL 表       {', '.join(payload['storage']['mysql_tables'])}"
+          f"(表前缀 {payload['storage']['mysql_table_prefix']})")
     for surface in ("chat", "autonomy"):
         ids = [t["id"] for t in payload["chat_tools"] if surface in t["surfaces"]]
         print(f"  {surface:<8} 能力  {', '.join(ids)}")
@@ -2965,122 +3148,90 @@ def run_contract(args: argparse.Namespace) -> int:
 
 def run_doctor(args: argparse.Namespace) -> int:
     """Check the things that fail quietly. Non-zero exit when one of them has."""
-    db_path = Path(args.db_path)
+    from anima_world.redis_state import durability_warning, events_key, RedisEventLog
+
+    redis, world_id, _ = _world_args(args)
     print(onboarding.rule("体检"))
     problems = 0
-    _warn_if_live(db_path)
+    _warn_if_live(redis, world_id)
 
-    if not db_path.exists():
-        print(f"  {onboarding.red(onboarding.BAD)} 没有世界文件:{db_path}")
+    if not _world_exists(redis, world_id):
+        print(f"  {onboarding.red(onboarding.BAD)} 这个 Redis 上没有叫 {world_id!r} 的世界")
         print(f"      {onboarding.dim('anima-world start 会创建它')}")
         return 1
-    print(f"  {onboarding.green(onboarding.OK)} 世界文件 {db_path}")
+    print(f"  {onboarding.green(onboarding.OK)} 世界 {world_id} @ "
+          f"{getattr(args, 'redis', None) or _redis_url_default()}")
 
-    # keyfile 只对**旧世界**还有意义。`llm.api_key` 是唯一声明为密文的键,而它
-    # 已经归了机器配置 —— 新世界里一个 secret 都没有,所以既不生成 keyfile,
-    # 也不该为"没有 keyfile"报警告(那句话现在是错的:没有它什么也不会丢)。
-    keyfile = Path(f"{db_path}.key")
-    if keyfile.exists():
-        print(f"  {onboarding.yellow(onboarding.WARN)} 还有 {keyfile.name} —— "
-              f"1.3.0 之前的世界才需要它")
-        print(f"      {onboarding.dim('钥匙现在住在这台机器上,不在世界里;')}"
-              f"{onboarding.dim('世界里的密文搬走之后这个文件就可以删了')}")
+    # **这个 Redis 会不会把世界忘掉** —— 忘掉的样子不是报错,是世界悄悄退回创世。
+    warning = durability_warning(redis)
+    if warning:
+        problems += 1
+        print(f"  {onboarding.yellow(onboarding.WARN)} {warning}")
 
-    conn, store = _open_config_store(db_path)
-    try:
-        from anima_world.db import DB_FORMAT_VERSION, read_db_format
+    store = _open_config_store(redis, world_id)
+    log = RedisEventLog(redis, events_key(world_id))
+    events = log.count()
+    joined = {e.who for e in log.replay() if e.type == "agent_join" and e.who}
+    print(f"  {onboarding.green(onboarding.OK)} {len(joined)} 个角色,{events} 条事件")
 
-        print(f"  {onboarding.green(onboarding.OK)} db 格式版本 {read_db_format(conn)}"
-              f"(本引擎支持到 {DB_FORMAT_VERSION})")
-        revision = read_schema_revision(conn)
-        if revision > SCHEMA_REVISION:
-            # 能挂、能跑,但这个世界身上有本引擎不读的表 —— 那些能力会整个缺席,
-            # 而"缺席"在产物上和"没启用"长得一模一样。所以这里必须是一句警告。
-            problems += 1
-            print(f"  {onboarding.yellow(onboarding.WARN)} schema 修订 {revision},"
-                  f"本引擎只到 {SCHEMA_REVISION} —— 这个世界是更新的引擎写的,"
-                  f"多出来的表本引擎不读,对应能力会缺席")
-            print(f"      {onboarding.dim('修复:装一个 ≥ 该修订的引擎(次版本号更高的那个)')}")
-        else:
-            print(f"  {onboarding.green(onboarding.OK)} schema 修订 {revision}"
-                  f"(本引擎写到 {SCHEMA_REVISION})")
+    status = onboarding.llm_status(store, world_id)
+    if status.degraded:
+        problems += 1
+        print(f"  {onboarding.yellow(onboarding.WARN)} {status.summary}")
+        if status.fix:
+            print(f"      {onboarding.dim('修复:' + status.fix)}")
+    else:
+        print(f"  {onboarding.green(onboarding.OK)} {status.summary}"
+              f" {onboarding.dim(status.masked_key or '')}")
+        if not args.skip_probe:
+            print(f"    {onboarding.dim('正在调用一次 LLM …')}", end="", flush=True)
+            error = onboarding.probe_llm(store)
+            print("\r" + " " * 30 + "\r", end="")
+            if error is None:
+                print(f"  {onboarding.green(onboarding.OK)} LLM 连通性正常")
+            else:
+                problems += 1
+                print(f"  {onboarding.red(onboarding.BAD)} LLM 调不通:{error}")
+                print(f"      {onboarding.dim('检查 llm.base_url / llm.model:anima-world config list --category llm')}")
 
-        refusal = offline_refusal(conn)
-        if refusal is not None:
-            print(f"  {onboarding.red(onboarding.BAD)} {refusal}")
-            return 1
-        events, = conn.execute("SELECT COUNT(*) FROM events").fetchone()
-        agents, = conn.execute(
-            "SELECT COUNT(DISTINCT who) FROM events WHERE type='agent_join'"
-        ).fetchone()
-        print(f"  {onboarding.green(onboarding.OK)} {agents} 个角色,{events} 条事件")
+    # **一个值从哪来,和它是什么一样重要。**
+    where = store.provenance("llm.api_key")
+    if store.get("llm.api_key", default=""):
+        print(f"  {onboarding.green(onboarding.OK)} llm.api_key 来自{where}")
+        if where == "世界文件":
+            print(f"  {onboarding.yellow(onboarding.WARN)} llm.api_key 还在"
+                  f"**世界**里 —— 它属于这台机器,不属于这个世界")
+            print(f"      {onboarding.dim('搬出来:anima-world config set llm.api_key sk-…')}")
 
-        status = onboarding.llm_status(store, db_path)
-        if status.degraded:
-            problems += 1
-            print(f"  {onboarding.yellow(onboarding.WARN)} {status.summary}")
-            if status.fix:
-                print(f"      {onboarding.dim('修复:' + status.fix)}")
-        else:
-            print(f"  {onboarding.green(onboarding.OK)} {status.summary}"
-                  f" {onboarding.dim(status.masked_key or '')}")
-            if not args.skip_probe:
-                print(f"    {onboarding.dim('正在调用一次 LLM …')}", end="", flush=True)
-                error = onboarding.probe_llm(store)
-                print("\r" + " " * 30 + "\r", end="")
-                if error is None:
-                    print(f"  {onboarding.green(onboarding.OK)} LLM 连通性正常")
-                else:
-                    problems += 1
-                    print(f"  {onboarding.red(onboarding.BAD)} LLM 调不通:{error}")
-                    print(f"      {onboarding.dim('检查 llm.base_url / llm.model:anima-world config list --category llm')}")
+    # 背景槽:意图分类与自主决策是**便宜活**,空着的背景槽会退回主模型。
+    background = str(store.get("llm.background.model", default="") or "").strip()
+    cheap_users = [
+        (key, label) for key, label in (
+            ("chat.intent.enabled", "意图分类(每轮一次,串在回复前面)"),
+            ("autonomy.enabled", "定时轮次的决定"),
+            ("chat.loop.enabled", "连说的每一步"),
+        ) if store.get(key, default=False)
+    ]
+    main_model = str(store.get("llm.model", default="") or "").strip() or "(未设置)"
+    if background:
+        print(f"  {onboarding.green(onboarding.OK)} 背景槽用 {background}(便宜活不走主模型)")
+    elif cheap_users:
+        print(f"  {onboarding.yellow(onboarding.WARN)} 背景槽没配 —— "
+              f"这些在用主模型 {main_model}:")
+        for _, label in cheap_users:
+            print(f"      {onboarding.dim('· ' + label)}")
+        print(f"      {onboarding.dim('anima-world config set llm.background.model <一个便宜快的模型>')}")
 
-        # 背景槽:意图分类与自主决策是**便宜活**,而空着的背景槽会退回主模型。
-        # 这不是坏配置,是个白花的钱 —— 而且分类那次往返**串在回复前面**,玩家等的
-        # 是两次生成而不是一次。产物上看不出来(她照样回话),所以这里得点一句。
-        # **一个值从哪来,和它是什么一样重要。**
-        from anima_world import machine_config
-
-        where = store.provenance("llm.api_key")
-        if store.get("llm.api_key", default=""):
-            print(f"  {onboarding.green(onboarding.OK)} llm.api_key 来自{where}")
-            if where == "世界文件":
-                # 1.3.0 之前建的世界里真的有这一行。读得出来就照用,但要说清它该搬走:
-                # `.cyberworld` 是分发物,发出去的世界不该带着作者的钥匙。
-                print(f"  {onboarding.yellow(onboarding.WARN)} llm.api_key 还在"
-                      f"**世界文件**里 —— 它属于这台机器,不属于这个世界")
-                print(f"      {onboarding.dim('打包发出去的世界会带着你的钥匙。搬出来:')}")
-                print(f"      {onboarding.dim('anima-world config set llm.api_key sk-…')}")
-
-        background = str(store.get("llm.background.model", default="") or "").strip()
-        cheap_users = [
-            (key, label) for key, label in (
-                ("chat.intent.enabled", "意图分类(每轮一次,串在回复前面)"),
-                ("autonomy.enabled", "定时轮次的决定"),
-                ("chat.loop.enabled", "连说的每一步"),
-            ) if store.get(key, default=False)
-        ]
-        main_model = str(store.get("llm.model", default="") or "").strip() or "(未设置)"
-        if background:
-            print(f"  {onboarding.green(onboarding.OK)} 背景槽用 {background}(便宜活不走主模型)")
-        elif cheap_users:
-            print(f"  {onboarding.yellow(onboarding.WARN)} 背景槽没配 —— "
-                  f"这些在用主模型 {main_model}:")
-            for _, label in cheap_users:
-                print(f"      {onboarding.dim('· ' + label)}")
-            print(f"      {onboarding.dim('anima-world config set llm.background.model <一个便宜快的模型>')}")
-
-        rate = store.get("scheduler.tick_rate", default=1.0)
-        mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
-        print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
-    finally:
-        conn.close()
+    rate = store.get("scheduler.tick_rate", default=1.0)
+    mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
+    print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
 
     print()
     if problems:
         print(f"  {onboarding.yellow(str(problems) + ' 项需要处理')}(世界仍然能跑,只是会降级)\n")
         return 1
-    print(f"  {onboarding.green('一切正常。')} anima-world start --db-path {db_path}\n")
+    where_arg = "" if world_id == _world_id_default() else f" --world-id {world_id}"
+    print(f"  {onboarding.green('一切正常。')} anima-world start{where_arg}\n")
     return 0
 
 
@@ -3100,7 +3251,7 @@ def run_simulate(args: argparse.Namespace) -> int:
     Builds the same scheduler `run` would (duties/planner/memory/
     persistence all wired), drives the tick loop synchronously, then drains
     the narrative/planner pools before exiting — the run is meant to be
-    picked up by `run --db-path` afterward. Nothing extra is written on the
+    picked up by `run --world-id` afterward. Nothing extra is written on the
     way out: every tick's events are already in the log, and the log is the
     only truth a reopen needs.
     """
@@ -3113,32 +3264,28 @@ def run_simulate(args: argparse.Namespace) -> int:
     # after construction would leave a fresh DB permanently seeded with the
     # broken-key fallback catalog. Opening the DB here is idempotent with what
     # build_serve_scheduler does right after.
-    if tier != "mock" and args.db_path is not None:
-        conn = open_db(args.db_path)
-        try:
-            preflight_store = ConfigStore(conn, fernet_key=load_or_create_key(args.db_path, create=False),
-                                        had_keyfile=has_keyfile(args.db_path))
-            error = onboarding.probe_llm(preflight_store)
-        finally:
-            conn.close()
+    redis, world_id, mysql = _world_args(args)
+    if tier != "mock":
+        preflight_store = _open_config_store(redis, world_id)
+        error = onboarding.probe_llm(preflight_store)
         if error is not None:
-            where = ("" if args.db_path == onboarding.DEFAULT_DB_PATH
-                     else f" --db-path {args.db_path}")
             print(f"[simulate] LLM 预检没过:{error}\n"
-                  f"           配置一个:anima-world config set llm.api_key sk-…{where}\n"
+                  f"           配置一个:anima-world config set llm.api_key sk-…\n"
                   f"           或改用 --llm mock / --no-llm 空跑。", file=sys.stderr)
             return 2
 
     try:
         scheduler = build_serve_scheduler(
-            args.agents,
-            db_path=args.db_path,
+            world_id,
+            redis,
+            mysql=mysql,
+            n_agents=args.agents,
             seed_path=args.seed,
             force_mock_llm=(tier == "mock"),
             mock_narrative=(tier == "planner"),
             beats_path=args.beats,
         )
-    except (BeatScriptError, WorldSeedError, DBFormatError) as exc:
+    except (BeatScriptError, WorldSeedError) as exc:
         print(f"[simulate] {exc}", file=sys.stderr)
         return 2
 
@@ -3282,14 +3429,18 @@ def run_world_package(args: argparse.Namespace) -> int:
                 _print_inspect_human(manifest, payload)
             return 0
         if args.world_command == "export":
+            redis, world_id, mysql = _world_args(args)
+            if not _require_existing_world(redis, world_id, "world export"):
+                return 2
             manifest = export_world_package(
-                db_path=args.db_path,
+                redis=redis,
+                world_id=world_id,
+                mysql=mysql,
                 seed_path=args.seed,
                 beats_path=args.beats,
                 output_path=args.output,
-                world_id=args.world_id,
+                package_world_id=args.package_id,
                 name=args.name,
-                mode=args.mode,
                 summary=args.summary,
                 genre=args.genre,
                 setting=args.setting,
@@ -3302,7 +3453,10 @@ def run_world_package(args: argparse.Namespace) -> int:
                 "mode": manifest.export_mode,
             }
         else:
-            imported = import_world_package(args.package, args.destination)
+            redis, world_id, mysql = _world_args(args)
+            imported = import_world_package(
+                args.package, redis=redis, world_id=world_id, mysql=mysql,
+            )
             result = {
                 "operation": "import",
                 "world_id": imported.world_id,
@@ -3362,6 +3516,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_prompt(args)
     if args.command == "map":
         return run_map(args)
+    if args.command == "ontology":
+        return run_ontology(args)
     if args.command == "chat":
         return run_chat(args)
     if args.command == "run":

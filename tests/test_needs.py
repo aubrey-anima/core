@@ -1,6 +1,10 @@
 """需求系统(v3.0 / db 3):曲线结算、紧急需求带、开关语义、持久化。"""
 from __future__ import annotations
 
+import json
+
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -86,7 +90,7 @@ def _hunger_samples(world, ticks: int = 300) -> set[float]:
 
 def test_an_agent_actually_gets_full_instead_of_hovering_at_the_trigger_line(tmp_path):
     """跑进稳态之后,饥饿度必须走出一条真的曲线,而不是钉在触发线上方。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("needs.enabled", "true")
         world.tick(288 * 3)  # 先进稳态
 
@@ -99,7 +103,7 @@ def test_an_agent_actually_gets_full_instead_of_hovering_at_the_trigger_line(tmp
 
 def test_hysteresis_does_not_let_anyone_sleep_through_their_shift(tmp_path):
     """释放线定太高会让角色睡穿整个班 —— 省下的事件不能是拿"再也不上班"换的。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("needs.enabled", "true")
         world.tick(288 * 4)
 
@@ -107,10 +111,11 @@ def test_hysteresis_does_not_let_anyone_sleep_through_their_shift(tmp_path):
         # 上班发的是 state_change/agent_state(actions.py:70),不是 agent_action。
         worked = {
             who
-            for (who,) in world.scheduler.event_log.conn.execute(
-                "SELECT DISTINCT who FROM events WHERE type = 'state_change'"
-                " AND json_extract(payload, '$.state.status') = 'working'"
-            )
+            for who in {
+                e.who for e in world.scheduler.event_log.replay()
+                if e.type == "state_change"
+                and (e.payload.get("state") or {}).get("status") == "working"
+            }
         }
         assert worked >= set(world.scheduler.agents), (
             f"四天里只有 {worked or '没有人'} 上过班 —— 迟滞把作息压死了"
@@ -124,24 +129,19 @@ def test_hysteresis_cuts_the_event_churn(tmp_path):
     的 32 倍账单,而世界并没有变得 32 倍有趣。这里断的是"同一个数量级",不是某个
     具体数字:世界逐次不确定,钉死数字会假绿。
     """
-    import sqlite3
+    from _worldfile import redis_for
 
     def narrative_count(enabled: bool) -> int:
         db = tmp_path / f"w{enabled}.db"
-        with World.open(str(db), force_mock_llm=True) as w:
+        with open_world_at(str(db), force_mock_llm=True) as w:
             if enabled:
                 w.config_set("needs.enabled", "true")
             w.tick(288 * 6)
         # **必须关闭之后再数**:叙事跑在线程池上(永不进 tick 线程),close 才排干
         # 它。在 with 块里数会漏掉还在队列里的那些 —— 实测会把 3989 数成 24,
         # 于是这条测试变成一条永远绿的假测试。
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        try:
-            return conn.execute(
-                "SELECT COUNT(*) FROM events WHERE type = 'narrative'"
-            ).fetchone()[0]
-        finally:
-            conn.close()
+        events = redis_for(db).lrange("anima:w:events", 0, -1) or []
+        return sum(1 for raw in events if json.loads(raw).get("type") == "narrative")
 
     off, on = narrative_count(False), narrative_count(True)
     assert on < off * 5, f"needs 打开后 narrative {off} → {on}({on/max(off,1):.1f}×)"
@@ -150,7 +150,7 @@ def test_hysteresis_cuts_the_event_churn(tmp_path):
 @pytest.fixture
 def world(tmp_path, bare_seed):
     # 素配:这些测试验的是"开关不点亮时的引擎默认行为"(见 conftest)
-    w = World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
     yield w
     w.close()
 
@@ -177,11 +177,11 @@ def test_urgent_hunger_overrides_duty(world):
 
 def test_needs_persist_across_reopen(tmp_path):
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.config_set("needs.enabled", "true")
         world.tick(1)
         world.scheduler.agents["夏"].agent.blackboard.write("need.hunger", 0.33)
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         reopened.tick(1)
         hunger = reopened.needs("夏")["hunger"]
         assert hunger == pytest.approx(0.33, abs=0.02), "关闭时落盘,重开接着曲线走"

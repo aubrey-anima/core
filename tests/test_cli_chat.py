@@ -6,6 +6,8 @@ README 开篇讲的是"会记住你的角色",而"和角色说句话"过去只�
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import subprocess
 import sys
 
@@ -13,22 +15,19 @@ from anima_world.api import World
 
 
 def _a_world(tmp_path) -> str:
-    """建一个世界但不推进它(`--ticks 0` 是唯一的无头建库口径)。"""
+    """建一个世界但不推进它(`--ticks 0` 是唯一的无头创世口径)。"""
+    from _worldfile import redis_for
+
     db = tmp_path / "w.db"
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "simulate", "--db-path", str(db),
-         "--ticks", "0", "--llm", "mock"],
-        capture_output=True, text=True,
-    )
+    redis_for(db)   # CLI 与 open_world_at 用同一个客户端
+    result = run_cli("simulate", "--world-id", "w",
+         "--ticks", "0", "--llm", "mock")
     assert result.returncode == 0, result.stderr
     return str(db)
 
 
 def _chat(db: str, *args: str, stdin: str = "") -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", "chat", "--db-path", db, *args],
-        input=stdin, capture_output=True, text=True,
-    )
+    return run_cli("chat", "--world-id", "w", *args, input=stdin)
 
 
 def test_chat_without_an_agent_lists_who_lives_here(tmp_path):
@@ -55,7 +54,7 @@ def test_a_chat_turn_lands_in_the_world_not_just_on_the_screen(tmp_path):
     result = _chat(db, "--agent", "夏", "--name", "阿檀", stdin="你好呀\n最近忙吗\n\n")
     assert result.returncode == 0, result.stderr
 
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         conversations = world.conversations("夏")
         assert len(conversations) == 2, "一轮一记,而不是退出时才补一笔"
         assert all(c["status"] == "closed" for c in conversations)
@@ -72,8 +71,8 @@ def test_chat_does_not_advance_the_world_clock(tmp_path):
     """对话发生在世界的此刻。一个 CLI 不该趁你打字偷偷推进别人的世界 ——
     要边活边聊是宿主应用的事(`World.open` + `start_clock` + `chat`)。"""
     db = _a_world(tmp_path)
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         before = world.scheduler.clock
     _chat(db, "--agent", "夏", stdin="在吗\n\n")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         assert world.scheduler.clock == before

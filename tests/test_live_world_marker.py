@@ -13,8 +13,9 @@ CLAUDE.md 的第一条不变量:**一个运行中的世界独占它的 world.db*
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import os
-import sqlite3
 import subprocess
 import sys
 
@@ -24,17 +25,16 @@ from anima_world.api import World
 
 
 def _meta(db, key: str):
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        row = conn.execute("SELECT value FROM db_meta WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+    from _worldfile import redis_for
+
+    from anima_world.redis_state import meta_rows
+
+    return meta_rows(redis_for(db), "w").get(key)
 
 
 def test_an_open_world_stamps_who_is_running_it(tmp_path):
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.tick(1)
         assert _meta(db, "owner_pid") == str(os.getpid())
         assert _meta(db, "owner_host")
@@ -43,7 +43,7 @@ def test_an_open_world_stamps_who_is_running_it(tmp_path):
 def test_closing_a_world_releases_the_marker(tmp_path):
     """关掉之后标记必须撤掉 —— 否则每个正常关闭过的世界都变成"有人在跑"。"""
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.tick(1)
     assert _meta(db, "owner_pid") is None
 
@@ -51,13 +51,10 @@ def test_closing_a_world_releases_the_marker(tmp_path):
 def test_config_set_on_a_live_world_warns_but_still_writes(tmp_path):
     """提示,不拒绝。陈旧标记不该在真出事那天把人挡在门外。"""
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.tick(1)
-        result = subprocess.run(
-            [sys.executable, "-m", "anima_world", "config", "set",
-             "--db-path", str(db), "world.minutes_per_tick", "7"],
-            capture_output=True, text=True,
-        )
+        result = run_cli("config", "set",
+             "--world-id", "w", "world.minutes_per_tick", "7")
 
     assert result.returncode == 0, result.stderr
     combined = result.stdout + result.stderr
@@ -65,26 +62,22 @@ def test_config_set_on_a_live_world_warns_but_still_writes(tmp_path):
         f"对一个活着的世界改配置,连一句提示都没有:\n{combined}"
     )
     assert _meta(db, "owner_pid") is None or True  # 世界已关,不断言标记
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        value = conn.execute(
-            "SELECT value FROM config WHERE key = 'world.minutes_per_tick'"
-        ).fetchone()
-    finally:
-        conn.close()
-    assert value and value[0] == "7", "提示归提示,写还是要写进去"
+    from _worldfile import redis_for
+
+    raw = redis_for(db).hget("anima:w:config", "world.minutes_per_tick")
+    assert raw is not None, "提示归提示,写还是要写进去"
+    import json as _json
+
+    assert _json.loads(raw).get("value") == "7"
 
 
 def test_config_set_on_a_closed_world_stays_quiet(tmp_path):
     """正常用法不该被一句警告淹掉。"""
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.tick(1)
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "config", "set",
-         "--db-path", str(db), "world.minutes_per_tick", "7"],
-        capture_output=True, text=True,
-    )
+    result = run_cli("config", "set",
+         "--world-id", "w", "world.minutes_per_tick", "7")
     assert result.returncode == 0, result.stderr
     combined = result.stdout + result.stderr
     assert "正被" not in combined and "在跑" not in combined, combined
@@ -92,11 +85,8 @@ def test_config_set_on_a_closed_world_stays_quiet(tmp_path):
 
 def test_doctor_reports_a_live_world(tmp_path):
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.tick(1)
-        result = subprocess.run(
-            [sys.executable, "-m", "anima_world", "doctor", "--db-path", str(db)],
-            capture_output=True, text=True,
-        )
+        result = run_cli("doctor", "--world-id", "w")
     combined = result.stdout + result.stderr
     assert "正被" in combined or "在跑" in combined, combined

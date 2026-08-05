@@ -26,6 +26,7 @@ import pytest
 _SHOWCASE_TOP_LEVEL = (
     "config", "relations", "memories", "items",
     "stocks", "rules", "stock_visibility", "stock_places",
+    "kinds", "entities",
 )
 # 角色/地点身上的富化字段。
 _SHOWCASE_AGENT_FIELDS = ("money", "inventory", "goals")
@@ -76,3 +77,60 @@ def _machine_config_stays_out_of_your_home(tmp_path_factory, monkeypatch):
                  "ANIMA_LLM_BASE_URL", "OPENAI_BASE_URL",
                  "ANIMA_LLM_MODEL", "OPENAI_MODEL"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def fresh_redis():
+    """一个干净的 fakeredis —— world.db 退役后,测试世界的家。
+
+    `decode_responses=True` 是**契约的一部分**:引擎全线假设 str 进 str 出,
+    裸 bytes 客户端下量名会变成 b'树高' 而规律静默失配(开机那条警告就是这么来的)。
+    """
+    fakeredis = pytest.importorskip("fakeredis")
+    return fakeredis.FakeStrictRedis(decode_responses=True)
+
+
+@pytest.fixture
+def open_world(fresh_redis):
+    """开测试世界的门:`world = open_world()`,或 `open_world(seed_path=bare_seed)`。
+
+    world_id 自动唯一(同一个 fakeredis 上开两个世界互不相扰),缺省 Mock LLM,
+    teardown 统一 close —— 忘了关的世界会把线程池留到下一个测试里。
+    """
+    import itertools
+
+    from anima_world.api import World
+
+    opened = []
+    counter = itertools.count()
+
+    def _open(world_id: str | None = None, *, redis=None, **kwargs):
+        kwargs.setdefault("force_mock_llm", True)
+        world = World.open(
+            world_id or f"t{next(counter)}", redis=redis or fresh_redis, **kwargs
+        )
+        opened.append(world)
+        return world
+
+    yield _open
+    for world in opened:
+        try:
+            world.close()
+        except Exception:  # noqa: BLE001 - teardown 里别把真错埋了
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _cli_connects_to_the_test_world(monkeypatch):
+    """CLI 测试的 `main([...])` 连到本测试的 fakeredis,而不是真的 127.0.0.1。
+
+    `_worldfile.open_world_at` 每建一个世界就记下客户端;CLI 随后连的就是它 ——
+    "同一个 db 路径 = 同一个世界"的旧语义在 CLI 侧由这条保住。
+    """
+    import _worldfile
+
+    _worldfile.reset_current()
+    monkeypatch.setattr(
+        "anima_world.__main__._connect_redis",
+        lambda url=None: _worldfile.current_client(),
+    )

@@ -2,7 +2,7 @@
 
 > 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
-> 对应引擎版本:1.1.1+(db 格式 1,包格式 1)。首发已并入原 [ROADMAP](ROADMAP.md)
+> 对应引擎版本:2.0(世界住 Redis,包格式 2)。首发已并入原 [ROADMAP](ROADMAP.md)
 > 2.0–5.0 的四大机制,详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
 > 想先理解"为什么是这样",读 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
@@ -26,10 +26,14 @@
 
 ## 1. 引擎是什么、不是什么
 
-**是**:一个可 pip 安装的**纯库**。一个 `world.db` 文件就是一个世界;引擎负责跑世界
-(时钟、角色决策、LLM 叙事/规划/关系)、快进世界、把世界打包成可分发的 `.cyberworld`。
-任何要用世界的模块 import 本包,通过 `anima_world.api.World` 的函数操作 db ——
-**本质就是用函数操作数据库**,像 SQLite 那样被链接进宿主。
+**是**:一个可 pip 安装的**纯库**。一个 **Redis 键前缀**(`anima:{world_id}:`)就是一个
+世界;引擎负责跑世界(时钟、角色决策、LLM 叙事/规划/关系)、快进世界、把世界打包成
+可分发的 `.cyberworld`。任何要用世界的模块 import 本包,通过 `anima_world.api.World`
+的函数操作那些键 —— **本质就是用函数操作一个共享的数据存储**,被链接进宿主。
+
+> 2.0 之前一个世界是一个 `world.db` 文件(SQLite)。文件整体退役了:世界不再是一个
+> 可挂载的东西,**键前缀就是格式**。无限增长的四样(`events` / `memories` /
+> `conversations` / `messages`)可以交给 MySQL,给了 `mysql=` 就走那条路。
 
 **不是**:
 - **没有 HTTP、没有端口、没有网页**。引擎不监听任何东西;要网络暴露,宿主应用自己包一层。
@@ -40,8 +44,9 @@
 
 **三条使用纪律**(权威版本在 `anima_world/api.py` docstring):
 
-1. 一个运行中的世界**独占**它的 world.db —— 世界的真相一半在内存(时钟/投影/锁/线程池),
-   第二个进程绕过 World 直写同一文件会立刻分叉;
+1. 世界的写入走**一把跨进程的世界锁**(`anima:{world_id}:lock`)—— 多个进程可以同时
+   操作同一个世界,但绕过 `World` 直写那些键会立刻分叉。连上一个已有世界的纪律是
+   **只填缺,不覆盖**:整份写回等于拿创世快照把她倒带;
 2. **一个进程一个引擎版本** —— 多版本共存按进程隔离(studio 的 venv+子进程模式);
 3. **信任边界是进程边界** —— `player_id` 只是参数,验证调用者是谁是宿主的责任。
 
@@ -81,7 +86,7 @@
 给 `conversation` 盖的是**墙钟**(Unix 秒)。tick 数不可能长到那个量级,所以
 `ts >= 1_000_000_000` 就是墙钟。**任何按 tick 做的算术都必须先过这道闸** —— 少了它,
 一条聊天记录就能把"第几天"算成六百多万。引擎自己的两处(时钟恢复、`sim_report`)都
-过闸,见 `world_time.WALL_CLOCK_FLOOR`。拆成两列属于 db 格式变更,留给下一个主版本。
+过闸,见 `world_time.WALL_CLOCK_FLOOR`。拆成两个字段属于线格式变更,留给下一个主版本。
 
 下表是各类型 `payload` 里的字段:
 
@@ -192,7 +197,7 @@ tick 与不带它一致。
 迟滞的判据是黑板上的 `need._restoring`(scheduler 每 tick 写"当前动作在补哪几条需求"),
 是派生值不是第二份状态 —— 重启即自愈。作者树里没写收工线的 `need_action` 节点行为不变。
 
-需求是连续量,不进事件日志;`agent_needs` 表在日切与关闭时做检查点
+需求是连续量,不进事件日志;`needs`在日切与关闭时做检查点
 (⚠️ 它是**检查点**不是实时值,读当前需求请用 `World.needs()`)。
 
 ### 2.7 物品与经济(`economy.enabled`,默认关)
@@ -307,7 +312,7 @@ Mock 上,而本地 ollama 与若干 OpenAI 兼容端点的 function calling 支�
 原生 tools 上可用的能力,等于在默认状态下缺席。原生 tool-calling 是 v2 的路,声明
 (`params_schema`)已经是同一份。
 
-**stance(#18)** 是 (角色, 对方) 的属性,落在 `agent_stance` 表:她可以同时对你找茬、
+**stance(#18)** 是 (角色, 对方) 的属性,落在 `stance`:她可以同时对你找茬、
 对别人讨好。`World.stance(agent_id, target_id)` 读它,`declared=False` 表示"这是兜的
 底,她没选" —— 文本上和"她选了中性"一模一样,只有这个字段能分开。惯性(不要一句
 讨好下一句找茬)做成**提示词压力**而不是引擎摇骰子:摇骰子会覆盖角色自己的选择,
@@ -318,11 +323,11 @@ Mock 上,而本地 ollama 与若干 OpenAI 兼容端点的 function calling 支�
 
 | id | 语义 | 世界里真发生的事 |
 |---|---|---|
-| `mute` | 屏蔽这个人一段时间 | 写 `agent_mutes`;下一条消息被拒(`AgentUnavailable`),发 `mute_started` |
+| `mute` | 屏蔽这个人一段时间 | 写 `mutes`;下一条消息被拒(`AgentUnavailable`),发 `mute_started` |
 | `end_conversation` | 结束对话,不屏蔽 | 关掉这场会话(照旧一个 `conversation` 事件) |
-| `delay_reply` | 等会儿再说 | 排一条 `agent_followups`;**到点她真的回来敲门**(`agent_hail`,`reason=delayed_reply`) |
+| `delay_reply` | 等会儿再说 | 排一条 `followups`;**到点她真的回来敲门**(`agent_hail`,`reason=delayed_reply`) |
 | `walk_away` | 话说到一半走人 | **面对面**时走 BT 那条路真的起程(`travel` / `location_join`);隔着手机时降级成**挂断**(`detail.degraded_to`)—— 对一个不在你面前的人"走开"是个空动作 |
-| `refuse_topic` | 以后不谈这个 | 写 `agent_refused_topics`;对方再提时提示词里加一段"岔开话题" |
+| `refuse_topic` | 以后不谈这个 | 写 `refused_topics`;对方再提时提示词里加一段"岔开话题" |
 | `broadcast` | 当众说一句话 | 一条 `agent_broadcast` 事件(`World.broadcasts()`,payload 带 `heard_by`)**外加**给每个在场角色一条 `memory_seed` —— 他们真的记住了。听众是**同一个地方**的人,不是全世界 |
 | `wait_for_user` | 我说完了,轮到你 | 连续输出的正常出口(#17) |
 
@@ -432,7 +437,7 @@ tool_call 落在**消息行**上(`messages` 表的四个新列,运维台照样�
 
 前面所有机制(needs 的衰减、economy 的价格漂移)的**规律都写死在 Python 里**,因为
 "人会饿"是通用的。但"树怎么长""矿怎么再生""修炼一小时涨多少功力"**因世界而异** ——
-不该由引擎替所有世界决定。这一层把规律本身变成数据,和提示词进 `prompt_templates`、
+不该由引擎替所有世界决定。这一层把规律本身变成数据,和提示词进 `prompts`、
 行为树进 `bt_nodes`、剧情进 `beats.json` 是同一条线上的最后一段。
 
 **量 = (owner, key, value)**,owner 是任意字符串,**前缀即种类**:
@@ -556,9 +561,9 @@ API:`World.declare_visibility` / `place_stock` / `visibility_rules` / `perceptio
 一个假 LLM 去偷看 —— 而改模板的世界作者一点办法没有。
 
 ```bash
-anima-world prompt --db-path w.db --agent 夏 --name 阿檀     # 摘要:块名、字数、占比、首行
-anima-world prompt --db-path w.db --agent 夏 --full          # 连正文
-anima-world prompt --db-path w.db --agent 夏 --json          # 给脚本
+anima-world prompt --world-id w --agent 夏 --name 阿檀     # 摘要:块名、字数、占比、首行
+anima-world prompt --world-id w --agent 夏 --full          # 连正文
+anima-world prompt --world-id w --agent 夏 --json          # 给脚本
 ```
 ```python
 seen = world.debug_prompt("夏", player_id="p1", display_name="阿檀", message="在吗")
@@ -567,18 +572,199 @@ seen["absent"]        # {块名: 为什么没出现} —— 照着这句话就�
 seen["system"]        # 并起来的整段,和真聊天送进 LLM 的逐字相同
 ```
 
+#### 2.9.6 本体层(ontology):世界里有哪些**种类**的东西,以及能对它们做什么
+
+§2.9.3 把量做成了数据,但 owner 那一栏是**任意字符串** —— `tree:oak` 和 `tree:oka`
+是两棵毫不相干的树,`树高` 写成 `树髙` 会安静地新建一个量。规律照跑、日志干净,
+而作者要到某天发现那棵树三个月没长过才知道。这一层补的就是那道闸:
+**先声明种类,实例只能引用声明过的种类,量只能是种类声明过的量。**
+
+架构上是本体工程里的 Type Object:**种类只存一份,实例只带随实例变的东西**
+(`Kind` 持有量的声明、能力、提示词预算;`Entity` 只有 id / 名字 / 一行补充描述 /
+在哪)。提示词里实例引用种类而不复述它 —— §2.9.7 那条"一万棵树"的有界性就是这么
+买到的。
+
+```jsonc
+"kinds": [{
+  "id": "tree",
+  "gloss": "一棵树",                                   // 一行人话。**进提示词的是它,不是属性表**
+  "quantities": {
+    "树高": {"default": 1.0, "visibility": "here", "unit": "米"},
+    "最大树高": 12                                     // 简写 = 只有默认值,默认 hidden
+  },
+  "affordances": {
+    "look": {},                                        // 什么也不改:声明它只是让"端详"进提示词
+    "tend": {"when": ["树高 < 最大树高"],
+             "set":  {"树高": "min(树高 + 0.05, 最大树高)"}}
+  },
+  "prompt": {"budget": 3}                              // 同一个地方最多带几个进提示词
+}],
+"entities": [{"id": "tree:harbor_oak", "name": "门口那棵老橡树",
+              "gloss": "树冠遮住半条街", "location": "cafe"}]
+```
+
+**加载时两阶段严格校验**(和规律同一条纪律:整体拒绝,不逐条丢弃):先读全部声明建
+符号表,再解析引用 —— 于是种类的先后顺序无所谓,而一个指向不存在的种类的实例、一个
+写了没声明过的量的规律、一个引用未知量的能力条件,全部在世界启动前抛 `OntologyError`,
+**一次报全部错**而不是修一条报一条。
+
+四个内置种类(`agent` / `location` / `world` / `player`)的命名空间被这一层认得,
+但名单不归它持有(角色在投影里、地点在 `locations` 表)—— 所以给 `agent:夏` 挂一个
+量不会被当成"引用了不存在的东西"。其中 `agent` 是唯一能在数据里被扩写的,而且
+**只能扩写 `quantities`**,见下一节。
+
+**能力(affordance)是这一层真正新增的东西**,不是又一种规律。它的效果落在这里而不
+写成一条 `for_each: {"action": "tend"}` 的规律,理由是规律层**有意拒绝跨实体写**
+(双缓冲下扇入没有意义,见 §2.9.3 结尾)。而一次能力调用是**一个人、一个东西、一个
+瞬间**:没有集合,就没有扇入,那条理由整个不适用。
+
+调用它的两条路**是同一条**(`Scheduler.perform_affordance`):
+
+| 从哪儿 | 怎么写 |
+|---|---|
+| 她聊天里动手 | `chat.tools.enabled` 的 `interact` 动词 |
+| 排班让她动手 | duty 的 `"kind": "interact", "params": {"target","verb"}` |
+
+另写一份"行为树版本的照料"迟早和工具那份分叉,而分叉那天没人会发现。失败分**三类**,
+调用方据此决定怎么报,理由是**她接下来该做的事不一样**:
+
+| `reason` | 意思 | 她该干什么 |
+|---|---|---|
+| `conditions` | 世界说"这会儿不行"(果子还没熟) | 等,或者换一棵 |
+| `incapable` | 她做不了(没力气、手艺不够) | 换件别的事,或先去补足 |
+| `no_ontology` / `unknown_entity` / `unknown_verb` / `absent` | 这个调用本身讲不通 | 聊天那条路抛 `ToolCallError` |
+
+混成一个,一个累坏了的人会挨棵树轮着试过去,每一棵都回她"再等等"。
+
+##### 2.9.6.1 能力也看**施动者**:`requires` / `costs` / `me_` 前缀
+
+上面那份声明漏了一半:**照料的那个人**。Gibson 的 affordance 存在于施动者与环境
+这一对里 —— 同一把斧头对有力气的人是"能砍",对没力气的人不是。只读得到对象身上
+的量时,能力退化成一个"谁按谁灵"的按钮,而**一个总能成功的动作产生不了任何决策**:
+没有理由挑先做哪件、没有理由休息、没有理由变强。
+
+补上的是三样:
+
+```jsonc
+"kinds": [
+  {"id": "agent",                                       // 内置种类里唯一开的口子
+   "quantities": {                                      // **而且只开在 quantities 上**
+     "体力": {"default": 100, "visibility": "self", "unit": "点"},
+     "手艺": {"default": 1.0, "visibility": "here"}     // here = 别人也看得出
+   }},
+  {"id": "tree", "gloss": "一棵树",
+   "quantities": {"树高": {"default": 1.0, "visibility": "here"}, "最大树高": 12},
+   "affordances": {
+     "tend": {
+       "when":     ["树高 < 最大树高"],                  // 关于**它**:这会儿行不行
+       "requires": ["me_体力 >= 15"],                    // 关于**她**:做不做得了
+       "set":      {"树高": "min(树高 + 0.05 * me_手艺, 最大树高)"},
+       "costs":    {"体力": "me_体力 - 15"}              // 做完从她身上扣
+     }}}
+]
+```
+
+| | 读什么 | 写到哪 | 不成立时 |
+|---|---|---|---|
+| `when` | 它的量、`world_*`、`me_*` | — | `reason == "conditions"` |
+| `set` | 同上 | **它**身上(键是它的量名) | — |
+| `requires` | **只准** `me_*` | — | `reason == "incapable"` |
+| `costs` | 它的量、`world_*`、`me_*` | **她**身上(键是她的量名) | — |
+
+四条硬纪律,每条对着一个"不拦就静默地错"的坏法:
+
+1. **`requires` 只准读 `me_*`。** 放开的话它就和 `when` 是同一样东西,而拒绝理由
+   再也分不出"等一会儿"和"换件事做" —— 分得开正是它存在的全部理由。
+2. **`me_X` 里的 `X` 必须是 `agent` 声明过的量。** 拼错的 `me_休力` 读到 0,于是
+   那道门要么永远开着要么永远关着,而世界照跑、日志干净(和量名拼错那条同源)。
+3. **`costs` 和 `set` 读同一份旧值**(双缓冲,和规律那一层同一条)。顺序敏感的话,
+   "扣体力"和"树长高"谁先算就成了写声明时看不见的语义。
+4. **拒绝时两边一个字都不写。** 半成功(扣了体力而树没长)是这一层最坏的形状。
+
+她的量住 `stock:agent:{id}`,和树的量同一个后端、同一套可见性 —— 于是 `self` 档
+自动进她自己的感知(§2.9.4),`here` 档同地的人也看得出。`here` 要成立,引擎每 tick
+把"她此刻在哪"同步进可见性表(`_settle_actor_place`);全是 `self` 的世界(以及
+没声明 `agent` 的世界)一次都不写。
+
+**声明本身就是开关**,这一半也一样:没写 `requires` / `costs` 的能力连她身上的量
+都不去读,没声明 `agent` 的世界一比特都没变。
+
+⚠️ **一次交互是一下子的事,不是一个状态。** 所以 `interact` **不进** `_current_action` ——
+记成当前动作的话,树下一 tick 重挑同一个动作、与当前相同、于是不再发生,"树矮就浇水"
+这条排班一辈子只浇一次,而闸门还开着、日志还干净。`walk` / `work` / `sleep` 正相反,
+它们本来就是持续的状态。
+
+**排班能按量分支了**(`when_stock`)—— 钟点排班("八点到六点半照看店里")是这个引擎
+在这之前能表达的全部,而人不是那样活的:面粉见底了才去进货,树长到够高了才去收。
+
+```jsonc
+{"name": "tend_oak", "start": "08:00", "end": "08:30",
+ "kind": "interact", "params": {"target": "tree:harbor_oak", "verb": "tend"},
+ "when_stock": {"owner": "tree:harbor_oak", "key": "树高", "op": "<", "value": 6}}
+```
+
+比较符六个(`< <= > >= == !=`),打错**当场抛**而不是静默 FAILURE:一个打错的符号会让
+这条分支**永不触发**,而世界照跑、日志干净、作者以为自己写对了。`owner` 写 `self` 指
+她自己(作者写树的时候并不知道这棵树会挂到谁身上)。
+
+**闸门先过一遍感知**(§2.9.4)。这是这一层最要紧的一条:一条读得到"隔着半个地图那棵
+树的高度"的排班,等于让她**用她不可能知道的事做决定** —— 和角色随口说出矿的确切储量
+是同一种破戏,只是这次破在行为上,**连一行提示词都不留**,只有一个"她怎么就突然动身
+了"。感知不到的量在黑板上写成 `None` 而不是跳过:留着旧值会让她按上一次路过时看到的
+数字做决定(知道得太旧,是知道得太多的另一副面孔)。
+
+拒绝的理由分得开,因为处理方式相反:`hidden`(压根没声明可见性)和 `not_mine`
+(声明成 `self` 而这是别人的量)是**静态的坏** —— 世界怎么跑这条分支都永不触发,
+所以**吼一声 warning**(每个组合只吼一次);`elsewhere` 是正常的 —— 走过去就看得见,
+静默。混成一个 bool,就只能要么对正常情况刷屏、要么对写错的声明一声不吭。
+
+黑板上放的是**她的树问到的那几个量**,不是这儿所有东西的所有量 —— 从建好的树上读
+(和 `duty_windows()` 从 `time_window` 节点读时间窗同一条),另存一份"她关心哪些量"
+迟早和树分叉。3000 棵树的世界里,她的黑板上只有一个 `stock.*`。
+
+```bash
+anima-world ontology --world-id w                 # 有哪些类、身上有哪些量、能对它们做什么
+anima-world ontology --world-id w --kind tree     # 只看这一类
+anima-world ontology --world-id w --json          # 契约(渲染是赠品,和 map 同一条)
+```
+```python
+world.kinds()          # [{"id","gloss","builtin","budget","quantities":[…],"affordances":[…]}]
+world.entities("tree") # [{"id","kind","name","gloss","location","values":{…}}] —— 带此刻的量
+world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "tend"}, surface="body")
+```
+
+**能力表只有这一个地方问得到。** `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个
+词存不存在 —— 宿主猜一份动词表出来是这一层最容易犯的错:猜错了不报错,按钮点下去才
+发现世界不认。
+
+#### 2.9.7 有界性是**渲染器**的属性,不是存储的属性
+
+本体层加进来之后,世界里可以有一万棵树。它们住 Redis 还是 MySQL 一样把提示词撑爆 ——
+**存储分层保护不了提示词**(存储分家的判据见 CLAUDE.md 的"关键不变量")。所以
+"每个能进提示词的类型必须声明一个带上限的选择器"这条归**渲染那一层**:
+`perception.perceive` 的 budget、`Ontology.budget_of`(没声明的种类回落到一个默认上限
+—— **有上限不是可选项**)。
+
+截断了**必须吭声**(`Perception.overflow` → 提示词里那句"你没细看"):截了却不说,
+等于让她在一个"她以为只有三棵树"的世界里做决定,而她永远不会知道自己被骗了。
+
+`tests/test_bounded.py` 守四件事:提示词不随世界**变老**而涨(跑到第 40 个世界日)、
+不随世界**变大**而涨(20 棵树 vs 3000 棵树,实测 989 字 vs 991 字)、黑板按她的树封顶、
+以及**让有界的东西保持有界的那个前提**(`edges` 有上界只因为谓词是闭集 —— 哪天让 LLM
+自己造谓词,存储分家的账要重算)。
+
 ### `anima-world map` —— 把地图画出来,看得见她今天去了哪儿
 
 位移这件事此前只在事件日志里躺着,而**看不见的东西没人会去查**。"她走了"到底有没有
 在世界里兑现,正是 1.3.0 那批 issue 的病本身。
 
 ```bash
-anima-world map --db-path w.db                    # 地图 + 全程轨迹 + 此刻谁在哪
-anima-world map --db-path w.db --day 2            # 只看第 2 个世界日
-anima-world map --db-path w.db --agent 夏 --agent 柔   # 只看这几个人
-anima-world map --db-path w.db --now              # 只画此刻,不画轨迹
-anima-world map --db-path w.db --watch            # 每 2 秒重画(不推时钟)
-anima-world map --db-path w.db --json             # 给别的仓库渲染
+anima-world map --world-id w                    # 地图 + 全程轨迹 + 此刻谁在哪
+anima-world map --world-id w --day 2            # 只看第 2 个世界日
+anima-world map --world-id w --agent 夏 --agent 柔   # 只看这几个人
+anima-world map --world-id w --now              # 只画此刻,不画轨迹
+anima-world map --world-id w --watch            # 每 2 秒重画(不推时钟)
+anima-world map --world-id w --json             # 给别的仓库渲染
 ```
 
 **渲染是赠品,`--json` 才是契约。** 本包无 HTTP、无 HTML —— 终端这张图只是让你现在
@@ -591,8 +777,8 @@ anima-world map --db-path w.db --json             # 给别的仓库渲染
 **连一个活着的世界**(世界跑在另一个进程里):
 
 ```bash
-anima-world map --db-path w.db --redis redis://127.0.0.1:6379 --now     # 此刻
-anima-world map --db-path w.db --redis redis://127.0.0.1:6379 --watch   # 跟着看
+anima-world map --world-id w --redis redis://127.0.0.1:6379 --now     # 此刻
+anima-world map --world-id w --redis redis://127.0.0.1:6379 --watch   # 跟着看
 ```
 
 `world_id` **从这个 db 自己的戳里读**,不用人抄。给了 `--world-id` 而它和戳对不上就
@@ -629,49 +815,51 @@ Redis 上**建出一个全新的世界**,于是你看到一张排版正常、三
 
 ### 2.11 配置与密钥
 
-配置存 `config` 表,带类型(str/int/float/bool)、分类、是否 secret。secret 用 **Fernet
-加密**入库,密钥在 db 旁边的 `world.db.key` 文件(0600 权限)—— **搬迁 db 必须带上它**。
-丢了 keyfile,`llm.api_key` 读不出来,世界静默降级 Mock,但三处会点名真实原因
-("没配过" 与 "读不出来" 严格区分):打开世界时的启动警告、`anima-world doctor`、
-`World.state()` 的 `runtime.llm.degraded_reason`。
+配置存 `anima:{world_id}:config` 这个 hash,带类型(str/int/float/bool)、分类、是否
+secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的 secret 值是当场
+`RuntimeError` —— 不是加密失败,是引擎手里根本没有钥匙了(Fernet 与 `world.db.key`
+随 SQLite 整体退役)。
 
-提示词模板(约 12 个)存 `prompt_templates` 表,拼 prompt 现场 live 读取,改完即生效;
+**钥匙住在这台机器上,不住在世界里**:`~/.anima-world/config.json`(0600,
+`machine_config`)。`config set llm.api_key …` 与 `World.config_set` 自动路由过去,
+人不必手写环境变量。理由是 `.cyberworld` 是**分发物** —— 打包发出去的世界不该带着
+作者的钥匙。
+
+解析顺序:**环境变量 → 机器配置 → 世界配置(旧世界兼容,`doctor` 会点名)→ 引擎默认值**。
+环境变量是每次读都现算的,不是"首启播种"。
+
+没有 key 时世界降级 Mock,但降级不许无声,三处点名真实原因("没配过" 与 "在旧世界里"
+严格区分):打开世界时的启动警告、`anima-world doctor`、`World.state()` 的
+`runtime.llm.degraded_reason`(常驻)。
+
+提示词模板存 `anima:{world_id}:prompts` 这个 hash,拼 prompt 现场 live 读取,改完即生效;
 保存前用代表性变量试渲染一次,占位符错误抛 `PromptRenderError`。
+
+**两个 hash 里只存作者动过的**(1.4.0):创世不播引擎默认值,读的时候按上面那条顺序
+回落,`config list` / `prompt_list` 每行带 `source`。播下去的那份是**创世那天的快照** ——
+引擎日后把 `chat.recall_k` 从 3 改成 99,已有的世界一个都吃不到,而 `config list`
+看上去一模一样。
 
 ### 2.12 版本即契约
 
-一个 core 版本 = (引擎代码, db 格式版本, 包格式版本) 一起冻结:
+一个 core 版本 = (引擎代码, 存储形状, 包格式版本) 一起冻结:
 
-- `anima_world.__version__` 是唯一版本源(pyproject 动态读取)
-- **主版本号 = db 格式 = 可挂载性**:让老引擎**读不了**世界文件的改动才升第一位
-  (改列义、拆表、换单位)。第二位加能力,第三位纯修 bug
-- `DB_FORMAT_VERSION` 联锁:挂上更新格式的 db 当场拒绝打开,**不写入任何表**
-- **加法修订 `SCHEMA_REVISION`(1.3.0 起)**:纯加法的 schema 变化 —— 新表、新的可空列
-  —— 不改可挂载性,跟着**次版本号**走。1.3.0 是修订 **2**(1.0.0~1.2.x 是 1)
+- `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
+- **改 Redis 键形状 / MySQL 表形状 = 改跨仓库契约**,和改包格式同一级别
+- `anima-world contract --json` 自报 `storage` 段(后端、键前缀、MySQL 表名与表前缀)
+  与包格式版本(**2**),镜像端照它对齐
 - `anima_world.api` 的函数面**只加不改** —— 宿主应用的代码依赖它
 
-#### 加法修订:为什么它不是"偷偷改了 db 格式"
+`tests/test_version_contract.py` 守这两条(版本单一来源、`contract --json` 报包格式)。
 
-1.3.0 加了六张表和 `messages` 的四个可空列。按原来的字面规则(schema 一变就升 db 格式,
-而 db 格式一升就升主版本),这一版本该叫 2.0.0 —— 而那会把**所有 1.x 的世界作废**,
-只为了一批加法。那条规则真正在保护的是"版本号能告诉你两个世界文件互不互通",而加法
-不影响互通:
+#### db 格式联锁去哪了
 
-| 组合 | 结果 |
-|---|---|
-| 1.0~1.2 的世界 → 1.3 引擎 | 打开,补建新表,戳升到 2 |
-| 1.3 的世界 → 1.2 引擎 | **打开,照跑** —— 新表被忽略,那几个开关的能力缺席 |
-| 更高修订的世界 → 本引擎 | 打开,照跑,**并打一条警告**说明哪些能力这次运行会缺席 |
+1.x 有一整套 `DB_FORMAT_VERSION` / `SCHEMA_REVISION` / `db_meta` 联锁,它保护的是
+**可挂载性**:世界是一个文件,老引擎挂上一个更新格式的文件会悄悄写坏它,所以要当场拒绝。
 
-所以规则改成:主版本 = 可挂载性,加法修订跟次版本走,而**修订号只增不减**并且被写进
-`db_meta.schema_revision`。它存在的唯一理由是让降级**看得见**:一个 1.3 的世界跑在 1.2
-引擎上照样跑,但 stance / 静音 / 拒谈话题整套不生效 —— 那正是这个仓库最在意的
-"照跑但给错东西"。`anima-world contract --json` 与 `anima-world doctor` 都报这个数,
-镜像端(运维台)对齐时要一起读。
-
-`tests/test_version_contract.py` 机器强制这一套:主版本仍等于 db 格式、硬钉窗口仍然
-关着、修订号只增不减、以及**更高修订的世界必须仍然能挂**(它要是拒绝,那这个改动就
-不是加法,应该去升主版本)。
+2.0 世界不再是一个可挂载的文件了 —— **键前缀就是格式**,那套联锁随 `world.db` 整体退役。
+留下的纪律是同一条,只是换了执行处:改键的形状要当作跨仓库破坏来对待,并在
+`contract --json` 的 `storage` 段里报出来让镜像端看见。
 
 #### 下一个大版本发布时,已有的世界会怎样
 
@@ -682,9 +870,8 @@ Redis 上**建出一个全新的世界**,于是你看到一张排版正常、三
 | | 跨得过大版本吗 | 靠什么 |
 |---|---|---|
 | 作者写的种子(`world_seed.json`) | **能** | 它是版本中立的 JSON,schema 是跨仓库镜像契约 |
-| `template` 包 | **大版本内自由流动**;跨大版本**不能** | 见 §4.7 的区间算法 |
-| `snapshot` 包 / `world.db` | **不能** | 里面是盖了格式戳的数据库 |
-| 事件历史、积累的记忆、关系状态 | **不能** | 它们只活在 `world.db` 里 |
+| `.cyberworld` 包 | **不能** | 里面是那一版键形状的类型化 dump |
+| 事件历史、积累的记忆、关系状态 | **不能** | 它们只活在那些键(或 MySQL 表)里 |
 
 也就是说:**世界的设定活得下来,世界经历过的事活不下来。** 一个跑了三个月、
 角色之间攒出真实关系的世界,在大版本边界上只能留下它出生时的样子。
@@ -709,13 +896,15 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `World.open(db_path, *, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子),并把这份种子存进 `db_meta` 当出生证明;已有库的 seed 被忽略并警告;**显式指定**的坏 seed / 坏 beats 当场抛 `WorldSeedError` / `BeatScriptError`。开机会收割上次崩溃遗留的 open 会话(补摘要、发事件) |
+| `World.open(world_id, *, redis, mysql=None, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子),并把这份种子存进 `:meta` 当出生证明;已有世界的 seed 被忽略并警告;**显式指定**的坏 seed / 坏 beats 当场抛 `WorldSeedError` / `BeatScriptError`。开机会收割上次崩溃遗留的 open 会话(补摘要、发事件) |
 | `world.close(wait=True)` | 停时钟、排干 LLM 线程池。幂等;`with World.open(...) as world:` 自动调用。事件每 tick 已落盘,退出时不额外写 |
-| `world.export_snapshot(output_path, *, world_id, name, seed_path=None, beats_path=None, …)` | **活体导出**:世界不停,当场打出完整 snapshot 包。先刷检查点,持锁瞬间用 SQLite backup 拷一致副本,打包在锁外;密文当场剥除。种子按 显式参数 → db_meta 出生种子 → 内置种子(记警告) 解析。返回 `WorldPackageManifest` |
+| `world.export_snapshot(output_path, *, world_id, name, seed_path=None, beats_path=None, …)` | **活体导出**:世界不停,当场打出完整 snapshot 包。先刷检查点,持世界锁 `dump_world_state` 拷一份一致快照(锁只挡这一瞬),打包在锁外;secret 行当场剥除。种子按 显式参数 → `:meta` 出生种子 → 内置种子(记警告) 解析。返回 `WorldPackageManifest` |
 
 交互即检查点:`record_chat_turn` / `player_action` / `player_buy` / `close_conversation`
-结束时会顺手把 needs / 反思水位 / 时钟检查点刷进 db —— 玩家碰过世界的那一刻,db 就是
-完整的,崩溃或活体导出都不缩水。安静挂机的损失上限仍是"上个日切以来的检查点数据"。
+结束时会顺手把 needs / 反思水位 / 时钟检查点刷进存储 —— 玩家碰过世界的那一刻,存储
+就是完整的,崩溃或活体导出都不缩水。安静挂机的损失上限仍是"上个日切以来的检查点数据"。
+⚠️ 这条的前提是 **Redis 自己得存得住**:AOF 关着的 Redis 一重启,世界退回创世那一刻
+而且不报错。开机会点名(`durability_warning`),`doctor` 也查。
 
 ### 时钟
 
@@ -738,7 +927,7 @@ from anima_world.api import World
 | `world.needs(agent_id)` | 当前需求 `{energy, hunger, social, mood}`;未点亮或首 tick 前返回 `{}` |
 | `world.graph(agent_id=None)` | 关系图谱三元组 |
 | `world.cliques()` | 小团体(friendship 连通分量,日切重算) |
-| `world.events(since_seq=None)` | 近期事件缓冲(全量历史离线读 `events` 表) |
+| `world.events(since_seq=None)` | 近期事件缓冲(全量历史用下面的 `history()`) |
 | `world.history(*, since_seq=0, limit=1000, who=None, kind=None)` | **全量事件历史,分页**。事件形状与 `events()` 完全一致;`who` / `kind` 过滤。`broadcasts()` 就是它的一层壳 |
 | `world.fast_forward(ticks, *, plan_wait_cap=None)` | 无头快进,每个世界日等在途的规划落地。和 `simulate` **共用** `Scheduler.fast_forward`,免得两条快进路径长出不同行为。⚠️ 定时轮次不在快进里跑(§2.9.2) |
 | `world.report(*, ticks=None)` | 把跑出来的历史读成一份运行摘要,与 `simulate --report` **同一口径**(`report_format_version` 见 `contract`) |
@@ -766,10 +955,10 @@ from anima_world.api import World
 | 函数 | 说明 |
 |---|---|
 | `world.act(agent_id, verb, params=None, *, player_id="", surface="autonomy")` | **以某个角色的身份做一件事** —— 外面的进程改变这个世界的唯一入口。整个执行期持有世界那把唯一的锁,所以**一个动作是原子的**(world-rules 的双缓冲、三源仲裁、`events.seq` 的折叠顺序都要求它)。**在执行时校验,不在决定时**:她想了 6.5 秒,决定送达时世界早变了,所以"还在不在场""走不走得掉"由动词自己在执行那一刻查。未知动词 / 不在这个面上 / 工具失败一律返回 `ok=False` **并说明原因**(一个 agent 进程挑错动词不该让世界崩);未知角色抛 `KeyError`。结果形状与聊天里的工具调用**逐字相同**。⚠️ 它**不推进世界的时间** |
-| `World.open(db_path, *, redis=None, world_id="world", …)` | 给了 `redis`,**世界的运行时状态整个搬进 Redis**,这个进程不再持有它。黑板那 20 个键(她在哪/在干嘛/饿不饿/打算做什么)、时钟、在途、当前动作、规划、需求、意图、关系图、姿态/静音/拒谈、量与规律 —— 此前全是纯内存,于是两个进程各开同一个世界文件会读到同一份历史、然后在各自内存里跑出**两个不同的世界**。`world_id` 进键名(一个 Redis 上跑十个世界是常态)。**接上一个已经在跑的世界不会把她按回原点**:搬家只填 Redis 里还没有的键(逐键 `HSETNX`),和时钟的 `setnx` 同一条道理 |
+| `World.open(world_id, *, redis, …)` | 给了 `redis`,**世界的运行时状态整个搬进 Redis**,这个进程不再持有它。黑板那 20 个键(她在哪/在干嘛/饿不饿/打算做什么)、时钟、在途、当前动作、规划、需求、意图、关系图、姿态/静音/拒谈、量与规律 —— 此前全是纯内存,于是两个进程各开同一个世界文件会读到同一份历史、然后在各自内存里跑出**两个不同的世界**。`world_id` 进键名(一个 Redis 上跑十个世界是常态)。**接上一个已经在跑的世界不会把她按回原点**:搬家只填 Redis 里还没有的键(逐键 `HSETNX`),和时钟的 `setnx` 同一条道理 |
 | — | **记忆投影仍在进程里,而且是有意的**:它是从事件重折出来的派生数据,存两份只会多一种不一致的坏法。别的进程记了一条 `payment`,这个进程靠 `catch_up_projection()` 补折 —— 重折廉价且必然正确 |
 | — | 给了 `redis` 之后:**时钟**住进 Redis(只能有一个答案),`act()` / `intend()` 在一把**跨进程的世界锁**下执行(可重入、有 ttl、释放比对 token)。那把锁在调度器的 RLock **之外**,不是替代 —— RLock 还被 `threading.Condition` 用着 |
-| `World.open(db_path, *, mysql=None, …)` | 给了 `mysql`,**她带不进上下文的那几样搬去 MySQL**:`events` / `memories` / `conversations` / `messages`。判据是**进不进得了提示词** —— Redis 装她此刻要带进提示词的东西,而 LLM 的上下文本来就有上限,两个"有上限"是同一个;进不了提示词的可以无限,要用时按 k 取回来。分对了的话**提示词不随世界变老而涨**(实测 60 世界日:后端涨 61 倍,提示词 2251→2272 字;`tests/test_bounded.py` 是闸)。⚠️ `edges` **不在这里**:它有 `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,按世界的规模封顶 —— 实测一个三人世界跑 20 天,Redis 内存增量的九成是 events + memories(每世界日 13 KB;一千个世界跑一年 **4.6 GB 常驻**,永不回落),而黑板/地图/行为树随**世界的规模**有界。分家后同一份负载:20→40 世界日 Redis **一个字节没涨**,三十个聊天回合(60 条消息)Redis +0 KB。可以只给 `mysql` 不给 `redis`。⚠️ **传一个工厂,不要传裸连接**:`mysql=lambda: pymysql.connect(...)`(引擎自动包成每线程一条)。`pymysql` 的 threadsafety 是 1 而引擎有线程池 —— 共用一条连接会让协议帧交叉、连接当场作废,症状是 `InterfaceError (0, '')` 或 `read of closed file`,**而且不是必现**(大多数 tick 相安无事,某次在负载下才炸,报错离原因很远)。给裸连接照旧能开,但开机时会点名 |
+| `World.open(world_id, *, redis, mysql=None, …)` | 给了 `mysql`,**她带不进上下文的那几样搬去 MySQL**:`events` / `memories` / `conversations` / `messages`。判据是**进不进得了提示词** —— Redis 装她此刻要带进提示词的东西,而 LLM 的上下文本来就有上限,两个"有上限"是同一个;进不了提示词的可以无限,要用时按 k 取回来。分对了的话**提示词不随世界变老而涨**(实测 60 世界日:后端涨 61 倍,提示词 2251→2272 字;`tests/test_bounded.py` 是闸)。⚠️ `edges` **不在这里**:它有 `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,按世界的规模封顶 —— 实测一个三人世界跑 20 天,Redis 内存增量的九成是 events + memories(每世界日 13 KB;一千个世界跑一年 **4.6 GB 常驻**,永不回落),而黑板/地图/行为树随**世界的规模**有界。分家后同一份负载:20→40 世界日 Redis **一个字节没涨**,三十个聊天回合(60 条消息)Redis +0 KB。可以只给 `mysql` 不给 `redis`。⚠️ **传一个工厂,不要传裸连接**:`mysql=lambda: pymysql.connect(...)`(引擎自动包成每线程一条)。`pymysql` 的 threadsafety 是 1 而引擎有线程池 —— 共用一条连接会让协议帧交叉、连接当场作废,症状是 `InterfaceError (0, '')` 或 `read of closed file`,**而且不是必现**(大多数 tick 相安无事,某次在负载下才炸,报错离原因很远)。给裸连接照旧能开,但开机时会点名 |
 | — | `events.seq` 的**连续性**在 MySQL 上不成立(自增在事务回滚后留空洞),Redis 版靠 `RPUSH` 返回长度是连续的。`since_seq` 分页照旧正确(它问的是"比这个大的"),但任何依赖 seq 连续的代码会悄悄错 —— 目前没有,写新代码时别引入 |
 | — | **一个动作横跨两个后端,而崩溃不挑时候**。写序是 Redis 先、MySQL 后,所以中间死掉的样子是:在途状态写下了,而历史里没有这趟。伤面是**历史少一条**(从事件重折的东西从此少算一次,不会自愈),不是"她卡在路上"——在途带着到达 tick,时钟一到照样落地。`tests/test_mysql_state.py` 把这个伤面钉住了,判据变了会当场红 |
 | `world.map_data(from_tick=None, to_tick=None, agents=None)` | **地图 + 此刻谁在哪 + 这段时间里谁去了哪儿。** `anima-world map` 与任何宿主渲染器共用这一份 —— 观察窗另写一遍取数就会撒谎。四块:`places`(`id`/`name`/`kind`/`x`/`y`,region 另带 `w`/`h`)、`standing`(`{地点: [角色…]}`)、`travelling`(此刻在路上的人,`from`/`to`/`arrive_at`)、`tracks`(`[{agent, points:[{tick, place}]}]`)。⚠️ **几何是绝对画布坐标**(0~1),已换算好:库里存的是**相对父级**的(`w=0.55` 是父级宽度的 55%),照原始值画出来的图每个东西都在错的地方而且什么都不报错(实测 workshop 原始 `x=0.78`,绝对 `0.482`)。⚠️ **在路上的人不站在任何地方** —— 只看 `standing` 会让她在图上凭空消失半段路。`tracks` 只认**到达**(`location_join`),起程不算:她可能走到一半被打断,而画一条没走完的线等于说她到了。给了 `from_tick` 时,每条轨迹的第一个点是**窗口之前她在哪**(带 `before: true`)—— 不带的话起点在窗口之前的人只剩一个孤点、画不出线,看上去像「她这天没动」(实测第 2 天,三个人里两个是这样) |
@@ -871,6 +1060,14 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.place_stock(owner, location, label=None)` | 这个东西在哪(`here` 档要用) |
 | `world.visibility_rules()` | 现有的可见性声明 |
 
+### 本体:有哪些种类的东西,能对它们做什么(见 §2.9.6)
+
+| 函数 | 说明 |
+|---|---|
+| `world.kinds()` | 声明过的种类:`{"id","gloss","builtin","budget","quantities":[{"key","default","visibility","label","unit"}],"affordances":[{"verb","changes_world","needs_actor","conditions","sets","requires","costs"}]}`(后三个是关于**施动者**的那一半,见 §2.9.6.1)。**能力表只有这一个地方问得到** —— `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在,宿主猜一份动词表出来是猜错了也不报错 |
+| `world.entities(kind=None)` | 实例:`{"id","kind","name","gloss","location","values"}`,**带此刻的量**。分开问的话宿主得先 `entities()` 再逐个 `stocks()`,而两次之间世界还在跑 |
+| `world.act(agent_id, "interact", {"target": …, "verb": …}, surface="body")` | 让她对一样东西做一件事。和聊天里的 `interact` 动词、排班里的 `interact` 动作**同一条**(`Scheduler.perform_affordance`) |
+
 ### 经济(`economy.enabled` 点亮后才有意义)
 
 | 函数 | 说明 |
@@ -893,7 +1090,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 
 | 函数 | 说明 |
 |---|---|
-| `world.scheduler` / `world.chat_store` | 底层对象,进阶用;绕过它们直写 db 违反纪律 1 |
+| `world.scheduler` / `world.chat_store` | 底层对象,进阶用;绕过它们直写那些 Redis 键违反纪律 1 |
 
 打包与校验是模块级函数(也是 CLI 的底座):
 `anima_world.world_package.export_world_package / import_world_package / inspect_world_package`、
@@ -914,7 +1111,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--db-path` | `saves/world.db` | 世界文件位置,不存在就新建 |
+| `--redis` / `--world-id` | `$ANIMA_REDIS_URL` 或 `redis://127.0.0.1:6379/0` / `$ANIMA_WORLD_ID` 或 `world` | 世界住在哪个 Redis、叫什么名字(键前缀 `anima:<world_id>:`)。可选 `--mysql DSN` 让无限增长的四样进 MySQL |
 | `--seed` | 内置种子 | 世界种子 JSON,**只对新建世界生效** |
 | `--beats` | 无 | 节拍脚本 JSON |
 | `--no-input` | - | 不交互提问(CI / 脚本) |
@@ -923,13 +1120,13 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 ### 4.2 anima-world chat —— 和一个角色说话
 
 ```bash
-anima-world chat --db-path saves/world.db                  # 不给 --agent:列出这个世界住着谁
-anima-world chat --db-path saves/world.db --agent 夏 --name 阿檀
+anima-world chat --world-id world                  # 不给 --agent:列出这个世界住着谁
+anima-world chat --world-id world --agent 夏 --name 阿檀
 ```
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--db-path` | `saves/world.db` | 世界文件 |
+| `--redis` / `--world-id` | `$ANIMA_REDIS_URL` 或 `redis://127.0.0.1:6379/0` / `$ANIMA_WORLD_ID` 或 `world` | 世界住在哪个 Redis、叫什么名字(键前缀 `anima:<world_id>:`)。可选 `--mysql DSN` 让无限增长的四样进 MySQL |
 | `--agent` | 无 | 找谁说话;省略或写错都会列出名册(写错时退出码 2) |
 | `--player-id` | `cli` | 你的身份 id —— **角色对你的印象记在它头上**,换 id 就是换个人 |
 | `--name` | `访客` | 你在角色眼里的称呼 |
@@ -945,10 +1142,10 @@ anima-world chat --db-path saves/world.db --agent 夏 --name 阿檀
 ### 4.2.1 anima-world prompt —— 看一眼她收到了什么
 
 ```bash
-anima-world prompt --db-path w.db --agent 夏 --name 阿檀     # 摘要:块名、字数、占比、首行
-anima-world prompt --db-path w.db --agent 夏 --full          # 连正文一起
-anima-world prompt --db-path w.db --agent 夏 --json          # 给脚本
-anima-world prompt --db-path w.db                            # 不给 --agent:列名册
+anima-world prompt --world-id w --agent 夏 --name 阿檀     # 摘要:块名、字数、占比、首行
+anima-world prompt --world-id w --agent 夏 --full          # 连正文一起
+anima-world prompt --world-id w --agent 夏 --json          # 给脚本
+anima-world prompt --world-id w                            # 不给 --agent:列名册
 ```
 
 | 参数 | 默认 | 说明 |
@@ -958,11 +1155,32 @@ anima-world prompt --db-path w.db                            # 不给 --agent:�
 | `--message` | `在吗` | 假设这一刻你说的是哪句话(会影响"拒谈话题"那块) |
 | `--full` / `--json` | - | 连正文 / JSON |
 
-改 `prompt_templates` 的人一般不写 Python,而"改完她到底收到了什么"过去只有写 Python
+改提示词模板的人一般不写 Python,而"改完她到底收到了什么"过去只有写 Python
 塞假 LLM 才看得见。语义与 `World.debug_prompt` 完全相同(§2.9.5):**看,但不碰** ——
 不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来。
 
 摘要里的占比一列值得看:它会立刻告诉你**提示词的字数花在哪儿了**。
+
+### 4.2.2 anima-world ontology —— 世界里有哪些东西,能对它们做什么
+
+```bash
+anima-world ontology --world-id w                 # 类 + 每类的量与能力 + 实例和此刻的量
+anima-world ontology --world-id w --kind tree     # 只看这一类
+anima-world ontology --world-id w --builtin       # 连内置四类一起列
+anima-world ontology --world-id w --json          # 契约
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--kind` | 全部 | 只看这一类;这个世界没声明过它就退出码 2(而不是给你一张空表) |
+| `--builtin` | - | 连 `agent` / `location` / `world` / `player` 一起列(平时是噪音)。**声明过量的 `agent` 不受此限,一直都列** —— `requires` / `costs` 里的 `me_体力` 出自那儿,藏起来的话读的人查不到"体力"是什么、默认多少 |
+| `--json` | - | `{"kinds": [...], "entities": [...]}` |
+
+量和规律此前在 CLI 上**完全没有出口**,而创作台那侧的判据是**有没有 CLI 出口** ——
+库里有而命令行上没有,对不 import 本包的它等于不存在。**渲染是赠品,`--json` 才是
+契约**(和 `map` 同一条)。
+
+最要紧的一栏是**能力**:`stocks` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在。
 
 ### 4.3 anima-world run —— 无引导的前台宿主
 
@@ -971,7 +1189,7 @@ anima-world prompt --db-path w.db                            # 不给 --agent:�
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--db-path` | `saves/world.db` | 世界文件 |
+| `--redis` / `--world-id` | `$ANIMA_REDIS_URL` 或 `redis://127.0.0.1:6379/0` / `$ANIMA_WORLD_ID` 或 `world` | 世界住在哪个 Redis、叫什么名字(键前缀 `anima:<world_id>:`)。可选 `--mysql DSN` 让无限增长的四样进 MySQL |
 | `--seed` / `--beats` / `--agents` | - | 同 start;坏 seed / 坏 beats 拒绝启动(退出码 2) |
 | `--quiet` | - | 不回显叙事事件 |
 
@@ -987,9 +1205,11 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 
 ### 4.5 anima-world doctor
 
-检查:世界文件、`world.db.key` 是否在(不在则警告旧密钥永久读不出)、db 格式版本、
-事件/角色计数、LLM 四态(没建库/读不出来/没配/正常)+ **真调一次 LLM**(`--skip-probe`
-跳过)、时钟快慢翻译成人话。有问题退出码 1。
+检查:这个 world_id 存不存在、**这台 Redis 的持久化**(`durability_warning` —— AOF 关着
+的话世界一重启就退回创世那一刻,而且不报错)、事件/角色计数、LLM 四态(世界不存在 /
+没配 / 配了 / 正常)+ **真调一次 LLM**(`--skip-probe` 跳过)、`llm.api_key` 是从哪儿
+解析出来的(环境变量 / 机器配置 / 旧世界配置 —— 最后一种会点名)、后台模型槽、
+时钟快慢翻译成人话。有问题退出码 1。
 
 还报一条**不算问题但白花钱**的:`chat.intent.enabled` / `autonomy.enabled` /
 `chat.loop.enabled` 开着而 `llm.background.model` 空着时,这些便宜活会退回主模型。
@@ -1000,7 +1220,7 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 
 | 参数 | 说明 |
 |---|---|
-| `--db-path`(必填) | 世界文件 |
+| `--redis` / `--world-id` | 世界住在哪个 Redis、叫什么名字;可选 `--mysql DSN` |
 | `--days N` / `--ticks N` | 二选一必填 |
 | `--llm full\|planner\|mock` | 三档:全真 / 真规划+Mock 叙事(长跑推荐)/ 全 Mock |
 | `--no-llm` | `--llm mock` 的别名,同时给时它赢 |
@@ -1015,13 +1235,13 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 
 #### 运行摘要(`--report`)
 
-这份数据全在事件日志里,但 **db 格式与事件 schema 是引擎的私有契约** —— 消费方伸手
-进 `world.db` 去数会把自己钉死在某个 db format 上。所以口径归引擎定,消费方按需读取。
-`anima_world.sim_report.build_run_report()` 是同一份逻辑的库入口(纯函数,可离线对
-任何 `world.db` 重算)。
+这份数据全在事件日志里,但 **存储形状与事件 schema 是引擎的私有契约** —— 消费方伸手
+进那些 Redis 键去数会把自己钉死在某一版的键形状上。所以口径归引擎定,消费方按需读取。
+`anima_world.sim_report.build_run_report()` 是同一份逻辑的库入口(纯函数,可对任何
+已有世界重算)。
 
-顶层带 `report_format_version`(**与引擎版本分开**:口径变了不该逼消费方升引擎)、
-`engine_version`、`db_format_version`。
+顶层带 `report_format_version`(**与引擎版本分开**:口径变了不该逼消费方升引擎)与
+`engine_version`,就这两个。
 
 | 字段 | 内容 |
 |---|---|
@@ -1056,17 +1276,21 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 ### 4.7 anima-world world export / import / inspect —— 打包
 
 ```bash
-anima-world world export --seed seed.json --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode template          # 模板包
-anima-world world export --seed seed.json --db-path saves/world.db \
-    [--beats beats.json] --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode snapshot          # 快照包(secret 剥除)
-anima-world world import my.cyberworld --destination ./instances
-anima-world world inspect my.cyberworld [--json]                  # 它需要什么引擎?
+anima-world world export --world-id w --output my.cyberworld \
+    --package-id my-world --name "我的世界" [--seed seed.json] [--beats beats.json]
+anima-world world import my.cyberworld --world-id w2      # 目标必须是空世界
+anima-world world inspect my.cyberworld [--json]          # 它需要什么引擎?
 ```
 
+⚠️ **两个 id 别混**:`--world-id` 是**源世界在 Redis 上的名字**,`--package-id` 是
+**包的世系 id**。1.x 里这两件事共用一个参数,2.0 拆开了 —— 因为源世界的名字是运维的
+事,而世系 id 印在分发物上。走校验的是 `--package-id`(`^[a-z0-9][a-z0-9._-]{0,63}$`)。
+
+**`--mode` 没有了**:v2 只有 snapshot。`--seed` 缺省时用世界自己的创世出生证明。
+导入**只进空世界**,目标非空当场拒绝 —— 往一个跑着的世界上盖一份快照没有正确的语义。
+
 成功时 stdout 输出一行 JSON(`export` / `import`)或一份清单(`inspect`,`--json` 给
-一行 JSON);失败退出码 2。`--world-id` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
+一行 JSON);失败退出码 2。
 
 #### 各命令的 JSON 字段集
 
@@ -1075,7 +1299,7 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 | 命令 | 字段 |
 |---|---|
 | `export` | `operation` / `world_id` / `revision_id` / `mode` |
-| `import` | `operation` / `world_id` / `instance_id` / `path` |
+| `import` | `operation` / `world_id` / `instance_id` / `path`(`instance_id == world_id`,`path` 是 `redis:{world_id}` —— 没有磁盘目录了,这两个字段留着是给镜像端不破) |
 | `inspect --json` | manifest 全字段(`world_id` / `name` / `summary` / `genre` / `setting` / `theme` / `export_mode` / `revision_id` / `created_at` / `files` / `source_engine_version` / `package_format_version` / `engine_min` / `engine_max_exclusive`)+ `current_engine_version` / `runnable` / `operation` |
 
 #### `inspect` 跑不了的包也要回答
@@ -1094,17 +1318,19 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 #### 引擎兼容区间怎么算
 
-导出时盖章,`[engine_min, engine_max_exclusive)`:
+导出时盖章,`[engine_min, engine_max_exclusive)`。v2 只有 snapshot 一种模式:
 
-| | `engine_min` | `engine_max_exclusive` |
-|---|---|---|
-| `snapshot` | **导出它的那个引擎版本** | 下一个大版本 |
-| `template` | **当前大版本的地板**(`{major}.0.0`) | 下一个大版本 |
+| `engine_min` | `engine_max_exclusive` |
+|---|---|
+| **导出它的引擎截到次版本**(`{major}.{minor}.0`) | 下一个大版本 |
 
-差别的理由:snapshot 带着盖了格式戳的 `world.db`,老引擎没有理由能打开它;template
-只装 `world_seed.json` —— 版本中立的作者数据,其 schema 本来就是跨仓库镜像契约,
-为的正是能travel。两者盖同一个章,代价就从"存档带不走"(已决定、已写进文档的取舍)
-变成"作品带不走"(没有人决定过)。
+下限取次版本而不是补丁版本,因为 `world_state.json` 里是引擎写进 Redis 的那些键,
+**它的形状随次版本演进**,而补丁版本按定义不改形状 —— 拿 2.0.3 导出的包在 2.0.0 上
+是能开的,拿 2.1 导出的包不该在 2.0 上开。
+
+1.x 曾有一种只装 `world_seed.json` 的 `template` 模式,它盖的是当前大版本的地板。
+2.0 删掉了:种子本来就该直接分发(它是版本中立的 JSON,schema 是跨仓库镜像契约),
+把它塞进一个带引擎区间的容器里只是给一份不需要引擎的数据凭空加了一道版本闸。
 
 ---
 
@@ -1112,33 +1338,37 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 | 变量 | 用途 |
 |---|---|
-| `ANIMA_SETTINGS_KEY` | Fernet 密钥(优先于 `world.db.key` 文件) |
-| `ANIMA_LLM_API_KEY` / `OPENAI_API_KEY` / `LONGCAT_API_KEY` | 仅首启播种 `llm.api_key` 时读取 |
-| `ANIMA_LLM_BASE_URL` / `OPENAI_BASE_URL` | 仅首启播种 `llm.base_url` |
-| `ANIMA_LLM_MODEL` / `OPENAI_MODEL` | 仅首启播种 `llm.model` |
+| `ANIMA_REDIS_URL` | 世界住在哪个 Redis(CLI 的 `--redis` 缺省值;默认 `redis://127.0.0.1:6379/0`) |
+| `ANIMA_WORLD_ID` | 默认世界名(CLI 的 `--world-id` 缺省值;默认 `world`) |
+| `ANIMA_LLM_API_KEY` / `OPENAI_API_KEY` / `LONGCAT_API_KEY` | `llm.api_key` |
+| `ANIMA_LLM_BASE_URL` / `OPENAI_BASE_URL` | `llm.base_url` |
+| `ANIMA_LLM_MODEL` / `OPENAI_MODEL` | `llm.model` |
 | `NO_COLOR` | 关闭 CLI 彩色输出 |
 
-只设 `LONGCAT_API_KEY` 时自动播种 LongCat 端点与模型。**首启之后 `llm.*` 一律以 db
-配置为准**,环境变量不再被读。
+只设 `LONGCAT_API_KEY` 时自动补上 LongCat 的端点与模型。
+
+⚠️ **`llm.*` 这几个是每次读都现算的,不是"首启播种"**(1.x 的说法已作废)。环境变量
+排在解析链的最前面,**赢过机器配置和世界配置**。而**人不必手写它们**:
+`config set llm.api_key sk-…` 自动写进 `~/.anima-world/config.json`(0600)。
 
 ## 6. 配置键参考
 
 `anima-world config list` / `world.config_list()` 可见,全部支持热更新。
 
-**世界文件里只存作者动过的**(1.4.0)。创世不再播默认值,读的时候按
-**环境变量 → 机器配置 → 世界文件 → 引擎默认值**解析,`source` 那一栏告诉你这一次
-走到了哪层。两个后果:
+**世界里只存作者动过的**(1.4.0;如今在 `anima:{world_id}:config` 这个 hash)。创世
+不再播默认值,读的时候按**环境变量 → 机器配置 → 世界 → 引擎默认值**解析,`source`
+那一栏告诉你这一次走到了哪层。两个后果:
 
-- 引擎改进过的默认值,**已有的世界也吃得到** —— 此前世界文件把创世那天的默认值冻死了,
+- 引擎改进过的默认值,**已有的世界也吃得到** —— 此前世界把创世那天的默认值冻死了,
   而且无声(两个世界行为不同,`config list` 看上去一模一样)
-- 表里剩下的就是**作者的意见**,一眼可见
+- 剩下的就是**作者的意见**,一眼可见
 
 取舍是真实的:需要在两个引擎版本上行为一致的场合,把值显式写进种子的 `config` 块 ——
 那本来就是作者的意见。
 
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `llm.api_key` | str(secret) | 空 | LLM API key,Fernet 加密存储;空 = Mock 降级 |
+| `llm.api_key` | str(secret) | 空 | LLM API key。**`config set` 会把它路由进机器配置**(`~/.anima-world/config.json`,0600),不进世界 —— 往世界里写一个非空 secret 是当场 `RuntimeError`。空 = Mock 降级 |
 | `llm.base_url` | str | 空 | OpenAI 兼容端点 |
 | `llm.model` | str | `gpt-4o-mini` | 模型名 |
 | `llm.timeout` | float | 30.0 | 单次调用超时(秒) |
@@ -1208,14 +1438,42 @@ anima-world world inspect my.cyberworld [--json]                  # 它需要什
 
 ## 8. 数据文件
 
-**一个世界 = 一个卷**,包含:
+**一个世界 = 一个 Redis 键前缀**(`anima:{world_id}:`),里面装着事件(无 MySQL 时)、
+聊天、记忆、图谱、配置、提示词、地图、行为树、量与规律、本体,以及 stance / 静音 /
+拒谈话题 / 回头找你 / 玩家教的规则五类当前值(§2.9.1)。给了 `mysql=` 的世界把
+`events` / `memories` / `conversations` / `messages` 交给 MySQL(`{world_id}_` 表前缀),
+判据见 §2.9.7。
+
+**没有世界文件了。** 磁盘上只剩两份作者数据:
 
 | 文件 | 说明 |
 |---|---|
-| `world.db` | SQLite(WAL):事件、聊天、记忆、图谱、配置、提示词、地图、行为树、格式戳与加法修订戳。1.3.0 起还有 stance / 静音 / 拒谈话题 / 回头找你 / 玩家教的规则五类当前值(§2.9.1) |
-| `world.db.key` | Fernet 密钥,**搬迁必须随行**;丢失 = secret 永久读不出(降级 Mock,但会点名) |
-| `world_seed.json` | 种子,字段见下表。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空库一次,静默降级不可挽回 |
+| `world_seed.json` | 种子,字段见下表。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空世界一次,静默降级不可挽回 |
 | `beats.json` | 可选节拍脚本(见 §9) |
+
+密钥也不在世界里:见 §2.11(机器配置,`~/.anima-world/config.json`)。
+
+#### 键清单
+
+本文其余各节沿用"表"这个说法讲这些东西(它们在 1.x 里确实是 SQLite 表),名字没变、
+数据没变,只是住进了 hash / list / zset。**这一张是名字的权威**;要照着写代码就查
+`anima-world contract --json` 的 `storage` 段,别照文档里的散落提法猜。
+
+| 键(`anima:{world_id}:` 之后) | 装什么 |
+|---|---|
+| `clock` / `lock` / `meta` | 世界时钟 / 跨进程世界锁 / 创世出生证明与占用标记 |
+| `agent:{id}` | 一个角色的黑板(位置、当前动作、心情…) |
+| `doing` / `transit` / `plans` / `overrides` | 当前动作 / 在途 / 规划 / persona 覆盖 |
+| `events` | 事件日志(**给了 `mysql=` 就搬去 `{world_id}_events`**) |
+| `memories` / `memories:id` / `reflection` | 记忆与自增 id / 反思水位(同上,搬 MySQL) |
+| `conversations` / `messages` | 转录(同上,搬 MySQL;stance/intent/tool_call 落在 `messages` 行上,跟着一起走) |
+| `edges` | 关系边。**有界**(谓词是闭集,上界 2×N²),所以它不进 MySQL —— §2.9.7 |
+| `cliques` / `stance` / `mutes` / `refused_topics` / `followups` | 小团体 / 关系性意图 / 静音 / 拒谈话题 / 回头找你 |
+| `needs` / `item_defs` / `shop_stock` | 需求 / 物品定义 / 货架 |
+| `locations` / `bt_nodes` / `bt_actions` | 地图 / 行为树节点与动作 |
+| `config` / `prompts` | 作者动过的配置 / 作者改过的提示词模板(见 §2.11) |
+| `stock:{owner}` / `stock_owners` / `stock_places` / `visibility` | 量 / 有量的东西 / 量在哪儿 / 谁感知得到 |
+| `world_rules` / `kinds` / `entities` | 世界的规律 / 种类声明 / 实例(见 §2.9.6) |
 
 **内置种子是橱窗,不是毛坯。** 它替这个世界点亮了 needs / economy / social /
 stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身物品、货架与目标
@@ -1245,6 +1503,12 @@ stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身
 | `rules[]` | **这个世界的规律**(§2.9.3)。坏规律**整体拒绝**,不逐条丢弃 |
 | `stock_visibility[]` | 哪些量角色感知得到:`{"kind","key","visible"}`(§2.9.4)。**没声明 = 感知不到** |
 | `stock_places[]` | 东西在哪:`{"owner","location","label"}` —— `here` 档靠它成立 |
+| `kinds[]` | **种类声明**(§2.9.6):`id` / `gloss` / `quantities` / `affordances` / `prompt.budget`。坏声明**整体拒绝**,一次报全部错 |
+| `entities[]` | 实例:`{"id": "tree:x", "name", "gloss", "location"}`。`id` 的前缀必须是声明过的种类;`location` 同时替它落 `stock_places`,量按 `quantities` 的默认值落 `stocks` |
+
+声明了 `kinds` 的世界,`stocks` / `stock_visibility` / `stock_places` 三段大多可以不写 ——
+量的默认值、可见档、位置都从种类和实例声明里推出来。⚠️ 两边都写时以显式的那份为准,
+而**显式的那份仍要过种类的闸**:给 `tree:x` 写一个 `tree` 没声明过的量会被拒。
 
 #### `config`:种子替它的世界做的开关决定
 
@@ -1294,17 +1558,21 @@ stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身
 **`.cyberworld` 包** = 受严格约束的 ZIP:
 
 ```
-manifest.json      # 格式版本、world_id、revision_id、mode、引擎兼容区间、名称/简介/题材、文件清单
+manifest.json      # 格式版本(**2**)、world_id、revision_id、mode、引擎兼容区间、名称/简介/题材、文件清单
 checksums.json     # sha256 逐文件校验(algorithm 必须 sha256,清单必须与归档一致)
 world_seed.json    # 必有
-world.db           # 仅 snapshot 模式;导出时经 sqlite3.backup 一致性快照并剥除全部 secret 行
+world_state.json   # Redis 键的**类型化 dump**(+ 可选的 MySQL 段);secret 行在 dump 时剥除
 beats.json         # 可选
 assets/…           # 可选,扩展名白名单
 ```
 
+v1 的 `world.db` 成员在 v2 换成了 `world_state.json` —— 它按键记类型(string / hash /
+list / zset),因为一份不带类型的 dump 还原不回 Redis,而**还原错了不会报错**。
+`lock` 键与占用标记(`owner_pid` / `owner_host`)不进包:它们是那台机器上的运行时状态。
+
 安全约束:压缩后 ≤256MB、解压 ≤512MB、≤128 个文件、拒绝 zip 炸弹/符号链接/路径穿越/
 加密成员/重复名。导出是**确定性 ZIP**(固定时间戳/权限/排序,同输入同字节),先自检再
-原子落地;导入解到暂存、校验通过后原子替换,并写 `instance.json`(instance_id 等)。
+原子落地;导入先校验、再往一个**空的** world_id 上写那些键。
 
 ## 9. 节拍脚本格式
 
@@ -1350,7 +1618,7 @@ assets/…           # 可选,扩展名白名单
 后两条是**物质层**:op 曾经只能改"她怎么想",改不了"她有什么"。作者写不出"父亲的
 怀表在这一幕里丢了",只能写一条"她觉得很难过"的记忆去暗示。它们展开成账本已有的
 事件类型(`payment` / `item_transfer`),余额与库存本来就是那两者的投影 —— 不新增
-schema,不改 db 格式。
+schema,不改存储形状。
 
 **谓词清单**(`trigger.when`,全部 AND;必填字段列同样是机器校验的):
 

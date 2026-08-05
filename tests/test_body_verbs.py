@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world import tools as tools_mod
@@ -25,7 +27,7 @@ from anima_world.api import World
 
 @pytest.fixture()
 def world(tmp_path):
-    w = World.open(str(tmp_path / "world.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "world.db"), force_mock_llm=True)
     w.tick(50)
     yield w
     w.close()
@@ -102,7 +104,8 @@ def test_body_verbs_stay_off_the_chat_and_autonomy_menus(world):
     autonomy = {v["id"] for v in world.verbs(agent, "autonomy")}
     body = {v["id"] for v in world.verbs(agent, "body")}
 
-    assert body == {"walk", "work", "eat", "sleep", "talk_to", "wander", "seek_company"}
+    assert body == {"walk", "work", "eat", "sleep", "talk_to", "wander", "seek_company",
+                    "interact"}
     assert not (body & chat), f"日常动词漏进了聊天菜单:{body & chat}"
     assert not (body & autonomy), f"日常动词漏进了自主菜单:{body & autonomy}"
     # 而它们确实在总目录里
@@ -151,3 +154,70 @@ def test_bt_actions_are_bindings_of_these_verbs(world):
         f"行为树能做但动词表里没有:{missing} —— 割裂还在,"
         "同一个人还是两套能力"
     )
+
+
+# ── 对东西做事:本体声明的能力必须在世界的量上兑现 ────────────────────────
+
+
+def _tree_height(world: World) -> float:
+    return float(world.scheduler.stock_store.of("tree:harbor_oak")["树高"])
+
+
+def test_照料真的让树长高(world):
+    """这一条是整个本体层的收口。
+
+    在这之前她的提示词里写着"可以照料",而**没有任何路径让她照料** —— 那正是
+    `tools/base.py` 开头那句"声明了却没人兑现的能力,比没有更坏"。判据只有一个:
+    世界的量变没变。
+    """
+    before = _tree_height(world)
+    result = world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "tend"},
+                       surface="body")
+
+    assert result["ok"] is True, result
+    assert _tree_height(world) > before, "她照料了,树一动没动 —— 这就是说得出做不到"
+    assert result["detail"]["changed"]["树高"] == _tree_height(world)
+
+
+def test_她读到的动词就是她调得动的动词(world):
+    """提示词里是"照料",引擎里是 `tend`。**两边必须对得上** —— 她照着提示词说的话
+    被引擎回一句"不认识这个动词",是这一层最容易埋进去的谎。"""
+    line = world._perceive("夏", "cafe").describe_here("tree:harbor_oak")
+    assert "照料" in line
+    assert "tree:harbor_oak" in line, "没给她 id,她说得出却指不着"
+
+    result = world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "照料"},
+                       surface="body")
+    assert result["ok"] is True, result
+
+
+def test_隔着半个地图照料不到(world):
+    """在场语义由引擎守住,和 `walk` 拒绝编造的地名同一条规矩:世界的量会真的变,
+    而没有一行日志说这不对劲。"""
+    before = _tree_height(world)
+    result = world.act("遥", "interact", {"target": "tree:harbor_oak", "verb": "tend"},
+                       surface="body")
+
+    assert result["ok"] is False
+    assert "不在你这儿" in result["error"]
+    # 两头都要说出来:只说"它在 cafe"会读成一句谎
+    assert "cafe" in result["error"] and "workshop" in result["error"]
+    assert _tree_height(world) == before
+
+
+def test_做不到的事当场拒绝而不是静默成功(world):
+    for params, fragment in (
+        ({"target": "tree:nope", "verb": "tend"}, "这儿没有"),
+        ({"target": "tree:harbor_oak", "verb": "enter"}, "不能被"),
+    ):
+        result = world.act("夏", "interact", params, surface="body")
+        assert result["ok"] is False and fragment in result["error"]
+
+
+def test_交互进世界的历史(world):
+    """她对世界做的事是**世界里发生的事**,所以它是事件 —— 不是一行日志。"""
+    world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "tend"}, surface="body")
+    events = [e for e in world.history(limit=999)["events"] if e["type"] == "entity_interaction"]
+    assert events and events[-1]["who"] == "夏"
+    assert events[-1]["loc"] == "cafe"
+    assert events[-1]["payload"]["target"] == "tree:harbor_oak"

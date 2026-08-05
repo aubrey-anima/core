@@ -321,6 +321,35 @@ class MySQLMemoryStore:
              "event_seq", "created_at", "strength", "last_access", "access_count",
              "source_ids")
 
+    def count(self) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {self._table}")
+            (total,) = cur.fetchone()
+        return int(total)
+
+    def rebuild(self, events, trigger) -> int:
+        """Replay events through `trigger` only if the store is empty (idempotent).
+
+        与 SQLite 时代同一条契约:有行就一动不动 —— 记忆是持久状态,重放一遍
+        等于把她的一生按今天的触发器重新裁一遍。
+        """
+        total = self.count()
+        if total > 0:
+            return total
+        for event in events:
+            descriptor = trigger(event)
+            if descriptor is not None:
+                self.add(
+                    agent_id=descriptor.agent_id,
+                    tick=descriptor.tick,
+                    kind=descriptor.kind,
+                    summary=descriptor.summary,
+                    importance=descriptor.importance,
+                    anchor=descriptor.anchor,
+                    event_seq=descriptor.event_seq,
+                )
+        return self.count()
+
     def add(self, agent_id: str, tick: int, kind: str, summary: str,
             importance: float = 0.5, anchor: bool = False,
             event_seq: int | None = None, created_at: int | None = None,
@@ -395,6 +424,8 @@ class MySQLMemoryStore:
 
         updates = []
         for row in self.query(agent_id=agent_id):
+            if row.get("anchor"):
+                continue   # 锚定的不衰减 —— 和 Redis/SQLite 时代同一条
             last = row.get("last_access")
             last = int(row.get("tick") or 0) if last is None else int(last)
             updates.append((

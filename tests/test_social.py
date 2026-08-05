@@ -1,6 +1,8 @@
 """关系 2.0(原路线图 v5):三轴关系、判官轴裁定、八卦传播、小团体。"""
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -85,7 +87,7 @@ def test_world_integration_gossip_and_cliques(tmp_path, monkeypatch):
     import anima_world.gossip as gossip_mod
 
     monkeypatch.setattr(gossip_mod, "GOSSIP_PROBABILITY", 1.0)
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("social.enabled", "true")
         # 给夏一条高重要度记忆,然后直接触发一次对柔的八卦
         world.scheduler._record_event({
@@ -122,7 +124,7 @@ def test_idle_social_gossips_to_whoever_is_in_the_room(tmp_path, monkeypatch):
     from anima_world.actions import ActionDescriptor
 
     monkeypatch.setattr(gossip_mod, "GOSSIP_PROBABILITY", 1.0)
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("social.enabled", "true")
         sched = world.scheduler
         speaker = sched.agents["夏"].agent

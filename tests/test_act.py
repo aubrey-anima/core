@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import threading
 
 import pytest
@@ -24,7 +26,7 @@ from anima_world.api import World
 
 @pytest.fixture()
 def world(tmp_path):
-    w = World.open(str(tmp_path / "world.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "world.db"), force_mock_llm=True)
     w.config_set("chat.tools.enabled", True)
     yield w
     w.close()

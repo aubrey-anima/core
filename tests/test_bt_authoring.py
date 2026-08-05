@@ -11,6 +11,8 @@ idle_wander 的根选择器)。世界照跑,角色什么也不干,而日志里�
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 import logging
 
@@ -18,26 +20,20 @@ import pytest
 
 from anima_world.api import World
 from anima_world.bt_nodes import Blackboard, NeedAction, Status
-from anima_world.db import BT_NODE_TYPES
+from anima_world.world_store import BT_NODE_TYPES
 from anima_world.needs import RELEASE, URGENT
 
 
 def _insert_node(world, tree, node_id, type_, parent, sort, params):
-    world.scheduler.event_log.conn.execute(
-        "INSERT OR REPLACE INTO bt_nodes (tree, node_id, type, parent, sort, params)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (tree, node_id, type_, parent, sort, json.dumps(params)),
-    )
-    world.scheduler.event_log.conn.commit()
+    # 存储原语不做类型校验(和当年"合法 SQL"同一个位置):坏类型在 build 时才暴露。
+    world.scheduler.bt_store.add_node(tree, node_id, type_, parent, sort, params)
 
 
 def test_every_node_type_the_schema_allows_can_actually_be_built(tmp_path):
     """CHECK 与构造器必须认同一份类型集 —— 差一个,整棵树静默塌掉。"""
-    from anima_world.world_store import BTStore
-
     buildable = set()
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
-        store = BTStore(world.scheduler.event_log.conn)
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        store = world.scheduler.bt_store
         for node_type in BT_NODE_TYPES:
             _insert_node(world, "probe", "root", node_type, None, 0, {
                 "need": "hunger", "threshold": URGENT, "action_id": "eat",
@@ -63,16 +59,14 @@ def test_every_node_type_the_schema_allows_can_actually_be_built(tmp_path):
 
 def test_a_need_action_node_does_not_collapse_the_whole_tree(tmp_path, caplog):
     """一个合法的 need_action 行,不该把作者写的整棵树换成 idle_wander。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
-        from anima_world.world_store import BTStore
-
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         _insert_node(world, "authored", "root", "selector", None, 0, {})
         _insert_node(world, "authored", "hungry", "need_action", "root", 0,
                      {"need": "hunger", "threshold": URGENT,
                       "release": RELEASE["hunger"], "action_id": "eat"})
         _insert_node(world, "authored", "fallback", "action", "root", 1, {})
 
-        store = BTStore(world.scheduler.event_log.conn)
+        store = world.scheduler.bt_store
         with caplog.at_level(logging.WARNING):
             tree = store.build_tree("authored")
 
@@ -87,15 +81,13 @@ def test_a_need_action_node_does_not_collapse_the_whole_tree(tmp_path, caplog):
 
 def test_an_authored_need_action_carries_its_release_line(tmp_path):
     """作者写的收工线要生效,不然迟滞对作者树无效。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
-        from anima_world.world_store import BTStore
-
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         _insert_node(world, "authored", "root", "selector", None, 0, {})
         _insert_node(world, "authored", "hungry", "need_action", "root", 0,
                      {"need": "hunger", "threshold": 0.2, "release": 0.9,
                       "action_id": "eat"})
         leaf = [
-            k for k in BTStore(world.scheduler.event_log.conn).build_tree("authored").children
+            k for k in world.scheduler.bt_store.build_tree("authored").children
             if isinstance(k, NeedAction)
         ][0]
 
@@ -109,13 +101,10 @@ def test_an_authored_need_action_carries_its_release_line(tmp_path):
 
 def test_an_unknown_node_type_names_the_node_it_choked_on(tmp_path, caplog):
     """真遇到不认识的类型时,那行 warning 至少要说是哪个节点。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
-        from anima_world.world_store import BTStore
-
-        world.scheduler.event_log.conn.execute("PRAGMA ignore_check_constraints = ON")
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         _insert_node(world, "weird", "root", "从未听说的类型", None, 0, {})
         with caplog.at_level(logging.WARNING):
-            BTStore(world.scheduler.event_log.conn).build_tree("weird")
+            world.scheduler.bt_store.build_tree("weird")
         messages = " ".join(r.getMessage() for r in caplog.records)
         assert "从未听说的类型" in messages, messages
 
@@ -143,14 +132,12 @@ _SEED = {
 def _seed_world(tmp_path, seed):
     path = tmp_path / "seed.json"
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
-    return World.open(str(tmp_path / "w.db"), seed_path=str(path), force_mock_llm=True)
+    return open_world_at(str(tmp_path / "w.db"), seed_path=str(path), force_mock_llm=True)
 
 
 def test_a_seed_can_author_a_behavior_tree_directly(tmp_path):
     with _seed_world(tmp_path, _SEED) as world:
-        from anima_world.world_store import BTStore
-
-        tree = BTStore(world.scheduler.event_log.conn).build_tree("夏")
+        tree = world.scheduler.bt_store.build_tree("夏")
         assert any(isinstance(k, NeedAction) for k in getattr(tree, "children", [])), (
             f"种子写的 need_action 没进树:{tree!r}"
         )
@@ -163,9 +150,7 @@ def test_a_broken_node_in_an_authored_tree_never_blocks_boot(tmp_path):
         {"node_id": "坏的", "type": "根本不是节点类型", "parent": "root", "sort": 2}
     )
     with _seed_world(tmp_path, seed) as world:
-        from anima_world.world_store import BTStore
-
-        tree = BTStore(world.scheduler.event_log.conn).build_tree("夏")
+        tree = world.scheduler.bt_store.build_tree("夏")
         assert any(isinstance(k, NeedAction) for k in getattr(tree, "children", []))
 
 
@@ -177,7 +162,5 @@ def test_a_seed_without_a_behavior_tree_still_uses_duties(tmp_path):
         {"name": "开店", "start": "08:00", "end": "18:00", "kind": "work"}
     ]
     with _seed_world(tmp_path, seed) as world:
-        rows = world.scheduler.event_log.conn.execute(
-            "SELECT node_id FROM bt_nodes WHERE tree = '夏'"
-        ).fetchall()
-        assert any("开店" in r[0] for r in rows), [r[0] for r in rows]
+        rows = world.scheduler.bt_store._tree_rows("夏")
+        assert any("开店" in r["node_id"] for r in rows), [r["node_id"] for r in rows]

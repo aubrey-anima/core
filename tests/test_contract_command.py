@@ -16,7 +16,6 @@ import pytest
 
 import anima_world
 from anima_world.beats import OP_REQUIRED_FIELDS, VALID_OPS
-from anima_world.db import DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT, SCHEMA_REVISION
 from anima_world.tools import tools_for
 from anima_world.sim_report import REPORT_FORMAT_VERSION
 from anima_world.world_package import PACKAGE_FORMAT_VERSION
@@ -40,12 +39,13 @@ def test_contract_needs_no_world_and_no_database():
 
 def test_contract_reports_every_wire_format_version():
     payload = json.loads(_contract("--json").stdout)
-    assert payload["db"] == {
-        "format_version": DB_FORMAT_VERSION,
-        "min_supported": MIN_SUPPORTED_DB_FORMAT,
-        # 加法修订也要报:一个 1.3 的世界在 1.2 引擎上"照跑"而 stance/静音整套
-        # 缺席,镜像端只有读到这个数才看得出来(1.3.0)。
-        "schema_revision": SCHEMA_REVISION,
+    # world.db 退役(2.0 改造):`db` 段没有了,镜像端读到 `storage` 段才算对齐。
+    assert "db" not in payload
+    assert payload["storage"] == {
+        "backend": "redis",
+        "key_prefix": "anima:{world_id}:",
+        "mysql_tables": ["events", "memories", "conversations", "messages"],
+        "mysql_table_prefix": "{world_id}_",
     }
     assert payload["package"]["format_version"] == PACKAGE_FORMAT_VERSION
     assert payload["report"]["format_version"] == REPORT_FORMAT_VERSION
@@ -83,4 +83,4 @@ def test_contract_is_readable_by_a_human_too():
     result = _contract()
     assert result.returncode == 0, result.stderr
     assert anima_world.__version__ in result.stdout
-    assert "db" in result.stdout.lower()
+    assert "redis" in result.stdout.lower()

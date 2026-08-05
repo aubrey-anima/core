@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -38,7 +40,7 @@ class ScriptedLLM:
 
 
 def _world(tmp_path, *replies: str, loop: bool = True) -> tuple[World, ScriptedLLM]:
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     llm = ScriptedLLM(*replies)
     world.chat_service._llm = llm
     world.config_set("chat.loop.enabled", loop)
@@ -301,7 +303,7 @@ def test_the_first_step_is_never_swallowed_even_if_it_repeats(tmp_path):
 def test_the_default_no_key_world_does_not_repeat_itself_three_times(tmp_path):
     """没有 key 是**默认状态**,而 Mock 就是模板回声 —— 同一句话刷三遍正是新用户
     看到的第一屏。句子级查重会漏掉它(回声太短),所以整段一字不差也得算。"""
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     with world:
         world.config_set("chat.loop.enabled", True)
         world.player_move("p1", "cafe")

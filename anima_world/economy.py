@@ -8,11 +8,15 @@
 夹在 [base×0.25, base×4] 之间 —— 你把咖啡买断,明天真的更贵。
 
 默认关闭(config `economy.enabled`)。
+
+这个模块是**纯数据与算法**(默认物品、价格漂移曲线、创世常量)。存取在
+`anima_world.redis_state.RedisEconomyStore`;SQLite 版存取函数已随 world.db 层
+退役,只有 `take_stock` 还留着一个吃连接的签名(api.py 的玩家购物路径仍在用,
+它只要求 `execute`/`commit` 两个方法,鸭子类型)。
 """
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 TOWN = "__town__"  # 小镇金库:工资的来源、消费的去向,允许负债
@@ -40,113 +44,3 @@ def drift_price(
     pressure = (sold - restocked) / max(sold + restocked, 1)
     target = price * (1 + k * pressure)
     return max(base * floor, min(base * cap, 0.7 * price + 0.3 * target))
-
-
-def seed_defaults(conn: sqlite3.Connection) -> None:
-    """空表才种(populated 表是作者/运行数据,绝不覆盖)。"""
-    import json
-
-    (items,) = conn.execute("SELECT COUNT(*) FROM item_defs").fetchone()
-    if items == 0:
-        for item_id, name, kind, base_price, restores in DEFAULT_ITEMS:
-            conn.execute(
-                "INSERT INTO item_defs (id, name, kind, base_price, restores) VALUES (?, ?, ?, ?, ?)",
-                (item_id, name, kind, base_price, json.dumps(restores, ensure_ascii=False)),
-            )
-    (stock,) = conn.execute("SELECT COUNT(*) FROM shop_stock").fetchone()
-    if stock == 0:
-        for location_id, item_id, quantity in DEFAULT_STOCK:
-            row = conn.execute(
-                "SELECT base_price FROM item_defs WHERE id = ?", (item_id,)
-            ).fetchone()
-            if row is None:
-                continue
-            conn.execute(
-                "INSERT INTO shop_stock (location_id, item_id, quantity, price) VALUES (?, ?, ?, ?)",
-                (location_id, item_id, quantity, float(row[0])),
-            )
-    conn.commit()
-
-
-def seed_authored(
-    conn: sqlite3.Connection,
-    items: list[tuple[str, str, str, float, dict[str, Any]]],
-    stock: list[tuple[str, str, int, float | None]],
-) -> None:
-    """种子里写下的物品定义与店铺货架,种进空表(#12)。
-
-    与 `seed_defaults` 同一条规矩:**空表才种**。作者数据先落地,内置演示物品
-    随后看到非空表就整体让位 —— 一个自带怀表和过冬煤的世界,不该再被塞进三份
-    演示咖啡。反过来说也成立:**种子一碰物质层,演示物质层就整体不出现**,
-    半真半假的货架比空货架更难查。
-
-    调用方保证条目已校验(kind 合法、qty/price 可转数)。`price` 为 None 时
-    取该物品的 base_price。
-    """
-    import json
-
-    (defined,) = conn.execute("SELECT COUNT(*) FROM item_defs").fetchone()
-    if defined == 0:
-        for item_id, name, kind, base_price, restores in items:
-            conn.execute(
-                "INSERT OR IGNORE INTO item_defs (id, name, kind, base_price, restores)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (item_id, name, kind, base_price, json.dumps(restores, ensure_ascii=False)),
-            )
-    (shelved,) = conn.execute("SELECT COUNT(*) FROM shop_stock").fetchone()
-    if shelved == 0:
-        for location_id, item_id, quantity, price in stock:
-            row = conn.execute(
-                "SELECT base_price FROM item_defs WHERE id = ?", (item_id,)
-            ).fetchone()
-            if row is None:
-                continue
-            conn.execute(
-                "INSERT OR IGNORE INTO shop_stock (location_id, item_id, quantity, price)"
-                " VALUES (?, ?, ?, ?)",
-                (location_id, item_id, quantity, float(row[0]) if price is None else price),
-            )
-    conn.commit()
-
-
-def cheapest_meal(conn: sqlite3.Connection, location_id: str) -> dict[str, Any] | None:
-    """某地货架上最便宜的、还有货的吃食。没有就 None(照样能吃,只是不花钱)。"""
-    row = conn.execute(
-        "SELECT s.item_id, s.price, s.quantity, d.name FROM shop_stock s"
-        " JOIN item_defs d ON d.id = s.item_id"
-        " WHERE s.location_id = ? AND s.quantity > 0 AND d.kind = 'consumable'"
-        " ORDER BY s.price ASC LIMIT 1",
-        (location_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return {"item_id": row[0], "price": float(row[1]), "quantity": int(row[2]), "name": row[3]}
-
-
-def take_stock(conn: sqlite3.Connection, location_id: str, item_id: str, qty: int = 1) -> bool:
-    cur = conn.execute(
-        "UPDATE shop_stock SET quantity = quantity - ? WHERE location_id = ? AND item_id = ?"
-        " AND quantity >= ?",
-        (qty, location_id, item_id, qty),
-    )
-    conn.commit()
-    return cur.rowcount > 0
-
-
-def daily_price_pass(conn: sqlite3.Connection, sales: dict[tuple[str, str], int]) -> None:
-    """日切:补货 + 按当日销量漂移价格。纯 SQL/算术,tick 帧内零 LLM。"""
-    rows = conn.execute(
-        "SELECT s.location_id, s.item_id, s.quantity, s.price, d.base_price"
-        " FROM shop_stock s JOIN item_defs d ON d.id = s.item_id"
-    ).fetchall()
-    for location_id, item_id, quantity, price, base_price in rows:
-        sold = sales.get((location_id, item_id), 0)
-        conn.execute(
-            "UPDATE shop_stock SET quantity = ?, price = ? WHERE location_id = ? AND item_id = ?",
-            (
-                min(MAX_STOCK, int(quantity) + RESTOCK_PER_DAY),
-                round(drift_price(float(base_price), float(price), sold, RESTOCK_PER_DAY), 2),
-                location_id, item_id,
-            ),
-        )
-    conn.commit()

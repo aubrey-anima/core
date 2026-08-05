@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -78,7 +80,7 @@ def test_a_live_world_fills_the_block_in(tmp_path, bare_seed):
     """
     from anima_world.__main__ import _planner_situation
 
-    with World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
         world.config_set("needs.enabled", "true")
         world.tick(200)
         ctx = _planner_situation(world.scheduler, "夏")
@@ -92,7 +94,7 @@ def test_a_live_world_fills_the_block_in(tmp_path, bare_seed):
 def test_money_shows_up_only_when_the_economy_is_on(tmp_path):
     from anima_world.__main__ import _planner_situation
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("economy.enabled", "true")
         world.tick(5)
         assert "money" in _planner_situation(world.scheduler, "夏")

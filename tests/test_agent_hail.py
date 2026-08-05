@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -40,7 +42,7 @@ def _where_is(world, agent_id: str) -> str:
 
 
 def test_a_character_comes_looking_for_a_player_who_is_actually_there(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         world.player_move("p1", _where_is(world, "柔"))
 
@@ -53,15 +55,14 @@ def test_a_character_comes_looking_for_a_player_who_is_actually_there(tmp_path):
 
 def test_knocking_is_not_a_conversation(tmp_path):
     """敲门不产生记忆、不动关系、不开会话 —— 玩家还没回话。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         world.player_move("p1", _where_is(world, "柔"))
         assert _hail_until(world, "p1"), "前提:得先真的被搭话"
 
-        conn = world.scheduler.event_log.conn
-        conversations = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE type = 'conversation'"
-        ).fetchone()[0]
+        conversations = sum(
+            1 for e in world.scheduler.event_log.replay() if e.type == "conversation"
+        )
         assert conversations == 0, "敲门不该写出一场没有人在的对话"
 
         relations = {
@@ -70,15 +71,17 @@ def test_knocking_is_not_a_conversation(tmp_path):
         }
         assert not relations, f"敲门不该动关系:{relations}"
 
-        memories = conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE summary LIKE '%p1%'"
-        ).fetchone()[0]
+        memories = sum(
+            1 for aid in world.scheduler.agents
+            for m in world.scheduler.memory_store.query(aid)
+            if "p1" in str(m.get("summary") or "")
+        )
         assert memories == 0, "敲门不该在角色心里留下一条记忆"
 
 
 def test_nobody_knocks_on_a_player_who_left(tmp_path):
     """离场之后不该再被搭话 —— 否则就是给不在的人写事件。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         world.player_move("p1", _where_is(world, "柔"))
         world.player_leave("p1")
@@ -89,7 +92,7 @@ def test_nobody_knocks_on_a_player_who_left(tmp_path):
 
 def test_nobody_knocks_on_a_player_who_went_quiet(tmp_path):
     """TTL 过期等同于离场 —— 幽灵访客不该收到敲门。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         world.player_move("p1", _where_is(world, "柔"))
         world.players["p1"]["last_seen"] -= world.player_ttl_seconds + 1
@@ -100,7 +103,7 @@ def test_nobody_knocks_on_a_player_who_went_quiet(tmp_path):
 
 def test_a_player_somewhere_else_is_not_hailed(tmp_path):
     """搭话要同地 —— 不然就成了隔空喊话。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         elsewhere = next(
             loc for loc in ("home", "cafe", "workshop")
@@ -114,7 +117,7 @@ def test_a_player_somewhere_else_is_not_hailed(tmp_path):
 
 
 def test_the_inbox_supports_incremental_reads(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         world.player_move("p1", _where_is(world, "柔"))
         first = _hail_until(world, "p1")

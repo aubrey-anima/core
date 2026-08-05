@@ -32,8 +32,6 @@ import asyncio
 import contextlib
 import logging
 import queue
-import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -108,11 +106,16 @@ class _WorldView:
             agent = brain.agent
             recovered = self.projection.agents.get(aid)
             if recovered is not None:
+                # **投影只填缺,不覆盖。** 投影是从事件重折出来的过去,黑板上可能
+                # 已经躺着别的进程写下的现在(她真的走到了新地方,只是那一步不发
+                # 事件)。拿过去盖掉现在,就是"第二个 World.open 把她挪回 cafe"。
                 if recovered.location:
                     agent.location = recovered.location
-                    agent.blackboard.write("loc", recovered.location)
+                    if agent.blackboard.read("loc") is None:
+                        agent.blackboard.write("loc", recovered.location)
                 for key, value in recovered.state.items():
-                    agent.blackboard.write(f"state.{key}", value)
+                    if agent.blackboard.read(f"state.{key}") is None:
+                        agent.blackboard.write(f"state.{key}", value)
                 continue
             self.projection.agents[aid] = AgentState(
                 spec={"name": agent.name},
@@ -317,14 +320,14 @@ class _WorldView:
     def _runtime_status(self, recent_events: list[dict[str, Any]]) -> dict[str, Any]:
         log = self.scheduler.event_log
         if log is not None:
-            db_status = {"enabled": True, "path": self.scheduler.db_path}
+            db_status = {"enabled": True, "world_id": self.scheduler.world_id}
             events_status = {
                 "count": log.count(),
                 "latest_seq": log.max_seq(),
                 "buffered_count": len(recent_events),
             }
         else:
-            db_status = {"enabled": False, "path": None}
+            db_status = {"enabled": False, "world_id": None}
             events_status = {
                 "count": len(recent_events),
                 "latest_seq": max((int(ev.get("seq", 0) or 0) for ev in recent_events), default=0),
@@ -577,6 +580,32 @@ class _ToolRuntime:
             return {"in_transit": True, "arrive_at": int(trip.get("arrive_at", 0))}
         return {"in_transit": False, "location": self.agent_location(agent_id)}
 
+    def interact_with(self, agent_id: str, target: str, verb: str) -> dict[str, Any]:
+        """对一样东西做一件事 —— 把本体声明的能力真的兑现在世界的量上。
+
+        这一条补的是本体层最后那半步:她的提示词里写着"可以照料",而在这之前
+        **没有任何路径让她照料**。`tools/base.py` 开头那句"声明了却没人兑现的能力,
+        比没有更坏"说的就是它。
+
+        四道闸,每道都对着一种"能跑但给错东西":没有本体的世界(这一层本就没开)、
+        不认识的东西、不认识的动词、以及**东西不在她这儿** —— 最后一条是在场语义,
+        和 `walk` 拒绝不存在的地名同一条规矩:隔着半个地图照料一棵树,世界的量会
+        真的变,而没有一行日志说这不对劲。
+
+        **实现委托 `Scheduler.perform_affordance`**,和排班里那个 `interact` 动作
+        走同一条(理由见 `do_action`:另写一份迟早分叉)。这一层只做一件事 ——
+        把"讲不通的调用"翻成 `ToolCallError`,把"世界说这会儿不行"原样交出去。
+        """
+        scheduler = self._world.scheduler
+        with scheduler._lock:
+            outcome = scheduler.perform_affordance(agent_id, target, verb)
+            if outcome.get("ok"):
+                self._world._view._fan_out()
+                scheduler.checkpoint()  # 交互即检查点(RLock,可重入)
+        if not outcome.get("ok") and outcome.get("reason") != "conditions":
+            raise tools_mod.ToolCallError(str(outcome.get("refusal")))
+        return outcome
+
     def do_action(self, agent_id: str, kind: str, params: dict[str, Any]) -> bool:
         """过日子的动作 —— **委托行为树走的那条路**(`Scheduler.emit_action`)。
 
@@ -602,93 +631,10 @@ class _ToolRuntime:
         return self._world.close_conversation(int(active["id"]))
 
 
-# 搬完之后要清掉的表。**搬家一直是复制,不是移动** —— 不清的话那个 .db 既不是完整
-# 的世界,也不是干净的空壳,而是**一份过时的副本**,而我们刚在它上面盖了"这里没数据"
-# 的戳。那个组合最危险:戳没撒谎(数据确实以 Redis 为准),但文件里躺着一份看起来
-# 很像真世界的旧数据,谁手滑读一下都会读出一个几小时前的世界。
-#
-# 不清的两张:`config`(还没搬,而且按 DB-SPLIT.md 它该搬**出**世界)与
-# `conversations` / `messages`(转录,同理)。`db_meta` 当然留 —— 戳就在那儿。
-_MIGRATED_TABLES = (
-    "events", "memories", "reflection_state", "edges", "stocks", "world_rules",
-    "stock_visibility", "stock_places", "agent_needs", "cliques",
-    "item_defs", "shop_stock", "locations", "bt_nodes", "bt_actions",
-    "prompt_templates", "agent_stance", "agent_mutes", "agent_refused_topics",
-    "agent_followups", "persona_overrides",
-)
-
-
-def _goes_to_mysql(table: str, mysql: Any) -> bool:
-    """这张表会不会被 MySQL 接手 —— **接手的话就别往 Redis 搬。**
-
-    搬进去再被换掉,留下的是一份**冻在创世的旧拷贝**:引擎自己不读它(store 已经
-    换成 MySQL 版),但 Redis 的全部意义是"另一个只有 Redis 连接的进程读得到这个
-    世界" —— 那个进程读到的会是一个从创世起什么都没发生过的世界。实测:MySQL 289
-    条事件,Redis 那份停在 50 条,而且永远不再长。
-
-    两份真相里有一份不会更新,是这个仓库最怕的坏法:两边都读得出来,只是一边是错的。
-    """
-    from anima_world.mysql_state import GROWS_FOREVER
-
-    return mysql is not None and table in GROWS_FOREVER
-
-
-def _drop_stale_redis_copies(redis: Any, world_id: str) -> list[str]:
-    """删掉上一次"只有 Redis"时留下的那份拷贝。
-
-    一个世界可能先只用 Redis 跑过,后来才接上 MySQL —— 那时 Redis 里已经有
-    events / memories 了。不删的话它会一直躺在那儿冒充这个世界的历史。
-    删之前 MySQL 那边已经从 SQLite 补齐了全量,所以这不是丢数据。
-    """
-    from anima_world.redis_state import KEY_PREFIX, events_key
-
-    doomed = [
-        events_key(world_id),
-        f"{KEY_PREFIX}:{world_id}:memories",
-        f"{KEY_PREFIX}:{world_id}:memories:id",
-    ]
-    dropped = [key for key in doomed if redis.delete(key)]
-    if dropped:
-        logger.info("删掉 Redis 里冻住的旧拷贝(这些表归 MySQL 了):%s", dropped)
-    return dropped
-
-
-def _rebind_chat_store(world: Any, store: Any) -> None:
-    """把转录存储换掉,**并且换掉每一个攥着旧引用的人**。
-
-    这是踩出来的:换后端时只改 `world.chat_state` 那一个字段,而 `ChatService`
-    在构造时把它存进了自己的 `_state`,于是聊天照跑、照写 —— 写进了旧后端。
-    **测试全绿,因为每个组件单看都对。** 转录这边攥着旧引用的有四处,少改一处
-    就是一半的聊天记录落在 SQLite、一半落在 MySQL。
-
-    `tests/test_mysql_state.py::test_swapping_the_transcript_rebinds_every_holder`
-    是这条的闸:它枚举持有者,漏一个就红。
-    """
-    world.chat_store = store
-    world.chat_service._store = store
-    world.session_manager._store = store
-    # chat_state 的 `annotate_message` 经 transcript 转发到 `messages` 表。
-    world.chat_state._transcript = store
-    # 会话关闭事件带的那份 meta 也是从转录里算的。
-    world.session_manager._meta_provider = world.chat_state.conversation_meta
-
-
-def _shed_migrated_rows(conn: Any) -> None:
-    """把已经搬进 Redis 的表清空,让这个文件成为一个**诚实的空壳**(schema + 戳)。"""
-    import sqlite3
-
-    for table in _MIGRATED_TABLES:
-        try:
-            conn.execute(f"DELETE FROM {table}")
-        except sqlite3.Error:  # noqa: PERF203 - 少一张表不该让开机失败
-            logger.debug("清空 %s 时跳过(这个世界没有这张表)", table)
-    conn.commit()
-
-
 class World:
     """一个打开的世界:时钟、状态、聊天、玩家、配置,全部函数化。
 
-    用 `World.open(db_path)` 打开,用完 `close()`(或 with 语句)。
+    用 `World.open(world_id, redis=…)` 打开,用完 `close()`(或 with 语句)。
     所有方法线程安全 —— 内部沿用调度器的单锁纪律。
     """
 
@@ -703,17 +649,37 @@ class World:
         self._tick_lock = threading.Lock()
         self._closed = False
 
-        # 聊天子系统:共享世界的 SQLite 连接与唯一锁。
+        # 聊天子系统:转录跟着"无限增长归 MySQL"走,没给 MySQL 就住 Redis。
         if scheduler.event_log is None:
             raise ValueError("World requires a persistent scheduler (event_log wired)")
-        conn = scheduler.conn
+        redis_client = getattr(scheduler, "redis", None)
+        if redis_client is None:
+            raise ValueError(
+                "World requires a Redis-backed scheduler (build_serve_scheduler)"
+            )
         # 同步门面的异步工作全跑在这一条循环上(见 `_BridgeLoop`:一个跨循环复用的
         # HTTP 连接池是"每轮泄一条连接,某天忽然全炸"那种坏)。
         self._bridge = _BridgeLoop()
-        self.chat_store = ChatStore(conn, lock=scheduler._lock)
+        mysql_conn = getattr(scheduler, "mysql_conn", None)
+        if mysql_conn is not None:
+            from anima_world.mysql_state import MySQLChatStore
+
+            self.chat_store = MySQLChatStore(
+                mysql_conn, getattr(scheduler, "mysql_prefix", ""), lock=scheduler._lock
+            )
+        else:
+            from anima_world.redis_state import RedisChatStore
+
+            self.chat_store = RedisChatStore(
+                redis_client, scheduler.world_id, lock=scheduler._lock
+            )
         # chat-agent(1.3.0):一轮聊天要读写的当前值(stance / 静音 / 拒谈话题 /
-        # 玩家教的规则)。和 ChatStore 共用同一个连接与同一把锁。
-        self.chat_state = ChatStateStore(conn, lock=scheduler._lock)
+        # 玩家教的规则)。转录不归它,只经 transcript 转发逐轮观测量。
+        from anima_world.redis_state import RedisChatStateStore
+
+        self.chat_state = RedisChatStateStore(
+            redis_client, scheduler.world_id, transcript=self.chat_store
+        )
         self._tool_runtime = _ToolRuntime(self)
         self._director = Director(self._tool_runtime)
         scheduler.chat_state = self.chat_state
@@ -786,356 +752,53 @@ class World:
     @classmethod
     def open(
         cls,
-        db_path: str,
+        world_id: str,
         *,
+        redis: Any,
+        mysql: Any = None,
         seed_path: str | None = None,
         beats_path: str | None = None,
         agents: int | None = None,
         force_mock_llm: bool = False,
-        redis: Any = None,
-        mysql: Any = None,
-        world_id: str = "world",
     ) -> "World":
-        """打开(或创建)一个世界。
+        """打开(或创建)一个世界。**世界住在 Redis 里,`world_id` 是它的名字。**
 
-        空库首启时从 seed 播种(缺省用内置种子);已有库的 seed 会被忽略并
+        空世界首启时从 seed 播种(缺省用内置种子);已有世界的 seed 会被忽略并
         警告。坏 beats 脚本在这里当场抛 BeatScriptError,不流到运行期。
 
-        `redis` 给了的话,**每个角色的黑板搬进 Redis**,这个进程不再持有它们
-        (`anima_world.redis_state`)。那 20 个键 —— 她在哪、在干嘛、饿不饿、打算做
-        什么 —— 此前是纯内存,于是两个进程各开同一个世界文件会读到同一份历史、
-        然后在各自内存里跑出**两个不同的世界**。搬走之后那一半不再是进程私有的。
+        创世与重连共用一条纪律:**只填缺,不覆盖**(黑板 seed_missing、时钟
+        setnx、每个 seed 函数空 store 才播)—— 接一个已经在跑的世界不许把她
+        按回原点。`world_id` 进 Redis 键名:一个 Redis 实例上跑十个世界是常态,
+        键撞车的后果是两个世界的角色共用一个脑子。
 
-        `world_id` 进 Redis 键名:一个 Redis 实例上跑十个世界是常态,键撞车的后果是
-        两个世界的角色共用一个脑子。
-
-        ⚠️ 这是"全部状态进 Redis"的**第一步,不是全部**。时钟、在途集合、当前动作、
-        规划、记忆投影仍在进程里 —— 见 `docs/AGENT-RUNTIME.md`。
+        `mysql` 给了的话,随时间无限增长的四样(events / memories /
+        conversations / messages)归 MySQL —— 判据是"她带不带得进上下文"。
+        **传工厂,别传裸连接**(`mysql=lambda: pymysql.connect(...)`)。
         """
         from anima_world.__main__ import build_serve_scheduler  # 延迟导入避免环
+        from anima_world.redis_state import RedisLock, durability_warning, lock_key
 
         scheduler = build_serve_scheduler(
-            agents,
-            db_path=db_path,
+            world_id,
+            redis,
+            mysql=mysql,
+            n_agents=agents,
             seed_path=seed_path,
             beats_path=beats_path,
             force_mock_llm=force_mock_llm,
         )
         world = cls(scheduler)
-        if redis is not None:
-            from anima_world.redis_state import (
-                RedisBlackboard, RedisClock, RedisDict, RedisLock,
-                agent_key, clock_key, current_action_key, decode_action,
-                encode_action, lock_key, plans_key, transit_key, RedisStockStore,
-                RedisMemoryStore, RedisPromptStore, RedisVisibilityStore,
-                RedisBTStore, RedisLocationStore, RedisChatStateStore,
-                RedisEventLog, events_key, RedisKnowledgeGraph, RedisNeedsStore,
-                RedisCliqueStore, RedisReflectionStore, RedisEconomyStore,
-            )
+        # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
+        # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
+        world._world_lock = RedisLock(redis, lock_key(world_id))
 
-            # 搬家而不是清空:黑板上此刻的内容(创世写进去的性格、目标、位置)必须
-            # 跟过去,否则第一个 tick 她会以为自己没有性格。
-            for aid, brain in scheduler.agents.items():
-                board = RedisBlackboard(redis, agent_key(world_id, aid))
-                # **只填缺的,不覆盖。** 手里这份是从 SQLite 读出来的创世快照;
-                # 接上一个已经在跑的世界时写回去,等于把她按回原点。
-                board.seed_missing(brain.agent.blackboard.snapshot())
-                brain.agent.blackboard = board
-            # 时钟同理:先把 db 里恢复出来的那个值带过去,再交给 Redis 管。
-            scheduler._clock_store = RedisClock(
-                redis, clock_key(world_id), initial=scheduler.clock
-            )
-            # 谁在路上、谁在干嘛。此前是纯内存的 dict,后果很具体:另一个进程不知道
-            # 她**正在赶路**,于是会让她"走开"、让她跟一个还没走到的人搭话 —— 而这些
-            # 判断恰恰是引擎用来把约束变成等待、把等待变成相遇的。
-            transit = RedisDict(redis, transit_key(world_id))
-            for agent_id, trip in list(scheduler._transit.items()):
-                transit[agent_id] = trip
-            scheduler._transit = transit
-
-            doing = RedisDict(
-                redis, current_action_key(world_id),
-                encode=encode_action, decode=decode_action,
-            )
-            for agent_id, action in list(scheduler._current_action.items()):
-                doing[agent_id] = action
-            scheduler._current_action = doing
-
-            # 规划:同样是真状态,同样搬走。它的值是 JSON 原生的(计划步骤列表),
-            # 不需要编解码。
-            plans = RedisDict(redis, plans_key(world_id))
-            for agent_id, plan in list(scheduler._plans.items()):
-                plans[agent_id] = plan
-            scheduler._plans = plans
-
-            # 世界的量。**搬家要把已有的量带过去** —— 创世播下的树高、季节、
-            # 钱都在 SQLite 里,不带过去世界会从一张白纸重新开始。
-            if scheduler.stock_store is not None:
-                shelf = RedisStockStore(redis, world_id)
-                for owner in scheduler.stock_store.owners():
-                    snap = scheduler.stock_store.snapshot(owner)
-                    for key, (value, tick) in snap.items():
-                        shelf.set(owner, key, value, tick)
-                scheduler.stock_store = shelf
-
-            # 记忆 / 提示词模板 / 可见性声明。三样都**先把已有内容搬过去** ——
-            # 创世播下的记忆、内置的十几个模板、种子里的可见性声明,不带过去
-            # 世界会从一张白纸重开。
-            if scheduler.memory_store is not None and not _goes_to_mysql("memories", mysql):
-                fresh_mem = RedisMemoryStore(redis, world_id, scheduler.config_store)
-                for aid in scheduler.agents:
-                    for row in scheduler.memory_store.query(aid):
-                        fresh_mem.add(
-                            aid, tick=int(row.get("tick") or 0), kind=str(row.get("kind") or ""),
-                            summary=str(row.get("summary") or ""),
-                            importance=float(row.get("importance") or 0.5),
-                            anchor=bool(row.get("anchor")),
-                            event_seq=row.get("event_seq"),
-                            created_at=row.get("created_at"),
-                        )
-                scheduler.memory_store = fresh_mem
-
-            if scheduler.prompt_store is not None:
-                fresh_prompts = RedisPromptStore(redis, world_id)
-                # **只搬作者动过的。** `list()` 返回的是合并视图(引擎声明的 31 条
-                # 加上世界里多出来的),整份搬过去等于把刚从 SQLite 拆掉的默认值
-                # 快照在 Redis 里原样重建 —— 改进过的模板从此又到不了这个世界,
-                # 而且照样无声(DB-SPLIT.md 移动 1 要拆的正是这个)。
-                for row in scheduler.prompt_store.list():
-                    if row.get("source") != "世界文件":
-                        continue
-                    fresh_prompts.set(
-                        str(row["name"]), str(row.get("template") or ""),
-                        row.get("description"),
-                    )
-                scheduler.prompt_store = fresh_prompts
-
-            if scheduler.visibility_store is not None:
-                fresh_vis = RedisVisibilityStore(redis, world_id)
-                for row in scheduler.visibility_store.declarations():
-                    fresh_vis.declare(
-                        str(row["kind"]), str(row["key"]), str(row["visibility"]),
-                        row.get("label"),
-                    )
-                for owner, label in scheduler.visibility_store.labels().items():
-                    where = scheduler.visibility_store.place_of(owner)
-                    if where:
-                        fresh_vis.place(owner, where, label)
-                scheduler.visibility_store = fresh_vis
-
-            # 地图与行为树。两样都是创世时写好、之后基本不动的配置,但**只要还有
-            # 一张表留在 SQLite,你就仍然需要那个文件** —— 而这一整件事的目的正是让
-            # 世界不再是一个文件。完整性比冷热重要。
-            if scheduler.location_store is not None:
-                fresh_loc = RedisLocationStore(redis, world_id)
-                for row in scheduler.location_store.all():
-                    fresh_loc.upsert(str(row["id"]), **{
-                        k: v for k, v in row.items() if k != "id"
-                    })
-                scheduler.location_store = fresh_loc
-
-            if scheduler.bt_store is not None:
-                fresh_bt = RedisBTStore(redis, world_id)
-                for row in scheduler.bt_store.actions():
-                    fresh_bt.set_action(
-                        str(row["node_id"]), str(row["kind"]), dict(row.get("params") or {})
-                    )
-                for tree in {"default", *scheduler.agents}:
-                    for node in scheduler.bt_store._tree_rows(tree):
-                        fresh_bt.add_node(
-                            tree, str(node["node_id"]), str(node["type"]),
-                            node.get("parent"), int(node.get("sort") or 0),
-                            dict(node.get("params") or {}),
-                        )
-                scheduler.bt_store = fresh_bt
-
-            # 她和某个人之间的状态:意图 / 静音 / 拒谈 / 回头找你 / 玩家教的规则。
-            # 这五样是**真世界状态**(她真的在不理你、真的拒绝谈那件事),搬。
-            # 转录**不搬进 Redis**(它随时间无限增长,见 mysql_state.py);
-            # 但这一层要拿着它,否则 `annotate_message` 没有落脚的地方。
-            fresh_chat = RedisChatStateStore(redis, world_id, transcript=world.chat_store)
-            old_chat = world.chat_state
-            for agent_id in scheduler.agents:
-                for row in old_chat.stances(agent_id):
-                    fresh_chat.set_stance(
-                        agent_id, str(row["target"]), str(row["stance"]),
-                        declared=bool(row["declared"]), tick=int(row["updated_tick"]),
-                    )
-                for row in old_chat.refused_topics(agent_id):
-                    fresh_chat.refuse_topic(agent_id, str(row["keyword"]))
-            for row in old_chat.mutes():
-                fresh_chat.set_quiet(
-                    str(row["agent_id"]), str(row["player_id"]), kind=str(row["kind"]),
-                    minutes=max(0.0, row["seconds_left"] / 60.0), reason=row.get("reason"),
-                )
-            for row in old_chat.pending_followups():
-                fresh_chat.add_followup(
-                    str(row["agent_id"]), str(row["player_id"]),
-                    due_tick=int(row["due_tick"]), kind=str(row["kind"]),
-                    reason=row.get("reason"),
-                )
-            world.chat_state = fresh_chat
-            scheduler.chat_state = fresh_chat
-            # **聊天服务在构造时就拿走了旧的那个引用**,只换 world/scheduler 上的
-            # 属性它看不见 —— 于是 stance / 静音 / 拒谈会继续写进 SQLite,而这个
-            # 世界的别的东西全在 Redis。一半在这儿一半在那儿,而且不报错。
-            if world.chat_service is not None:
-                world.chat_service._state = fresh_chat
-
-            # 最后六张:关系图 / 身体 / 小团体 / 反思水位 / 物品 / 货架。
-            if scheduler.knowledge_graph is not None:
-                fresh_graph = RedisKnowledgeGraph(redis, world_id)
-                for edge in scheduler.knowledge_graph.query():
-                    fresh_graph.add(
-                        str(edge["subject"]), str(edge["predicate"]), str(edge["object"]),
-                        edge.get("source_event_seq"), int(edge.get("created_at") or 0),
-                    )
-                scheduler.knowledge_graph = fresh_graph
-
-            if scheduler.needs_store is not None:
-                fresh_needs = RedisNeedsStore(redis, world_id)
-                for agent_id in scheduler.agents:
-                    fresh_needs.persist(agent_id, scheduler.needs_store.load(agent_id), 0)
-                scheduler.needs_store = fresh_needs
-
-            if scheduler.clique_store is not None:
-                fresh_cliques = RedisCliqueStore(redis, world_id)
-                rows = scheduler.clique_store.load()
-                if rows:
-                    fresh_cliques.store(
-                        [list(r["member_ids"]) for r in rows],
-                        int(rows[0].get("computed_tick") or 0),
-                    )
-                scheduler.clique_store = fresh_cliques
-
-            if scheduler.reflection_store is not None:
-                fresh_reflect = RedisReflectionStore(redis, world_id)
-                for agent_id in scheduler.agents:
-                    fresh_reflect.set(agent_id, scheduler.reflection_store.get(agent_id))
-                scheduler.reflection_store = fresh_reflect
-
-            if scheduler.economy_store is not None:
-                fresh_econ = RedisEconomyStore(redis, world_id)
-                for item in scheduler.economy_store.items():
-                    fresh_econ.put_item(
-                        str(item["id"]), str(item["name"]), str(item["kind"]),
-                        float(item["base_price"]), item.get("restores"),
-                    )
-                for shelf in scheduler.economy_store.shelves():
-                    fresh_econ.put_shelf(
-                        str(shelf["location_id"]), str(shelf["item_id"]),
-                        int(shelf["quantity"]), float(shelf["price"]),
-                    )
-                scheduler.economy_store = fresh_econ
-
-            # **事件日志 —— 唯一真相那张表。** 放在最后搬:上面那些 store 的搬家
-            # 都不发事件,而一旦换成 Redis 版,之后的每一条都进 Redis。
-            # 已有的历史要带过去,否则重放会重建出一个从头开始的世界。
-            if scheduler.event_log is not None and not _goes_to_mysql("events", mysql):
-                fresh_log = RedisEventLog(redis, events_key(world_id))
-                if not fresh_log.max_seq():
-                    for e in scheduler.event_log.replay():
-                        fresh_log.append({
-                            "ts": e.ts, "type": e.type, "who": e.who,
-                            "loc": e.loc, "payload": e.payload,
-                        })
-                sqlite_log = scheduler.event_log
-                scheduler.event_log = fresh_log
-                world._sqlite_log = sqlite_log   # 盖戳还要用它那条连接
-
-            # **在世界文件上盖个戳**:数据不在这儿了。
-            # 离线命令(doctor / events export / report / 打包)是直接开这个文件的,
-            # 读到的会是一张空表 —— 报"0 条事件",然后一切照跑。盖了戳它们就当场
-            # 停下并说清去哪儿看,而不是给一个错的答案。
-            from anima_world.db import stamp_storage
-
-            if getattr(world, "_sqlite_log", None) is not None:
-                _shed_migrated_rows(world._sqlite_log.conn)
-                stamp_storage(world._sqlite_log.conn, "redis", world_id)
-
-            # ── 随时间无限增长的那几样搬去 MySQL ──────────────────────────
-            #
-            # 实测:一个三人世界跑 20 天,Redis 内存增量的**九成**是 `events` 与
-            # `memories`。一年 4.7 MB/世界,一千个世界跑一年 4.6 GB **常驻**,
-            # 而且永远不回落。别的东西随世界规模有界,不随时间涨。
-            #
-            # **分界线是增长性,不是冷热** —— 内存装得下一个热但有界的东西,
-            # 装不下一个冷但无限的东西。
-            if mysql is not None:
-                from anima_world.mysql_state import (
-                    MySQLChatStore, MySQLEventLog, MySQLMemoryStore, as_connection,
-                    ensure_schema,
-                )
-
-                # 工厂 → 每线程一条;裸连接 → 能用但当场点名(见 `as_connection`)。
-                mysql = as_connection(mysql)
-
-                prefix = f"{world_id}_"
-                ensure_schema(mysql, prefix)
-                if redis is not None:
-                    _drop_stale_redis_copies(redis, world_id)
-
-                fresh_log = MySQLEventLog(mysql, prefix)
-                if not fresh_log.max_seq():
-                    for e in scheduler.event_log.replay():
-                        fresh_log.append({
-                            "ts": e.ts, "type": e.type, "who": e.who,
-                            "loc": e.loc, "payload": e.payload,
-                        })
-                scheduler.event_log = fresh_log
-
-                fresh_mem = MySQLMemoryStore(mysql, prefix, scheduler.config_store)
-                if not any(fresh_mem.query(a) for a in scheduler.agents):
-                    for agent_id in scheduler.agents:
-                        for row in scheduler.memory_store.query(agent_id):
-                            fresh_mem.add(
-                                agent_id, tick=int(row.get("tick") or 0),
-                                kind=str(row.get("kind") or ""),
-                                summary=str(row.get("summary") or ""),
-                                importance=float(row.get("importance") or 0.5),
-                                anchor=bool(row.get("anchor")),
-                                event_seq=row.get("event_seq"),
-                                created_at=row.get("created_at"),
-                            )
-                scheduler.memory_store = fresh_mem
-
-                # 转录 —— **用户点名要在 MySQL 的那一样。**
-                # 它是所有表里最该离开内存的:一条消息几百字,只增不减,而世界
-                # 只在会话关闭时收一个摘要事件。放 Redis 等于用最贵的存储装最冷的数据。
-                fresh_chat_store = MySQLChatStore(mysql, prefix, lock=scheduler._lock)
-                for agent_id in scheduler.agents:
-                    if fresh_chat_store.list_conversations(agent_id):
-                        continue
-                    for row in world.chat_store.list_conversations(agent_id):
-                        new_id = fresh_chat_store.start_conversation(
-                            agent_id, int(row.get("started_at") or 0),
-                            participants=row.get("participants"),
-                            location=row.get("location"),
-                            player_id=row.get("player_id"),
-                        )
-                        for msg in world.chat_store.messages_for(int(row["id"])):
-                            fresh_chat_store.add_message(
-                                new_id, str(msg["role"]), str(msg["content"]),
-                                int(msg.get("created_at") or 0))
-                        if row.get("status") == "closed":
-                            fresh_chat_store.close(
-                                new_id, row.get("summary") or "",
-                                int(row.get("closed_at") or 0))
-                _rebind_chat_store(world, fresh_chat_store)
-
-            # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
-            # 那把还被 threading.Condition 用着(等规划落地),而 Condition 要真线程锁。
-            world._world_lock = RedisLock(redis, lock_key(world_id))
-
-            # **开机点名:这个 Redis 会不会把世界忘掉。**
-            # Redis 主要活在内存里,持久化是配置选项,而默认的 redis.conf 里 AOF
-            # 是关的。忘掉的样子不是报错,是"世界悄悄退回创世那一刻然后接着跑"。
-            from anima_world.redis_state import durability_warning
-
-            warning = durability_warning(redis)
-            if warning:
-                logger.warning("世界跑在 Redis 上,但 %s", warning)
-                world._durability_warning = warning
+        # **开机点名:这个 Redis 会不会把世界忘掉。**
+        # Redis 主要活在内存里,持久化是配置选项,而默认的 redis.conf 里 AOF
+        # 是关的。忘掉的样子不是报错,是"世界悄悄退回创世那一刻然后接着跑"。
+        warning = durability_warning(redis)
+        if warning:
+            logger.warning("世界跑在 Redis 上,但 %s", warning)
+            world._durability_warning = warning
         return world
 
     def close(self, *, wait: bool = True) -> None:
@@ -1169,54 +832,44 @@ class World:
     ) -> WorldPackageManifest:
         """活体导出:世界不停,当场打出一个完整的 snapshot 包。
 
-        先刷检查点(needs/反思水位/时钟),再持世界锁用 SQLite backup API
-        拷一致副本 —— 锁只挡拷贝那一瞬,打包在锁外进行。种子按
-        显式 seed_path → 建库时存进 db_meta 的出生种子 → 内置种子(记警告)
-        解析。分发纪律不变:密文(is_secret=1)在副本落地时即剥除。
+        先刷检查点(needs/反思水位),再持世界锁 dump 一份一致的状态快照 ——
+        锁只挡 dump 那一瞬,打包在锁外进行。种子按显式 seed_path →
+        `:meta` 里的创世出生证明 → 内置种子(记警告)解析(world_package 内部)。
+        分发纪律不变:包里零 secret(config 行里 is_secret 的字段在 dump 时剥除)。
         """
+        from anima_world.world_package import dump_world_state
+
         if self._closed:
             raise RuntimeError("world is closed; use export_world_package offline instead")
         scheduler = self.scheduler
-        with tempfile.TemporaryDirectory(prefix="anima_world-live-export-") as temp_dir:
-            temp_db = Path(temp_dir) / "world.db"
-            scheduler.checkpoint()
+        scheduler.checkpoint()
+        world_lock = getattr(self, "_world_lock", None)
+        mysql_conn = getattr(scheduler, "mysql_conn", None)
+        if world_lock is not None:
+            world_lock.acquire()
+        try:
             with scheduler._lock:
-                target = sqlite3.connect(temp_db)
-                try:
-                    scheduler.conn.backup(target)
-                    target.execute("DELETE FROM config WHERE is_secret=1")
-                    target.commit()
-                finally:
-                    target.close()
-                genesis_row = scheduler.conn.execute(
-                    "SELECT value FROM db_meta WHERE key='world_seed'"
-                ).fetchone()
-            if seed_path is not None:
-                resolved_seed = Path(seed_path)
-            elif genesis_row is not None:
-                resolved_seed = Path(temp_dir) / "world_seed.json"
-                resolved_seed.write_text(genesis_row[0], encoding="utf-8")
-            else:
-                import anima_world
-
-                resolved_seed = Path(anima_world.__file__).parent / "world_seed.json"
-                logger.warning(
-                    "this database predates genesis-seed provenance (1.0.2); the exported "
-                    "package carries the BUNDLED seed — pass seed_path to override"
+                state = dump_world_state(
+                    redis=scheduler.redis, world_id=scheduler.world_id, mysql=mysql_conn,
                 )
-            return export_world_package(
-                seed_path=resolved_seed,
-                output_path=output_path,
-                world_id=world_id,
-                name=name,
-                mode="snapshot",
-                db_path=temp_db,
-                beats_path=beats_path,
-                summary=summary,
-                genre=genre,
-                setting=setting,
-                theme=theme,
-            )
+        finally:
+            if world_lock is not None:
+                world_lock.release()
+        return export_world_package(
+            redis=scheduler.redis,
+            world_id=scheduler.world_id,
+            seed_path=seed_path,
+            beats_path=beats_path,
+            output_path=output_path,
+            package_world_id=world_id,
+            name=name,
+            summary=summary,
+            genre=genre,
+            setting=setting,
+            theme=theme,
+            mysql=mysql_conn,
+            state=state,
+        )
 
     # ── 时钟 ────────────────────────────────────────────────────────────────
 
@@ -1955,6 +1608,93 @@ class World:
         store = self.scheduler.visibility_store
         return [] if store is None else store.declarations()
 
+    # ── 本体:世界里有哪些种类的东西,以及能对它们做什么 ─────────────────────
+
+    def kinds(self) -> list[dict[str, Any]]:
+        """这个世界声明过的种类。**能力表是这里唯一的权威。**
+
+        宿主要画一个"她能对这棵树做什么"的界面,只有这一个地方问得到 ——
+        `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在。
+        猜一份动词表出来是这一层最容易犯的错:猜错了不报错,按钮点下去
+        才发现世界不认。
+
+        每行 `{"id","gloss","builtin","budget","quantities":[{"key","default",
+        "visibility","label","unit"}],"affordances":[{"verb","changes_world",
+        "needs_actor","conditions":[…],"sets":[…],"requires":[…],"costs":[…],
+        "consumes":{item_id: 几个}}]}`。
+        条件与效果给的是**源表达式的字符串**,照着作者写的样子 —— 宿主要显示
+        "照料:树高 < 最大树高 时可用"。
+
+        `requires` / `costs` / `consumes` 是关于**施动者**的那一半(`me_*` 读她身上
+        的量,`have_*` 读她随身带着几个某样东西),和 `conditions` / `sets` 分开列
+        而不是拼在一起:界面上"这棵树还没长好"和"你没力气了 / 你没带剪子"要能显示成
+        两句不同的话,因为她该做的事不一样。
+        她身上有哪些量,看 `id == "agent"` 那一行的 `quantities`。
+        `consumes` 自带一道"你得有"的门,不会另外出现在 `requires` 里。
+        """
+        ontology = self.scheduler.ontology
+        if ontology is None:
+            return []
+        return [
+            {
+                "id": kind.id,
+                "gloss": kind.gloss,
+                "builtin": kind.builtin,
+                "budget": ontology.budget_of(kind.id),
+                "quantities": [
+                    {
+                        "key": q.key, "default": q.default, "visibility": q.visibility,
+                        "label": q.render_label(), "unit": q.unit,
+                    }
+                    for q in kind.quantities.values()
+                ],
+                "affordances": [
+                    {
+                        "verb": a.verb,
+                        "changes_world": a.changes_world,
+                        "needs_actor": a.needs_actor,
+                        "conditions": [str(c) for c in a.conditions],
+                        "sets": [f"{k} = {v}" for k, v in a.outputs.items()],
+                        "requires": [str(r) for r in a.requires],
+                        "costs": [f"{k} = {v}" for k, v in a.costs.items()],
+                        "consumes": dict(a.consumes),
+                    }
+                    for a in kind.affordances.values()
+                ],
+            }
+            for kind in sorted(ontology.kinds.values(), key=lambda k: k.id)
+        ]
+
+    def entities(self, kind: str | None = None) -> list[dict[str, Any]]:
+        """世界里的实例;给了 `kind` 就只看那一类。
+
+        带上此刻的量(`values`)是有意的:这两样分开问的话,宿主得先 `entities()`
+        再逐个 `stocks()`,而两次之间世界还在跑。`gloss` 是**这一个**的补充描述,
+        空的时候回落到种类的那一行 —— 提示词里也是这么落的。
+
+        每行 `{"id","kind","name","gloss","location","values"}`。
+        """
+        ontology = self.scheduler.ontology
+        if ontology is None:
+            return []
+        store = self.scheduler.stock_store
+        rows = (
+            ontology.entities_of(kind) if kind is not None
+            else sorted(ontology.entities.values(), key=lambda e: e.id)
+        )
+        return [
+            {
+                "id": e.id,
+                "kind": e.kind,
+                "name": e.name,
+                "gloss": e.gloss or (ontology.kinds[e.kind].gloss
+                                     if e.kind in ontology.kinds else ""),
+                "location": e.location,
+                "values": {} if store is None else store.of(e.id),
+            }
+            for e in rows
+        ]
+
     # ---- 看一眼她收到了什么 ----------------------------------------------
 
     def debug_prompt(
@@ -2181,10 +1921,13 @@ class World:
             if perceived.own:
                 notes.append("你自己:" + "、".join(
                     f"{key} {value:g}" for key, value in sorted(perceived.own.items())))
-            for owner, values in sorted(perceived.here.items()):
-                name = perceived.labels.get(owner) or owner
-                notes.append(f"这里的{name}:" + "、".join(
-                    f"{key} {value:g}" for key, value in sorted(values.items())))
+            # 和聊天那条路共用 `describe_here` —— 自主决定这一路要是另写一遍拼装,
+            # 她做决定时看到的世界就和她说话时看到的不是同一个,而两边都能跑、
+            # 都不报错。观察窗不许撒谎,这一条同样适用于她自己的决定上下文。
+            for owner in sorted(perceived.here):
+                notes.append(f"这里的{perceived.describe_here(owner)}")
+            if perceived.overflow:
+                notes.append(f"这里还有 {perceived.overflow} 样别的东西,你没细看")
             if perceived.public:
                 notes.append("人人都知道:" + "、".join(
                     f"{key} {value:g}" for key, value in sorted(perceived.public.items())))
@@ -2256,7 +1999,6 @@ class World:
                 self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
 
     _world_lock: Any = None
-    _sqlite_log: Any = None
     _durability_warning: str | None = None
 
     def _guard(self) -> Any:
@@ -2695,18 +2437,21 @@ class World:
 
     def shop(self, location_id: str) -> list[dict[str, Any]]:
         """某地货架:物品、现价、库存。"""
-        if self.scheduler.event_log is None:
+        store = self.scheduler.economy_store
+        if store is None:
             return []
         with self.scheduler._lock:
-            rows = self.scheduler.conn.execute(
-                "SELECT s.item_id, d.name, d.kind, s.price, s.quantity FROM shop_stock s"
-                " JOIN item_defs d ON d.id = s.item_id WHERE s.location_id = ?"
-                " ORDER BY s.item_id",
-                (location_id,),
-            ).fetchall()
+            items = {str(r["id"]): r for r in store.items()}
+            shelves = [r for r in store.shelves() if r["location_id"] == location_id]
         return [
-            {"item_id": r[0], "name": r[1], "kind": r[2], "price": float(r[3]), "quantity": int(r[4])}
-            for r in rows
+            {
+                "item_id": r["item_id"],
+                "name": items.get(str(r["item_id"]), {}).get("name"),
+                "kind": items.get(str(r["item_id"]), {}).get("kind"),
+                "price": float(r["price"]),
+                "quantity": int(r["quantity"]),
+            }
+            for r in shelves
         ]
 
     def player_topup(self, player_id: str, amount: float) -> float:
@@ -2746,21 +2491,24 @@ class World:
         player = self.players.get(player_id)
         if player is None:
             raise KeyError(f"player {player_id} not present")
+        store = self.scheduler.economy_store
+        if store is None:
+            raise ValueError("economy needs a persistent world")
         with self.scheduler._lock:
-            conn = self.scheduler.conn
-            row = conn.execute(
-                "SELECT price, quantity FROM shop_stock WHERE location_id = ? AND item_id = ?",
-                (location_id, item_id),
-            ).fetchone()
-            if row is None or int(row[1]) <= 0:
+            shelf = next(
+                (r for r in store.shelves()
+                 if r["location_id"] == location_id and r["item_id"] == item_id),
+                None,
+            )
+            if shelf is None or int(shelf.get("quantity") or 0) <= 0:
                 raise KeyError(f"{location_id} 没有 {item_id} 的货")
-            price = float(row[0])
+            price = float(shelf["price"])
             holder = f"player:{player_id}"
             # 门禁读账本,不读内存 —— 那两个数此前会分叉(见 player_topup)。
             wallet = float(self.scheduler._memory_projection.balances.get(holder, 0.0))
             if wallet < price:
                 raise ValueError(f"钱包不够:{wallet} < {price}")
-            if not economy.take_stock(conn, location_id, item_id):
+            if not store.take_stock(location_id, item_id):
                 raise KeyError(f"{location_id} 没有 {item_id} 的货")
             self.scheduler._shop_sales[(location_id, item_id)] = (
                 self.scheduler._shop_sales.get((location_id, item_id), 0) + 1
@@ -2956,7 +2704,7 @@ class World:
 
         try:
             return perceive(agent_id=agent_id, here=here, stock_store=store,
-                            visibility=visibility)
+                            visibility=visibility, ontology=self.scheduler.ontology)
         except Exception:  # noqa: BLE001 - 读不到感知不该让聊天告吹
             logger.warning("读 perception 失败", exc_info=True)
             return None

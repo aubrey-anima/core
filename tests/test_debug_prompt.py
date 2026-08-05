@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import json
 import subprocess
 import sys
@@ -50,7 +52,7 @@ class Spy:
 
 @pytest.fixture()
 def world(tmp_path):
-    w = World.open(str(tmp_path / "world.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "world.db"), force_mock_llm=True)
     w.config_set("chat.intent.enabled", False)  # 分类会多跑一次 LLM,与这里无关
     yield w
     w.close()
@@ -59,7 +61,7 @@ def world(tmp_path):
 @pytest.fixture()
 def bare_world(bare_seed, tmp_path):
     """空橱窗的世界:出厂种子自带可见性声明与量,验"缺席"要一个干净的底。"""
-    w = World.open(str(tmp_path / "bare.db"), seed_path=bare_seed, force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "bare.db"), seed_path=bare_seed, force_mock_llm=True)
     w.config_set("chat.intent.enabled", False)
     yield w
     w.close()
@@ -197,14 +199,12 @@ def test_unknown_agent_is_a_keyerror(world):
 
 
 def _cli(*argv: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", *argv], capture_output=True, text=True
-    )
+    return run_cli(*argv)
 
 
 def _a_world(tmp_path) -> str:
     db = tmp_path / "cli.db"
-    done = _cli("simulate", "--db-path", str(db), "--ticks", "0", "--llm", "mock")
+    done = _cli("simulate", "--world-id", "w", "--ticks", "0", "--llm", "mock")
     assert done.returncode == 0, done.stderr
     return str(db)
 
@@ -216,7 +216,7 @@ def test_cli_prompt_shows_blocks_and_absences(tmp_path):
     写 Python 塞假 LLM 才看得到。
     """
     db = _a_world(tmp_path)
-    done = _cli("prompt", "--db-path", db, "--agent", "夏", "--name", "阿檀")
+    done = _cli("prompt", "--world-id", "w", "--agent", "夏", "--name", "阿檀")
     assert done.returncode == 0, done.stderr
     assert "persona" in done.stdout and "identity" in done.stdout
     assert "没出现的块" in done.stdout
@@ -227,11 +227,11 @@ def test_cli_prompt_shows_blocks_and_absences(tmp_path):
 
 def test_cli_prompt_full_and_json(tmp_path):
     db = _a_world(tmp_path)
-    full = _cli("prompt", "--db-path", db, "--agent", "夏", "--full")
+    full = _cli("prompt", "--world-id", "w", "--agent", "夏", "--full")
     assert full.returncode == 0, full.stderr
     assert "      │ " in full.stdout, "--full 没有把正文打出来"
 
-    as_json = _cli("prompt", "--db-path", db, "--agent", "夏", "--json")
+    as_json = _cli("prompt", "--world-id", "w", "--agent", "夏", "--json")
     assert as_json.returncode == 0, as_json.stderr
     payload = json.loads(as_json.stdout)
     assert payload["system"] == "\n\n".join(b["text"] for b in payload["blocks"])
@@ -240,11 +240,11 @@ def test_cli_prompt_full_and_json(tmp_path):
 def test_cli_prompt_without_agent_lists_the_roster(tmp_path):
     """不给 --agent 就列名册,和 `chat` 一个规矩 —— 不猜她是谁。"""
     db = _a_world(tmp_path)
-    done = _cli("prompt", "--db-path", db)
+    done = _cli("prompt", "--world-id", "w")
     assert done.returncode == 0, done.stderr
     assert "夏" in done.stdout
 
-    missing = _cli("prompt", "--db-path", db, "--agent", "并不存在的人")
+    missing = _cli("prompt", "--world-id", "w", "--agent", "并不存在的人")
     assert missing.returncode == 2
     assert "没有" in missing.stderr
 

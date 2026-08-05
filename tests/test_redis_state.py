@@ -34,9 +34,7 @@ def redis():
 
 @pytest.fixture()
 def world(tmp_path, redis):
-    w = World.open(
-        str(tmp_path / "world.db"), force_mock_llm=True, redis=redis, world_id="t"
-    )
+    w = World.open("t", redis=redis, force_mock_llm=True)
     yield w
     w.close()
 
@@ -105,8 +103,8 @@ def test_a_world_on_redis_still_runs(world):
 
 def test_two_worlds_on_one_redis_do_not_share_brains(tmp_path, redis):
     """一个 Redis 上跑十个世界是常态。键撞车的后果是两个世界的角色共用一个脑子。"""
-    a = World.open(str(tmp_path / "a.db"), force_mock_llm=True, redis=redis, world_id="a")
-    b = World.open(str(tmp_path / "b.db"), force_mock_llm=True, redis=redis, world_id="b")
+    a = World.open("a", redis=redis, force_mock_llm=True)
+    b = World.open("b", redis=redis, force_mock_llm=True)
     try:
         agent = _an_agent(a)
         a.scheduler.agents[agent].agent.blackboard.write("state.status", "A 世界的")
@@ -160,16 +158,12 @@ def test_reopening_does_not_wind_the_clock_back(tmp_path, redis):
     """重开一个世界不该把时钟拨回去 —— Redis 里已有的值说了算。"""
     from anima_world.redis_state import RedisClock, clock_key
 
-    first = World.open(
-        str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t"
-    )
+    first = World.open("t", redis=redis, force_mock_llm=True)
     first.tick(40)
     first.close()
     assert RedisClock(redis, clock_key("t")).get() == 40
 
-    again = World.open(
-        str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t"
-    )
+    again = World.open("t", redis=redis, force_mock_llm=True)
     try:
         assert again.scheduler.clock == 40, "重开把时钟拨回去了"
     finally:
@@ -322,11 +316,11 @@ def test_the_projection_is_not_moved_but_caught_up(tmp_path, redis):
     但**不搬不等于不管**:进程 A 记了一条事件,进程 B 的投影里还没有它,而 B 正是
     靠投影判断"她买得起吗""他们认识吗"。所以 B 要能追上。
     """
-    a = World.open(str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t")
+    a = World.open("t", redis=redis, force_mock_llm=True)
     try:
         a.tick(40)
         # 同一个世界文件的第二个"进程"
-        b = World.open(str(tmp_path / "w.db"), force_mock_llm=True, redis=redis, world_id="t")
+        b = World.open("t", redis=redis, force_mock_llm=True)
         try:
             seen_before = b.scheduler._projection_seq
             # 让 A 真的写进去一条:光 tick 不一定产生事件 —— 事件只在动作**改变**
@@ -377,42 +371,6 @@ _SCRIPT = [
 ]
 
 
-def test_the_two_event_logs_answer_identically(tmp_path, redis):
-    """**两个实现互验。**
-
-    换后端最坏的坏法不是崩,是"两边都能跑,但答案不一样" —— 而事件日志是唯一真相,
-    它答错一次,所有投影跟着错。所以不各测各的:同一串事件喂给两个实现,逐个问题
-    比对答案。
-    """
-    import sqlite3
-
-    from anima_world.db import open_db
-    from anima_world.events import EventLog
-    from anima_world.redis_state import RedisEventLog, events_key
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        sqlite_log = EventLog(conn)
-        redis_log = RedisEventLog(redis, events_key("cmp"))
-        for log in (sqlite_log, redis_log):
-            _drive(log, _SCRIPT)
-
-        def shape(events):
-            return [(e.seq, e.ts, e.type, e.who, e.loc, e.payload) for e in events]
-
-        assert shape(sqlite_log.replay()) == shape(redis_log.replay())
-        assert sqlite_log.max_seq() == redis_log.max_seq() == 4
-        for kwargs in (
-            {}, {"who": "夏"}, {"kind": "travel"}, {"who": "夏", "kind": "travel"},
-        ):
-            assert sqlite_log.count(**kwargs) == redis_log.count(**kwargs), kwargs
-        for since in (0, 1, 3, 9):
-            assert shape(sqlite_log.replay(since)) == shape(redis_log.replay(since)), since
-        for kwargs in ({"limit": 2}, {"since_seq": 1, "limit": 2, "kind": "travel"}):
-            assert shape(sqlite_log.page(**kwargs)) == shape(redis_log.page(**kwargs)), kwargs
-    finally:
-        conn.close()
-
 
 def test_two_appenders_get_unique_increasing_seqs(redis):
     """`seq` 的保序是多进程下最不能含糊的东西之一。
@@ -445,75 +403,6 @@ def test_two_appenders_get_unique_increasing_seqs(redis):
 # ---- 世界的量 ---------------------------------------------------------------
 
 
-def test_the_two_stock_stores_answer_identically(tmp_path, redis):
-    """两个实现互验 —— 量答错一次,规律就一路错下去,而且照跑。"""
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisStockStore
-    from anima_world.stocks import StockStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = StockStore(conn), RedisStockStore(redis, "cmp")
-        for store in (a, b):
-            store.set("tree:oak", "树高", 3.2, 10)
-            store.set_many("tree:oak", {"生长速度": 0.004, "最大树高": 12.0}, 10)
-            store.set("tree:elm", "树高", 5.0, 10)
-            store.set("agent:夏", "功力", 120.0, 3)
-            store.set("world", "季节", 2.0, 0)
-
-        assert a.get("tree:oak", "树高") == b.get("tree:oak", "树高")
-        assert a.get("tree:oak", "没有的", 7.0) == b.get("tree:oak", "没有的", 7.0) == 7.0
-        assert a.of("tree:oak") == b.of("tree:oak")
-        assert a.owners() == b.owners()
-        for kind in ("tree", "agent", "world", "mine"):
-            assert a.owners(kind) == b.owners(kind), kind
-            assert a.snapshot_kind(kind) == b.snapshot_kind(kind), kind
-        assert a.snapshot("tree:oak") == b.snapshot("tree:oak")
-        assert a.snapshot_many(["tree:oak", "world"]) == b.snapshot_many(["tree:oak", "world"])
-
-        pending = {"tree:oak": {"树高": 3.3}, "tree:elm": {"树高": 5.1}}
-        assert a.write_round(pending, 22) == b.write_round(pending, 22)
-        assert a.snapshot_kind("tree") == b.snapshot_kind("tree")
-
-        for store in (a, b):
-            store.delete("tree:elm", "树高")
-        assert a.owners() == b.owners(), "删光最后一个键之后,owner 名单对不上"
-        for store in (a, b):
-            store.delete("agent:夏")
-        assert a.owners() == b.owners()
-    finally:
-        conn.close()
-
-
-def test_the_rules_get_the_same_answer_on_either_store(tmp_path, redis):
-    """不只比接口,连**规律真跑一轮**的结果也比。
-
-    `dt` 从量自己的 `updated_tick` 算,所以 tick 有没有跟着值一起存对,决定了树长
-    多高。这条是接口比对看不出来的。
-    """
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisStockStore
-    from anima_world.rules import parse_rules
-    from anima_world.stocks import StockStore, evaluate_due
-
-    spec = [{
-        "id": "grow", "every": {"ticks": 12}, "for_each": {"kind": "tree"},
-        "set": {"树高": "min(树高 + 生长速度 * dt, 最大树高)"},
-    }]
-    rules = parse_rules(spec)
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        results = []
-        for store in (StockStore(conn), RedisStockStore(redis, "rules")):
-            store.set_many("tree:oak", {"树高": 3.2, "生长速度": 0.01, "最大树高": 12.0}, 0)
-            last_run: dict[str, int] = {}
-            for now in range(12, 289, 12):
-                evaluate_due(store, rules, now, last_run=last_run)
-            results.append(round(store.get("tree:oak", "树高"), 6))
-        assert results[0] == results[1], f"同一条规律两个后端长出不同的树:{results}"
-        assert results[0] > 3.2, "树根本没长,这条测试没在验它想验的"
-    finally:
-        conn.close()
 
 
 def test_the_stock_store_keeps_its_batching_promise(redis):
@@ -567,280 +456,10 @@ def test_the_stock_store_keeps_its_batching_promise(redis):
 # ---- 记忆 / 提示词模板 / 可见性 ---------------------------------------------
 
 
-def test_the_two_memory_stores_answer_identically(tmp_path, redis):
-    """记忆答错一次,她说出来的话就不是她该记得的事 —— 而且照跑。"""
-    from anima_world.db import open_db
-    from anima_world.memory_store import MemoryStore
-    from anima_world.redis_state import RedisMemoryStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        script = [
-            (0, "observation", "下雨了", 0.3),
-            (0, "observation", "他说了难听的话", 0.9),   # 同 tick:排序键必须再看 id
-            (10, "seed", "这家店是我盘下来的", 0.8),
-            (20, "observation", "卖出第一杯咖啡", 0.7),
-        ]
-        a, b = MemoryStore(conn), RedisMemoryStore(redis, "mem")
-        for store in (a, b):
-            for tick, kind, summary, importance in script:
-                store.add("夏", tick=tick, kind=kind, summary=summary, importance=importance)
-
-        def shape(rows):
-            return [(r["summary"], r["kind"], round(float(r["importance"]), 6)) for r in rows]
-
-        assert shape(a.query("夏")) == shape(b.query("夏")), "同 tick 时次序对不上"
-        assert shape(a.query("夏", kind="seed")) == shape(b.query("夏", kind="seed"))
-        assert shape(a.query("夏", min_importance=0.7)) == shape(b.query("夏", min_importance=0.7))
-        assert a.query("查无此人") == b.query("查无此人") == []
-
-        assert shape(a.retrieve("夏", now_tick=30, query="咖啡", k=2)) == \
-               shape(b.retrieve("夏", now_tick=30, query="咖啡", k=2))
-        # 检索是复习:两边加固的强度也要一样
-        assert [round(float(r["strength"]), 6) for r in a.query("夏")] == \
-               [round(float(r["strength"]), 6) for r in b.query("夏")]
-
-        for store in (a, b):
-            store.decay_pass("夏", now_tick=2000)
-        assert [round(float(r["strength"]), 6) for r in a.query("夏")] == \
-               [round(float(r["strength"]), 6) for r in b.query("夏")], "两个后端遗忘速度不同"
-
-        for store in (a, b):
-            store.set_anchor(2, True)
-        assert shape(a.anchors("夏")) == shape(b.anchors("夏"))
-    finally:
-        conn.close()
 
 
-def test_the_two_prompt_stores_answer_identically(tmp_path, redis):
-    from anima_world.db import open_db
-    from anima_world.prompt_store import PromptStore
-    from anima_world.redis_state import RedisPromptStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = PromptStore(conn), RedisPromptStore(redis, "pr")
-        for store in (a, b):
-            store.set("chat.x", "模板A", "说明")
-            store.set("chat.y", "模板B")
-            store.set("chat.x", "模板A2")          # 改内容不该把说明冲掉
-        for store in (a, b):
-            assert store.has("chat.x") and not store.has("没有的")
-            assert store.get("chat.x") == "模板A2"
-            assert store.get("没有的", "兜底") == "兜底"
-        assert [(r["name"], r["template"], r.get("description")) for r in a.list()] == \
-               [(r["name"], r["template"], r.get("description")) for r in b.list()]
-    finally:
-        conn.close()
 
 
-def test_the_two_visibility_stores_answer_identically(tmp_path, redis):
-    """**没声明 = 感知不到**那条默认值,换后端也必须原样保住。"""
-    from anima_world.db import open_db
-    from anima_world.perception import VisibilityStore
-    from anima_world.redis_state import RedisVisibilityStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = VisibilityStore(conn), RedisVisibilityStore(redis, "vis")
-        for store in (a, b):
-            store.declare("tree", "树高", "here", "门口那棵老橡树")
-            store.declare("world", "季节", "public")
-            store.declare("agent", "功力", "self")
-            store.place("tree:oak", "cafe", "老橡树")
-            store.place("mine:north", "hill")
-        assert a.declarations() == b.declarations()
-        assert a.rules_map() == b.rules_map()
-        assert a.at("cafe") == b.at("cafe")
-        assert a.at("没这个地方") == b.at("没这个地方") == {}
-        assert a.place_of("tree:oak") == b.place_of("tree:oak") == "cafe"
-        assert a.place_of("没这个东西") == b.place_of("没这个东西") is None
-        for store in (a, b):
-            with pytest.raises(ValueError):
-                store.declare("tree", "x", "乱写的档")
-    finally:
-        conn.close()
-
-
-# ---- 地图 / 行为树 -----------------------------------------------------------
-
-
-def test_the_two_location_stores_answer_identically(tmp_path, redis):
-    """地图的几何**不许有第二份**:父子链、相对坐标折算、距离公式各写一遍,
-    迟早两个后端算出不同的路程,而两边都跑得动。所以 Redis 版继承那三个算出来的
-    方法,只覆盖真正碰库的 `all` / `get` / `upsert`。"""
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisLocationStore
-    from anima_world.world_store import LocationStore
-
-    # 扁平列表 + parent,不是嵌套 children —— 这是种子的真实形状
-    seed = [
-        {"id": "cafe", "kind": "point", "parent": "town", "x": 0.2, "y": 0.3},
-        {"id": "town", "kind": "region", "x": 0, "y": 0, "w": 1, "h": 1},
-        {"id": "home", "kind": "point", "parent": "town", "x": 0.8, "y": 0.7},
-    ]
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = LocationStore(conn), RedisLocationStore(redis, "loc")
-        for store in (a, b):
-            store.seed_defaults(seed)
-        assert [r["id"] for r in a.all()] == [r["id"] for r in b.all()]
-        # `updated_at` 是写入时刻,两边必然不同 —— 比其余所有列
-        drop = lambda r: {k: v for k, v in (r or {}).items() if k != "updated_at"}
-        assert drop(a.get("cafe")) == drop(b.get("cafe"))
-        assert "updated_at" in a.get("cafe") and "updated_at" in b.get("cafe"), (
-            "行的形状不一样 —— 调用方拿的是整行 dict,少一个键会变成静默的 None"
-        )
-        assert a.get("没这地方") == b.get("没这地方") is None
-        assert [(t["id"], [c["id"] for c in t.get("children", [])]) for t in a.tree()] == \
-               [(t["id"], [c["id"] for c in t.get("children", [])]) for t in b.tree()]
-        assert a.absolute_xy("cafe") == b.absolute_xy("cafe")
-        assert a.distance("cafe", "home") == b.distance("cafe", "home")
-        for store in (a, b):
-            store.seed_defaults([{"id": "别的", "kind": "point"}])
-        assert [r["id"] for r in a.all()] == [r["id"] for r in b.all()], (
-            "已有地图被今天的种子覆盖了 —— 地图是运行数据"
-        )
-    finally:
-        conn.close()
-
-
-def test_the_two_bt_stores_answer_identically(tmp_path, redis):
-    """树组装错了不会崩,只会让她一整天站着不动 —— 所以组装逻辑只能有一份。"""
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisBTStore
-    from anima_world.world_store import BTStore
-
-    duties = [
-        {"name": "open_cafe", "start": "07:30", "end": "08:00",
-         "kind": "walk", "params": {"location": "cafe"}},
-        {"name": "tend", "start": "08:00", "end": "18:30",
-         "kind": "work", "params": {"location": "cafe"}},
-    ]
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = BTStore(conn), RedisBTStore(redis, "bt")
-        for store in (a, b):
-            store.seed_defaults(["夏", "柔"], ["cafe", "home"])
-            store.seed_duties("夏", duties)
-            store.ensure_plan_node("夏")
-
-        def acts(store):
-            return [(r["node_id"], r["kind"], r.get("params")) for r in store.actions()]
-
-        def nodes(store, tree):
-            return [
-                (n["node_id"], n["type"], n["parent"], n["sort"], n["params"])
-                for n in store._tree_rows(tree)
-            ]
-
-        assert acts(a) == acts(b)
-        assert nodes(a, "default") == nodes(b, "default")
-        assert nodes(a, "夏") == nodes(b, "夏"), "同样的日课组装出不同的树"
-        assert a.duty_windows("夏") == b.duty_windows("夏")
-        assert type(a.build_tree("夏")).__name__ == type(b.build_tree("夏")).__name__
-        assert a.action_table().lookup("go_to_cafe") == b.action_table().lookup("go_to_cafe")
-        # 已有树不许被再播一次覆盖
-        for store in (a, b):
-            store.seed_duties("夏", [{"name": "别的", "start": "01:00", "end": "02:00",
-                                     "kind": "sleep", "params": {}}])
-        assert nodes(a, "夏") == nodes(b, "夏")
-    finally:
-        conn.close()
-
-
-# ---- 她和某个人之间的状态 ---------------------------------------------------
-
-
-def test_the_two_chat_state_stores_answer_identically(tmp_path, redis):
-    """五张表一次比完,重点盯**时间语义** —— 那是最容易想当然搬错的地方。
-
-    - 静音用**墙钟**:玩家那侧的"五分钟"是真的五分钟,而世界时钟可能是演示速度
-      (1 tick/秒),用 tick 会让"五分钟别理我"变成不到一分钟
-    - 回头找你用 **tick**:那是世界内部的约定,和墙钟无关
-    - 过期的**读到就清**:读到的必须是此刻还成立的
-    """
-    from anima_world.chat_state import ChatStateStore
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisChatStateStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = ChatStateStore(conn), RedisChatStateStore(redis, "cs")
-        now = 1_700_000_000
-
-        for store in (a, b):
-            store.set_stance("夏", "p1", "test", tick=5)
-            store.set_stance("夏", "p2", "avoid", declared=False, tick=6)
-            store.set_quiet("夏", "p1", kind="mute", minutes=5, reason="越界", now=now)
-            store.set_quiet("夏", "p2", kind="delay", minutes=10, now=now)
-            store.refuse_topic("夏", "彩票", now=now)
-            store.refuse_topic("夏", "前任", minutes=30, now=now)
-            store.add_followup("夏", "p1", due_tick=10, reason="等会儿说")
-            store.add_followup("柔", "p1", due_tick=5)
-            store.set_override("夏", "p1", "address_form", "叫我阿檀")
-
-        def drop_at(rows):
-            return [{k: v for k, v in r.items() if k != "updated_at"} for r in rows]
-
-        assert drop_at([a.stance("夏", "p1")]) == drop_at([b.stance("夏", "p1")])
-        assert a.stance("夏", "没这人") == b.stance("夏", "没这人") is None
-        assert drop_at(a.stances("夏")) == drop_at(b.stances("夏"))
-
-        assert a.quiet_until("夏", "p1", now=now) == b.quiet_until("夏", "p1", now=now)
-        assert a.mutes(now=now) == b.mutes(now=now)
-        assert a.mutes("夏", now=now) == b.mutes("夏", now=now)
-        # 墙钟:6 分钟后 mute 该过期,delay 还在
-        later = now + 6 * 60
-        assert a.quiet_until("夏", "p1", now=later) == b.quiet_until("夏", "p1", now=later) is None
-        assert a.mutes(now=later) == b.mutes(now=later)
-        assert len(a.mutes(now=later)) == 1, "过期清扫没生效,这条测试没在验它想验的"
-
-        assert a.refused_topics("夏", now=now) == b.refused_topics("夏", now=now)
-        assert a.topics_hit_by("夏", "彩票中了吗", now=now) == \
-               b.topics_hit_by("夏", "彩票中了吗", now=now) == ["彩票"]
-        # 31 分钟后带期限那条过期
-        gone = now + 31 * 60
-        assert a.refused_topics("夏", now=gone) == b.refused_topics("夏", now=gone)
-        assert len(a.refused_topics("夏", now=gone)) == 1
-
-        # tick,不是墙钟
-        assert a.due_followups(10) == b.due_followups(10)
-        assert a.due_followups(4) == b.due_followups(4) == []
-        assert a.pending_followups("夏") == b.pending_followups("夏")
-        for store in (a, b):
-            store.mark_followup_fired(1, 11)
-        assert a.pending_followups() == b.pending_followups()
-
-        assert drop_at(a.overrides("夏", "p1")) == drop_at(b.overrides("夏", "p1"))
-        assert a.clear_override("夏", "p1", "address_form") == \
-               b.clear_override("夏", "p1", "address_form") is True
-        assert a.clear_override("夏", "p1", "address_form") == \
-               b.clear_override("夏", "p1", "address_form") is False
-
-        for store in (a, b):
-            with pytest.raises(ValueError):
-                store.set_stance("夏", "p1", "并不存在的意图")
-            with pytest.raises(ValueError):
-                store.set_override("夏", "p1", "并不存在的规则", "x")
-            with pytest.raises(ValueError):
-                store.set_quiet("夏", "p1", kind="乱写", minutes=1)
-
-        # 放在最后,免得给上面那些计数断言塞进额外的行:同一对 (角色, 玩家) 上
-        # 同时有 mute 和 delay 时,**取最晚那条** —— 取最早的话,她会在还该沉默
-        # 的时候开口。前面那组每对只有一条,分不出最早和最晚。
-        for store in (a, b):
-            store.set_quiet("柔", "p9", kind="mute", minutes=2, now=now)
-            store.set_quiet("柔", "p9", kind="delay", minutes=20, now=now)
-        assert a.quiet_until("柔", "p9", now=now) == b.quiet_until("柔", "p9", now=now)
-        assert a.quiet_until("柔", "p9", now=now)["kind"] == "delay", (
-            "同一对上有两条时没取最晚的 —— 她会在还该沉默的时候开口"
-        )
-    finally:
-        conn.close()
-
-
-# ---- 事件日志真的接上了吗 ---------------------------------------------------
 
 
 def test_a_redis_world_actually_writes_its_events_to_redis(tmp_path, redis):
@@ -852,32 +471,20 @@ def test_a_redis_world_actually_writes_its_events_to_redis(tmp_path, redis):
 
     所以不能只测那个类,要测**这个世界的事件到底落在哪儿**。
     """
-    import sqlite3
-
     from anima_world.redis_state import RedisEventLog, events_key
 
-    db = str(tmp_path / "w.db")
-    w = World.open(db, force_mock_llm=True, redis=redis, world_id="ev")
+    w = World.open("ev", force_mock_llm=True, redis=redis)
     try:
         assert isinstance(w.scheduler.event_log, RedisEventLog), (
-            "世界跑在 Redis 上,事件日志却还是 SQLite 的 —— 写了没接"
+            "世界跑在 Redis 上,事件日志却接错了后端"
         )
-        before_sqlite = sqlite3.connect(db).execute(
-            "SELECT count(*) FROM events"
-        ).fetchone()[0]
         before_redis = int(redis.llen(events_key("ev")) or 0)
-        assert before_redis >= before_sqlite, "已有历史没带过去,重放会重建出另一个世界"
+        assert before_redis > 0, "创世事件没落进 Redis"
 
         w.tick(288)
 
-        after_sqlite = sqlite3.connect(db).execute(
-            "SELECT count(*) FROM events"
-        ).fetchone()[0]
         after_redis = int(redis.llen(events_key("ev")) or 0)
         assert after_redis > before_redis, "跑了一天,Redis 里一条新事件都没有"
-        assert after_sqlite == before_sqlite, (
-            f"跑起来之后还在往 SQLite 写事件({before_sqlite} → {after_sqlite})"
-        )
     finally:
         w.close()
 
@@ -885,153 +492,19 @@ def test_a_redis_world_actually_writes_its_events_to_redis(tmp_path, redis):
 # ---- 最后六张表 -------------------------------------------------------------
 
 
-def test_the_two_knowledge_graphs_answer_identically(tmp_path, redis):
-    """`(subject, predicate, object)` 唯一,**重复写不覆盖** —— 一条边的出处是它
-    第一次被证实的那一刻。覆盖的话,`query_by_event` 会把边挂到错的事件上。"""
-    from anima_world.db import open_db
-    from anima_world.graph import KnowledgeGraph
-    from anima_world.redis_state import RedisKnowledgeGraph
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = KnowledgeGraph(conn), RedisKnowledgeGraph(redis, "kg")
-        for store in (a, b):
-            store.add("夏", "knows", "柔", source_event_seq=3, created_at=1)
-            store.add("夏", "knows", "遥", source_event_seq=4, created_at=2)
-            store.add("柔", "dislikes", "遥", source_event_seq=5, created_at=3)
-            store.add("夏", "knows", "柔", source_event_seq=99, created_at=99)  # 重复
-
-        def shape(rows):
-            return [(r["subject"], r["predicate"], r["object"], r["source_event_seq"])
-                    for r in rows]
-
-        assert shape(a.query()) == shape(b.query())
-        assert shape(a.query(subject="夏")) == shape(b.query(subject="夏"))
-        assert shape(a.query(predicate="knows")) == shape(b.query(predicate="knows"))
-        assert shape(a.query(object="遥")) == shape(b.query(object="遥"))
-        assert shape(a.query_by_event(3)) == shape(b.query_by_event(3))
-        assert shape(a.query_by_event(99)) == shape(b.query_by_event(99)) == [], (
-            "重复那条把出处覆盖了 —— 边会挂到错的事件上"
-        )
-    finally:
-        conn.close()
 
 
-def test_the_two_needs_stores_answer_identically(tmp_path, redis):
-    """没记过就是满的 —— 那条默认值不能丢,否则新角色一出生就在饿。"""
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisNeedsStore
-    from anima_world.small_stores import NeedsStore
 
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = NeedsStore(conn), RedisNeedsStore(redis, "nd")
-        assert a.load("没记过的人") == b.load("没记过的人")
-        assert all(v == 1.0 for v in a.load("没记过的人").values())
-        for store in (a, b):
-            store.persist("夏", {"hunger": 0.3, "energy": 0.8}, 42)
-        assert a.load("夏") == b.load("夏")
-    finally:
-        conn.close()
-
-
-def test_the_two_clique_stores_answer_identically(tmp_path, redis):
-    """派生缓存,写是全量重写 —— 上一轮的小团体不许留在这一轮里。"""
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisCliqueStore
-    from anima_world.small_stores import CliqueStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = CliqueStore(conn), RedisCliqueStore(redis, "cq")
-        for store in (a, b):
-            store.store([["夏", "柔"], ["遥"]], 5)
-        assert [(r["member_ids"], r["computed_tick"]) for r in a.load()] == \
-               [(r["member_ids"], r["computed_tick"]) for r in b.load()]
-        for store in (a, b):
-            store.store([["夏", "遥"]], 9)
-        assert len(a.load()) == len(b.load()) == 1, "全量重写没生效,旧的小团体留下了"
-    finally:
-        conn.close()
-
-
-def test_the_two_reflection_stores_answer_identically(tmp_path, redis):
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisReflectionStore
-    from anima_world.small_stores import ReflectionStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = ReflectionStore(conn), RedisReflectionStore(redis, "rf")
-        assert a.get("没记过") == b.get("没记过") == 0.0
-        for store in (a, b):
-            store.add("夏", 0.4)
-            store.add("夏", 0.3)
-        assert round(a.get("夏"), 6) == round(b.get("夏"), 6)
-        for store in (a, b):
-            store.set("柔", 1.25)
-            store.reset("夏", 9)
-        assert a.get("夏") == b.get("夏") == 0.0
-        assert a.get("柔") == b.get("柔") == 1.25
-    finally:
-        conn.close()
-
-
-def test_the_two_economy_stores_answer_identically(tmp_path, redis):
-    """**价格漂移曲线不许有第二份** —— 两份曲线的后果是两个后端的物价慢慢分家,
-    而两边都跑得动。所以 Redis 版复用 `economy.drift_price`。"""
-    from anima_world.db import open_db
-    from anima_world.redis_state import RedisEconomyStore
-    from anima_world.small_stores import EconomyStore
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        a, b = EconomyStore(conn), RedisEconomyStore(redis, "ec")
-        for store in (a, b):
-            store.seed_defaults()
-
-        def shape_items(rows):
-            return [(r["id"], r["name"], r["kind"], r["base_price"]) for r in rows]
-
-        def shape_shelves(rows):
-            return [(r["location_id"], r["item_id"], r["quantity"], round(r["price"], 6))
-                    for r in rows]
-
-        assert shape_items(a.items()) == shape_items(b.items())
-        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
-        assert a.cheapest_meal("cafe") == b.cheapest_meal("cafe")
-        assert a.cheapest_meal("没这地方") == b.cheapest_meal("没这地方") is None
-
-        for store in (a, b):
-            assert store.take_stock("cafe", "coffee") is True
-            assert store.take_stock("cafe", "coffee", 9999) is False
-            assert store.take_stock("cafe", "没这东西") is False
-        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
-
-        for store in (a, b):
-            store.daily_price_pass({("cafe", "coffee"): 9})
-        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves()), (
-            "两个后端的物价分家了 —— 漂移曲线有两份"
-        )
-        # 再播一次不该覆盖已有货架
-        for store in (a, b):
-            store.seed_defaults()
-        assert shape_shelves(a.shelves()) == shape_shelves(b.shelves())
-    finally:
-        conn.close()
-
-
-# ---- Redis 会不会把世界忘掉 -------------------------------------------------
 
 
 class _FakeConfig:
-    """一个只回答 CONFIG GET 的假 Redis —— 这条测的是判定,不是连接。"""
+    """只回答 CONFIG GET save/appendonly 的假客户端。"""
 
     def __init__(self, save: str, appendonly: str) -> None:
-        self._values = {"save": save, "appendonly": appendonly}
+        self._answers = {"save": {"save": save}, "appendonly": {"appendonly": appendonly}}
 
-    def config_get(self, name: str) -> dict[str, str]:
-        return {name: self._values[name]}
+    def config_get(self, key: str) -> dict:
+        return self._answers.get(key, {})
 
 
 def test_a_redis_that_forgets_the_world_is_called_out():
@@ -1084,7 +557,7 @@ def test_a_second_process_does_not_rewind_her(tmp_path, redis):
     from anima_world.api import World
 
     db = str(tmp_path / "w.db")
-    first = World.open(db, force_mock_llm=True, redis=redis, world_id="rewind")
+    first = World.open("rewind", force_mock_llm=True, redis=redis)
     try:
         agent = next(iter(first.state()["agents"]))
         board = first.scheduler.agents[agent].agent.blackboard
@@ -1092,7 +565,7 @@ def test_a_second_process_does_not_rewind_her(tmp_path, redis):
         board.write("loc", "她后来去的地方")
         board.write("state.status", "她后来的样子")
 
-        second = World.open(db, force_mock_llm=True, redis=redis, world_id="rewind")
+        second = World.open("rewind", force_mock_llm=True, redis=redis)
         try:
             assert second.state()["agents"][agent].get("location") == "她后来去的地方", (
                 f"第二个进程把她倒带回了创世值 {origin!r}"
@@ -1118,7 +591,7 @@ def test_moving_in_still_fills_keys_redis_never_had(tmp_path, redis):
     from anima_world.redis_state import RedisBlackboard, agent_key
 
     db = str(tmp_path / "w.db")
-    first = World.open(db, force_mock_llm=True, redis=redis, world_id="fill")
+    first = World.open("fill", force_mock_llm=True, redis=redis)
     agent = next(iter(first.state()["agents"]))
     first.close()
 
@@ -1126,7 +599,7 @@ def test_moving_in_still_fills_keys_redis_never_had(tmp_path, redis):
     redis.hdel(raw._key, "loc")            # 假装这一格是新版本才有的
     assert raw.read("loc") is None
 
-    second = World.open(db, force_mock_llm=True, redis=redis, world_id="fill")
+    second = World.open("fill", force_mock_llm=True, redis=redis)
     try:
         assert raw.read("loc"), "缺的那一格没补上 —— 她开机就没有位置"
     finally:

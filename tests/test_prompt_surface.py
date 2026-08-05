@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import re
 from pathlib import Path
 
@@ -70,7 +72,7 @@ def test_the_reply_format_rules_are_authorable(tmp_path):
             )
             return "……"
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         assert "chat.response_format" in {p["name"] for p in world.prompt_list()}, (
             "作者在 prompt_list() 里看不见它,就等于这段规则不存在"
         )

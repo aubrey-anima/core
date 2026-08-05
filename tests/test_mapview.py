@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import os
 
 import pytest
@@ -236,23 +238,16 @@ def test_geometry_comes_out_absolute_not_parent_relative(tmp_path):
 
     所以 `map_data` 交出来的必须已经是绝对坐标,而这条拿库里的原始行去比。
     """
-    import sqlite3
-
     from anima_world.api import World
 
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         data = world.map_data()
-    by_id = {p["id"]: p for p in data["places"]}
-
-    conn = sqlite3.connect(db_path)
-    try:
         raw = {
-            r[0]: r[1:] for r in
-            conn.execute("SELECT id, x, y, w, h, parent FROM locations")
+            str(r["id"]): (r.get("x"), r.get("y"), r.get("w"), r.get("h"), r.get("parent"))
+            for r in world.scheduler.location_store.all()
         }
-    finally:
-        conn.close()
+    by_id = {p["id"]: p for p in data["places"]}
 
     nested = [i for i, row in raw.items() if row[4] is not None and row[0] is not None]
     assert nested, "这个种子里没有嵌套地点 —— 这条测试验不到它想验的"
@@ -265,19 +260,13 @@ def test_geometry_comes_out_absolute_not_parent_relative(tmp_path):
         "图上每个东西都会在错的地方"
     )
     # 而且换算的结果要和地图自己那套一致(不能各算各的)
-    from anima_world.db import open_db
-    from anima_world.world_store import LocationStore
-
-    conn = open_db(db_path)
-    try:
-        store = LocationStore(conn)
+    with open_world_at(db_path, force_mock_llm=True) as world:
+        store = world.scheduler.location_store
         for place_id, place in by_id.items():
             expected = store.absolute_xy(place_id)
             assert expected is not None
             assert abs(place["x"] - expected[0]) < 1e-9
             assert abs(place["y"] - expected[1]) < 1e-9
-    finally:
-        conn.close()
 
 
 def test_someone_on_the_road_is_not_standing_anywhere(tmp_path):
@@ -288,7 +277,7 @@ def test_someone_on_the_road_is_not_standing_anywhere(tmp_path):
     """
     from anima_world.api import World
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         agent = next(iter(world.state()["agents"]))
         here = world.state()["agents"][agent].get("location")
         dest = next(loc["id"] for loc in world.state()["locations"]
@@ -312,21 +301,13 @@ def test_the_track_matches_what_the_world_logged(tmp_path):
     from anima_world.api import World
 
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         world.tick(288)
         data = world.map_data()
-
-    conn = sqlite3.connect(db_path)
-    try:
         logged = []
-        for ts, who, payload in conn.execute(
-            "SELECT ts, who, payload FROM events WHERE type='state_change' ORDER BY seq"
-        ):
-            body = json.loads(payload)
-            if body.get("kind") == "location_join":
-                logged.append((int(ts), str(who), str(body["location"])))
-    finally:
-        conn.close()
+        for e in world.scheduler.event_log.replay():
+            if e.type == "state_change" and e.payload.get("kind") == "location_join":
+                logged.append((int(e.ts), str(e.who), str(e.payload["location"])))
 
     drawn = sorted(
         (p["tick"], t["agent"], p["place"])
@@ -343,10 +324,7 @@ def _cli(*argv):
     import subprocess
     import sys
 
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", "map", *argv],
-        capture_output=True, text=True, env={**os.environ},
-    )
+    return run_cli("map", *argv)
 
 
 def test_the_cli_prints_a_map(tmp_path):
@@ -354,10 +332,10 @@ def test_the_cli_prints_a_map(tmp_path):
     from anima_world.api import World
 
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         world.tick(288)
 
-    done = _cli("--db-path", db_path)
+    done = _cli("--world-id", "w")
     assert done.returncode == 0, done.stderr
     assert "◉" in done.stdout, "没画出地点"
     assert "世界时钟" in done.stdout
@@ -371,42 +349,23 @@ def test_the_cli_json_is_machine_readable(tmp_path):
     from anima_world.api import World
 
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         world.tick(288)
 
-    done = _cli("--db-path", db_path, "--json")
+    done = _cli("--world-id", "w", "--json")
     assert done.returncode == 0, done.stderr
     data = json.loads(done.stdout)          # 混进任何一行别的就炸在这儿
     assert data["places"] and "clock" in data
     assert set(data) == {"clock", "places", "standing", "travelling", "tracks"}
 
 
-def test_the_cli_refuses_when_the_world_moved_out(tmp_path):
-    """**搬走了的世界不许假装还在这儿。**
-
-    直接读那个 .db 会得到一张空地图,而空地图看上去像"这个世界没有地方",
-    不像"你读错了文件"。
-    """
-    fakeredis = pytest.importorskip("fakeredis")
-
-    from anima_world.api import World
-
-    db_path = str(tmp_path / "w.db")
-    redis = fakeredis.FakeStrictRedis(decode_responses=True)
-    with World.open(db_path, force_mock_llm=True, redis=redis, world_id="gone") as world:
-        world.tick(10)
-
-    done = _cli("--db-path", db_path)
-    assert done.returncode == 2, f"照读了一个空壳:\n{done.stdout}"
-    assert "redis" in done.stderr and "gone" in done.stderr
-
 
 def test_day_and_tick_range_are_mutually_exclusive(tmp_path):
     from anima_world.api import World
 
     db_path = str(tmp_path / "w.db")
-    World.open(db_path, force_mock_llm=True).close()
-    done = _cli("--db-path", db_path, "--day", "1", "--from", "0")
+    open_world_at(db_path, force_mock_llm=True).close()
+    done = _cli("--world-id", "w", "--day", "1", "--from", "0")
     assert done.returncode == 2
     assert "二选一" in done.stderr
 
@@ -420,7 +379,7 @@ def test_a_window_carries_where_she_came_from(tmp_path):
     """
     from anima_world.api import World
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(288 * 2)
         whole = world.map_data()
         day2 = world.map_data(from_tick=288, to_tick=576)
@@ -467,145 +426,63 @@ def test_the_anchor_is_not_reported_as_a_move():
 # ── 连上一个活着的世界 ──────────────────────────────────────────────────────
 
 
-def test_the_world_id_comes_from_the_stamp():
-    """**默认从 db 自己的戳里读,不让人手抄。**
-
-    人手抄一个 id 是必然会错的那种事,而这里错了不响 —— 错法有多难看见,见
-    `test_a_world_id_that_contradicts_the_stamp_is_refused`。
-    """
-    from anima_world.__main__ import map_world_id
-
-    assert map_world_id(None, ("redis", "live")) == "live"
-    # 和戳一致时显式给也行(照抄一遍不算错)
-    assert map_world_id("live", ("redis", "live")) == "live"
-    assert map_world_id(None, None) is None, "没戳又没给,就该说不知道,而不是编一个"
-    # 和戳**对不上**时不许照着连 —— 见下一条
 
 
-def test_without_redis_a_moved_world_still_refuses(tmp_path):
-    """加了 `--redis` 这条路之后,**不给 `--redis` 时那道拒绝不许松掉**。
+def test_the_cli_reads_a_live_world_from_another_connection(tmp_path):
+    """**另一条连接读到的必须是「此刻」,不是一份快照。**
 
-    松掉的后果是回到原点:读一个空壳,得到一张空地图。
-    """
-    fakeredis = pytest.importorskip("fakeredis")
-
-    from anima_world.api import World
-
-    db_path = str(tmp_path / "w.db")
-    redis = fakeredis.FakeStrictRedis(decode_responses=True)
-    with World.open(db_path, force_mock_llm=True, redis=redis, world_id="gone") as world:
-        world.tick(10)
-
-    done = _cli("--db-path", db_path)
-    assert done.returncode == 2
-    assert "redis" in done.stderr
-    assert "--redis" in done.stderr, "拒绝了,却没告诉人该怎么连上去"
-
-
-_REDIS_URL = os.environ.get("ANIMA_TEST_REDIS")
-
-
-@pytest.mark.skipif(not _REDIS_URL, reason="没有 ANIMA_TEST_REDIS(形如 redis://127.0.0.1:6379)")
-def test_the_cli_reads_a_live_world_from_another_process(tmp_path):
-    """**另一个进程读到的必须是「此刻」,不是一份快照。**
-
-    这条是那十一步搬进 Redis 换来的东西的验收:世界活在 A 进程里,B 进程只有一个
-    Redis 连接,而它看到的是同一个世界的现在。此前 B 只能读到一份历史,然后在
-    自己内存里跑出另一个世界。
-
-    `--watch` 没有它就是半废的:能盯的只有一个不动的世界。
+    世界活在 World 实例里,CLI 只有一个 Redis 连接 —— 它看到的是同一个世界的
+    现在。(真正的跨进程互见由 test_redis_state 的黑板/时钟测试守;这里守的是
+    map 这条只读路真的读活状态。)
     """
     import json
 
-    redis_mod = pytest.importorskip("redis")
-
-    from anima_world.api import World
-
-    world_id = f"t{abs(hash(tmp_path.name)) % 100000}"
-    client = redis_mod.Redis.from_url(_REDIS_URL, decode_responses=True)
-    for key in client.keys(f"anima:{world_id}:*"):
-        client.delete(key)
-
     db_path = str(tmp_path / "w.db")
-    world = World.open(db_path, force_mock_llm=True, redis=client, world_id=world_id)
+    world = open_world_at(db_path, force_mock_llm=True)
     try:
         world.tick(288)
         clock_here = world.scheduler.clock
 
-        # world_id 不给 —— 它该从这个 db 的戳里自己读出来
-        done = _cli("--db-path", db_path, "--redis", _REDIS_URL, "--json")
+        done = run_cli("map", "--world-id", "w", "--json")
         assert done.returncode == 0, done.stderr
         seen = json.loads(done.stdout)
         assert seen["clock"] == clock_here, (
-            f"另一个进程读到的时钟是 {seen['clock']},而世界在 {clock_here} —— "
-            f"它读的不是这个活世界"
+            f"读到的时钟是 {seen['clock']},而世界在 {clock_here} —— 它读的不是这个活世界"
         )
         assert seen["places"], "地图是空的 —— 多半是 world_id 没对上"
         assert seen["standing"] or seen["travelling"], "一个人都没有"
 
-        # 再推一段,B 进程必须跟着看见
         world.tick(60)
-        again = json.loads(
-            _cli("--db-path", db_path, "--redis", _REDIS_URL, "--json").stdout
-        )
-        assert again["clock"] == world.scheduler.clock > clock_here, (
-            "世界往前走了,而另一个进程还停在老地方 —— 它读到的是快照不是此刻"
-        )
+        again = json.loads(run_cli("map", "--world-id", "w", "--json").stdout)
+        assert again["clock"] == world.scheduler.clock, "推了时钟,另一条连接没看见"
     finally:
         world.close()
-        for key in client.keys(f"anima:{world_id}:*"):
-            client.delete(key)
 
 
-def test_a_world_id_that_contradicts_the_stamp_is_refused():
-    """**抄错 world_id 的样子比「报错」坏得多,也比「空地图」坏得多。**
+def test_a_wrong_world_id_leaves_no_garbage_behind(tmp_path):
+    """拒绝之前一个键都不许建 —— 差点抄错 id 就在 Redis 上创出一个新世界。"""
+    from _worldfile import redis_for
 
-    实测:给一个不存在的 world_id,`World.open` 会拿这个 db 当创世输入,在 Redis 上
-    **建出一个全新的世界** —— 于是你看到的是一张排版正常、三个人各就各位、时钟 0 的
-    地图。它读起来像"这个世界还没开始跑",而不是"你看错世界了"。顺带还在 Redis 里
-    留下一份垃圾。
-
-    人手抄一个 id 是**必然会错**的那种事,而这里错了不响。所以对不上就停下。
-    """
-    from anima_world.__main__ import MapWorldIdMismatch, map_world_id
-
-    with pytest.raises(MapWorldIdMismatch) as caught:
-        map_world_id("抄错的", ("redis", "真的那个"))
-    said = str(caught.value)
-    assert "真的那个" in said and "抄错的" in said, "拒绝了却没说清是哪两个对不上"
-    assert "不给 --world-id" in said, "说了问题没说怎么办"
-
-    # 没戳的 db 上,显式给的照旧算数 —— 那是唯一能指明世界的办法
-    assert map_world_id("我说了算", None) == "我说了算"
-
-
-@pytest.mark.skipif(not _REDIS_URL, reason="没有 ANIMA_TEST_REDIS")
-def test_the_cli_refuses_a_contradicting_world_id(tmp_path):
-    """上一条走 CLI 那条真路。"""
-    redis_mod = pytest.importorskip("redis")
-
-    from anima_world.api import World
-
-    client = redis_mod.Redis.from_url(_REDIS_URL, decode_responses=True)
     db_path = str(tmp_path / "w.db")
-    world_id = f"t{abs(hash(tmp_path.name)) % 100000}b"
+    world = open_world_at(db_path, force_mock_llm=True)
+    client = redis_for(db_path)
     bogus = "根本没有这个世界"
-    # **先清干净。** 这条验的是"拒绝之前一个键都没建",而上一次跑(或一次注入变异
-    # 的验证)可能真的建出来过 —— 那时这条会因为别人留下的垃圾而红,查起来很难看。
-    for key in client.keys(f"anima:{bogus}:*"):
-        client.delete(key)
-    world = World.open(db_path, force_mock_llm=True, redis=client, world_id=world_id)
     try:
         world.tick(60)
-        done = _cli("--db-path", db_path, "--redis", _REDIS_URL,
-                    "--world-id", bogus, "--json")
+        done = run_cli("map", "--world-id", bogus, "--json")
         assert done.returncode == 2, f"照着抄错的 id 连上去了:\n{done.stdout[:300]}"
-        assert bogus in done.stderr and world_id in done.stderr
-        assert not client.keys(f"anima:{bogus}:*"), (
+        assert bogus in done.stderr
+        assert not list(client.scan_iter(match=f"anima:{bogus}:*")), (
             "拒绝之前已经在 Redis 上把那个假世界建出来了"
         )
     finally:
         world.close()
-        for prefix in (world_id, bogus):
-            for key in client.keys(f"anima:{prefix}:*"):
-                client.delete(key)
+
+
+def test_map_refuses_a_world_that_does_not_exist(capsys):
+    """抄错 world_id 的样子比报错坏得多(5ce6aed 的教训,新形态):打开一个不存在
+    的名字会当场创世 —— 你看到的是一张排版正常、时钟 0 的地图。只读命令必须拒绝。"""
+    result = run_cli("map", "--world-id", "no-such-world")
+    assert result.returncode == 2
+    assert "没有叫" in result.stderr
+    assert "start" in result.stderr

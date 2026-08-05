@@ -17,6 +17,8 @@ side** —— 事件日志今天还不完备,在它补齐之前把这份东西�
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import json
 import subprocess
 import sys
@@ -27,16 +29,13 @@ from anima_world.api import World
 
 
 def _export(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", "events", "export", *args],
-        capture_output=True, text=True,
-    )
+    return run_cli("events", "export", *args)
 
 
 @pytest.fixture
 def lived_in(tmp_path):
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.fast_forward(288)
         world.player_move("p1", "cafe")
         world.player_action("p1", "挥手", {"target": "夏"})
@@ -49,18 +48,14 @@ def _lines(path):
 
 def test_it_exports_every_event_one_per_line(lived_in, tmp_path):
     out = tmp_path / "stream.jsonl"
-    assert _export("--db-path", str(lived_in), "--output", str(out)).returncode == 0
+    assert _export("--world-id", "w", "--output", str(out)).returncode == 0
 
     lines = _lines(out)
     header, events = lines[0], lines[1:]
     assert header["kind"] == "anima-events"
-    total = 0
-    import sqlite3
-    conn = sqlite3.connect(f"file:{lived_in}?mode=ro", uri=True)
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    finally:
-        conn.close()
+    from _worldfile import redis_for
+
+    total = int(redis_for(lived_in).llen("anima:w:events") or 0)
     assert len(events) == total
     assert [e["seq"] for e in events] == sorted(e["seq"] for e in events)
 
@@ -68,7 +63,7 @@ def test_it_exports_every_event_one_per_line(lived_in, tmp_path):
 def test_the_header_says_what_this_cannot_carry(lived_in, tmp_path):
     """**这才是这条命令存在的理由。** 一份不说明自己缺什么的导出比没有更危险。"""
     out = tmp_path / "stream.jsonl"
-    _export("--db-path", str(lived_in), "--output", str(out))
+    _export("--world-id", "w", "--output", str(out))
     header = _lines(out)[0]
 
     assert header["replayable"] is False, "不承诺可重放 —— 承诺了就得兑现"
@@ -80,18 +75,16 @@ def test_the_header_says_what_this_cannot_carry(lived_in, tmp_path):
 def test_the_header_pins_the_engine_and_db_format(lived_in, tmp_path):
     """将来谁要写导入端,第一件事就是问"这是哪一版写的"。"""
     import anima_world
-    from anima_world.db import DB_FORMAT_VERSION
 
     out = tmp_path / "stream.jsonl"
-    _export("--db-path", str(lived_in), "--output", str(out))
+    _export("--world-id", "w", "--output", str(out))
     header = _lines(out)[0]
     assert header["engine_version"] == anima_world.__version__
-    assert header["db_format_version"] == DB_FORMAT_VERSION
 
 
 def test_payloads_survive_the_round_trip(lived_in, tmp_path):
     out = tmp_path / "stream.jsonl"
-    _export("--db-path", str(lived_in), "--output", str(out))
+    _export("--world-id", "w", "--output", str(out))
     actions = [e for e in _lines(out)[1:] if e["type"] == "player_action"]
     assert actions, "玩家动作应该在流里"
     assert actions[-1]["payload"]["action"] == "挥手"
@@ -100,14 +93,14 @@ def test_payloads_survive_the_round_trip(lived_in, tmp_path):
 
 def test_a_missing_world_is_refused_and_nothing_is_created(tmp_path):
     missing = tmp_path / "nope.db"
-    result = _export("--db-path", str(missing), "--output", str(tmp_path / "x.jsonl"))
+    result = _export("--world-id", "w", "--output", str(tmp_path / "x.jsonl"))
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
     assert not missing.exists()
 
 
 def test_it_can_write_to_stdout(lived_in):
-    result = _export("--db-path", str(lived_in), "--output", "-")
+    result = _export("--world-id", "w", "--output", "-")
     assert result.returncode == 0, result.stderr
     first = json.loads(result.stdout.splitlines()[0])
     assert first["kind"] == "anima-events"

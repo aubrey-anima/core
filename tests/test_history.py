@@ -12,6 +12,8 @@ docstring 写了"全量历史请离线读 events 表",但**返回值本身不带
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import logging
 
 import pytest
@@ -20,7 +22,7 @@ from anima_world.api import World
 
 
 def _busy_world(tmp_path, ticks: int = 2600) -> World:
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     world.tick(ticks)
     return world
 
@@ -30,9 +32,8 @@ def test_history_pages_through_everything_the_window_dropped(tmp_path):
     with _busy_world(tmp_path) as world:
         # 世界是活的:叙事跑在线程池上,分页期间还会有新事件落库。所以基准是
         # **开始分页那一刻**的历史,而不是"分页结束时的总数"——后者是移动目标。
-        total, max_seq = world.scheduler.event_log.conn.execute(
-            "SELECT COUNT(*), MAX(seq) FROM events"
-        ).fetchone()
+        total = world.scheduler.event_log.count()
+        max_seq = world.scheduler.event_log.max_seq()
         assert total > 200, f"这个世界只产了 {total} 条事件,测不出窗口截断"
 
         seen, cursor, pages = [], 0, 0
@@ -77,9 +78,7 @@ def test_history_can_filter_by_who_and_by_type(tmp_path):
 def test_history_reports_the_total_so_a_host_knows_the_shape(tmp_path):
     with _busy_world(tmp_path, ticks=300) as world:
         def count() -> int:
-            return world.scheduler.event_log.conn.execute(
-                "SELECT COUNT(*) FROM events"
-            ).fetchone()[0]
+            return world.scheduler.event_log.count()
 
         # 夹逼:世界是活的,叙事线程池随时可能再落一条。total 只需落在这一刻的
         # 前后两次计数之间 —— 钉死等号会随机假红。

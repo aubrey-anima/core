@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import json
 import os
 import stat
@@ -30,14 +32,11 @@ from anima_world.api import World
 
 
 def _cli(*argv: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", *argv],
-        capture_output=True, text=True, env={**os.environ},
-    )
+    return run_cli(*argv)
 
 
 def test_the_resolution_order(tmp_path, monkeypatch):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     try:
         store = w.scheduler.config_store
         assert store.get("llm.model") == "gpt-4o-mini"
@@ -56,7 +55,7 @@ def test_the_resolution_order(tmp_path, monkeypatch):
 
 def test_values_are_coerced_to_the_declared_type(tmp_path):
     """环境变量和 JSON 里都可能是字符串,而每个读它的人都指望 float/int。"""
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     try:
         machine_config.set_value("llm.timeout", "45")
         assert w.config_get("llm.timeout") == 45.0
@@ -67,29 +66,18 @@ def test_values_are_coerced_to_the_declared_type(tmp_path):
 
 def test_the_key_never_lands_in_the_world_file(tmp_path):
     """**打包发出去的世界不该带着你的钥匙。**"""
-    import sqlite3
+    from _worldfile import current_client
 
-    db = str(tmp_path / "w.db")
-    done = _cli("config", "set", "llm.api_key", "sk-测试用的", "--db-path", db)
+    done = _cli("config", "set", "llm.api_key", "sk-测试用的", "--world-id", "w")
     assert done.returncode == 0, done.stderr
     assert "config.json" in done.stdout
 
     stored = json.loads(machine_config.config_path().read_text(encoding="utf-8"))
     assert stored["llm.api_key"] == "sk-测试用的"
 
-    # 判据是**解密之后的值**,不是那一列非不非空:创世会播一个加密过的空串进去,
-    # 而密文非空 ≠ 值非空 —— 我第一版就是这么判错的。
-    from anima_world.config_store import ConfigStore
-    from anima_world.db import open_db
-
-    conn = open_db(db)
-    try:
-        # 用 `world_value` 而不是 `get`:`get()` 现在会先问机器配置,
-        # 所以它回答不了"这个**世界文件**里有没有它"。
-        assert not ConfigStore(conn).world_value("llm.api_key"), "钥匙落进了世界文件"
-    finally:
-        conn.close()
-    _ = sqlite3
+    # 世界(:config hash)里一个字节都不许有
+    raw = current_client().hgetall("anima:w:config") or {}
+    assert not any("sk-测试用的" in v for v in raw.values()), "钥匙落进了世界"
 
 
 def test_the_file_is_0600(tmp_path):
@@ -102,8 +90,8 @@ def test_the_file_is_0600(tmp_path):
 def test_setting_a_world_key_still_goes_to_the_world(tmp_path):
     """这道路由不许误伤:只有 `llm.*` 属于机器,别的照旧进世界。"""
     db = str(tmp_path / "w.db")
-    World.open(db, force_mock_llm=True).close()
-    done = _cli("config", "set", "needs.enabled", "true", "--db-path", db)
+    open_world_at(db, force_mock_llm=True).close()
+    done = _cli("config", "set", "needs.enabled", "true", "--world-id", "w")
     assert done.returncode == 0, done.stderr
     assert "config.json" not in done.stdout
     assert machine_config.load().get("needs.enabled") is None
@@ -112,41 +100,10 @@ def test_setting_a_world_key_still_goes_to_the_world(tmp_path):
 def test_an_env_var_that_would_shadow_the_write_is_called_out(tmp_path, monkeypatch):
     """写了但不生效是最难查的一种 —— 当场说破。"""
     monkeypatch.setenv("ANIMA_LLM_MODEL", "环境变量赢了")
-    done = _cli("config", "set", "llm.model", "我刚设的", "--db-path", str(tmp_path / "w.db"))
+    done = _cli("config", "set", "llm.model", "我刚设的", "--world-id", "w")
     assert done.returncode == 0
     assert "此刻不生效" in done.stdout, "改了不生效,而它一声没吭"
 
-
-def test_an_old_world_still_reads_but_gets_called_out(tmp_path):
-    """1.3.0 之前建的世界里真的有那一行 —— 读得出来就照用,同时说清它该搬走。"""
-    from anima_world.config_store import ConfigStore, load_or_create_key
-    from anima_world.db import open_db
-
-    db = str(tmp_path / "old.db")
-    conn = open_db(db)
-    try:
-        # **老世界里那一行是密文**,不是明文:创世播默认值时带着 `is_secret=True`,
-        # 而那时每个世界都有 keyfile。用明文建这个"老世界"曾经也能通过 ——
-        # 只因为 `set()` 拿不到元数据就当普通值存;那个洞已经堵上(元数据回落到
-        # 引擎的声明),而这条测试的 setup 也就必须跟着变忠实。
-        ConfigStore(conn, fernet_key=load_or_create_key(db)).set(
-            "llm.api_key", "sk-旧世界里的"
-        )
-    finally:
-        conn.close()
-    assert (tmp_path / "old.db.key").exists(), "老世界该有 keyfile,不然这条没在验它想验的"
-
-    w = World.open(db, force_mock_llm=True)
-    try:
-        assert w.config_get("llm.api_key") == "sk-旧世界里的", "旧世界读不出来了"
-        assert w.scheduler.config_store.provenance("llm.api_key") == "世界文件"
-    finally:
-        w.close()
-
-    done = _cli("doctor", "--db-path", db, "--skip-probe")
-    assert "还在**世界文件**里" in done.stdout
-    assert "带着你的钥匙" in done.stdout
-    assert "config set llm.api_key" in done.stdout, "说了问题没说怎么办"
 
 
 def test_tests_never_touch_the_real_home():
@@ -181,7 +138,7 @@ def test_a_new_world_no_longer_needs_a_keyfile(tmp_path):
     )
 
     db = tmp_path / "fresh.db"
-    World.open(str(db), force_mock_llm=True).close()
+    open_world_at(str(db), force_mock_llm=True).close()
     assert not (tmp_path / "fresh.db.key").exists(), "新世界还在生成 keyfile"
 
 
@@ -193,48 +150,14 @@ def test_an_empty_cipher_is_not_a_lost_key(tmp_path):
     是假警报,而且是每次开机都来一遍的那种。
     """
     db = str(tmp_path / "w.db")
-    w = World.open(db, force_mock_llm=True)
+    w = open_world_at(db, force_mock_llm=True)
     try:
         assert w.scheduler.config_store.undecryptable_secrets() == [], (
             "把一个空串报成了丢钥匙"
         )
     finally:
         w.close()
-    done = _cli("doctor", "--db-path", db, "--skip-probe")
+    done = _cli("doctor", "--world-id", "w", "--skip-probe")
     assert "解不开" not in done.stdout, "doctor 报了假警报"
 
 
-def test_a_genuinely_lost_key_is_still_reported(tmp_path):
-    """**保守的那一半**:真存过 secret 的世界,钥匙丢了照旧要报。
-
-    漏报比误报坏 —— 一个真丢了钥匙的世界会静默降级成 Mock,而产物上看不出来。
-    所以判据是"这个世界有没有过 keyfile"(`had_keyfile`),缺省是 True:不知道
-    来历就照旧报警。
-    """
-    from anima_world.config_store import ConfigStore, load_or_create_key
-    from anima_world.db import open_db
-
-    db = str(tmp_path / "old.db")
-    conn = open_db(db)
-    try:
-        store = ConfigStore(conn, fernet_key=load_or_create_key(db))
-        # **必须显式声明 is_secret**:没有元数据的键会按普通值明文存,那样这条测试
-        # 验的就不是加密路径了(我第一版就是这么写的,它"通过"得毫无意义)。
-        store.set("llm.api_key", "sk-真的", value_type="str",
-                  category="llm", is_secret=True)
-    finally:
-        conn.close()
-    assert (tmp_path / "old.db.key").exists(), "旧路径没生成 keyfile,这条没在验它想验的"
-
-    (tmp_path / "old.db.key").unlink()          # 钥匙丢了,密文还在
-    conn = open_db(db)
-    try:
-        # had_keyfile 缺省 True = 保守:不知道来历就当它存过真东西
-        store = ConfigStore(conn, fernet_key=load_or_create_key(db, create=False))
-        # 问**世界那一层**:`get()` 会先看机器配置,而这条验的是世界里的密文。
-        assert store.world_value("llm.api_key") is None, "钥匙没了还读得出来?"
-        assert "llm.api_key" in store.undecryptable_secrets(), (
-            "真丢了钥匙却没报 —— 世界会静默降级成 Mock,而产物上看不出来"
-        )
-    finally:
-        conn.close()

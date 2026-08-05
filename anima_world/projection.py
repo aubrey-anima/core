@@ -90,9 +90,15 @@ def _apply_item_consume(proj: Projection, e: Event) -> None:
     who, item_id = payload.get("who") or e.who, payload.get("item_id")
     if not who or not item_id:
         return
+    try:
+        qty = int(payload.get("qty", 1))
+    except (TypeError, ValueError):
+        qty = 1
+    if qty <= 0:
+        return
     holding = proj.inventories.get(who)
     if holding and item_id in holding:  # 直接吃货架上的餐不经过随身库存,no-op
-        holding[item_id] -= 1
+        holding[item_id] -= qty
         if holding[item_id] <= 0:
             holding.pop(item_id, None)
 

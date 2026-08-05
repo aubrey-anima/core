@@ -1,39 +1,30 @@
-"""The first-run surface: `start` / `config` / `doctor`.
+"""`start` / `config` / `doctor` 的引导层:说人话的时钟、LLM 状态、CLI 往返。
 
-These commands exist because the engine's honest defaults are hostile to a
-newcomer — an unset key degrades silently, and a fresh world's clock runs at
-1:1 with reality, so the page looks frozen for the first five minutes anyone
-watches it. What is pinned here is the *reporting*, since that is the part
-that silently rots: a status that stops distinguishing "unset" from
-"unreadable" is worse than no status at all.
+world.db 退役后世界是 Redis 上的一个前缀:CLI 经 `_connect_redis` 连接,测试里
+把它换成 fakeredis(monkeypatch),`--world-id` 取代了 `--db-path` 的全部角色。
+keyfile / Fernet 的整组测试随密钥搬进机器配置而退役(世界里不再有 secret)。
 """
 from __future__ import annotations
 
-
 import pytest
-from cryptography.fernet import Fernet
 
-from anima_world import onboarding
+from anima_world import machine_config, onboarding
 from anima_world.__main__ import _coerce_config_value, main
 from anima_world.config_store import ConfigStore
-from anima_world.db import open_db
+from anima_world.redis_state import RedisConfigBackend, meta_rows
 
 
 @pytest.fixture
-def world(tmp_path):
-    """A world db with seeded config, plus its ConfigStore.
-
-    Keyed off the real sibling keyfile, not an ephemeral key: the CLI reopens
-    the db through `load_or_create_key`, and a mismatch here would put every
-    test into the "lost keyfile" branch instead of the one it means to check.
-    """
-    from anima_world.config_store import load_or_create_key
-
-    db = tmp_path / "w.db"
-    conn = open_db(db)
-    store = ConfigStore(conn, fernet_key=load_or_create_key(db))
-    yield db, store, conn
-    conn.close()
+def world(monkeypatch):
+    """一个"存在"的世界(meta 上有一行)+ 它的 ConfigStore + 接管 CLI 的连接。"""
+    fakeredis = pytest.importorskip("fakeredis")
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    monkeypatch.setattr(
+        "anima_world.__main__._connect_redis", lambda url=None: client
+    )
+    meta_rows(client, "world").put("created", "1")   # 只读命令的存在性守卫认这个
+    store = ConfigStore(RedisConfigBackend(client, "world"))
+    return client, store
 
 
 # ── clock, in words ──────────────────────────────────────────────────────────
@@ -61,7 +52,7 @@ def test_stopped_clock_is_not_a_division_by_zero():
 
 
 def test_status_unset_carries_the_fix_command(world):
-    _, store, _ = world
+    _, store = world
     status = onboarding.llm_status(store)
     assert status.state == "unset"
     assert status.degraded
@@ -69,32 +60,14 @@ def test_status_unset_carries_the_fix_command(world):
 
 
 def test_status_ok_masks_the_key(world):
-    _, store, _ = world
-    store.set("llm.api_key", "sk-abcdefghijklmnop")
+    _, store = world
+    # 密钥住机器配置,不进世界 —— ConfigStore.get 的解析顺序会读到它。
+    machine_config.set_value("llm.api_key", "sk-abcdefghijklmnop")
     status = onboarding.llm_status(store)
     assert status.state == "ok"
     assert not status.degraded
     assert status.masked_key == "sk-***mnop"
     assert "sk-abcdefghijklmnop" != status.masked_key  # never the raw key
-
-
-def test_status_tells_a_lost_keyfile_apart_from_an_unset_key(tmp_path):
-    """The two states are indistinguishable through `get()` and have opposite
-    fixes — restore a file vs. go get a key."""
-    db = tmp_path / "w.db"
-    conn = open_db(db)
-    store = ConfigStore(conn, fernet_key=Fernet.generate_key())
-    store.set("llm.api_key", "sk-real")
-    conn.close()
-
-    conn = open_db(db)
-    try:
-        reopened = ConfigStore(conn, fernet_key=Fernet.generate_key())  # keyfile lost
-        status = onboarding.llm_status(reopened, db)
-        assert status.state == "unreadable"
-        assert str(db) in status.summary and "key" in status.summary
-    finally:
-        conn.close()
 
 
 def test_no_config_store_is_its_own_state():
@@ -126,42 +99,43 @@ def test_config_rejects_a_value_of_the_wrong_type():
 
 
 def test_config_set_then_get_round_trips_through_the_cli(world, capsys):
-    db, _, conn = world
-    conn.close()  # the CLI opens its own connection
-
-    assert main(["config", "--db-path", str(db), "set", "scheduler.tick_rate", "0.5"]) == 0
+    assert main(["config", "set", "scheduler.tick_rate", "0.5"]) == 0
     capsys.readouterr()
-    assert main(["config", "--db-path", str(db), "get", "scheduler.tick_rate"]) == 0
+    assert main(["config", "get", "scheduler.tick_rate"]) == 0
     assert capsys.readouterr().out.strip() == "0.5"
 
 
 def test_config_set_refuses_an_unknown_key(world, capsys):
-    db, _, conn = world
-    conn.close()
-    assert main(["config", "--db-path", str(db), "set", "llm.apikey", "x"]) == 2
+    assert main(["config", "set", "llm.apikey", "x"]) == 2
     assert "config list" in capsys.readouterr().err
 
 
 def test_config_get_never_prints_a_raw_secret(world, capsys):
-    db, store, conn = world
-    store.set("llm.api_key", "sk-supersecretvalue")
-    conn.close()
-    assert main(["config", "--db-path", str(db), "get", "llm.api_key"]) == 0
+    machine_config.set_value("llm.api_key", "sk-supersecretvalue")
+    assert main(["config", "get", "llm.api_key"]) == 0
     assert "sk-supersecretvalue" not in capsys.readouterr().out
+
+
+def test_config_set_routes_a_machine_key_to_machine_config(world, capsys):
+    """密钥属于这台机器:`config set llm.api_key` 落进 ~/.anima-world,不进世界。"""
+    assert main(["config", "set", "llm.api_key", "sk-routed"]) == 0
+    found = machine_config.resolve("llm.api_key")
+    assert found is not None and found[0] == "sk-routed"
+    client, _ = world
+    raw = client.hgetall("anima:world:config") or {}
+    assert not any("sk-routed" in v for v in raw.values()), "密钥不许落进世界"
 
 
 # ── doctor ───────────────────────────────────────────────────────────────────
 
 
-def test_doctor_on_a_missing_world_points_at_start(tmp_path, capsys):
-    assert main(["doctor", "--db-path", str(tmp_path / "nope.db")]) == 1
+def test_doctor_on_a_missing_world_points_at_start(world, capsys):
+    assert main(["doctor", "--world-id", "nope"]) == 1
     assert "anima-world start" in capsys.readouterr().out
 
 
 def test_doctor_flags_a_degraded_world_without_calling_out(world, capsys):
-    db, _, conn = world
-    conn.close()
-    assert main(["doctor", "--db-path", str(db), "--skip-probe"]) == 1
+    assert main(["doctor", "--skip-probe"]) == 1
     out = capsys.readouterr().out
     assert "LLM 未配置" in out
     assert "与现实 1:1" in out  # the clock is reported in words, always
@@ -173,11 +147,12 @@ def test_doctor_names_the_cheap_work_running_on_the_expensive_model(world, capsy
     意图分类走的是背景槽,而空的背景槽退回主模型。它每轮跑一次、**串在回复前面**,
     所以玩家等的是两次生成而不是一次。她照样回话,所以这条永远不会自己暴露。
     """
-    db, store, conn = world
+    _, store = world
     store.set("chat.intent.enabled", True)
-    conn.close()
+    machine_config.set_value("llm.api_key", "sk-x")
+    machine_config.set_value("llm.model", "big-model")
 
-    main(["doctor", "--db-path", str(db), "--skip-probe"])
+    main(["doctor", "--skip-probe"])
     out = capsys.readouterr().out
     assert "背景槽没配" in out
     assert "意图分类" in out
@@ -186,12 +161,11 @@ def test_doctor_names_the_cheap_work_running_on_the_expensive_model(world, capsy
 
 def test_doctor_stays_quiet_when_nothing_cheap_is_running(world, capsys):
     """开关都关着就别唠叨 —— 一个没人会读的建议和没有建议一样。"""
-    db, store, conn = world
+    _, store = world
     for key in ("chat.intent.enabled", "autonomy.enabled", "chat.loop.enabled"):
         store.set(key, False)
-    conn.close()
 
-    main(["doctor", "--db-path", str(db), "--skip-probe"])
+    main(["doctor", "--skip-probe"])
     assert "背景槽没配" not in capsys.readouterr().out
 
 
@@ -199,79 +173,75 @@ def test_doctor_stays_quiet_when_nothing_cheap_is_running(world, capsys):
 
 
 def test_empty_key_is_a_supported_answer_not_an_error(world):
-    db, store, _ = world
+    _, store = world
     configured = onboarding.configure_llm_interactively(
-        store, db, input_fn=lambda _: "", secret_input_fn=lambda _: ""
+        store, input_fn=lambda _: "", secret_input_fn=lambda _: ""
     )
     assert configured is False
     assert onboarding.llm_status(store).state == "unset"
 
 
 def test_guided_setup_stores_key_url_and_model(world, capsys):
-    db, store, _ = world
+    _, store = world
     answers = iter(["https://api.longcat.chat/openai/v1", "LongCat-2.0"])
     configured = onboarding.configure_llm_interactively(
-        store, db, input_fn=lambda _: next(answers), secret_input_fn=lambda _: "sk-typed-in"
+        store, input_fn=lambda _: next(answers), secret_input_fn=lambda _: "sk-typed-in"
     )
     assert configured is True
     assert store.get("llm.api_key") == "sk-typed-in"
     assert store.get("llm.model") == "LongCat-2.0"
     assert store.get("llm.base_url") == "https://api.longcat.chat/openai/v1"
     assert "sk-typed-in" not in capsys.readouterr().out  # echoed masked only
+    # 写进的是机器配置,不是世界。
+    found = machine_config.resolve("llm.api_key")
+    assert found is not None and found[0] == "sk-typed-in"
 
 
 def test_guided_setup_accepts_defaults_on_bare_enter(world):
-    db, store, _ = world
+    _, store = world
     onboarding.configure_llm_interactively(
-        store, db, input_fn=lambda _: "", secret_input_fn=lambda _: "sk-typed-in"
+        store, input_fn=lambda _: "", secret_input_fn=lambda _: "sk-typed-in"
     )
     assert store.get("llm.base_url") == onboarding.DEFAULT_BASE_URL
     assert store.get("llm.model") == onboarding.DEFAULT_MODEL
 
 
-@pytest.mark.parametrize("db_path", ["worlds/mine.db", __import__("pathlib").Path("worlds/mine.db")])
-def test_fix_command_names_the_world_it_applies_to(world, db_path):
-    """回归:自定义路径的世界,修复提示必须带上 --db-path。
+def test_fix_command_names_the_world_it_applies_to(world):
+    """回归:非默认名字的世界,修复提示必须带上 --world-id。
 
-    不带的话,照抄提示的人会在默认路径下静默新建一个空世界、把密钥写进那个
-    幽灵世界,自己的世界依旧降级 —— 再跑 doctor 还是同一句提示,原地打转。
-    Path 与 str 两种传法都要认(doctor 传 Path,start 传 str)。
+    不带的话,照抄提示的人会把密钥配置指向默认世界,自己的世界依旧降级 ——
+    再跑 doctor 还是同一句提示,原地打转。
     """
-    _, store, _ = world
-    fix = onboarding.llm_status(store, db_path).fix
-    assert "--db-path worlds/mine.db" in fix
+    _, store = world
+    fix = onboarding.llm_status(store, "mine").fix
+    assert "--world-id mine" in fix
 
 
 def test_fix_command_stays_bare_on_the_default_world(world):
-    """反过来:世界就在默认路径时,提示不该塞进冗余的 --db-path。"""
-    _, store, _ = world
-    fix = onboarding.llm_status(store, onboarding.DEFAULT_DB_PATH).fix
-    assert "--db-path" not in fix
+    """反过来:世界就叫默认名字时,提示不该塞进冗余的 --world-id。"""
+    _, store = world
+    fix = onboarding.llm_status(store, onboarding.DEFAULT_WORLD_ID).fix
+    assert "--world-id" not in fix
 
 
-def test_config_accepts_db_path_trailing_like_every_other_command(world, capsys):
-    """回归:`config set k v --db-path w.db` 必须和前置写法等价。
+def test_config_accepts_world_id_trailing_like_every_other_command(world, capsys):
+    """回归:`config set k v --world-id world` 必须和前置写法等价。
 
-    --db-path 曾只挂在 config 这一层组解析器上,是六个子命令里唯一的例外:
-    doctor/run/simulate 乃至同为两级的 `world export` 都接受尾置写法,而
-    config 尾置会撞上一句顶层 usage 错(exit 2),连正确位置都不提示。
+    这组参数曾只挂在 config 的组解析器上,尾置会撞一句顶层 usage 错(exit 2),
+    连正确位置都不提示。SUPPRESS 的叶子副本就是修这个的。
     """
-    db, _, conn = world
-    conn.close()
-
-    assert main(["config", "set", "scheduler.tick_rate", "0.25", "--db-path", str(db)]) == 0
+    assert main(["config", "set", "scheduler.tick_rate", "0.25", "--world-id", "world"]) == 0
     capsys.readouterr()
-    assert main(["config", "get", "scheduler.tick_rate", "--db-path", str(db)]) == 0
+    assert main(["config", "get", "scheduler.tick_rate", "--world-id", "world"]) == 0
     assert capsys.readouterr().out.strip() == "0.25"
-    assert main(["config", "list", "--db-path", str(db)]) == 0
+    assert main(["config", "list", "--world-id", "world"]) == 0
     assert "scheduler.tick_rate" in capsys.readouterr().out
 
 
-def test_config_leaf_db_path_wins_over_the_group_copy(world, capsys):
+def test_config_leaf_world_id_wins_over_the_group_copy(world, capsys):
     """两处都给时,以叶子(用户最后打的那个)为准 —— 不能各写各的。"""
-    db, _, conn = world
-    conn.close()
-
-    assert main(["config", "--db-path", "saves/nonexistent.db", "get",
-                 "scheduler.tick_rate", "--db-path", str(db)]) == 0
-    assert capsys.readouterr().out.strip()  # 读到了真实世界,而不是那个不存在的
+    assert main(["config", "set", "scheduler.tick_rate", "0.75"]) == 0
+    capsys.readouterr()
+    assert main(["config", "--world-id", "ghost-world", "get",
+                 "scheduler.tick_rate", "--world-id", "world"]) == 0
+    assert capsys.readouterr().out.strip() == "0.75"  # 读到了真实世界

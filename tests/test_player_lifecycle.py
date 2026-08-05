@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -20,7 +22,7 @@ from anima_world.api import World
 
 @pytest.fixture
 def world(tmp_path):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     yield w
     w.close()
 
@@ -74,18 +76,18 @@ def test_what_a_visitor_leaves_behind_outlives_the_visit(world):
     world.player_leave("p1")
 
     assert world.who_is_present() == []
-    conversations = world.scheduler.event_log.conn.execute(
-        "SELECT COUNT(*) FROM events WHERE type = 'conversation'"
-    ).fetchone()[0]
+    conversations = sum(
+        1 for e in world.scheduler.event_log.replay() if e.type == "conversation"
+    )
     assert conversations == 1, "人走了,他造成的历史必须还在"
 
 
 def test_presence_does_not_survive_a_restart(tmp_path):
     """在场是会话状态,刻意不落库 —— 重启即新访,这是访客模型的定义。"""
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.player_move("p1", "cafe")
         assert world.who_is_present() == ["p1"]
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.who_is_present() == []

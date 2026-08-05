@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 from importlib import resources
 
@@ -28,7 +30,7 @@ def _bundled_seed() -> dict:
 @pytest.fixture
 def flagship(tmp_path):
     """开箱世界:不指定种子 = 用内置的那一份。"""
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     yield world
     world.close()
 
@@ -91,6 +93,37 @@ def test_everyone_wants_something(flagship):
     """目标进 planner 的 prompt —— 没有目标的角色只会闲逛。"""
     for agent_id, brain in flagship.scheduler.agents.items():
         assert brain.agent.blackboard.read("goals"), f"{agent_id} 没有目标"
+
+
+def test_doing_something_costs_her_something(flagship):
+    """**一个总能成功的动作产生不了任何决策。**
+
+    橱窗里那棵老橡树原本是个"谁按谁灵"的按钮:照料一次长 5 厘米,不累、不限次、
+    谁来做都一样。于是这个世界里没有任何理由挑先做哪件事、没有理由歇一会儿、
+    也没有理由变强 —— 而丰富的决策全是从"做不到"里长出来的。
+
+    这条把那一整条链演一遍:她有体力 → 照料要花体力 → 花光了当场做不了 →
+    过一天缓过来。断在任何一环,橱窗就退回那个按钮。
+    """
+    agent_id = next(iter(flagship.scheduler.agents))
+    assert flagship.stocks(f"agent:{agent_id}")["体力"] == 100.0
+
+    tended = 0
+    while True:
+        result = flagship.scheduler.perform_affordance(agent_id, "tree:harbor_oak", "tend")
+        if not result["ok"]:
+            break
+        tended += 1
+        assert tended < 50, "她怎么都累不倒 —— 代价没落到她身上"
+    assert tended > 1, "她一次都没干成,橱窗展示的是一堵墙不是一个世界"
+    # 而"做不了"和"这会儿不行"必须分得开:她该去歇着,不是去等这棵树。
+    assert result["reason"] == "incapable", result
+
+    # 她自己知道这件事 —— 不知道的话,她会在一个"以为自己精神得很"的世界里做决定。
+    assert flagship.perception(agent_id)["own"]["体力"] < 100.0
+
+    flagship.tick(288)   # 一个世界日
+    assert flagship.stocks(f"agent:{agent_id}")["体力"] == 100.0, "缓不过来 = 只能干一天活"
 
 
 def test_a_no_key_world_still_boots_clean(flagship):

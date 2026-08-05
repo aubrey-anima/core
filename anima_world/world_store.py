@@ -1,30 +1,32 @@
-"""World definition stores: locations, action table, and BT structure in DB.
+"""World definition stores: locations, action table, and BT structure.
 
 Data-plane principle: definition data (location geometry, the node→action
-mapping, tree shape) lives in tables — seeded idempotently on first boot,
-current value owned by the DB row (M5 "DB row wins"). The event log remains
-the world's history; nothing here emits or replays events.
+mapping, tree shape) is rows — seeded idempotently on first boot, current
+value owned by the storage row (M5 "row wins"). The event log remains the
+world's history; nothing here emits or replays events.
 
-`LocationStore` owns the `locations` table — the map's single source of truth
+这一层是**纯逻辑基类**:存储原语(增删查行)归子类
+(`redis_state.RedisLocationStore` / `redis_state.RedisBTStore`),这里只放
+从行**算出来**的东西 —— 树的组装、相对坐标折算、距离、播种次序。派生逻辑
+只依赖存储原语,所以任何后端接上那几个方法就得到整套行为,而"这棵树怎么
+组装"永远只有一份实现。
+
+`LocationStore` owns the location rows — the map's single source of truth
 (nested-map D7): an adjacency tree of regions and points with parent-relative
 0~1 geometry. Nothing about the map goes through the event log.
-`BTStore` owns `bt_actions` (the DB-backed `ActionTable`) and `bt_nodes`
-(behavior tree shape, one row per node: children link via `parent`, ordered
-by `sort`), and can rebuild live `bt_nodes.py` objects from those rows.
+`BTStore` owns the action rows (the row-backed `ActionTable`) and the BT node
+rows (behavior tree shape, one row per node: children link via `parent`,
+ordered by `sort`), and can rebuild live `bt_nodes.py` objects from those rows.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import math
-import sqlite3
-import threading
 from datetime import datetime, timezone
 from typing import Any
 
 from anima_world.actions import ActionDescriptor, ActionTable
-from anima_world.db import BT_NODE_TYPES
 from anima_world.bt_nodes import (
     Action,
     Condition,
@@ -34,6 +36,7 @@ from anima_world.bt_nodes import (
     Selector,
     Sequence,
     Status,
+    StockCondition,
     TimeWindow,
     default_bt,
 )
@@ -49,44 +52,48 @@ def _now() -> str:
 
 _LOCATION_FIELDS = ("name", "description", "kind", "parent", "x", "y", "w", "h")
 
-# Depth cap for tree assembly — dirty data (a cycle written via raw SQL) must
-# degrade, never recurse forever.
+# `seed_tree` 认识的全部节点类型 —— 也是 `_build_node` 能构造的全集。
+# (历史上住在 `anima_world.db` 的 CHECK 约束里;SQLite 层移除后,这里是权威。
+# 加类型时两处一起动:这行 + `_build_node`,`tests/test_bt_authoring.py` 盯着。)
+BT_NODE_TYPES = (
+    "selector", "sequence", "condition", "action", "time_window", "plan",
+    "need_action", "stock_condition",
+)
+
+# Depth cap for tree assembly — dirty data (a cycle written via a raw backend
+# write) must degrade, never recurse forever.
 _MAX_TREE_DEPTH = 32
 
 
 class LocationStore:
-    """SQLite-backed location definitions — the map's single source of truth.
+    """Location definitions — the map's single source of truth(纯逻辑基类).
 
-    Rows form an adjacency tree: `parent` self-refs another row (NULL = top
+    Rows form an adjacency tree: `parent` self-refs another row (None = top
     level), `kind` is 'region' (may nest) or 'point' (agents stand on these).
-    Geometry is relative to the parent region, normalized 0~1. Access is
-    serialized through `lock` (the scheduler's RLock in the server — same
-    pattern as ChatStore).
+    Geometry is relative to the parent region, normalized 0~1.
+
+    **存储归子类**:`all` / `get` / `upsert` 是存储原语,子类负责实现
+    (`redis_state.RedisLocationStore`)。子类还要自备 `self._lock`
+    (进程内线程锁;跨进程那把在 `World` 上)—— 派生方法在它下面串行化。
+    没有 `__init__`:这一层不持有任何存储状态。
     """
 
-    def __init__(self, conn: sqlite3.Connection, lock: Any | None = None) -> None:
-        self._conn = conn
-        self._lock = lock if lock is not None else threading.RLock()
-
-    def _rows(self, cur: sqlite3.Cursor) -> list[dict[str, Any]]:
-        cols = [c[0] for c in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    def _rows(self, cur: Any) -> list[dict[str, Any]]:
+        """(历史上是 SQLite 游标→dict 适配器。)存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisLocationStore)")
 
     def all(self) -> list[dict[str, Any]]:
-        with self._lock:
-            return self._rows(self._conn.execute("SELECT * FROM locations ORDER BY id"))
+        """All location rows, ordered by id. 存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisLocationStore)")
 
     def get(self, loc_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            rows = self._rows(
-                self._conn.execute("SELECT * FROM locations WHERE id = ?", (loc_id,))
-            )
-            return rows[0] if rows else None
+        """One location row, or None. 存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisLocationStore)")
 
     def tree(self) -> list[dict[str, Any]]:
         """Assemble the adjacency rows into nested dicts (each row gains a
         `children` list). Defensive: a row whose parent is dangling or part of
-        a cycle is logged and treated as top-level, so hand-written SQL can
+        a cycle is logged and treated as top-level, so a hand-written row can
         never make the map un-renderable."""
         rows = {r["id"]: {**r, "children": []} for r in self.all()}
         roots: list[dict[str, Any]] = []
@@ -221,41 +228,19 @@ class LocationStore:
     def upsert(self, loc_id: str, **fields: Any) -> None:
         """Create or partially update a location; omitted fields are untouched.
         Invalid hierarchy (unknown/point parent, cycle) or a point carrying
-        region geometry raises and leaves the table unchanged."""
-        unknown = set(fields) - set(_LOCATION_FIELDS)
-        if unknown:
-            raise ValueError(f"unknown location fields: {sorted(unknown)}")
-        with self._lock:
-            existing = self.get(loc_id)
-            base: dict[str, Any] = existing or {
-                "name": loc_id, "description": "", "kind": "point",
-                "parent": None, "x": None, "y": None, "w": None, "h": None,
-            }
-            merged = {**base, **fields}
-            self._validate(loc_id, merged)
-            values = tuple(merged[f] for f in _LOCATION_FIELDS)
-            if existing is None:
-                cols = ", ".join(_LOCATION_FIELDS)
-                marks = ", ".join("?" for _ in _LOCATION_FIELDS)
-                self._conn.execute(
-                    f"INSERT INTO locations (id, {cols}, updated_at) VALUES (?, {marks}, ?)",
-                    (loc_id, *values, _now()),
-                )
-            else:
-                assignments = ", ".join(f"{f}=?" for f in _LOCATION_FIELDS)
-                self._conn.execute(
-                    f"UPDATE locations SET {assignments}, updated_at=? WHERE id=?",
-                    (*values, _now(), loc_id),
-                )
-            self._conn.commit()
+        region geometry raises and leaves the rows unchanged. 存储归子类
+        (子类实现里要调用 `self._validate(loc_id, merged)` 保住这些约束)。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisLocationStore)")
 
     def seed_defaults(self, entries: list[dict[str, Any]]) -> None:
-        """Insert `entries` only when the table is empty — a populated table
-        is user data and must never be clobbered by re-seeding. Parents are
-        seeded before their children so hierarchy validation can see them."""
+        """Insert `entries` only when the store is empty — populated rows are
+        user data and must never be clobbered by re-seeding. Parents are
+        seeded before their children so hierarchy validation can see them.
+
+        只依赖 `all` / `upsert`,所以任何后端接上原语就能用;子类想换判空
+        姿势(如 Redis 版)可以覆盖,但语义必须保持"空才播"。"""
         with self._lock:
-            (count,) = self._conn.execute("SELECT COUNT(*) FROM locations").fetchone()
-            if count:
+            if self.all():
                 return
             for e in _parents_first(entries):
                 self.upsert(
@@ -286,31 +271,25 @@ def _parents_first(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 class BTStore:
-    """SQLite-backed action table (`bt_actions`) + tree shape (`bt_nodes`)."""
+    """Action table + tree shape(纯逻辑基类).
 
-    def __init__(self, conn: sqlite3.Connection, lock: Any | None = None) -> None:
-        self._conn = conn
-        self._lock = lock if lock is not None else threading.RLock()
+    **存储归子类**:`actions` / `set_action` / `add_node` / `_tree_rows` 是
+    存储原语,子类负责实现(`redis_state.RedisBTStore`)。子类还要自备
+    `self._lock`(进程内线程锁)。`action_table` / `build_tree` / `seed_*` /
+    `duty_windows` 全建在那四个原语之上 —— 组装逻辑只此一份。
+    没有 `__init__`:这一层不持有任何存储状态。
+    """
 
     # ── action table ────────────────────────────────────────────────────────
 
     def actions(self) -> list[dict[str, Any]]:
-        with self._lock:
-            cur = self._conn.execute("SELECT node_id, kind, params FROM bt_actions ORDER BY node_id")
-            return [
-                {"node_id": n, "kind": k, "params": json.loads(p or "{}")}
-                for n, k, p in cur.fetchall()
-            ]
+        """All action rows `{node_id, kind, params}`, ordered by node_id.
+        存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisBTStore)")
 
     def set_action(self, node_id: str, kind: str, params: dict[str, Any] | None = None) -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO bt_actions (node_id, kind, params, updated_at) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(node_id) DO UPDATE SET kind=excluded.kind, "
-                "params=excluded.params, updated_at=excluded.updated_at",
-                (node_id, kind, json.dumps(params or {}, ensure_ascii=False), _now()),
-            )
-            self._conn.commit()
+        """Upsert one action binding. 存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisBTStore)")
 
     def action_table(self) -> ActionTable:
         """Build a live `ActionTable` from the rows (lookup fallback stays
@@ -333,15 +312,8 @@ class BTStore:
         sort: int = 0,
         params: dict[str, Any] | None = None,
     ) -> None:
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO bt_nodes (tree, node_id, type, parent, sort, params) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(tree, node_id) DO UPDATE SET type=excluded.type, "
-                "parent=excluded.parent, sort=excluded.sort, params=excluded.params",
-                (tree, node_id, node_type, parent, sort, json.dumps(params or {}, ensure_ascii=False)),
-            )
-            self._conn.commit()
+        """Upsert one BT node row (keyed on (tree, node_id)). 存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisBTStore)")
 
     def build_tree(self, tree: str = "default") -> Node:
         """Rebuild a `bt_nodes.py` tree from rows.
@@ -376,15 +348,9 @@ class BTStore:
             return default_bt()
 
     def _tree_rows(self, tree: str) -> list[dict[str, Any]]:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT node_id, type, parent, sort, params FROM bt_nodes WHERE tree = ? ORDER BY sort",
-                (tree,),
-            )
-            return [
-                {"node_id": n, "type": t, "parent": p, "sort": s, "params": json.loads(pr or "{}")}
-                for n, t, p, s, pr in cur.fetchall()
-            ]
+        """One tree's node rows `{node_id, type, parent, sort, params}`,
+        ordered by sort(次序决定 Selector 的优先级). 存储归子类。"""
+        raise NotImplementedError("存储归子类(redis_state.RedisBTStore)")
 
     def _build_node(
         self, row: dict[str, Any], children: dict[str, list[dict[str, Any]]]
@@ -401,9 +367,9 @@ class BTStore:
         if node_type == "plan":
             return PlanAction()
         if node_type == "need_action":
-            # `bt_nodes` 的 CHECK 一直放行这个类型,而这里一直不认它 —— 于是作者
-            # 写一行完全合法的 SQL,`_build_node` 抛 ValueError,调用方兜成一行
-            # warning,**整棵作者树塌回 default_bt()**(只会 idle_wander)。
+            # 这个类型曾经在存储侧放行、在这里不认 —— 于是作者写一行完全合法的
+            # 节点,`_build_node` 抛 ValueError,调用方兜成一行 warning,
+            # **整棵作者树塌回 default_bt()**(只会 idle_wander)。
             # 世界照跑,角色什么也不干。
             p = row["params"]
             release = p.get("release")
@@ -412,6 +378,15 @@ class BTStore:
                 float(p.get("threshold", 0.0)),
                 str(p.get("action_id", "")),
                 None if release is None else float(release),
+            )
+        if node_type == "stock_condition":
+            p = row["params"]
+            # 比较符不认识时 `StockCondition` 自己抛 ValueError,消息里带着那个符号。
+            # 调用方兜成一行 warning —— 打错一个符号让整棵树塌回 idle_wander 是重了,
+            # 但比"这条分支永不触发而日志干净"轻得多。
+            return StockCondition(
+                str(p.get("owner", "")), str(p.get("key", "")),
+                str(p.get("op", "<")), float(p.get("value", 0.0)),
             )
         kids = [self._build_node(c, children) for c in children.get(row["node_id"], [])]
         if node_type == "selector":
@@ -426,11 +401,11 @@ class BTStore:
         """Seed the action table from the live roster (`go_to_<loc>` per
         location, `chat_with_<agent>` per agent — no hardcoded ghosts) plus
         the fixed kinds, and the 'default' tree (root selector → idle_wander,
-        byte-for-byte the old `default_bt()` behavior). Empty-table-only,
+        byte-for-byte the old `default_bt()` behavior). Empty-store-only,
         same contract as `LocationStore.seed_defaults`."""
         with self._lock:
-            # 走 `self.actions()` 而不是直接查表:这个方法要能在换了后端的子类上
-            # 照跑(`redis_state.RedisBTStore`)。父类里留一处直读,子类就得把整个
+            # 走 `self.actions()` 而不是直读存储:这个方法要能在任何后端的子类上
+            # 照跑(`redis_state.RedisBTStore`)。基类里留一处直读,子类就得把整个
             # 方法重写一遍 —— 而重写的那份迟早和这份不一样。
             if not self.actions():
                 for loc in location_ids:
@@ -449,38 +424,62 @@ class BTStore:
         """用种子里写死的节点表播一棵树(`agents[].behavior_tree`)。
 
         `duties` 只能表达"时间窗 → 动作"这一种形状 —— 作者要写条件分支、需求带、
-        嵌套选择器,就够不着了。这条路把 `bt_nodes` 的表达力整个交出去。
+        嵌套选择器,就够不着了。这条路把 BT 节点行的表达力整个交出去。
 
         规矩与其它播种一致:**空表才播**(手改过的树是用户数据),**坏条目跳过并
         警告、绝不阻塞开机**(坏种子让世界少一个分支,不该让世界开不了机)。
         返回是否真的播了 —— 调用方据此决定要不要退回 `duties`。
+
+        `action` 节点可以随身带一个 `{"action": {"kind": ..., "params": {...}}}`。
+        没有它,一个作者写的动作叶子跑起来**只会 idle_wander**:节点 id 在动作表里
+        查不到,`ActionTable.lookup` 回落到闲逛,树成功、世界不动、日志干净 ——
+        `duties` 那条路一直替作者调 `set_action`,这条路以前根本没有出口。
+        带在节点上而不是另开一张表,是为了不可能出现孤儿行。
         """
         if not nodes:
             return False
         with self._lock:
-            # 走 `_tree_rows` 而不是直接查表 —— 见 `seed_defaults` 里那条注释。
+            # 走 `_tree_rows` 而不是直读存储 —— 见 `seed_defaults` 里那条注释。
             if self._tree_rows(agent_id):
                 return True  # 已有树:视作"种子这条路走过了",别再叠 duties 上去
 
             planted = 0
+            leaves: list[str] = []
             for index, node in enumerate(nodes):
                 try:
                     node_type = str(node["type"])
                     if node_type not in BT_NODE_TYPES:
                         raise ValueError(f"unknown node type {node_type!r}")
+                    node_id = str(node["node_id"])
                     self.add_node(
                         agent_id,
-                        str(node["node_id"]),
+                        node_id,
                         node_type,
                         parent=node.get("parent"),
                         sort=int(node.get("sort", index)),
                         params=dict(node.get("params") or {}),
                     )
+                    if node_type == "action":
+                        leaves.append(node_id)
+                        spec = node.get("action")
+                        if spec is not None:
+                            self.set_action(
+                                node_id, str(spec["kind"]), dict(spec.get("params") or {})
+                            )
                     planted += 1
-                except (KeyError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+                except (KeyError, TypeError, ValueError) as exc:
                     logger.warning(
                         "agent %r 的 behavior_tree[%d] 写坏了(%s)—— 跳过这个节点",
                         agent_id, index, exc,
+                    )
+            known = {row["node_id"] for row in self.actions()}
+            for node_id in leaves:
+                if node_id not in known:
+                    logger.warning(
+                        "agent %r 的动作叶子 %r 在动作表里没有对应的行 —— 它跑起来"
+                        "只会 idle_wander。给这个节点加一个 "
+                        '"action": {"kind": ..., "params": {...}}',
+                        agent_id, node_id,
                     )
             return planted > 0
 
@@ -490,10 +489,15 @@ class BTStore:
         Shape — a priority Selector, duties first, idle last:
 
             root (selector)
-              ├─ <duty> (sequence) ─┬─ <duty>_when (time_window)
-              │                     └─ <duty>     (action → bt_actions row)
+              ├─ <duty> (sequence) ─┬─ <duty>_when  (time_window)
+              │                     ├─ <duty>_stock (stock_condition,可选)
+              │                     └─ <duty>       (action → action row)
               ├─ …
               └─ idle_wander (action)            ← always the last resort
+
+        `when_stock` 是可选的第二道闸:**到点了,而且世界的量到了那个数**。
+        钟点排班表达不了"面粉见底了才去进货" —— 而人正是那样活的。缺席时这个
+        节点不存在,树逐字和以前一样。
 
         Seeds only when this agent's tree is empty (same empty-only contract as
         the other stores — a hand-edited tree is user data). A malformed duty is
@@ -502,7 +506,7 @@ class BTStore:
         i.e. today's idle-only behavior).
         """
         with self._lock:
-            # 走 `_tree_rows` 而不是直接查表 —— 见 `seed_defaults` 里那条注释。
+            # 走 `_tree_rows` 而不是直读存储 —— 见 `seed_defaults` 里那条注释。
             if self._tree_rows(agent_id):
                 return
 
@@ -514,6 +518,15 @@ class BTStore:
                     start = parse_hhmm(duty["start"])
                     end = parse_hhmm(duty["end"])
                     kind = str(duty["kind"])
+                    gate = duty.get("when_stock")
+                    if gate is not None:
+                        gate = {
+                            "owner": str(gate["owner"]), "key": str(gate["key"]),
+                            "op": str(gate.get("op", "<")), "value": float(gate["value"]),
+                        }
+                        # 就地造一个,把打错的比较符在**播种的时候**就顶回来。
+                        # 留到 `build_tree` 才炸,炸掉的是整棵树。
+                        StockCondition(gate["owner"], gate["key"], gate["op"], gate["value"])
                 except (KeyError, TypeError, ValueError) as exc:
                     logger.warning(
                         "agent %r has a malformed duty %r (%s) — skipping it", agent_id, duty, exc
@@ -524,7 +537,12 @@ class BTStore:
                     agent_id, f"{name}_when", "time_window", parent=name, sort=0,
                     params={"start": start, "end": end},
                 )
-                self.add_node(agent_id, f"{name}_do", "action", parent=name, sort=1)
+                if gate is not None:
+                    self.add_node(
+                        agent_id, f"{name}_stock", "stock_condition", parent=name,
+                        sort=1, params=gate,
+                    )
+                self.add_node(agent_id, f"{name}_do", "action", parent=name, sort=2)
                 # The leaf's node_id is what Brain looks up in the action table.
                 self.set_action(f"{name}_do", kind, duty.get("params") or {})
                 sort += 1

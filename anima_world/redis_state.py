@@ -671,6 +671,11 @@ class RedisPromptStore:
         return resolve(name, None if row is None else str(row.get("template", "")), default)
 
     def set(self, name: str, template: str, description: str | None = None) -> None:
+        from anima_world.prompt_store import check_renders
+
+        # 坏模板当场拒绝(PromptRenderError)—— SQLite 版就在这儿挡;不挡的话
+        # 它落进世界,渲染时才炸,而渲染在聊天路径上。
+        check_renders(name, template)
         old = self._rows.get(name) or {}
         self._rows.put(name, {
             "name": name, "template": template,
@@ -721,6 +726,11 @@ class RedisVisibilityStore:
         }
 
     def place(self, owner: str, location: str, label: str | None = None) -> None:
+        # 挪位置不丢名字:label 没给就沿用旧的(SQLite 版 COALESCE 的对应物)。
+        if label is None:
+            row = self._places.get(owner)
+            if row is not None:
+                label = row.get("label")
         self._places.put(owner, {"owner": owner, "location": location, "label": label})
 
     def at(self, location: str) -> dict[str, str | None]:
@@ -749,16 +759,45 @@ class RedisMemoryStore:
     世界在两台机器上召回不同的记忆,而且不报错**。这里照抄那个排序键。
     """
 
-    __slots__ = ("_redis", "_world", "_rows", "_config")
+    __slots__ = ("_redis", "_world", "_rows", "_config", "_explicit_capacity")
 
-    def __init__(self, redis: Any, world_id: str, config_store: Any = None) -> None:
+    def __init__(self, redis: Any, world_id: str, config_store: Any = None,
+                 capacity: int | None = None) -> None:
         self._redis = redis
         self._world = world_id
         self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:memories")
         self._config = config_store
+        # 显式 capacity 归测试;生产从 config(`memory.capacity`)现读。
+        self._explicit_capacity = capacity
 
     def _next_id(self) -> int:
         return int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:memories:id"))
+
+    def count(self) -> int:
+        return len(self._rows)
+
+    def rebuild(self, events, trigger) -> int:
+        """Replay events through `trigger` only if the store is empty (idempotent).
+
+        与 SQLite 时代同一条契约:有行就一动不动 —— 记忆是持久状态,重放一遍
+        等于把她的一生按今天的触发器重新裁一遍。
+        """
+        total = self.count()
+        if total > 0:
+            return total
+        for event in events:
+            descriptor = trigger(event)
+            if descriptor is not None:
+                self.add(
+                    agent_id=descriptor.agent_id,
+                    tick=descriptor.tick,
+                    kind=descriptor.kind,
+                    summary=descriptor.summary,
+                    importance=descriptor.importance,
+                    anchor=descriptor.anchor,
+                    event_seq=descriptor.event_seq,
+                )
+        return self.count()
 
     def add(self, agent_id: str, tick: int, kind: str, summary: str,
             importance: float = 0.5, anchor: bool = False,
@@ -772,7 +811,29 @@ class RedisMemoryStore:
             "source_ids": list(source_ids or []), "strength": 1.0,
             "last_access": None, "access_count": 0,
         })
+        self._evict_if_over_capacity(agent_id)
         return memory_id
+
+    def _capacity(self) -> int:
+        if self._explicit_capacity is not None:
+            return int(self._explicit_capacity)
+        if self._config is not None:
+            return int(self._config.get("memory.capacity", default=50))
+        return 50
+
+    def _evict_if_over_capacity(self, agent_id: str) -> None:
+        """memory-2.0:淘汰**最弱**的,不是最旧的 —— 常被想起的旧记忆活过被无视的
+        新记忆。锚定的永远不走。"""
+        rows = [r for r in self._rows.all().values() if r.get("agent_id") == agent_id]
+        overflow = len(rows) - self._capacity()
+        if overflow <= 0:
+            return
+        evictable = sorted(
+            (r for r in rows if not r.get("anchor")),
+            key=lambda r: (float(r.get("strength") or 1.0), int(r["id"])),
+        )
+        for row in evictable[:overflow]:
+            self._rows.drop(str(row["id"]))
 
     def query(self, agent_id: str, kind: str | None = None,
               min_importance: float | None = None) -> list[dict[str, Any]]:
@@ -814,6 +875,8 @@ class RedisMemoryStore:
         from anima_world.memory_retrieval import decayed_strength
 
         for row in self.query(agent_id=agent_id):
+            if row.get("anchor"):
+                continue   # 锚定的不衰减 —— 创世记忆是她是谁的一部分
             last = row.get("last_access")
             last = int(row.get("tick") or 0) if last is None else int(last)
             fresh = decayed_strength(
@@ -1355,6 +1418,10 @@ class RedisEconomyStore:
             for r in self._shelves.all().values()
             if r.get("location_id") == location_id and int(r.get("quantity") or 0) > 0
             and by_id.get(str(r["item_id"]), {}).get("kind") == "consumable"
+            # 一样什么也补不回来的东西不是饭。`kind == "consumable"` 单独一个判据太宽:
+            # 一包肥料、一管颜料也是用一次就没的东西,而 `eat` 会挑最便宜的那个 ——
+            # 于是她会把肥料当午饭吃掉,而且吃得很饱(需求照样归零)。
+            and self.restores_of(str(r["item_id"]))
         ]
         if not candidates:
             return None
@@ -1387,6 +1454,31 @@ class RedisEconomyStore:
                 drift_price(base, float(row["price"]), sold, RESTOCK_PER_DAY), 2
             )
             self._shelves.put(field, row)
+
+    def seed_authored(
+        self,
+        items: list[tuple[str, str, str, float, dict[str, Any]]],
+        stock: list[tuple[str, str, int, float | None]],
+    ) -> None:
+        """种子里写下的物品定义与店铺货架,种进空 store(#12)。
+
+        与 `seed_defaults` 同一条规矩:**空的才种**。作者数据先落地,内置演示
+        物品随后看到非空 store 就整体让位。`price` 为 None 时取 base_price。
+        """
+        base_prices: dict[str, float] = {}
+        if not self._items.all():
+            for item_id, name, kind, base_price, restores in items:
+                self.put_item(item_id, name, kind, base_price, restores)
+                base_prices[item_id] = float(base_price)
+        else:
+            base_prices = {
+                str(r["id"]): float(r.get("base_price") or 0.0)
+                for r in self._items.all().values()
+            }
+        if not self._shelves.all():
+            for location_id, item_id, quantity, price in stock:
+                resolved = price if price is not None else base_prices.get(item_id, 0.0)
+                self.put_shelf(location_id, item_id, quantity, float(resolved))
 
     def seed_defaults(self) -> None:
         """创世播默认货架。**已有货架就不动** —— 和别的 seed_* 同一条规矩。"""
@@ -1445,3 +1537,348 @@ def durability_warning(redis: Any) -> str | None:
         "它一重启,这个世界就退回创世那一刻,而且不会报错,只会接着跑。\n"
         "      开 `appendonly yes`,或者至少给它一组 `save` 存盘点。"
     )
+
+
+# ── 1.5.0(去 SQLite):世界文件退役后,这几样也要有 Redis 的家 ──────────────
+
+
+def meta_rows(redis: Any, world_id: str) -> "RedisRows":
+    """世界的元数据行(`:meta`):创世出生证明(world_seed)、占用标记(owner_pid/host)。
+
+    world.db 时代它们住 `db_meta`;格式联锁(format_version)不再需要 —— 键的
+    形状就是格式,而键前缀里带着 world_id。
+    """
+    return RedisRows(redis, f"{KEY_PREFIX}:{world_id}:meta")
+
+
+class RedisRulesStore:
+    """世界的规律(`world_rules`)的家:`:world_rules` 一个 hash,field=规律 id。
+
+    此前规律只在开机时从 SQLite 读进进程 —— SQLite 退役后没有这个家的话,
+    "只有 Redis 连接的进程"看到的世界就没有物理法则。定义存原文(JSON),
+    编译(parse_rules)仍在读取侧:坏定义要在**读的时候**当场报错,不流到运行期。
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:world_rules")
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    def seed(self, entries: list, stamp: str) -> None:
+        """空的时候播一次;之后这里的行说了算 —— 和地图/行为树同一条契约。"""
+        if len(self._rows):
+            return
+        for entry in entries:
+            rule_id = str(entry.get("id"))
+            self._rows.put(rule_id, {"id": rule_id, "definition": entry, "updated_at": stamp})
+
+    def definitions(self) -> list[dict]:
+        rows = self._rows.all()
+        return [rows[k]["definition"] for k in sorted(rows)]
+
+
+class RedisOntologyStore:
+    """世界的本体:`:kinds`(种类)与 `:entities`(实例)**两个 hash,物理分开**。
+
+    分成两张表是这一层唯一的结构性决定,理由在 `ontology.py` 的开头:一张表里
+    "种类"和"实例"只能靠一个字段区分,而靠字段区分就是靠作者自觉 —— Wikidata
+    那条路走完的账单是 8400 万条 split-order pair。分成两张表让它**不可表达**。
+
+    **种类只在创世时播,之后冻结;实例可以运行期长出来。** 这一刀不是任意的:
+    规律是按种类校验的(`resolve`),运行期新增一个种类等于让"这条规律合不合法"
+    随时间变化,重放就不再确定。而种一棵树只是多一个 owner —— 规律早就写好了。
+
+    定义存原文,编译在读取侧(`load`)—— 和 `RedisRulesStore` 同一条:坏声明要在
+    **读的时候**当场报错,不流到运行期。
+    """
+
+    __slots__ = ("_kinds", "_entities")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._kinds = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:kinds")
+        self._entities = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:entities")
+
+    def __len__(self) -> int:
+        return len(self._kinds)
+
+    def seed(self, kinds: list, entities: list, stamp: str) -> None:
+        """空的时候播一次 —— 和规律/地图/行为树同一条契约:只填缺,不覆盖。"""
+        if not len(self._kinds) and not len(self._entities):
+            for entry in kinds or []:
+                self._kinds.put(str(entry.get("id")), {"definition": entry, "updated_at": stamp})
+            for entry in entities or []:
+                self._entities.put(
+                    str(entry.get("id")), {"definition": entry, "updated_at": stamp}
+                )
+
+    def kind_definitions(self) -> list[dict]:
+        rows = self._kinds.all()
+        return [rows[k]["definition"] for k in sorted(rows)]
+
+    def entity_definitions(self) -> list[dict]:
+        rows = self._entities.all()
+        return [rows[k]["definition"] for k in sorted(rows)]
+
+    def load(self, *, rules: Any = (), locations: Any = (), items: Any = ()) -> Any:
+        """读 + 编译 + 解析全部引用。坏了当场 `OntologyError`。"""
+        from anima_world.ontology import parse_entities, parse_kinds, resolve
+
+        kinds = parse_kinds(self.kind_definitions())
+        entities = parse_entities(self.entity_definitions(), kinds)
+        return resolve(kinds, entities, rules=rules, locations=locations, items=items)
+
+    def add_entity(self, entry: dict, stamp: str) -> Any:
+        """运行期种一棵树。**种类照样要解析得到** —— 新实例不是绕过本体的后门。"""
+        from anima_world.ontology import parse_entities, parse_kinds
+
+        kinds = parse_kinds(self.kind_definitions())
+        entity = parse_entities([entry], kinds)[str(entry.get("id")).strip()]
+        self._entities.put(entity.id, {"definition": entry, "updated_at": stamp})
+        return entity
+
+    def drop_entity(self, entity_id: str) -> int:
+        return self._entities.drop(entity_id)
+
+
+class RedisConfigBackend:
+    """`ConfigStore` 的 Redis 底座:`:config` 一个 hash,field=键名,值=整行。
+
+    行的形状和 world.db 时代的 `config` 表逐列相同(value/value_type/category/
+    is_secret/description/updated_at),而且**只存作者动过的** —— 判据照旧是
+    "引擎声明过什么",不是"这儿有没有行"(那套逻辑全在 ConfigStore,这里纯存取)。
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:config")
+
+    def all(self) -> dict[str, dict]:
+        return self._rows.all()
+
+    def put(self, key: str, row: dict) -> None:
+        self._rows.put(key, row)
+
+
+class RedisChatStore:
+    """转录(conversations / messages)的 Redis 家 —— 没给 `mysql=` 的世界用它。
+
+    转录随时间无限增长,判据上它属于 MySQL;但 events / memories 在"只有 Redis"
+    的世界里也接受了同一笔账 —— 转录没理由是那个例外,否则没有 MySQL 的世界
+    聊天记录无处可放。给了 `mysql=` 的世界照旧走 `MySQLChatStore`,这里让位。
+
+    形状:
+        :conversations       hash  field=会话 id,值=整行(participants 是列表)
+        :conversations:id    INCR  会话 id
+        :messages            hash  field=消息 id,值=整行(含逐轮观测量)
+        :messages:id         INCR  消息 id
+        :conv_msgs:{conv_id} list  这场会话的消息 id,按序
+
+    语义逐条对照老 ChatStore:player_id 缺省读作 'user'(COALESCE 的对应物)、
+    recent_messages 返回时间正序、past_summaries 最近的在前。
+    """
+
+    __slots__ = ("_redis", "_world", "_convs", "_msgs", "_lock")
+
+    def __init__(self, redis: Any, world_id: str, lock: Any | None = None) -> None:
+        import threading
+
+        self._redis = redis
+        self._world = world_id
+        self._convs = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:conversations")
+        self._msgs = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:messages")
+        self._lock = lock if lock is not None else threading.RLock()
+
+    # ── 内部 ────────────────────────────────────────────────────────────────
+
+    def _conv_msgs_key(self, conversation_id: int) -> str:
+        return f"{KEY_PREFIX}:{self._world}:conv_msgs:{int(conversation_id)}"
+
+    @staticmethod
+    def _pid(row: dict) -> str:
+        return row.get("player_id") or "user"
+
+    def _conversations(self) -> list[dict]:
+        rows = list(self._convs.all().values())
+        rows.sort(key=lambda r: int(r["id"]))
+        return rows
+
+    # ── conversations ───────────────────────────────────────────────────────
+
+    def active_conversation(self, agent_id: str, player_id: str | None = None):
+        with self._lock:
+            best = None
+            for row in self._conversations():
+                if row.get("agent_id") != agent_id or row.get("status") != "open":
+                    continue
+                if player_id is not None and self._pid(row) != player_id:
+                    continue
+                best = row
+            return dict(best) if best is not None else None
+
+    def start_conversation(self, agent_id: str, ts: int, participants=None,
+                           location: str | None = None, player_id: str | None = None,
+                           player_name: str | None = None) -> int:
+        pid = player_id or "user"
+        if participants is None:
+            user_entry: dict = {"id": pid, "kind": "user"}
+            if player_name:
+                user_entry["name"] = player_name
+            participants = [user_entry, {"id": agent_id, "kind": "agent"}]
+        with self._lock:
+            conv_id = int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:conversations:id"))
+            self._convs.put(str(conv_id), {
+                "id": conv_id, "agent_id": agent_id, "status": "open",
+                "started_at": int(ts), "last_activity_at": int(ts), "closed_at": None,
+                "summary": None, "message_count": 0, "participants": participants,
+                "location": location, "player_id": pid,
+            })
+            return conv_id
+
+    def active_or_start(self, agent_id: str, ts: int, participants=None,
+                        location: str | None = None, player_id: str | None = None,
+                        player_name: str | None = None) -> int:
+        with self._lock:
+            active = self.active_conversation(agent_id, player_id=player_id)
+            if active is not None:
+                return int(active["id"])
+            return self.start_conversation(
+                agent_id, ts, participants=participants, location=location,
+                player_id=player_id, player_name=player_name,
+            )
+
+    def get(self, conversation_id: int):
+        row = self._convs.get(str(int(conversation_id)))
+        return dict(row) if row is not None else None
+
+    def list_conversations(self, agent_id: str) -> list[dict]:
+        with self._lock:
+            rows = [r for r in self._conversations() if r.get("agent_id") == agent_id]
+            rows.reverse()
+            return [dict(r) for r in rows]
+
+    def close(self, conversation_id: int, summary: str, ts: int) -> None:
+        with self._lock:
+            row = self._convs.get(str(int(conversation_id)))
+            if row is None:
+                return
+            row.update(status="closed", closed_at=int(ts), summary=summary)
+            self._convs.put(str(int(conversation_id)), row)
+
+    def touch(self, conversation_id: int, ts: int) -> None:
+        with self._lock:
+            row = self._convs.get(str(int(conversation_id)))
+            if row is None:
+                return
+            row["last_activity_at"] = int(ts)
+            self._convs.put(str(int(conversation_id)), row)
+
+    def idle_open_conversations(self, now: int, timeout: int) -> list[dict]:
+        with self._lock:
+            return [
+                dict(r) for r in self._conversations()
+                if r.get("status") == "open" and int(r.get("last_activity_at") or 0) <= now - timeout
+            ]
+
+    # ── messages ────────────────────────────────────────────────────────────
+
+    def add_message(self, conversation_id: int, role: str, content: str, ts: int) -> int:
+        with self._lock:
+            msg_id = int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:messages:id"))
+            self._msgs.put(str(msg_id), {
+                "id": msg_id, "conversation_id": int(conversation_id), "role": role,
+                "content": content, "created_at": int(ts),
+                "stance": None, "intent": None, "intent_confidence": None, "tool_calls": None,
+            })
+            self._redis.rpush(self._conv_msgs_key(conversation_id), msg_id)
+            row = self._convs.get(str(int(conversation_id)))
+            if row is not None:
+                row["message_count"] = int(row.get("message_count") or 0) + 1
+                row["last_activity_at"] = int(ts)
+                self._convs.put(str(int(conversation_id)), row)
+            return msg_id
+
+    def _message_rows(self, conversation_id: int) -> list[dict]:
+        ids = self._redis.lrange(self._conv_msgs_key(conversation_id), 0, -1) or []
+        out = []
+        for raw in ids:
+            mid = raw.decode() if isinstance(raw, bytes) else str(raw)
+            row = self._msgs.get(mid)
+            if row is not None:
+                out.append(row)
+        return out
+
+    def messages_for(self, conversation_id: int) -> list[dict]:
+        with self._lock:
+            return [
+                {"role": r["role"], "content": r["content"], "created_at": r["created_at"]}
+                for r in self._message_rows(conversation_id)
+            ]
+
+    def recent_messages(self, conversation_id: int, n: int) -> list[dict]:
+        with self._lock:
+            rows = self._message_rows(conversation_id)[-int(n):] if n else []
+            return [
+                {"role": r["role"], "content": r["content"], "created_at": r["created_at"]}
+                for r in rows
+            ]
+
+    def past_summaries(self, agent_id: str, k: int, player_id: str | None = None) -> list[str]:
+        with self._lock:
+            closed = [
+                r for r in self._conversations()
+                if r.get("agent_id") == agent_id and r.get("status") == "closed"
+                and r.get("summary")
+                and (player_id is None or self._pid(r) == player_id)
+            ]
+            closed.sort(key=lambda r: (int(r.get("closed_at") or 0), int(r["id"])), reverse=True)
+            return [r["summary"] for r in closed[: int(k)]]
+
+    # ── 一轮的观测量(表在谁那儿,写它的入口就在谁那儿)────────────────────────
+
+    def annotate_message(self, message_id: int, *, stance=None, intent=None,
+                         intent_confidence=None, tool_calls=None) -> None:
+        from anima_world.chat_store import annotation_values
+
+        values = annotation_values(stance, intent, intent_confidence, tool_calls)
+        if not values:
+            return
+        with self._lock:
+            row = self._msgs.get(str(int(message_id)))
+            if row is None:
+                return
+            row.update(values)
+            self._msgs.put(str(int(message_id)), row)
+
+    def annotation_rows(self, conversation_id: int) -> list[tuple]:
+        with self._lock:
+            return [
+                (r.get("role"), r.get("stance"), r.get("intent"), r.get("tool_calls"))
+                for r in self._message_rows(conversation_id)
+            ]
+
+    def conversation_meta(self, conversation_id: int) -> dict:
+        from anima_world.chat_store import summarize_annotations
+
+        return summarize_annotations(self.annotation_rows(conversation_id))
+
+
+def drop_stale_copies_for_mysql(redis: Any, world_id: str) -> list[str]:
+    """删掉"只有 Redis"时期留下的 events / memories 拷贝 —— 这些表归 MySQL 了。
+
+    一个世界可能先只用 Redis 跑过,后来才接上 MySQL。不删的话那份旧拷贝会一直
+    躺着冒充这个世界的历史:引擎自己不读它,但"只有 Redis 连接的进程"读得到 ——
+    两份真相里一份不会更新,是这个仓库最怕的坏法。
+    """
+    doomed = [
+        events_key(world_id),
+        f"{KEY_PREFIX}:{world_id}:memories",
+        f"{KEY_PREFIX}:{world_id}:memories:id",
+    ]
+    dropped = [key for key in doomed if redis.delete(key)]
+    if dropped:
+        logger.info("删掉 Redis 里冻住的旧拷贝(这些表归 MySQL 了):%s", dropped)
+    return dropped

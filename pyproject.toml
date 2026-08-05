@@ -29,16 +29,17 @@ classifiers = [
 # that uses a world imports this package (anima_world.api.World). Keep this
 # list minimal — every dependency lands inside every host that embeds a world.
 dependencies = [
-    "cryptography>=42.0",  # Fernet encryption for config secrets (<db>.key)
     "openai>=1.30",        # LLM client: chat / narrative / planning / relationship judge
     "httpx>=0.27",         # injected transport for the OpenAI-compatible client
+    # world.db 退役后世界住在 Redis 里 —— 客户端库因此是必需的(服务端仍是
+    # 用户自己的;测试与试玩可用 fakeredis)。cryptography 随 keyfile 一起退役:
+    # 世界里没有 secret,钥匙住机器配置(0600 明文,见 machine_config)。
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]
-# redis 是**可选**的:不给 `World.open(redis=…)` 的世界一行 Redis 代码都不碰,
-# 而"装上包就能跑一个世界"是这个引擎的底线 —— 不该为一个可选后端加一个必需的服务。
-redis = ["redis>=5.0"]
-dev = ["pytest>=8.0", "build>=1.2", "twine>=5.0", "redis>=5.0", "fakeredis[lua]>=2.20"]
+mysql = ["pymysql>=1.1"]   # mysql= 的世界:无限增长的四样(传工厂,别传裸连接)
+dev = ["pytest>=8.0", "build>=1.2", "twine>=5.0", "fakeredis[lua]>=2.20", "pymysql>=1.1"]
 
 [project.urls]
 Homepage = "https://animametaverse.com"

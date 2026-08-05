@@ -2,16 +2,15 @@
 
 四条需求:energy / hunger / social 随 tick 衰减、由动作恢复;mood 是前三者的
 派生(木桶效应),**永不存储**(第二真相源教训)。连续曲线也不进事件日志 ——
-它们是纯数学,重放 tick 即可重建;持久化只有 agent_needs 表里的当前值
-(data-plane),日切与关闭时落盘。
+它们是纯数学,重放 tick 即可重建;当前值的持久化在存储层
+(`anima_world.redis_state.RedisNeedsStore`),日切与关闭时落盘。
 
 默认关闭(config `needs.enabled`):不点亮的世界行为与 v2 逐 tick 一致。
+
+这个模块是**纯逻辑**:曲线、恢复表、紧急带阈值。SQLite 存取已随 world.db 层退役。
 """
 
 from __future__ import annotations
-
-import sqlite3
-from typing import Any
 
 NEEDS = ("energy", "hunger", "social")
 
@@ -64,24 +63,3 @@ def settle(
         out[need] = max(0.0, min(1.0, value))
     out["mood"] = 0.2 + 0.8 * min(out[n] for n in NEEDS)
     return out
-
-
-def load(conn: sqlite3.Connection, agent_id: str) -> dict[str, float]:
-    rows = conn.execute(
-        "SELECT need, value FROM agent_needs WHERE agent_id = ?", (agent_id,)
-    ).fetchall()
-    values = {need: float(value) for need, value in rows if need in NEEDS}
-    for need in NEEDS:
-        values.setdefault(need, 1.0)
-    return values
-
-
-def persist(conn: sqlite3.Connection, agent_id: str, values: dict[str, Any], tick: int) -> None:
-    for need in NEEDS:
-        conn.execute(
-            "INSERT INTO agent_needs (agent_id, need, value, updated_tick) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(agent_id, need) DO UPDATE SET value=excluded.value,"
-            " updated_tick=excluded.updated_tick",
-            (agent_id, need, float(values.get(need, 1.0)), tick),
-        )
-    conn.commit()

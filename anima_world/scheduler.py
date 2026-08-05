@@ -24,9 +24,10 @@ from anima_world.beats import (
     expand_relations,
     memory_seed_event,
 )
-from anima_world.bt_nodes import Blackboard
+from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.events import EventLog
 from anima_world.narrative import NarrativeProvider
+from anima_world.perception import why_not_perceivable
 from anima_world.projection import project_events
 from anima_world.types import Event
 from anima_world.world_time import (
@@ -44,7 +45,10 @@ logger = logging.getLogger(__name__)
 # the clock skips wall-clock stamps; so does the run report (`sim_report`).
 _WALL_CLOCK_FLOOR = WALL_CLOCK_FLOOR
 
-# Performance guardrails
+# Performance guardrail — a default, not a law. The operator owns this number:
+# `config set scheduler.max_agents N` (0 = unlimited). Hardcoding it here was
+# the tool deciding for the operator; the constant remains only as the declared
+# default in config_store._DEFAULTS' absence.
 MAX_AGENTS = 100
 
 
@@ -102,7 +106,8 @@ class Scheduler:
         tick_delta: int = 1,
         narrative_provider: NarrativeProvider | None = None,
         event_log: EventLog | None = None,
-        db_path: str | None = None,
+        world_id: str | None = None,
+        meta_store: Any | None = None,
         memory_store: Any | None = None,
         knowledge_graph: Any | None = None,
         trigger_engine: Any | None = None,
@@ -128,22 +133,16 @@ class Scheduler:
         self._stopped: bool = False
         self.narrative_provider = narrative_provider
         self.event_log = event_log
-        self.db_path = db_path
-        # **世界的数据库连接归调度器,不归事件日志。**
-        # 此前二十多处写着 `event_log.conn` —— 把事件日志当成了整个世界的连接持有者。
-        # 那在事件日志换后端(住进 Redis)的那一刻整片崩掉,而崩的地方全是别的表:
-        # 需求、经济、关系图、聊天……它们和事件日志本来毫无关系。
-        self._conn = getattr(event_log, "conn", None) if event_log is not None else None
-        # 四张小表的缝(见 `small_stores`):需求 / 小团体 / 反思水位 / 经济。
-        # 它们此前是模块级函数直接吃连接,于是"换后端"无从下手 —— 没有可替换的东西。
-        from anima_world.small_stores import (
-            CliqueStore, EconomyStore, NeedsStore, ReflectionStore,
-        )
-
-        self.needs_store = NeedsStore(self._conn) if self._conn is not None else None
-        self.clique_store = CliqueStore(self._conn) if self._conn is not None else None
-        self.reflection_store = ReflectionStore(self._conn) if self._conn is not None else None
-        self.economy_store = EconomyStore(self._conn) if self._conn is not None else None
+        # 这个世界叫什么(Redis 键前缀里的那一段)。世界文件退役后它就是世界的名字。
+        self.world_id = world_id
+        # 世界的元数据行(`:meta`,redis_state.meta_rows):创世出生证明、占用标记。
+        self.meta_store = meta_store
+        # 需求 / 小团体 / 反思水位 / 经济:由 build_serve_scheduler 注入 Redis 版;
+        # 裸 Scheduler()(单元测试)没有它们,和以前的无 db 路径同一个形状。
+        self.needs_store: Any | None = None
+        self.clique_store: Any | None = None
+        self.reflection_store: Any | None = None
+        self.economy_store: Any | None = None
         self.narrative_history: list[str] = [] if narrative_provider else None
         # M4: memory/graph wiring is optional (mirrors narrative_provider) — a
         # bare Scheduler() behaves exactly as before. Duck-typed (`Any`) so
@@ -228,12 +227,24 @@ class Scheduler:
         self.stock_store: Any | None = None
         self.visibility_store: Any | None = None   # 可见性声明 + 东西在哪(perception)
         self.world_rules: list[Any] = []
+        # 本体:这个世界里能有什么东西。`None` = 作者没声明过种类,这一层不启用
+        # (声明本身就是开关,和认知层同构)。
+        self.ontology: Any | None = None
+        self.ontology_store: Any | None = None
         # 规律上次算是什么时候 —— 只决定"要不要现在算",不影响结果(结果由 dt 定),
         # 所以是内存态:重启清空最多多算一次,值不会错。
         self._rule_last_run: dict[str, int] = {}
         self._rule_stats: dict[str, Any] = {
             "evaluated": 0, "written": 0, "emitted": 0, "skipped": 0, "last_error": None,
         }
+        # 她的树问到了哪些量(见 `_stock_watches`):agent_id -> (树对象, 量的列表)。
+        # 树换了(`build_tree` 重建)`id()` 就变,缓存自然失效。
+        self._stock_watch_cache: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {}
+        self._stock_watch_warned: set[tuple[str, str, str, str]] = set()
+        # 她身上有没有别人看得见的量(本体加载完就定死),以及她上次被放在哪 ——
+        # 位置没变时不必再写一次(见 `_settle_actor_place`)。
+        self._actor_visible_cache: bool | None = None
+        self._actor_placed: dict[str, str] = {}
         # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
         self._hailed: dict[tuple[str, str], int] = {}
         # 本世界日各人上了多久班(tick)。日切结算工资时清空。
@@ -305,9 +316,43 @@ class Scheduler:
 
     def register(self, brain: BrainLike) -> None:
         with self._lock:
-            if len(self.agents) >= MAX_AGENTS:
-                raise RuntimeError(f"agent cap reached ({MAX_AGENTS})")
+            cap = MAX_AGENTS
+            if self.config_store is not None:
+                cap = int(self.config_store.get("scheduler.max_agents", default=cap))
+            if cap > 0 and len(self.agents) >= cap:
+                raise RuntimeError(
+                    f"agent cap reached ({cap}) — raise it with "
+                    f"`config set scheduler.max_agents N` (0 = unlimited)")
             self.agents[brain.agent.id] = brain
+            self._seed_actor_quantities(brain.agent.id)
+
+    def _seed_actor_quantities(self, agent_id: str) -> None:
+        """她身上声明过的量在这儿落地。**只填缺,不覆盖**(锁内)。
+
+        为什么落在 `register` 而不是开机那一段:角色不是 `ontology.entities` 的成员
+        (她的元数据归 Brain / 黑板),而**她可以在世界跑起来之后才出现** —— 节拍
+        导演的 `agent_join`、重启后的中途加入,都不经过开机那条路。`register` 是
+        这几条路唯一共同的窄口,所以那条不变量("一个实体存在,它声明过的量就存在")
+        钉在这里才真的成立。
+
+        整份写回会把跑了三十天的人倒带回创世体力(创世那条纪律踩过两次)。
+        """
+        ontology = self.ontology
+        store = self.stock_store
+        if ontology is None or store is None:
+            return
+        from anima_world.ontology import actor_quantities
+
+        declared = actor_quantities(ontology)
+        if not declared:
+            return
+        owner = f"agent:{agent_id}"
+        have = store.of(owner)
+        # 逐个量填,不是逐个人填 —— 加了一个新属性的世界重启时,老角色只会补上新的
+        # 那一个,而不是被跳过(跳过的话 `me_手艺` 恒为 0,门永远关着)。
+        missing = {k: v for k, v in declared.items() if k not in have}
+        if missing:
+            store.set_many(owner, missing, tick=int(self.clock))
 
     def unregister(self, agent_id: str) -> None:
         with self._lock:
@@ -517,12 +562,6 @@ class Scheduler:
         self._projection_seq = max(int(e.seq or 0) for e in fresh)
         return len(fresh)
 
-    @property
-    def conn(self) -> Any:
-        """这个世界的 SQLite 连接(还没搬走的那些表用它)。**别再走 `event_log.conn`**
-        —— 事件日志可能根本不在 SQLite 上。"""
-        return self._conn
-
     def _clock_box(self) -> Any:
         """时钟那个盒子,没有就现造一个。
 
@@ -548,94 +587,41 @@ class Scheduler:
         self._clock_box().set(int(value))
 
     def _persist_clock(self) -> None:
-        """Checkpoint the world clock into `db_meta` (lock held).
+        """时钟的持久化归 `RedisClock` 自己:每次 set 就是一次落盘。
 
-        The clock cannot be recovered from the event log alone: a stretch of
-        ticks where nobody does anything leaves no trace, so restoring from
-        max(event ts) silently rewinds the world to its last eventful moment.
-        The deficit is permanent — the world never catches back up — and it is
-        the common case, since agents are idle for most of the night.
-
-        This is the `agent_needs` pattern, and the same architectural criterion:
-        "发生了一件事" belongs in the event log, "现在是多少" belongs in a
-        data-plane row. Best-effort — a failed checkpoint costs at most the
-        quiet tail, which is what the old behaviour lost on every close.
+        world.db 时代这里有一个 db_meta 检查点(安静的夜晚不留事件,时钟只能
+        从检查点恢复)。RedisClock 每写即持久,检查点与恢复整个不再需要 ——
+        方法留空是因为 `checkpoint()` 的清单还点到它。
         """
-        if self.event_log is None:
-            return
-        try:
-            conn = self.conn
-            conn.execute(
-                "INSERT INTO db_meta (key, value) VALUES ('clock', ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(int(self.clock)),),
-            )
-            conn.commit()
-        except Exception:  # noqa: BLE001 - a clock checkpoint is never fatal
-            logger.warning("world clock checkpoint failed", exc_info=True)
 
     def claim_ownership(self) -> None:
-        """在 db 上盖一个"这个世界正被我跑着"的戳。
+        """在世界的 `:meta` 里盖一个"这个世界正被我跑着"的戳。
 
-        CLAUDE.md 的第一条不变量是"一个运行中的世界独占它的 world.db",但这条纪律
-        此前没有任何标记去支撑 —— 谁也看不出一个 db 正被人跑着。最尖的一处是
-        `config set`:它开自己的连接写 config 表、打印"已保存",而运行中那个世界的
-        `ConfigStore` 缓存不会重读。你以为改了,其实没改,直到下次重启才突然生效。
-
-        **这是给人看的提示,不是锁。** 进程崩掉标记就会陈旧,而拿陈旧标记去拒绝
-        操作,等于在真出事那天把人挡在门外。
+        **这是给人看的提示,不是锁**(跨进程互斥归 RedisLock)。进程崩掉标记就会
+        陈旧,而拿陈旧标记去拒绝操作,等于在真出事那天把人挡在门外。
         """
         self._write_meta("owner_pid", str(os.getpid()))
         self._write_meta("owner_host", socket.gethostname())
 
     def release_ownership(self) -> None:
         """撤掉占用标记。正常关闭必须撤,否则每个关过的世界都变成"有人在跑"。"""
-        if self.event_log is None:
+        if self.meta_store is None:
             return
         try:
             with self._lock:
-                self.conn.execute(
-                    "DELETE FROM db_meta WHERE key IN ('owner_pid', 'owner_host')"
-                )
-                self.conn.commit()
+                self.meta_store.drop("owner_pid")
+                self.meta_store.drop("owner_host")
         except Exception:  # noqa: BLE001 - 撤不掉标记不该拦住关停
             logger.warning("could not release the world ownership marker", exc_info=True)
 
     def _write_meta(self, key: str, value: str) -> None:
-        if self.event_log is None:
+        if self.meta_store is None:
             return
         try:
             with self._lock:
-                self.conn.execute(
-                    "INSERT INTO db_meta (key, value) VALUES (?, ?)"
-                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
-                self.conn.commit()
+                self.meta_store.put(key, value)
         except Exception:  # noqa: BLE001 - 一个提示标记永远不该是致命的
-            logger.warning("could not write db_meta %r", key, exc_info=True)
-
-    def _restore_clock(self) -> None:
-        """Adopt the checkpointed clock if it is ahead of the replayed events.
-
-        `max()` rather than a plain read: a database written by an older build
-        has no `clock` row, and one killed mid-run may have a stale one, but
-        events are always at least as new as the last checkpoint.
-        """
-        if self.event_log is None:
-            return
-        try:
-            row = self.conn.execute(
-                "SELECT value FROM db_meta WHERE key = 'clock'"
-            ).fetchone()
-        except Exception:  # noqa: BLE001 - fall back to the event-derived clock
-            return
-        if row is None:
-            return
-        try:
-            self.clock = max(self.clock, int(row[0]))
-        except (TypeError, ValueError):
-            logger.warning("db_meta.clock is not an integer (%r); ignoring", row[0])
+            logger.warning("could not write world meta %r", key, exc_info=True)
 
     def _persist_reflection_watermarks(self) -> None:
         """Checkpoint the in-memory watermarks (lock held). Best-effort: losing
@@ -865,8 +851,7 @@ class Scheduler:
                 if ts < _WALL_CLOCK_FLOOR:
                     self.clock = max(self.clock, ts)
             # Events only pin the clock to the last eventful tick; the quiet
-            # tail after it lives in `db_meta` (see `_persist_clock`).
-            self._restore_clock()
+            # tail is safe because RedisClock persists every advance itself.
 
     @staticmethod
     def _stream_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -956,6 +941,12 @@ class Scheduler:
                 bb.write("time.minute_of_day", now.minute_of_day)
                 if needs_enabled:
                     self._settle_agent_needs(brain)
+                # 世界的量 → 黑板(只放她感知得到的)。树里没有按量分支的叶子时,
+                # 这里是一次字典判空。
+                self._settle_stock_watches(brain)
+                # 她此刻站在哪 → 可见性表。声明成 `here` 的**她身上的量**靠它才
+                # 有人看得见(没声明就是一次布尔判断)。
+                self._settle_actor_place(brain)
                 # 工资按真的上过多久班发(见日切结算)。这里只数,不判断。
                 current = self._current_action.get(brain.agent.id)
                 if current is not None and current.kind == "work":
@@ -1179,6 +1170,215 @@ class Scheduler:
         # 迟滞的判据(见 NeedAction):当前动作正在补哪几条需求。写成派生值而不是
         # 一份新状态 —— 它就是 settle 刚用过的那个 kind,两处不可能对不上。
         bb.write("need._restoring", tuple(sorted(needs_mod.restores(kind))))
+
+    # ── 按量分支(StockCondition)──────────────────────────────────────────────
+
+    def _stock_watches(self, agent: Any) -> tuple[tuple[str, str], ...]:
+        """她这棵树问到了哪些量。**从建好的树上读**,不回存储查。
+
+        和 `duty_windows()` 从 `time_window` 行上读时间窗同一条:一棵树要什么,
+        树自己是唯一权威。另存一份"她关心哪些量"迟早和树分叉,而分叉那天没人会发现。
+        按树对象缓存 —— 树在 `build_tree` 时才重建,重建了 `id()` 就变了。
+        """
+        root = agent.bt_root
+        cached = self._stock_watch_cache.get(agent.id)
+        if cached is not None and cached[0] is root:
+            return cached[1]
+        found: list[tuple[str, str]] = []
+        stack = [root]
+        seen: set[int] = set()
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, StockCondition):
+                found.append((node.owner, node.key))
+            stack.extend(getattr(node, "children", ()) or ())
+        watches = tuple(sorted(set(found)))
+        self._stock_watch_cache[agent.id] = (root, watches)
+        return watches
+
+    def _settle_stock_watches(self, brain: BrainLike) -> None:
+        """把她的树问到的量放到黑板上 —— **只放她感知得到的**(锁内)。
+
+        没有这种叶子的树在这里是一次字典判空,所以常开不花钱。感知不到的量写成
+        `None` 而不是跳过:黑板上留着的旧值会让她**按上一次路过时看到的数字**做决定,
+        而那正是这一层要防的"知道得太多"的另一副面孔(知道得太旧)。
+        """
+        watches = self._stock_watches(brain.agent)
+        if not watches:
+            return
+        bb = brain.agent.blackboard
+        agent_id = brain.agent.id
+        if self.stock_store is None or self.visibility_store is None:
+            for owner, key in watches:
+                bb.write(f"stock.{owner}.{key}", None)
+            return
+        rules = self.visibility_store.rules_map()
+        here = bb.read("loc") or brain.agent.location or ""
+        values: dict[str, dict[str, float]] = {}
+        for owner, key in watches:
+            resolved = f"agent:{agent_id}" if owner == "self" else owner
+            reason = why_not_perceivable(
+                rules, agent_id=agent_id, here=here, owner=resolved, key=key,
+                place_of=self.visibility_store.place_of,
+            )
+            if reason:
+                if reason != "elsewhere":
+                    # 静态的坏:世界怎么跑这条分支都永不触发。吼一次,别每 tick 刷屏。
+                    mark = (agent_id, owner, key, reason)
+                    if mark not in self._stock_watch_warned:
+                        self._stock_watch_warned.add(mark)
+                        logger.warning(
+                            "%s 的行为树按 %s 的「%s」分支,而她感知不到它(%s)—— "
+                            "这条分支永远不会触发。去 stock_visibility 里给它声明一档。",
+                            agent_id, resolved, key, reason,
+                        )
+                bb.write(f"stock.{owner}.{key}", None)
+                continue
+            if resolved not in values:
+                values[resolved] = self.stock_store.of(resolved)
+            bb.write(f"stock.{owner}.{key}", values[resolved].get(key))
+
+    def _actor_is_visible_to_others(self) -> bool:
+        """她身上有没有**别人看得见**的量。没有的话下面那步整个不必做。
+
+        `self` 档不算:那种量只有她自己知道,谁站在哪儿都不改变这件事。
+        """
+        cached = self._actor_visible_cache
+        if cached is None:
+            ontology = self.ontology
+            kind = ontology.kinds.get("agent") if ontology is not None else None
+            cached = bool(kind) and any(
+                q.visibility not in ("hidden", "self") for q in kind.quantities.values()
+            )
+            self._actor_visible_cache = cached
+        return cached
+
+    def _settle_actor_place(self, brain: BrainLike) -> None:
+        """把"她此刻在哪"写进可见性表(锁内)。
+
+        为什么要有这一步:`here` 档问的是 `visibility_store.place_of(owner)`,而
+        角色的位置一直住在黑板上 —— 两边不通的话,一个声明成 `here` 的
+        「手艺」**谁也看不见**,而且不报错。那是这一层最怕的那种坏法:作者写了
+        一句"别人看得出她手艺好",世界照跑,只是那句话从来没有发生过。
+
+        为什么落在 tick 循环里而不是每个写 `loc` 的地方:`loc` 有五处写点
+        (创世、重连、到站、节拍、事件回放),挨个加等于给未来的第六处留一个
+        静默的洞。这里是它们唯一的汇合处,而**汇合处只有一个**才守得住。
+        """
+        if self.visibility_store is None or not self._actor_is_visible_to_others():
+            return
+        agent_id = brain.agent.id
+        if agent_id in self._transit:
+            return   # 在路上:不在任何地方,也就不该被任何地方看见
+        here = brain.agent.blackboard.read("loc") or brain.agent.location or ""
+        if not here or self._actor_placed.get(agent_id) == here:
+            return
+        self.visibility_store.place(f"agent:{agent_id}", here, brain.agent.name)
+        self._actor_placed[agent_id] = here
+
+    def perform_affordance(self, agent_id: str, target: str, verb: str) -> dict[str, Any]:
+        """对一样东西做一件事 —— 本体声明的能力,真的兑现在世界的量上。
+
+        **聊天里的 `interact` 动词和排班里的 `interact` 动作走的是这同一条**。
+        另写一份"行为树版本的照料"迟早和工具那份分叉,而分叉的那天没人会发现
+        (和 `_ToolRuntime.do_action` 委托 `emit_action` 同一条纪律)。
+
+        返回 `{"ok": False, "refusal": ..., "reason": ...}` 是没成。`reason` 分**三**类,
+        因为她接下来该做的事不一样:
+
+        | `reason` | 意思 | 她该干什么 |
+        |---|---|---|
+        | `conditions` | 世界说"这会儿不行"(果子还没熟) | 等,或者换一棵 |
+        | `incapable` | 她做不了(没力气、手艺不够) | 换件别的事,或先去补足 |
+        | `no_ontology` / `unknown_entity` / `unknown_verb` / `absent` | 这个调用本身讲不通 | 作者/模型的事 |
+
+        聊天那条路把最后一摞报成错、前两摞报成一句话;行为树那条路都只是"下一 tick
+        再试"—— 但**第二摞下一 tick 再试也一样**,所以它必须能被认出来。混成一个,
+        一个累坏了的人就会挨棵树轮着试过去,每一棵都回她"再等等"。
+        """
+        from anima_world.ontology import apply_affordance
+
+        def no(reason: str, refusal: str) -> dict[str, Any]:
+            return {"ok": False, "target": target, "verb": verb,
+                    "reason": reason, "refusal": refusal}
+
+        with self._lock:
+            ontology = self.ontology
+            store = self.stock_store
+            if ontology is None or store is None:
+                return no("no_ontology", "这个世界没有声明过任何东西,没什么可交互的")
+            entity = ontology.entities.get(target)
+            if entity is None:
+                return no(
+                    "unknown_entity",
+                    f"这儿没有 {target} 这个东西;有的是 {sorted(ontology.entities)[:10]}",
+                )
+            affordance = ontology.affordance_of(target, verb)
+            if affordance is None:
+                known = sorted(ontology.kinds[entity.kind].affordances)
+                return no("unknown_verb", f"{target} 不能被 {verb};它能被 {known}")
+
+            brain = self.agents.get(agent_id)
+            here = ""
+            if brain is not None and agent_id not in self._transit:
+                here = brain.agent.blackboard.read("loc") or brain.agent.location or ""
+            where = (
+                self.visibility_store.place_of(target)
+                if self.visibility_store is not None else entity.location
+            )
+            if not here or where != here:
+                # 两头都说出来。只说"它在 cafe"会读成一句谎:她也可能就在 cafe,
+                # 而真正的原因是引擎不知道**她**在哪(在路上就是这样)。
+                return no(
+                    "absent",
+                    f"{entity.name or target} 不在你这儿 —— "
+                    f"它在 {where or '别处'},你在 {here or '别处'}",
+                )
+
+            me = f"agent:{agent_id}"
+            outcome = apply_affordance(
+                affordance, values=store.of(target),
+                world_values=store.of("world"),
+                me_values=store.of(me) if affordance.needs_actor else None,
+                held=self._memory_projection.inventories.get(agent_id),
+                now=int(self.clock),
+            )
+            if not outcome.ok:
+                # `incapable`(她做不了)和 `conditions`(这会儿不行)必须分开传上去 ——
+                # 合成一个,一个累坏了的人会挨棵树轮着试,每棵都回她"再等等"。
+                return no(outcome.reason or "conditions", outcome.refusal)
+            if outcome.updates:
+                store.set_many(target, outcome.updates, tick=int(self.clock))
+            if outcome.me_updates:
+                store.set_many(me, outcome.me_updates, tick=int(self.clock))
+            for item_id, quantity in sorted(outcome.consumed.items()):
+                # 库存只有事件日志一个来源 —— 这里发事件,投影自己去减。直接改投影
+                # 会让"重启一次她的肥料就回来了"成为可能,而账上什么也看不出来。
+                self._record_event({
+                    "type": "item_consume", "who": agent_id, "loc": here,
+                    "payload": {"who": agent_id, "item_id": item_id, "qty": quantity,
+                                "source": f"{verb}:{target}"},
+                })
+            self._record_event({
+                "type": "entity_interaction",
+                "who": agent_id,
+                "loc": here,
+                "payload": {
+                    "target": target, "verb": verb, "changed": dict(outcome.updates),
+                    # 她身上少了什么也进事件:代价不留痕的话,一个人干了一天活之后
+                    # 账上只有"树高了",没有"她累了" —— 而后者才是她下一步的依据。
+                    "cost": dict(outcome.me_updates),
+                    "consumed": dict(outcome.consumed),
+                },
+            })
+            return {
+                "ok": True, "target": target, "verb": verb,
+                "changed": dict(outcome.updates), "cost": dict(outcome.me_updates),
+                "consumed": dict(outcome.consumed),
+            }
 
     def _persist_all_needs(self) -> None:
         if not self._needs_enabled() or self.event_log is None:
@@ -1698,6 +1898,13 @@ class Scheduler:
         # constraint into a wait, and a wait into an encounter.
         if self.emit_action(agent, action):
             self._advance_intent(agent)
+            if action.kind == "interact":
+                # **一次交互是一下子的事,不是一个状态。** 记成"当前动作"的话,
+                # 树下一 tick 重挑同一个动作 → 与当前相同 → 不再发生;于是
+                # "树矮就浇水"这条排班一辈子只浇一次,而闸门还开着、日志还干净。
+                # `walk`/`work`/`sleep` 正相反,它们本来就是持续的状态。
+                self._current_action.pop(agent.id, None)
+                return
             self._current_action[agent.id] = action
 
     @staticmethod
@@ -1775,7 +1982,29 @@ class Scheduler:
                 )
                 return False
 
-            events = to_event(action, agent_id=agent.id)
+            if action.kind == "interact":
+                # 排班里的"照料那棵树"和聊天里的 `interact` 动词走同一条
+                # (`perform_affordance`)—— 否则"她自己决定去照料"和"排班让她照料"
+                # 会在世界里变成两件不一样的事。
+                outcome = self.perform_affordance(
+                    agent.id,
+                    str(action.params.get("target") or ""),
+                    str(action.params.get("verb") or ""),
+                )
+                if not outcome.get("ok"):
+                    # 和 chat 找不到人同一条:不是失败,是世界说"还不行"。不记成
+                    # 当前动作,下一 tick 再试;条件一满足它自己就发生了。
+                    logger.debug(
+                        "%s 想 %s %s,世界说不行:%s", agent.id,
+                        action.params.get("verb"), action.params.get("target"),
+                        outcome.get("refusal"),
+                    )
+                    return False
+                # `entity_interaction` 已经把这件事记进世界的历史(还带着量变了多少),
+                # 再发一条 `agent_action` 等于同一件事记两遍。
+                events: list[dict[str, Any]] = []
+            else:
+                events = to_event(action, agent_id=agent.id)
             for ev in events:
                 if ev.get("who") == agent.id:
                     # Targeted to self or broadcast

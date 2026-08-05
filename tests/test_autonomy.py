@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import threading
 import time
 
@@ -50,7 +52,7 @@ def _world(tmp_path, *replies: str, delay: float = 0.0, interval: int = 1,
     多角色时哪句话落在谁身上取决于处理顺序 —— 单角色让每条测试的断言不用猜顺序。
     需要验证"每个角色各自有自己的额度"这类跨角色行为时显式传 `agents=3`。
     """
-    world = World.open(str(tmp_path / "w.db"), agents=agents, force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), agents=agents, force_mock_llm=True)
     llm = DecidingLLM(*replies, delay=delay)
     world.chat_service._background_llm = llm
     world.config_set("chat.tools.enabled", True)
@@ -277,7 +279,7 @@ def test_it_is_off_by_default(tmp_path, bare_seed):
     """默认关闭:一个每六小时打一次 LLM 的世界,不该是开箱状态。"""
     # 素配种子:这条验的是**引擎默认值**是关的。内置橱窗替世界点亮了 autonomy
     # (那是产品决定),拿它来验"默认关不关"是在验橱窗的布置(见 conftest)。
-    world = World.open(str(tmp_path / "w.db"), agents=1, seed_path=bare_seed,
+    world = open_world_at(str(tmp_path / "w.db"), agents=1, seed_path=bare_seed,
                        force_mock_llm=True)
     llm = DecidingLLM('〔tool:reach_out {"player_id": "p1", "text": "喂"}〕')
     world.chat_service._background_llm = llm
@@ -369,11 +371,8 @@ def test_simulate_says_out_loud_that_it_skips_autonomy(tmp_path):
     import subprocess
     import sys
 
-    done = subprocess.run(
-        [sys.executable, "-m", "anima_world", "simulate",
-         "--db-path", str(tmp_path / "w.db"), "--ticks", "1", "--llm", "mock"],
-        capture_output=True, text=True,
-    )
+    done = run_cli("simulate",
+         "--world-id", "w", "--ticks", "1", "--llm", "mock")
     assert done.returncode == 0, done.stderr
     assert "定时轮次" in done.stdout and "不在快进里跑" in done.stdout
     assert "anima-world run" in done.stdout, "只说不跑不够,得说清去哪儿看得到"
@@ -384,11 +383,8 @@ def test_the_notice_stays_quiet_when_autonomy_is_off(tmp_path, bare_seed):
     import subprocess
     import sys
 
-    done = subprocess.run(
-        [sys.executable, "-m", "anima_world", "simulate",
-         "--db-path", str(tmp_path / "bare.db"), "--seed", bare_seed,
-         "--ticks", "1", "--llm", "mock"],
-        capture_output=True, text=True,
-    )
+    done = run_cli("simulate",
+         "--world-id", "w", "--seed", bare_seed,
+         "--ticks", "1", "--llm", "mock")
     assert done.returncode == 0, done.stderr
     assert "定时轮次" not in done.stdout

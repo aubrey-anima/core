@@ -15,6 +15,8 @@ display_name 和 role,而判定读的是 `interlocutor["location"]`,恒为空串
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -51,7 +53,7 @@ def _somebody(world: World) -> tuple[str, str]:
 
 def test_standing_in_the_same_place_is_a_face_to_face_conversation(tmp_path):
     """走到她跟前再开口,她就该知道你在跟前。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         agent_id, where = _somebody(world)
         world.player_move("p1", where)
 
@@ -62,7 +64,7 @@ def test_standing_in_the_same_place_is_a_face_to_face_conversation(tmp_path):
 
 def test_being_somewhere_else_is_still_a_phone_chat(tmp_path):
     """不在同一个地方就还是手机 —— 这一支是对的,不许被顺手改掉。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         agent_id, where = _somebody(world)
         elsewhere = next(
             loc for loc in ("home", "cafe", "workshop") if loc != where
@@ -76,7 +78,7 @@ def test_being_somewhere_else_is_still_a_phone_chat(tmp_path):
 
 def test_a_player_who_never_moved_is_a_phone_chat(tmp_path):
     """宿主没调过 player_move 就是没告诉世界你在哪 —— 维持今天的行为,不猜。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         agent_id, _ = _somebody(world)
         system = _say(world, agent_id)
         assert "手机文字私聊" in system
@@ -89,7 +91,7 @@ def test_an_agent_on_the_road_is_never_face_to_face(tmp_path):
     地点就会得到「正在去 workshop 的路上」+「你们都在 cafe,因此这是面对面」——
     自相矛盾,而 LLM 会挑一边编,没有任何报错。
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         agent_id, where = _somebody(world)
         world.player_move("p1", where)
         world.scheduler._transit[agent_id] = {

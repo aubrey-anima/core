@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import time
 
 import pytest
@@ -43,7 +45,7 @@ def _say(world, text, *, agent="夏", player="p1"):
 
 def test_a_player_conversation_moves_the_relationship_with_no_api_key(tmp_path):
     """默认状态下聊一次,关系必须动。此前它恒为零 —— 而且是无声的。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.player_move("p1", "cafe")
         _say(world, "我叫阿檀,以后常来")
 
@@ -66,7 +68,7 @@ def test_a_regular_visitor_eventually_crosses_a_band_and_grows_an_edge(tmp_path)
     时钟是手推的,不是靠跑世界 —— 世界逐次不确定,靠跑 N tick 来断言"第几天
     跨档"必然假绿。同日阻尼(0.5^(N-1))按世界日重置,所以推日是必须的。
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.player_move("p1", "cafe")
         # 判据必须**限定到 p1**:夏 和别的角色也会跨档(内置世界就给她播了两段
         # 关系,创世当场各生一条 relation_shift),拿"她有没有任何一条跨档记忆"
@@ -107,7 +109,7 @@ def test_a_player_memory_is_gossip_eligible(tmp_path):
         def random(self):
             return 0.0
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.player_move("p1", "cafe")
         _say(world, "我叫阿檀")
         picked = pick_gossip(_AlwaysRolls(), "夏", world.memories("夏"), "遥")
@@ -166,10 +168,10 @@ def test_a_real_key_still_gets_the_real_judge(tmp_path):
     from anima_world.relationship_judge import RelationshipJudge
 
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         assert isinstance(world.scheduler.relationship_judge, DeterministicRelationshipJudge)
         world.config_set("llm.api_key", "sk-not-a-real-key")
-    with World.open(db) as world:
+    with open_world_at(db) as world:
         assert isinstance(world.scheduler.relationship_judge, RelationshipJudge)
 
 
@@ -182,7 +184,7 @@ def test_graph_finds_an_agents_edges_by_bare_agent_id(tmp_path):
     图谱里的 subject 带 `agent:` 前缀,而这个参数收的是裸 id,查不到。它不
     报错,返回空 —— 宿主读成"这个角色没有任何关系",而不是"我调错了"。
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         graph = world.scheduler.knowledge_graph
         graph.add("agent:夏", "friendship", "agent:遥")
 
@@ -209,7 +211,7 @@ def _remember(world, agent, text, *, tick):
 
 def test_recall_uses_the_players_name_not_the_opaque_id(tmp_path):
     """检索 query 必须是玩家的显示名 —— id 在记忆文本里根本不出现。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.player_move("p1", "cafe")
         # 关于阿檀的两条是**旧**的,无关的六条是新的 —— 这样 recency 帮不上忙,
         # 只有 relevance 能把它们捞上来。query 用不透明 id 时 relevance 恒 0。
@@ -237,7 +239,7 @@ def test_recall_order_is_deterministic_when_everything_ties(tmp_path):
     (注:这里**不是**在修"只召回最早三条"。`query()` 已经是 tick DESC,而
     `rows.sort` 是稳定排序,所以并列本来就解析成最新优先。)
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         for i in range(6):
             _remember(world, "夏", f"创世记忆 {i}:阿檀", tick=0)
         runs = [
@@ -256,7 +258,7 @@ def test_a_display_name_too_short_to_match_says_so(tmp_path, caplog):
     正是"降级不许无声"这条纪律要挡的。"""
     import logging
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         _remember(world, "夏", "夕说她明天不来了", tick=1)
         world.chat_reply("夏", [{"role": "user", "content": "在吗"}],
                          player_id="p1", display_name="夕")

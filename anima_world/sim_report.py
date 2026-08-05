@@ -231,14 +231,11 @@ def build_run_report(
     ticks: int,
     minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
     engine_version: str | None = None,
-    db_format_version: int | None = None,
 ) -> dict[str, Any]:
     """把一段事件日志读成运行摘要。纯函数;`ticks` 是这次跑到的 tick 数。"""
     events = sorted(events, key=lambda e: (e.ts, e.seq))
     if engine_version is None:
         from anima_world import __version__ as engine_version
-    if db_format_version is None:
-        from anima_world.db import DB_FORMAT_VERSION as db_format_version
 
     per_day = TICKS_PER_DAY(minutes_per_tick)
     # 双时基防护:只有世界 tick 上的事件参与任何 tick 算术(horizon、按天分桶、
@@ -326,7 +323,6 @@ def build_run_report(
     return {
         "report_format_version": REPORT_FORMAT_VERSION,
         "engine_version": engine_version,
-        "db_format_version": db_format_version,
         "world": {
             "ticks": ticks,
             "days": -(-horizon // per_day) if horizon else 0,

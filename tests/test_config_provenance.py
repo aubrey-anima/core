@@ -16,22 +16,21 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 
 import pytest
 
 from anima_world import config_store as config_mod
 from anima_world import prompt_store as prompt_mod
 from anima_world.api import World
+from _worldfile import open_world_at
 
 
 def _rows(db_path: str, table: str) -> list[str]:
-    conn = sqlite3.connect(db_path)
-    try:
-        column = "key" if table == "config" else "name"
-        return sorted(r[0] for r in conn.execute(f"SELECT {column} FROM {table}"))
-    finally:
-        conn.close()
+    """世界里真正落了盘的行(Redis hash 的 field)。"""
+    from _worldfile import redis_for
+
+    key = "anima:w:config" if table == "config" else "anima:w:prompts"
+    return sorted((redis_for(db_path).hgetall(key) or {}).keys())
 
 
 def _seed(tmp_path, config: dict) -> str:
@@ -52,7 +51,7 @@ def test_genesis_writes_no_engine_defaults(tmp_path, bare_seed):
     点亮了七个开关),拿它来验"创世不写默认值"会把作者的意见算成默认值。
     """
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=bare_seed, force_mock_llm=True):
+    with open_world_at(db_path, seed_path=bare_seed, force_mock_llm=True):
         pass
     assert _rows(db_path, "config") == []
     assert _rows(db_path, "prompt_templates") == []
@@ -61,7 +60,7 @@ def test_genesis_writes_no_engine_defaults(tmp_path, bare_seed):
 def test_only_what_the_author_decided_lands_in_the_world_file(tmp_path):
     """表里剩下的就是"这个世界的作者决定了什么" —— 一眼可见。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=_seed(tmp_path, {"needs.enabled": True}),
+    with open_world_at(db_path, seed_path=_seed(tmp_path, {"needs.enabled": True}),
                     force_mock_llm=True) as world:
         assert world.config_get("needs.enabled") is True
     assert _rows(db_path, "config") == ["needs.enabled"]
@@ -70,14 +69,14 @@ def test_only_what_the_author_decided_lands_in_the_world_file(tmp_path):
 def test_an_improved_engine_default_reaches_an_existing_world(tmp_path, bare_seed, monkeypatch):
     """这一条是移动 1 的全部理由:老世界吃得到引擎改进过的默认值。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
         assert world.config_get("chat.recall_k") == 3
 
     改进后 = dict(config_mod._DEFAULTS)
     改进后["chat.recall_k"] = (99, "int", "chat", False, "改进过的默认值")
     monkeypatch.setattr(config_mod, "_DEFAULTS", 改进后)
 
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         assert world.config_get("chat.recall_k") == 99
 
 
@@ -85,7 +84,7 @@ def test_an_authors_decision_still_wins_over_a_changed_default(tmp_path, monkeyp
     """回落只对"没人说过话"的键生效。作者写下的值仍然锁死 —— 需要可复现的场合,
     显式写进种子的 `config` 即可,那本来就是作者的意见。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=_seed(tmp_path, {"chat.recall_k": 7}),
+    with open_world_at(db_path, seed_path=_seed(tmp_path, {"chat.recall_k": 7}),
                     force_mock_llm=True):
         pass
 
@@ -93,14 +92,14 @@ def test_an_authors_decision_still_wins_over_a_changed_default(tmp_path, monkeyp
     改进后["chat.recall_k"] = (99, "int", "chat", False, "改进过的默认值")
     monkeypatch.setattr(config_mod, "_DEFAULTS", 改进后)
 
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         assert world.config_get("chat.recall_k") == 7
 
 
 def test_an_improved_default_template_reaches_an_existing_world(tmp_path, bare_seed, monkeypatch):
     """提示词模板同理 —— 31 行里作者动过的是 **0** 行,全是引擎默认值。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
         name = next(iter(prompt_mod._DEFAULTS))
         assert world.scheduler.prompt_store.get(name) == prompt_mod._DEFAULTS[name][0]
 
@@ -108,7 +107,7 @@ def test_an_improved_default_template_reaches_an_existing_world(tmp_path, bare_s
     改进后[name] = ("改进过的模板", "改进过的说明")
     monkeypatch.setattr(prompt_mod, "_DEFAULTS", 改进后)
 
-    with World.open(db_path, force_mock_llm=True) as world:
+    with open_world_at(db_path, force_mock_llm=True) as world:
         assert world.scheduler.prompt_store.get(name) == "改进过的模板"
 
 
@@ -116,7 +115,7 @@ def test_a_key_nobody_set_is_still_a_key_you_can_read_and_describe(tmp_path, bar
     """没有行 ≠ 不存在。`config get` / `config list` 照旧看得见它,
     否则移动 1 的代价就是"一个新世界里什么配置都没有"。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
         store = world.scheduler.config_store
         assert store.has("chat.recall_k")
         assert (store.meta("chat.recall_k") or {})["value_type"] == "int"
@@ -128,7 +127,7 @@ def test_a_key_nobody_set_is_still_a_key_you_can_read_and_describe(tmp_path, bar
 def test_the_source_of_every_value_is_visible(tmp_path):
     """"为什么我改了配置没生效"几乎总是这个问题。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=_seed(tmp_path, {"needs.enabled": True}),
+    with open_world_at(db_path, seed_path=_seed(tmp_path, {"needs.enabled": True}),
                     force_mock_llm=True) as world:
         listed = {row["key"]: row for row in world.config_list()}
         assert listed["needs.enabled"]["source"] == "世界文件"
@@ -139,7 +138,7 @@ def test_the_source_of_every_value_is_visible(tmp_path):
 def test_no_key_is_lost_when_nothing_is_seeded(tmp_path, bare_seed, key):
     """逐键盯着:创世不播之后,每一个声明过的键都还读得出它的默认值。"""
     db_path = str(tmp_path / "w.db")
-    with World.open(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(db_path, seed_path=bare_seed, force_mock_llm=True) as world:
         expected = config_mod._DEFAULTS[key][0]
         if key in ("llm.api_key", "llm.base_url", "llm.model",
                    "llm.background.model", "llm.timeout", "llm.max_retries"):
@@ -147,62 +146,27 @@ def test_no_key_is_lost_when_nothing_is_seeded(tmp_path, bare_seed, key):
         assert world.config_get(key) == expected
 
 
-def test_a_declared_secret_is_never_written_in_plaintext(tmp_path):
-    """**移动 1 差点把钥匙明文写进世界文件。**
+def test_a_declared_secret_is_refused_by_the_world(tmp_path):
+    """**世界是分发物,secret 不许进去 —— 现在是当场报错,不是加密。**
 
-    创世播默认值时,每个声明过的键都先有了一行带元数据(`is_secret=True`),
-    于是后来的 `set()` 从那一行继承。不播之后表是空的 —— `set("llm.api_key", …)`
-    拿不到任何元数据,`is_secret` 缺省成 False,**明文入库,一声不吭**。
-
-    而 `.cyberworld` 是分发物:一个世界打包发出去,里面躺着作者的 key。这正是
-    `machine_config` 那一整轮要防的事,移动 1 把它的地基抽掉了。
-
-    判据是"引擎声明过什么",不是"表里有没有行" —— 和 `has` / `meta` / `list` 同一条。
+    world.db 时代靠 Fernet + keyfile;钥匙搬进机器配置后,引擎手里没有加密
+    钥匙,"退回明文"就是那种照跑但给错东西的坏 —— 所以 `set()` 对非空密文值
+    直接 RuntimeError,指路机器配置。
     """
-    import sqlite3
+    import fakeredis
 
-    from cryptography.fernet import Fernet
-
-    from anima_world.db import open_db
+    from anima_world.redis_state import RedisConfigBackend
 
     secrets = [key for key, spec in config_mod._DEFAULTS.items() if spec[3]]
     assert secrets, "一个声明为密文的键都没有 —— 这条测试的锚点没了"
 
-    db_path = str(tmp_path / "w.db")
-    conn = open_db(db_path)
-    try:
-        store = config_mod.ConfigStore(conn, fernet_key=Fernet.generate_key())
-        for key in secrets:
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    store = config_mod.ConfigStore(RedisConfigBackend(client, "t"))
+    for key in secrets:
+        with pytest.raises(RuntimeError, match="machine config"):
             store.set(key, f"sk-{key}-的明文")
-    finally:
-        conn.close()
-
-    conn = sqlite3.connect(db_path)
-    try:
-        for key in secrets:
-            raw, is_secret = conn.execute(
-                "SELECT value, is_secret FROM config WHERE key = ?", (key,)
-            ).fetchone()
-            assert is_secret, f"{key} 存进去时没被当成密文"
-            assert "的明文" not in str(raw), f"{key} 明文躺在世界文件里"
-    finally:
-        conn.close()
-
-
-def test_setting_a_declared_secret_without_a_key_refuses_loudly(tmp_path):
-    """没有加密钥匙时**当场报错**,而不是退回明文。
-
-    退回明文是"照跑但给错东西"的教科书样子:调用方看到成功,钥匙进了分发物。
-    """
-    from anima_world.db import open_db
-
-    conn = open_db(str(tmp_path / "w.db"))
-    try:
-        store = config_mod.ConfigStore(conn)          # 没有 fernet_key
-        with pytest.raises(RuntimeError, match="secret"):
-            store.set("llm.api_key", "sk-没钥匙也要存")
-    finally:
-        conn.close()
+    raw = client.hgetall("anima:t:config") or {}
+    assert not any("的明文" in v for v in raw.values()), "明文躺在世界里"
 
 
 def test_moving_to_redis_does_not_rebuild_the_snapshot_there(tmp_path):
@@ -220,7 +184,7 @@ def test_moving_to_redis_does_not_rebuild_the_snapshot_there(tmp_path):
     db_path = str(tmp_path / "w.db")
     name = next(iter(prompt_mod._DEFAULTS))
 
-    with World.open(db_path, force_mock_llm=True, redis=redis, world_id="p") as world:
+    with World.open("p", redis=redis, force_mock_llm=True) as world:
         assert redis.hlen("anima:p:prompts") == 0, (
             f"没人动过一条模板,Redis 里却有 {redis.hlen('anima:p:prompts')} 条 —— "
             f"引擎的默认值被当成这个世界的内容搬过去了"
@@ -241,12 +205,12 @@ def test_an_improved_default_template_reaches_a_redis_world(tmp_path, monkeypatc
     redis = fakeredis.FakeStrictRedis(decode_responses=True)
     db_path = str(tmp_path / "w.db")
     name = next(iter(prompt_mod._DEFAULTS))
-    with World.open(db_path, force_mock_llm=True, redis=redis, world_id="p"):
+    with World.open("p", redis=redis, force_mock_llm=True):
         pass
 
     改进后 = dict(prompt_mod._DEFAULTS)
     改进后[name] = ("改进过的模板", "改进过的说明")
     monkeypatch.setattr(prompt_mod, "_DEFAULTS", 改进后)
 
-    with World.open(db_path, force_mock_llm=True, redis=redis, world_id="p") as world:
+    with World.open("p", redis=redis, force_mock_llm=True) as world:
         assert world.scheduler.prompt_store.get(name) == "改进过的模板"

@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from anima_world.ontology import AFFORDANCE_VERBS
 from anima_world.tools.base import BODY, ToolCallError, ToolContext, ToolResult, tool
 
 logger = logging.getLogger(__name__)
@@ -146,3 +147,37 @@ def wander(ctx: ToolContext, params: dict) -> ToolResult:
 )
 def seek_company(ctx: ToolContext, params: dict) -> ToolResult:
     return _do(ctx, "idle_social", {})
+
+
+# 她提示词里读到的是"照料",不是 `tend` —— 中文提示词里的英文动词是噪音。所以
+# 反过来这张表也要在,不然她照着提示词说"照料",引擎回一句"不认识这个动词"。
+_VERB_ALIASES = {label: verb for verb, label in AFFORDANCE_VERBS.items()}
+
+
+@tool(
+    id="interact",
+    writes=("stocks", "events:entity_interaction"),
+    kind="interact",
+    description=(
+        "对你这儿的一样东西做点什么(照料、收取产出、读……)。"
+        "东西的 id 和它能被怎么做,都写在【你此刻感觉到的】那一段里"
+    ),
+    params={
+        "target": {"type": "string", "description": "东西的 id,像 tree:harbor_oak", "required": True},
+        "verb": {"type": "string", "description": "做什么,比如 照料 / tend", "required": True},
+    },
+    surfaces=(BODY,),
+)
+def interact(ctx: ToolContext, params: dict) -> ToolResult:
+    target = str(params.get("target") or "").strip()
+    verb = str(params.get("verb") or "").strip()
+    if not target:
+        raise ToolCallError("没说对什么东西")
+    if not verb:
+        raise ToolCallError("没说做什么")
+    verb = _VERB_ALIASES.get(verb, verb)
+    outcome = ctx.runtime.interact_with(ctx.agent_id, target, verb)
+    if not outcome.get("ok"):
+        # 世界说"这会儿不行"(果子还没熟)。不是失败,是没成 —— 照实报。
+        return ToolResult(ok=False, error=str(outcome.get("refusal") or "这会儿不行"), detail=outcome)
+    return ToolResult(detail=outcome)

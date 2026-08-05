@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -13,7 +15,7 @@ from anima_world.api import World
 
 @pytest.fixture
 def world(tmp_path):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     yield w
     w.close()
 
@@ -100,13 +102,13 @@ def test_world_reopens_from_the_event_log(tmp_path):
     不是历史(事件溯源的本义),所以用一个确定性事件钉住最后时刻 ——
     依赖异步叙事事件恰好落盘的写法会 flaky。"""
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.tick(3)
         world.player_action("p1", "留下到此一游")  # ts = 当前时钟,同步落盘
         tick = world.state()["world_time"]["tick"]
         assert tick == 3
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         state = reopened.state()
         assert state["world_time"]["tick"] == tick, "重开必须接着最后一个事件的时钟走"
 
@@ -135,7 +137,7 @@ def test_world_has_exactly_one_projection(tmp_path):
     事件都折叠。于是从 view 那份读余额会读到开机时的旧值(已删除的 snapshots
     表正是把它写回库里,才留下会累积的错账)。
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("economy.enabled", "true")
         assert world._view.projection is world.scheduler._memory_projection, (
             "系统里只允许有一份投影"
@@ -150,7 +152,7 @@ def test_world_has_exactly_one_projection(tmp_path):
 
 def test_state_reports_live_locations(tmp_path):
     """位置改成快照时读活黑板后,state() 必须仍与角色实际所在一致。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(50)
         live = {
             aid: (brain.agent.blackboard.read("loc") or brain.agent.location)
@@ -167,10 +169,8 @@ def _tick_into_quiet_tail(world, budget: int = 600) -> int:
     在日志里没有任何痕迹。世界的事件疏密逐次运行都不同(角色行为带骰子),
     所以固定 tick 数的写法会时红时绿 —— 必须按"有没有事件"构造。
     """
-    conn = world.scheduler.event_log.conn
-
     def count() -> int:
-        return conn.execute("SELECT count(*) FROM events").fetchone()[0]
+        return world.scheduler.event_log.count()
 
     world.tick(30)  # 先离开开局的密集播种段
     for _ in range(budget):
@@ -190,10 +190,10 @@ def test_clock_survives_close_and_reopen(tmp_path):
     "'发生了一件事'进事件日志,'现在是多少'进 data-plane 表",时钟正是后者。
     """
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         reported = _tick_into_quiet_tail(world)
 
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         assert world.state()["world_time"]["tick"] == reported, (
             "重开后的时钟必须等于关闭时报告的时钟"
         )
@@ -204,9 +204,9 @@ def test_clock_deficit_never_accumulates_across_restarts(tmp_path):
     db = str(tmp_path / "w.db")
     expected = 0
     for _ in range(3):
-        with World.open(db, force_mock_llm=True) as world:
+        with open_world_at(db, force_mock_llm=True) as world:
             expected = _tick_into_quiet_tail(world)
-        with World.open(db, force_mock_llm=True) as world:
+        with open_world_at(db, force_mock_llm=True) as world:
             assert world.state()["world_time"]["tick"] == expected, (
                 "上一轮关闭时走到的时钟必须原样还在,欠账不许攒下来"
             )
@@ -223,7 +223,7 @@ def test_explicit_seed_that_cannot_be_read_fails_loudly(tmp_path):
     from anima_world.world_seed import WorldSeedError
 
     with pytest.raises(WorldSeedError) as excinfo:
-        World.open(
+        open_world_at(
             str(tmp_path / "w.db"),
             seed_path=str(tmp_path / "typo.json"),
             force_mock_llm=True,
@@ -243,7 +243,7 @@ def test_explicit_seed_failing_schema_says_what_is_wrong(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(WorldSeedError) as excinfo:
-        World.open(str(tmp_path / "w.db"), seed_path=str(seed), force_mock_llm=True)
+        open_world_at(str(tmp_path / "w.db"), seed_path=str(seed), force_mock_llm=True)
     message = str(excinfo.value)
     assert "locations" in message, "缺了整个 locations 列表,报错得说出来"
     assert "location" in message and "personality" in message, (
@@ -283,17 +283,17 @@ def test_reopening_a_world_keeps_its_own_cast(tmp_path):
     seed.write_text(json.dumps(_authored_seed(), ensure_ascii=False), encoding="utf-8")
     db = str(tmp_path / "w.db")
 
-    with World.open(db, seed_path=str(seed), force_mock_llm=True) as world:
+    with open_world_at(db, seed_path=str(seed), force_mock_llm=True) as world:
         assert set(world.state()["agents"]) == {"顾昀", "白露", "老陈"}
 
     # 不传 seed 重开 —— 世界必须还是那三个人,一个外人都不许进来
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         assert set(world.state()["agents"]) == {"顾昀", "白露", "老陈"}
         world.tick(30)
 
     who = {
         e.get("who")
-        for e in World.open(db, force_mock_llm=True).events()
+        for e in open_world_at(db, force_mock_llm=True).events()
         if e.get("who")
     }
     assert who <= {"顾昀", "白露", "老陈"}, f"外来角色污染了世界:{who}"

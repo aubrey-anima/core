@@ -33,7 +33,7 @@ The engine is **a library, not a service.** There is no HTTP server and no port.
 application imports it, and the world lives inside your process:
 
 ```
-your app  ──import anima_world.api──▶  world.db
+your app  ──import anima_world.api──▶  the world on Redis (anima:{world_id}:*)
 ```
 
 ## See it run
@@ -50,7 +50,7 @@ $ anima-world start
        修复:anima-world config set llm.api_key sk-…
 
   ② 世界
-     ✓ 新建 saves/world.db
+     ✓ 新建 world(住在 redis://127.0.0.1:6379/0)
      时钟:1 tick/秒 —— 约 5 分钟走完一个世界日(现实时间的 300 倍速)
      ✓ 3 个角色就位: 苏晚夏、陆知遥、沈亦柔
 
@@ -100,7 +100,10 @@ it, close it.
 ```python
 from anima_world.api import World
 
-with World.open("saves/world.db") as world:
+import redis
+
+client = redis.Redis.from_url("redis://127.0.0.1:6379/0", decode_responses=True)
+with World.open("world", redis=client) as world:
     world.start_clock()                        # background clock; or drive it yourself
     print(world.state()["world_time"])         # {'day': 0, 'hour': 6, 'minute': 25, ...}
 
@@ -144,7 +147,7 @@ enable is more LLM spend and more surface to reason about.
 | **Social** | `social.enabled` | Three-axis relationships (always on) plus gossip that propagates second-hand with confidence decay, and emergent cliques |
 
 ```bash
-anima-world config set needs.enabled true --db-path saves/world.db
+anima-world config set needs.enabled true --world-id world
 ```
 
 ### Choices of her own (1.3.0, four more flags, all off)
@@ -167,7 +170,7 @@ runs on Mock, and function-calling support across local and OpenAI-compatible en
 uneven. Prose still streams a character at a time; not one marker leaks to the player.
 
 ```python
-with World.open("saves/world.db") as world:
+with World.open("world", redis=client) as world:
     meta = {}
     reply = world.chat_reply("夏", turn, player_id="p1", display_name="阿宇", meta=meta)
     meta["stance"]        # 'provoke' — and meta['stance_declared'] tells you she chose it
@@ -182,39 +185,124 @@ with World.open("saves/world.db") as world:
 `world.chat()` raises `AgentUnavailable` while she is ignoring that player — an empty reply
 would be indistinguishable from an LLM outage, and those two deserve different UI.
 
+### Things that are not people (2.0)
+
+Until 2.0 a world contained characters, places, and items you could carry. There were
+quantities on things — but nothing said what a *tree* was, so nothing could say what you
+could *do* to one. Declaring a **kind** does both, once, for every instance of it:
+
+```jsonc
+{
+  "kinds": [{
+    "id": "agent",
+    "quantities": {
+      "stamina": {"default": 100, "visibility": "self", "unit": "pt"},
+      "skill":   {"default": 1.0, "visibility": "here"}
+    }
+  }, {
+    "id": "tree",
+    "gloss": "a tree",
+    "quantities": {
+      "height":     {"default": 1.0, "visibility": "here", "unit": "m"},
+      "max_height": 12.0
+    },
+    "affordances": {
+      "look": {},
+      "tend": {"when":     ["height < max_height"],
+               "set":      {"height": "min(height + 0.3 * me_skill, max_height)"},
+               "requires": ["me_stamina >= 15"],
+               "costs":    {"stamina": "me_stamina - 15"}}
+    },
+    "prompt": {"budget": 3}
+  }],
+  "entities": [{"id": "tree:oak", "name": "the old oak", "location": "yard"}]
+}
+```
+
+The declaration lives on the kind; an instance carries only its id, name, and where it is.
+That split is what buys **boundedness**: her prompt names the kind once instead of
+repeating the schema per tree, and `prompt.budget` caps how many of them she can see at
+once — a world with 3000 trees and a world with 20 send her the same number of characters.
+When the cap truncates, it says so ("there were 2997 other things here you didn't look at
+closely"); a silent truncation would have her decide inside a world she believes has three
+trees, and she would never find out.
+
+**Declaring is the switch.** A world with no `kinds` behaves exactly as it did before —
+this whole layer is absent. Write `kinds` and you have said "I have declared what exists
+here", so suggestions become gates: a typo'd quantity name (`heigth`) refuses to start the
+world and names the ones you did declare. Accepting it would quietly create a second
+quantity while the real one sat at its default, with clean logs, until you noticed months
+later that the tree had not grown.
+
+**An affordance is a relation between an actor and a thing, not a property of the thing.**
+The same axe affords chopping to someone strong and not to someone weak. So `when` and
+`set` (about the tree) have a second half: `requires` and `costs` (about her), reading her
+own quantities through the `me_` prefix. Without it every action always succeeds — and *an
+action that always succeeds produces no decisions*: no reason to pick what to do first, no
+reason to rest, no reason to get better at anything. With it, six turns of tending run her
+out of stamina, the seventh comes back `incapable`, and she has to go do something else.
+
+`agent` is the one built-in kind you may extend, and only its `quantities` — she is not
+another thing you can `tend`; her verbs live in the behaviour tree and the chat tools.
+Her quantities live in the same store as the tree's, under the same visibility rules, so
+declaring one `self` means she perceives it and declaring one `here` means anyone standing
+next to her does. `requires` may read only `me_*`, on purpose: a failed `requires` must
+always mean exactly one thing — *you can't* — and that is the whole reason it exists
+separately from `when`. `costs` and `set` read the same pre-action values (double
+buffering), and a refusal writes nothing at all.
+
+Three different gates, and they refuse for different reasons. Acting on a thing requires
+being **in the same place as it** — `tend` a tree from across town comes back naming both
+where the tree is and where she is, because "it's in the yard" reads as a lie when the real
+problem is that she is on the road and the engine does not know where she is. Branching a
+*duty* on a quantity is gated on **perception** instead: a schedule that reads a value her
+`visibility` keeps from her would have her decide on something she cannot know — the same
+break of character as blurting out a mine's reserves, except it leaves no trace in the
+prompt at all. So that branch is warned about once at startup and reads `None` forever
+after, rather than silently using whatever she saw last time she walked past.
+
+Ask the CLI what a world actually declares:
+
+```bash
+anima-world ontology --world-id world --json    # kinds, quantities, verbs, live values
+```
+
+The verb table is only obtainable here. `stocks` gives you numbers, and a number does not
+tell you whether the word `tend` exists.
+
 ## How it is built
 
-**One file is one world.** `world.db` holds events, chats, memories, and config.
-`world.db.key` sits next to it and encrypts the API key — **it must travel with the
-database**, or the key becomes unreadable and the world silently drops to Mock. (Not
-actually silently: the engine says so at boot and keeps saying so in `state()`.)
+**One key prefix is one world.** The world lives on Redis under `anima:{world_id}:*`
+(events, chats, memories, config, the map, her blackboard). Pass `mysql=` and the four
+unbounded tables (events / memories / conversations / messages) move to MySQL. The LLM
+key lives on the machine (`~/.anima-world/config.json`, 0600) — never inside a world,
+so a packaged world carries no secrets by construction.
 
 **The event log is the only truth.** There is no `balances` table, because two sources
-of truth eventually disagree and you cannot tell which one is right. `world.db` does not
+of truth eventually disagree and you cannot tell which one is right. The world does not
 store "夏 has 50 coins" — it stores *why* she has 50 coins. Reconciliation is replay.
 
-**One running world owns its file.** Half the truth lives in memory (clock, projection,
-locks, thread pools), so a second process writing the same `world.db` forks it
-immediately. Offline work — packaging, fast-forwarding — happens after the world closes.
+**Many processes, one world.** The clock, her blackboard, and everything she carries
+into a prompt live on Redis, so a second process with nothing but a Redis connection
+sees — and can change — the same world, under one cross-process lock. Joining a running
+world never rewinds it: every write on the way in is fill-if-missing.
 
-**Version is contract.** One release freezes (engine code, db format, package format)
-together. The major version *is* the db format version — meaning it is **mountability**:
-`db.py` enforces it at runtime, so mounting a database from an incompatible format is
-refused on the spot rather than quietly writing garbage. Purely additive schema changes
-(new tables, new nullable columns) don't affect mountability and ride the minor version
-instead, stamped into `db_meta.schema_revision` so a downgrade is visible — an older engine
-still opens the file, it just doesn't read the new tables, and `contract` / `doctor` say so.
+**Version is contract.** One release freezes (engine code, storage shape, package
+format) together. `anima-world contract --json` reports the storage contract (the Redis
+key prefix, the MySQL table set) and the package format version, so a repository holding
+a mirror can diff itself against the engine instead of quietly falling behind.
 
 ## Ship a world to someone else
 
-Worlds package into a single `.cyberworld` file — either a template (just the seed, the
-world builds itself on first boot) or a snapshot (a database that has already lived).
+Worlds package into a single `.cyberworld` file — a snapshot of a world that has
+lived (its full Redis state, plus the MySQL history when there is one), together with
+its genesis seed as a birth certificate.
 
 ```bash
-anima-world world export --seed seed.json --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode template
+anima-world world export --world-id world --output my.cyberworld \
+    --package-id my-world --name "我的世界"
 
-anima-world world import my.cyberworld --destination ./instances
+anima-world world import my.cyberworld --world-id restored   # must be an empty world id
 ```
 
 A package says what it needs without your having to be able to run it — the launcher
@@ -232,8 +320,10 @@ anima-world world inspect my.cyberworld --json
 anima-world start          # create + run, with guided setup — start here
 anima-world chat           # talk to a character; no --agent lists who lives there
 anima-world prompt         # see the prompt a character receives, block by block
-anima-world doctor         # health check: files, keys, a real LLM call, clock speed
-anima-world config         # read/write settings, secrets encrypted and masked
+anima-world map            # the map, who is where, and where they went (--json)
+anima-world ontology       # what kinds of things exist, their quantities and verbs (--json)
+anima-world doctor         # health check: Redis durability, keys, a real LLM call, clock speed
+anima-world config         # read/write settings; api keys route to this machine, not the world
 anima-world run            # foreground host, no onboarding (for deployment)
 anima-world simulate       # headless fast-forward (--report writes a run summary)
 anima-world world          # export / import / inspect .cyberworld packages

@@ -93,52 +93,45 @@ def test_authoring_is_not_importable_from_the_engine():
         __import__("anima_world.author")
 
 
-def test_template_export_import_roundtrip(tmp_path):
-    seed_path = tmp_path / "world_seed.json"
-    seed_path.write_text(json.dumps(_bundled_seed(), ensure_ascii=False), encoding="utf-8")
+def test_snapshot_export_import_roundtrip(tmp_path):
+    import fakeredis
+
+    from anima_world.api import World
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with World.open("src", redis=client, force_mock_llm=True) as world:
+        world.tick(3)
     package = tmp_path / "demo.cyberworld"
 
     manifest = export_world_package(
-        seed_path=seed_path,
-        output_path=package,
-        world_id="demo-world",
-        name="演示世界",
-        mode="template",
-        summary="roundtrip fixture",
+        redis=client, world_id="src", output_path=package,
+        package_world_id="demo-world", name="演示世界", summary="roundtrip fixture",
     )
     assert manifest.world_id == "demo-world"
-    assert manifest.export_mode == "template"
+    assert manifest.export_mode == "snapshot"
     assert package.is_file()
 
     # Inspecting must not need to unpack into an instance.
     assert inspect_world_package(package).revision_id == manifest.revision_id
 
-    imported = import_world_package(package, tmp_path / "instances")
-    assert imported.world_id == "demo-world"
-    assert (imported.path / "world_seed.json").is_file()
-    # A template carries no database — the world builds one on first boot.
-    assert not (imported.path / "world.db").exists()
+    target = fakeredis.FakeStrictRedis(decode_responses=True)
+    imported = import_world_package(package, redis=target, world_id="demo")
+    assert imported.world_id == "demo"   # 目标世界的名字;世系 id 在 manifest 里
+    with World.open("demo", redis=target, force_mock_llm=True) as world:
+        assert world.scheduler.event_log.count() > 0
+        assert world.scheduler.clock >= 3
 
 
-def test_snapshot_export_carries_the_live_database(tmp_path):
-    from anima_world.db import open_db
+def test_snapshot_export_carries_the_world_state(tmp_path):
+    import zipfile
 
-    db_path = tmp_path / "world.db"
-    open_db(db_path).close()
-    seed_path = tmp_path / "world_seed.json"
-    seed_path.write_text(json.dumps(_bundled_seed(), ensure_ascii=False), encoding="utf-8")
-    package = tmp_path / "snap.cyberworld"
-
-    export_world_package(
-        seed_path=seed_path,
-        db_path=db_path,
-        output_path=package,
-        world_id="snap-world",
-        name="快照世界",
-        mode="snapshot",
-    )
-    imported = import_world_package(package, tmp_path / "instances")
-    assert (imported.path / "world.db").is_file()
+    package = _a_snapshot(tmp_path, "snap.cyberworld")
+    with zipfile.ZipFile(package) as archive:
+        names = set(archive.namelist())
+        assert "world_state.json" in names, names
+        assert "world.db" not in names, "v2 包里不该再有 SQLite 文件"
+        state = json.loads(archive.read("world_state.json"))
+    assert state["redis"], "状态快照是空的"
 
 
 # ── 包格式:envelope 谁都读得懂,拒绝要说人话 ──────────────────────────────
@@ -176,13 +169,19 @@ def _repack(source: pathlib.Path, target: pathlib.Path, mutate) -> pathlib.Path:
     return target
 
 
-def _a_template(tmp_path: pathlib.Path, name: str = "demo.cyberworld") -> pathlib.Path:
-    seed_path = tmp_path / "world_seed.json"
-    seed_path.write_text(json.dumps(_bundled_seed(), ensure_ascii=False), encoding="utf-8")
+def _a_snapshot(tmp_path: pathlib.Path, name: str = "demo.cyberworld") -> pathlib.Path:
+    """一个真实来源的 v2 包:fakeredis 上创世,导出。"""
+    import fakeredis
+
+    from anima_world.api import World
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with World.open("pkg-src", redis=client, force_mock_llm=True):
+        pass
     package = tmp_path / name
     export_world_package(
-        seed_path=seed_path, output_path=package,
-        world_id="demo-world", name="演示世界", mode="template",
+        redis=client, world_id="pkg-src", output_path=package,
+        package_world_id="demo-world", name="演示世界",
     )
     return package
 
@@ -208,12 +207,12 @@ def test_manifest_is_readable_by_an_engine_that_cannot_run_it(tmp_path):
     """
     from anima_world.world_package import read_package_manifest
 
-    future = _needing_engine(_a_template(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
+    future = _needing_engine(_a_snapshot(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
 
     manifest = read_package_manifest(future)
     assert manifest.world_id == "demo-world"
     assert manifest.name == "演示世界"
-    assert manifest.export_mode == "template"
+    assert manifest.export_mode == "snapshot"
     assert manifest.engine_min == "2.0.0"
     assert manifest.runs_on("2.4.1") and not manifest.runs_on("1.0.2")
     assert manifest.compatibility()["runnable"] is False
@@ -224,7 +223,7 @@ def test_world_inspect_answers_for_an_incompatible_package(tmp_path):
     import subprocess
     import sys
 
-    future = _needing_engine(_a_template(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
+    future = _needing_engine(_a_snapshot(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
     result = subprocess.run(
         [sys.executable, "-m", "anima_world", "world", "inspect", str(future), "--json"],
         capture_output=True, text=True,
@@ -256,33 +255,12 @@ def test_world_inspect_still_refuses_an_unreadable_package(tmp_path):
     assert "ZIP" in result.stderr
 
 
-def test_template_travels_within_a_major_but_a_snapshot_does_not(tmp_path):
-    """模板只装 world_seed.json —— 版本中立的作者数据,不该按 db 的规矩钉版。
+def test_a_snapshot_pins_to_the_exporting_engine(tmp_path):
+    """快照带着世界的全部状态,地板是导出它的那个引擎(v2 起只有快照)。"""
+    from anima_world.world_package import _engine_version, read_package_manifest
 
-    快照带着盖了格式戳的 world.db,地板是导出它的那个引擎,天经地义;模板
-    盖同一个章,代价就从"存档带不走"变成"作品带不走",而后者从没有人决定过。
-    """
-    from anima_world.db import open_db
-    from anima_world.world_package import _engine_version, _version_tuple
-
-    major = _version_tuple(_engine_version())[0]
-    seed_path = tmp_path / "world_seed.json"
-    seed_path.write_text(json.dumps(_bundled_seed(), ensure_ascii=False), encoding="utf-8")
-
-    template = export_world_package(
-        seed_path=seed_path, output_path=tmp_path / "t.cyberworld",
-        world_id="t-world", name="模板", mode="template",
-    )
-    assert template.engine_min == f"{major}.0.0"
-    assert template.runs_on(f"{major}.0.0"), "同大版本的老引擎必须收得下"
-
-    db_path = tmp_path / "world.db"
-    open_db(db_path).close()
-    snapshot = export_world_package(
-        seed_path=seed_path, db_path=db_path, output_path=tmp_path / "s.cyberworld",
-        world_id="s-world", name="快照", mode="snapshot",
-    )
-    assert snapshot.engine_min == _engine_version()
+    manifest = read_package_manifest(_a_snapshot(tmp_path))
+    assert manifest.engine_min == _engine_version()
 
 
 REJECTIONS = [
@@ -304,7 +282,7 @@ def test_a_rejected_package_says_which_thing_is_wrong(tmp_path, flavour, expecte
     import subprocess
     import sys
 
-    package = _a_template(tmp_path)
+    package = _a_snapshot(tmp_path)
     if flavour == "engine range":
         target = _needing_engine(package, tmp_path / "bad.cyberworld", "2.0.0", "3.0.0")
     elif flavour == "seed schema":
@@ -331,14 +309,15 @@ def test_a_rejected_package_says_which_thing_is_wrong(tmp_path, flavour, expecte
         target = tmp_path / "bad.cyberworld"
         target.write_text("not a zip at all")
 
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "world", "import", str(target),
-         "--destination", str(tmp_path / "instances")],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 2
-    assert expected in result.stderr, (
-        f"{flavour} 的拒绝理由没有透出来,作者不知道该修哪样:{result.stderr!r}"
+    import fakeredis
+
+    from anima_world.world_package import PackageValidationError
+
+    target_redis = fakeredis.FakeStrictRedis(decode_responses=True)
+    with pytest.raises((PackageValidationError, OSError)) as err:
+        import_world_package(target, redis=target_redis, world_id="rejected")
+    assert expected in str(err.value), (
+        f"{flavour} 的拒绝理由没有透出来,作者不知道该修哪样:{err.value!r}"
     )
 
 
@@ -427,8 +406,7 @@ def test_version_identification_needs_no_third_party_imports():
 
     probe = (
         "import anima_world;"
-        "from anima_world.db import DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT;"
-        "print(anima_world.__version__, DB_FORMAT_VERSION, MIN_SUPPORTED_DB_FORMAT)"
+        "print(anima_world.__version__)"
     )
     # -S 不加载 site-packages,所以第三方包在子进程里根本不存在 —— 这正是
     # --no-deps venv 的形状。开发机上依赖装得好好的,少了这层隔离,测试会
@@ -440,30 +418,26 @@ def test_version_identification_needs_no_third_party_imports():
     )
     assert result.returncode == 0, (
         "版本识别探针在无依赖环境里失败了 —— 多半是有人往 anima_world/__init__.py "
-        f"或 db.py 里加了第三方 import:\n{result.stderr}"
+        f"里加了第三方 import:\n{result.stderr}"
     )
-    version, fmt, floor = result.stdout.split()
-    assert version and int(fmt) >= 1 and int(floor) >= 1
+    assert result.stdout.strip()
 
 
-def test_ticks_zero_initializes_a_world_without_running_it(tmp_path):
-    """跨仓库契约:`simulate --ticks 0` = 建库但不跑。
+def test_ticks_zero_initializes_a_world_without_running_it(monkeypatch):
+    """跨仓库契约:`simulate --ticks 0` = 创世但不跑。
 
-    这是唯一能无头建出世界文件的办法(没有 init/create 子命令),外部工具
-    靠它建库再交给宿主。将来给 tick 数加一条"必须为正"的校验 —— 一个看起来
-    完全合理的加固 —— 会悄悄拿掉这个能力。
+    这是唯一能无头建出世界的办法(没有 init/create 子命令),外部工具靠它创世
+    再交给宿主。将来给 tick 数加一条"必须为正"的校验会悄悄拿掉这个能力。
     """
+    import fakeredis
+
     from anima_world.__main__ import main
 
-    db = tmp_path / "w.db"
-    assert main(["simulate", "--db-path", str(db), "--ticks", "0", "--llm", "mock"]) == 0
-    assert db.exists()
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    monkeypatch.setattr("anima_world.__main__._connect_redis", lambda url=None: client)
 
-    conn = sqlite3.connect(db)
-    try:
-        joins = conn.execute("SELECT count(*) FROM events WHERE type='agent_join'").fetchone()[0]
-        ticked = conn.execute("SELECT count(*) FROM events WHERE ts > 0").fetchone()[0]
-    finally:
-        conn.close()
-    assert joins > 0, "建库应该播下创世角色"
-    assert ticked == 0, "--ticks 0 不该推进世界"
+    assert main(["simulate", "--world-id", "init", "--ticks", "0", "--llm", "mock"]) == 0
+    events = client.lrange("anima:init:events", 0, -1) or []
+    parsed = [json.loads(e) for e in events]
+    assert any(e.get("type") == "agent_join" for e in parsed), "创世应该播下角色"
+    assert all(int(e.get("ts") or 0) == 0 for e in parsed), "--ticks 0 不该推进世界"

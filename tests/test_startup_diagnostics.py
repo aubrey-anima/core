@@ -7,67 +7,14 @@ later. These tests pin the moment each one becomes visible.
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 import logging
 
 import pytest
-from cryptography.fernet import Fernet
 
 from anima_world.__main__ import build_serve_scheduler
-from anima_world.config_store import ConfigStore
-from anima_world.db import open_db
-
-
-def _store(db_path, key: bytes) -> tuple[ConfigStore, object]:
-    conn = open_db(db_path)
-    return ConfigStore(conn, fernet_key=key), conn
-
-
-def test_readable_secret_is_not_reported_as_undecryptable(tmp_path):
-    key = Fernet.generate_key()
-    store, conn = _store(tmp_path / "w.db", key)
-    try:
-        store.set("llm.api_key", "sk-real", value_type="str", category="llm", is_secret=True)
-        assert store.get("llm.api_key") == "sk-real"
-        assert store.undecryptable_secrets() == []
-    finally:
-        conn.close()
-
-
-def test_lost_keyfile_reads_as_unset_but_is_reported(tmp_path):
-    """The whole point of the accessor: `get` cannot distinguish these."""
-    db = tmp_path / "w.db"
-    store, conn = _store(db, Fernet.generate_key())
-    try:
-        store.set("llm.api_key", "sk-real", value_type="str", category="llm", is_secret=True)
-    finally:
-        conn.close()
-
-    # Reopening with a different key is exactly "the .key file did not travel".
-    store, conn = _store(db, Fernet.generate_key())
-    try:
-        assert store.get("llm.api_key", default="") is None  # indistinguishable from unset
-        assert store.undecryptable_secrets() == ["llm.api_key"]
-    finally:
-        conn.close()
-
-
-def test_rewriting_a_secret_clears_the_report(tmp_path):
-    db = tmp_path / "w.db"
-    store, conn = _store(db, Fernet.generate_key())
-    try:
-        store.set("llm.api_key", "sk-old", value_type="str", category="llm", is_secret=True)
-    finally:
-        conn.close()
-
-    store, conn = _store(db, Fernet.generate_key())
-    try:
-        assert store.undecryptable_secrets() == ["llm.api_key"]
-        store.set("llm.api_key", "sk-new")
-        assert store.undecryptable_secrets() == []
-        assert store.get("llm.api_key") == "sk-new"
-    finally:
-        conn.close()
 
 
 @pytest.fixture
@@ -90,8 +37,11 @@ def minimal_seed(tmp_path):
 
 def test_seed_is_applied_to_a_fresh_db_without_warning(tmp_path, minimal_seed, caplog):
     with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        import fakeredis
+
         scheduler = build_serve_scheduler(
-            db_path=tmp_path / "w.db", seed_path=minimal_seed, force_mock_llm=True
+            "w", fakeredis.FakeStrictRedis(decode_responses=True),
+            seed_path=minimal_seed, force_mock_llm=True,
         )
     try:
         assert list(scheduler.agents) == ["a"]
@@ -101,12 +51,14 @@ def test_seed_is_applied_to_a_fresh_db_without_warning(tmp_path, minimal_seed, c
 
 
 def test_seed_against_a_populated_db_is_ignored_and_says_so(tmp_path, minimal_seed, caplog):
-    db = tmp_path / "w.db"
-    build_serve_scheduler(db_path=db, seed_path=minimal_seed, force_mock_llm=True).stop()
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w", client, seed_path=minimal_seed, force_mock_llm=True).stop()
 
     with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
         scheduler = build_serve_scheduler(
-            db_path=db, seed_path=minimal_seed, force_mock_llm=True
+            "w", client, seed_path=minimal_seed, force_mock_llm=True
         )
     try:
         assert any("--seed" in r.getMessage() for r in caplog.records), (
@@ -119,7 +71,7 @@ def test_seed_against_a_populated_db_is_ignored_and_says_so(tmp_path, minimal_se
 def test_state_names_the_reason_the_llm_is_mocked(tmp_path):
     from anima_world.api import World
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         llm = world.state()["runtime"]["llm"]
     assert llm["mock"] is True
     assert llm["degraded_reason"] == "llm.api_key is not configured"
@@ -148,9 +100,12 @@ def test_malformed_rich_seed_sections_degrade_instead_of_stranding_the_world(tmp
         ),
         encoding="utf-8",
     )
+    import fakeredis
+
     with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
         scheduler = build_serve_scheduler(
-            db_path=tmp_path / "w.db", seed_path=seed, force_mock_llm=True
+            "w", fakeredis.FakeStrictRedis(decode_responses=True),
+            seed_path=seed, force_mock_llm=True,
         )
     try:
         assert sorted(scheduler.agents) == ["a", "b"], "坏 relations/memories 不得阻断世界初始化"

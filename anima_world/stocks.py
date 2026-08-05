@@ -11,16 +11,18 @@
 完全同构,而那套东西已经被证明够用了。**一个"实体"就是共用一个 owner 的一组量。**
 
 `evaluate_due` 是引擎那一步:挑出到点的规律、按 owner 求值、写回、必要时发事件。
-它是**纯算术 + SQL,没有 LLM**,所以和 needs/economy 一样跑在 tick 线程上 ——
+它是**纯算术,没有 LLM**,所以和 needs/economy 一样跑在 tick 线程上 ——
 这一点和 autonomy 正相反(那条要打网络,必须丢到别的线程去)。
+
+存储在别处:SQLite 版 `StockStore` 已退役,`store` 参数是鸭子类型
+(`anima_world.redis_state.RedisStockStore`),要求的接口是
+`of` / `snapshot_kind` / `snapshot_many` / `write_round`。
 """
 
 from __future__ import annotations
 
 import logging
-import sqlite3
-import threading
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable
 
 from anima_world.expressions import ExpressionError
 from anima_world.rules import WORLD_PREFIX, Rule
@@ -35,136 +37,8 @@ def owner_kind(owner: str) -> str:
     return owner.split(":", 1)[0] if ":" in owner else owner
 
 
-class StockStore:
-    """存量的持久层。所有访问经 `lock` 串行化(和 ChatStore 同一条纪律)。"""
-
-    def __init__(self, conn: sqlite3.Connection, lock: Any | None = None) -> None:
-        self._conn = conn
-        self._lock = lock if lock is not None else threading.RLock()
-
-    # ── 读写 ────────────────────────────────────────────────────────────────
-
-    def get(self, owner: str, key: str, default: float = 0.0) -> float:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT value FROM stocks WHERE owner = ? AND key = ?", (owner, key)
-            ).fetchone()
-        return float(row[0]) if row is not None else default
-
-    def of(self, owner: str) -> dict[str, float]:
-        """这个 owner 身上所有的量。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT key, value FROM stocks WHERE owner = ?", (owner,)
-            ).fetchall()
-        return {key: float(value) for key, value in rows}
-
-    def set(self, owner: str, key: str, value: float, tick: int = 0) -> None:
-        with self._lock:
-            self._write(owner, key, value, tick)
-            self._conn.commit()
-
-    def set_many(self, owner: str, values: dict[str, float], tick: int = 0) -> None:
-        with self._lock:
-            for key, value in values.items():
-                self._write(owner, key, value, tick)
-            self._conn.commit()
-
-    def _write(self, owner: str, key: str, value: float, tick: int) -> None:
-        self._conn.execute(
-            "INSERT INTO stocks (owner, key, value, updated_tick) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(owner, key) DO UPDATE SET value=excluded.value,"
-            " updated_tick=excluded.updated_tick",
-            (owner, key, float(value), int(tick)),
-        )
-
-    def delete(self, owner: str, key: str | None = None) -> None:
-        with self._lock:
-            if key is None:
-                self._conn.execute("DELETE FROM stocks WHERE owner = ?", (owner,))
-            else:
-                self._conn.execute(
-                    "DELETE FROM stocks WHERE owner = ? AND key = ?", (owner, key)
-                )
-            self._conn.commit()
-
-    def owners(self, kind: str | None = None) -> list[str]:
-        with self._lock:
-            if kind is None:
-                rows = self._conn.execute(
-                    "SELECT DISTINCT owner FROM stocks ORDER BY owner"
-                ).fetchall()
-            else:
-                # 主键是 (owner, key),所以前缀匹配走得到索引。
-                rows = self._conn.execute(
-                    "SELECT DISTINCT owner FROM stocks WHERE owner = ? OR owner LIKE ?"
-                    " ORDER BY owner",
-                    (kind, f"{kind}:%"),
-                ).fetchall()
-        return [row[0] for row in rows]
-
-    def snapshot(self, owner: str) -> dict[str, Any]:
-        """带 `updated_tick` 的快照 —— `dt` 要从这里算。"""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT key, value, updated_tick FROM stocks WHERE owner = ?", (owner,)
-            ).fetchall()
-        return {key: (float(value), int(tick)) for key, value, tick in rows}
-
-    def snapshot_kind(self, kind: str) -> dict[str, dict[str, tuple[float, int]]]:
-        """**一次查询**拿到某一类所有 owner 的快照 → `{owner: {key: (值, tick)}}`。
-
-        存在的理由是实测:逐个 owner 查一次(2000 棵树 = 2000 次查询 + 2000 次
-        commit)让每 tick 涨到 72ms,而"一万棵树也扛得住"是这一层写在文档里的承诺。
-        主键是 (owner, key),所以前缀匹配走得到索引。
-        """
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT owner, key, value, updated_tick FROM stocks"
-                " WHERE owner = ? OR owner LIKE ?",
-                (kind, f"{kind}:%"),
-            ).fetchall()
-        out: dict[str, dict[str, tuple[float, int]]] = {}
-        for owner, key, value, tick in rows:
-            out.setdefault(owner, {})[key] = (float(value), int(tick))
-        return out
-
-    def snapshot_many(self, owners: Sequence[str]) -> dict[str, dict[str, tuple[float, int]]]:
-        """指定若干 owner 的快照。分批发 —— SQLite 的参数个数有上限。"""
-        out: dict[str, dict[str, tuple[float, int]]] = {}
-        chunk = 400
-        with self._lock:
-            for start in range(0, len(owners), chunk):
-                batch = list(owners[start : start + chunk])
-                if not batch:
-                    continue
-                placeholders = ",".join("?" * len(batch))
-                rows = self._conn.execute(
-                    "SELECT owner, key, value, updated_tick FROM stocks"
-                    f" WHERE owner IN ({placeholders})",
-                    batch,
-                ).fetchall()
-                for owner, key, value, tick in rows:
-                    out.setdefault(owner, {})[key] = (float(value), int(tick))
-        return out
-
-    def write_round(self, pending: dict[str, dict[str, float]], tick: int) -> int:
-        """一轮的所有写入,**一次 commit**。返回写了几个量。
-
-        每个 owner 一次 commit 是典型的 SQLite 性能杀手 —— 那是 72ms/tick 的主因。
-        """
-        written = 0
-        with self._lock:
-            for owner, values in pending.items():
-                for key, value in values.items():
-                    self._write(owner, key, value, tick)
-                    written += 1
-            self._conn.commit()
-        return written
-
-
 def evaluate_due(
-    store: StockStore,
+    store: Any,
     rules: Iterable[Rule],
     now: int,
     *,
@@ -271,20 +145,6 @@ def evaluate_due(
         if emit is not None:
             emit(event)
     return report
-
-
-def _owners_for(
-    store: StockStore, rule: Rule, action_owners: Callable[[str], list[str]] | None
-) -> list[str]:
-    if rule.selector_kind == "owner":
-        return [rule.selector_value]
-    if rule.selector_kind == "kind":
-        return store.owners(rule.selector_value)
-    if rule.selector_kind == "action":
-        # 行为驱动:此刻正在做这个动作的角色。修炼、采矿、耕种都是这一类 ——
-        # 投入的是**时间**,而速率由行为者自己的量决定。
-        return list(action_owners(rule.selector_value)) if action_owners else []
-    return []
 
 
 def _apply(

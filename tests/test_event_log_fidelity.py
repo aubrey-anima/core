@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 
 import pytest
@@ -66,7 +68,7 @@ def test_the_projection_agrees_with_the_blackboard_while_the_world_runs(tmp_path
     运行中的投影照样冻结,而重开后又是对的。「答案取决于你有没有重启过」比统一
     错更难查。
     """
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         who, spawn, arrived = _tick_until_someone_arrives_elsewhere(world)
         assert _projected(world)[who] == arrived, (
             f"{who} 从 {spawn} 走到了 {arrived},投影却仍说 {_projected(world)[who]}"
@@ -76,25 +78,27 @@ def test_the_projection_agrees_with_the_blackboard_while_the_world_runs(tmp_path
 def test_where_everyone_is_survives_a_restart(tmp_path):
     """重开世界,人不该被传送回出生地。"""
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         who, spawn, arrived = _tick_until_someone_arrives_elsewhere(world)
         assert arrived != spawn
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert _live(reopened)[who] == arrived, f"{who} 重开后被传送回了 {_live(reopened)[who]}"
         presence = reopened.world_context(who, "p1").get("presence", {})
         assert presence.get("location_id") == arrived, "world_context 必须说同一个地方"
 
 
 def _player_action_rows(world: World) -> list[tuple[str, str]]:
-    return world.scheduler.event_log.conn.execute(
-        "SELECT who, payload FROM events WHERE type = 'player_action' ORDER BY seq"
-    ).fetchall()
+    return [
+        (e.who, json.dumps(e.payload, ensure_ascii=False))
+        for e in world.scheduler.event_log.replay()
+        if e.type == "player_action"
+    ]
 
 
 def test_a_player_action_reaches_the_event_log_with_its_content(tmp_path):
     """玩家做了什么,得真的落在库里 —— 不是一个空对象。"""
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.player_action("p1", "挥手", {"target": "夏"})
 
         rows = _player_action_rows(world)
@@ -114,7 +118,7 @@ def test_a_replayed_player_action_keeps_the_shape_the_live_stream_had(tmp_path):
     bug 换个地方犯,而现有断言照绿。
     """
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.player_action("p1", "挥手", {"target": "夏"})
         live = [e for e in world.events() if e.get("type") == "player_action"][-1]
         assert live["player_id"] == "p1"
@@ -122,7 +126,7 @@ def test_a_replayed_player_action_keeps_the_shape_the_live_stream_had(tmp_path):
         assert live["action"] == "挥手"
         assert live["details"] == {"target": "夏"}
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         replayed = [e for e in reopened.events() if e.get("type") == "player_action"]
         assert replayed, "重开后 player_action 事件不见了"
         for key in ("player_id", "role", "action", "details"):

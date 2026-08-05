@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 import pathlib
 
@@ -44,7 +46,7 @@ def test_price_drifts_up_when_demand_outruns_restock():
 @pytest.fixture
 def world(tmp_path, bare_seed):
     # 素配:验的是创世安家费与默认货架,不是橱窗里作者写的那些(见 conftest)
-    w = World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
     w.config_set("economy.enabled", "true")
     yield w
     w.close()
@@ -103,13 +105,13 @@ def test_player_buy_moves_money_and_item(world):
 
 def test_ledger_survives_reopen_via_replay(tmp_path):
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.config_set("economy.enabled", "true")
         world.player_move("p1", "cafe")
         world.player_topup("p1", 50.0)
         world.player_buy("p1", "cafe", "coffee")
         balance = world.balance("player:p1")
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.balance("player:p1") == pytest.approx(balance), "对账 = 重放"
         assert reopened.inventory("player:p1") == {"coffee": 1}
 
@@ -140,7 +142,7 @@ def _seed_with_material(tmp_path, bare_seed) -> str:
 
 
 def test_seed_can_author_money_inventory_and_shelves(tmp_path, bare_seed):
-    with World.open(str(tmp_path / "w.db"), seed_path=_seed_with_material(tmp_path, bare_seed),
+    with open_world_at(str(tmp_path / "w.db"), seed_path=_seed_with_material(tmp_path, bare_seed),
                     force_mock_llm=True) as world:
         agents = [entry["id"] for entry in json.loads(
             (tmp_path / "material_seed.json").read_text(encoding="utf-8"))["agents"]]
@@ -163,7 +165,7 @@ def test_a_seed_that_ignores_the_material_layer_still_gets_the_demo_shelf(tmp_pa
 
     必须用素配种子:内置橱窗**自己写了**货架,拿它来验"没写 stock 会怎样"是自相矛盾。
     """
-    with World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True) as world:
         assert {row["item_id"] for row in world.shop("cafe")} == {
             "coffee", "sandwich", "sketchbook"
         }
@@ -191,7 +193,7 @@ def test_broken_material_entries_are_dropped_one_by_one_not_fatally(tmp_path):
     path = tmp_path / "broken.json"
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
 
-    with World.open(str(tmp_path / "w.db"), seed_path=str(path), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=str(path), force_mock_llm=True) as world:
         agent = seed["agents"][0]["id"]
         assert world.inventory(agent) == {"ok": 2}, "好条目照常生效"
         assert world.balance(agent) == pytest.approx(30.0)
@@ -202,9 +204,36 @@ def test_seeded_inventory_survives_reopen(tmp_path, bare_seed):
     """随身物品走的是事件,不是表 —— 所以它和账本一样,对账即重放。"""
     db = str(tmp_path / "w.db")
     seed_path = _seed_with_material(tmp_path, bare_seed)
-    with World.open(db, seed_path=seed_path, force_mock_llm=True) as world:
+    with open_world_at(db, seed_path=seed_path, force_mock_llm=True) as world:
         owner = json.loads((tmp_path / "material_seed.json").read_text(
             encoding="utf-8"))["agents"][0]["id"]
         assert world.inventory(owner) == {"父亲的怀表": 1}
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.inventory(owner) == {"父亲的怀表": 1}
+
+
+def test_一样什么也补不回来的东西不是饭(tmp_path, bare_seed):
+    """`kind == "consumable"` 单独一个判据太宽。
+
+    一包肥、一管颜料也是"用一次就没"的东西,而 `eat` 挑的是**最便宜**的那个 ——
+    于是一包 4 块的肥料会排在 6 块的咖啡前面,她把肥料当午饭吃掉,而且吃得很饱
+    (需求照样归零)。判据得是"它补得回什么吗"。
+    """
+    seed = json.loads(pathlib.Path(bare_seed).read_text(encoding="utf-8"))
+    seed["items"] = [
+        {"id": "fertilizer", "name": "一包肥", "kind": "consumable", "base_price": 4.0},
+        {"id": "coffee", "name": "咖啡", "kind": "consumable", "base_price": 6.0,
+         "restores": {"hunger": 0.4}},
+    ]
+    seed["locations"][0].setdefault("stock", [])
+    seed["locations"][0]["stock"] = [
+        {"item": "fertilizer", "qty": 10, "price": 4.0},
+        {"item": "coffee", "qty": 10, "price": 6.0},
+    ]
+    path = tmp_path / "fertilizer_seed.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+    where = seed["locations"][0]["id"]
+    with open_world_at(str(tmp_path / "w.db"), seed_path=str(path),
+                       force_mock_llm=True) as world:
+        meal = world.scheduler.economy_store.cheapest_meal(where)
+        assert meal and meal["item_id"] == "coffee", "肥料被当成了饭"

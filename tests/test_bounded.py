@@ -22,11 +22,22 @@
   60天    2272字       612        3264      ← 后端涨了 61 倍,提示词纹丝不动
 ```
 
-## 这个文件守两件事
+## 判据还有另一半:有界性是**渲染器**的属性,不是存储的属性
+
+本体层加进来之后,世界里可以有一万棵树。它们住 Redis 还是 MySQL 一样把提示词撑爆 ——
+**存储分层保护不了提示词**。所以"每个能进提示词的类型必须声明一个带上限的选择器"
+这条归渲染那一层(`perception.perceive` 的 budget、`Ontology.budget_of`),
+而不是归分家那一张表。
+
+## 这个文件守四件事
 
 1. **提示词不随世界变老而增长。** 破了它的样子不是报错,是某天一个跑了很久的世界
    忽然超上下文 —— 而在那之前它一直好好的。
-2. **让有界的东西保持有界的那个前提。** `edges` 有上界,只因为谓词是闭集;哪天让
+2. **提示词也不随世界变大而增长。** 同一个角色站在 20 棵树中间和站在 3000 棵树
+   中间,收到的字数必须一样(截掉了多少要照实说,见 `Perception.overflow`)。
+3. **黑板上的量按她的树封顶,不按世界的规模。** 按量分支这条路是一个新的入口,
+   它本可以把整个世界的量搬上黑板。
+4. **让有界的东西保持有界的那个前提。** `edges` 有上界,只因为谓词是闭集;哪天让
    LLM 自己造谓词,它就不再有界,而分家的账要重算。这条把那个前提钉在明面上。
 """
 from __future__ import annotations
@@ -50,8 +61,7 @@ def test_the_prompt_does_not_grow_as_the_world_ages(tmp_path, redis):
     """
     from anima_world.api import World
 
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True,
-                       redis=redis, world_id="bounded")
+    world = World.open("bounded", redis=redis, force_mock_llm=True)
     try:
         agent = next(iter(world.state()["agents"]))
 
@@ -67,7 +77,8 @@ def test_the_prompt_does_not_grow_as_the_world_ages(tmp_path, redis):
         assert world.scheduler.event_log.count() > 1000, (
             "世界没怎么跑,这条测试是空的"
         )
-        assert len(world.scheduler.memory_store.query(agent)) > 50, "记忆没涨"
+        # 记忆有容量淘汰(memory.capacity=50,按强度逐出)—— 涨满即证明后端在写。
+        assert len(world.scheduler.memory_store.query(agent)) >= 50, "记忆没涨"
 
         # 而提示词没有。留 1.5 倍的余量:允许波动,不允许随年龄线性涨。
         assert aged <= fresh * 1.5, (
@@ -76,6 +87,74 @@ def test_the_prompt_does_not_grow_as_the_world_ages(tmp_path, redis):
         )
     finally:
         world.close()
+
+
+def _forest(tmp_path, count: int, *, watch: bool = False):
+    """一个角色,和这么多棵树站在同一个地方。"""
+    import json
+
+    from _worldfile import open_world_at
+
+    agent: dict = {"id": "甲", "name": "甲", "location": "cafe", "personality": "安静"}
+    if watch:
+        agent["duties"] = [{
+            "name": "tend", "start": "00:00", "end": "23:59", "kind": "idle_wander",
+            "when_stock": {"owner": "tree:t00000", "key": "树高", "op": "<", "value": 9},
+        }]
+    seed = {
+        "locations": [{"id": "cafe", "name": "咖啡店", "description": "拐角那家"}],
+        "agents": [agent],
+        "kinds": [{
+            "id": "tree", "gloss": "一棵树",
+            "quantities": {"树高": {"default": 1.0, "visibility": "here", "unit": "米"}},
+            "prompt": {"budget": 3},
+        }],
+        "entities": [
+            {"id": f"tree:t{i:05d}", "name": f"第{i}棵", "location": "cafe"}
+            for i in range(count)
+        ],
+        "stocks": [{"owner": f"tree:t{i:05d}", "values": {"树高": 1.0}} for i in range(count)],
+    }
+    path = tmp_path / f"seed{count}.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+    return open_world_at(str(tmp_path / f"w{count}.db"), seed_path=str(path), force_mock_llm=True)
+
+
+def test_the_prompt_does_not_grow_as_the_world_gets_bigger(tmp_path):
+    """**一万棵树住哪儿都一样炸提示词。** 所以有界性归渲染器,不归存储。
+
+    同一个角色,一次站在 20 棵树中间,一次站在 3000 棵中间。字数必须几乎一样 ——
+    差的那几个字是"这里还有 2997 样别的东西"里的数字,而**那句话本身是必须在的**:
+    截断了却不吭声,等于让她在一个"她以为只有三棵树"的世界里做决定,而她永远不会
+    知道自己被骗了。
+    """
+    def texts(world) -> list[str]:
+        return [b["text"] for b in world.debug_prompt("甲")["blocks"] if b.get("text")]
+
+    with _forest(tmp_path, 20) as small:
+        small.tick(2)
+        few = sum(len(t) for t in texts(small))
+        assert any("你没细看" in t for t in texts(small)), "截断了却没说"
+    with _forest(tmp_path, 3000) as big:
+        big.tick(2)
+        many = sum(len(t) for t in texts(big))
+
+    assert abs(many - few) < 30, (
+        f"树多了 150 倍,提示词从 {few} 字变成 {many} 字 —— 它在随世界变大而增长"
+    )
+
+
+def test_the_blackboard_is_capped_by_her_tree_not_by_the_world(tmp_path):
+    """按量分支是一个新入口 —— 它本可以把整个世界的量搬上黑板。
+
+    settle 的是**她的树问到的那几个**,不是这儿所有东西的所有量。3000 棵树的
+    世界里,她的黑板上该只有一个 `stock.*`。
+    """
+    with _forest(tmp_path, 3000, watch=True) as world:
+        world.tick(2)
+        keys = [k for k in world.scheduler.agents["甲"].agent.blackboard.snapshot()
+                if k.startswith("stock.")]
+        assert keys == ["stock.tree:t00000.树高"], keys
 
 
 def test_the_predicate_vocabulary_stays_closed(tmp_path):

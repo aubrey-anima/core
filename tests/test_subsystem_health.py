@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -18,7 +20,7 @@ from anima_world.api import World
 
 @pytest.fixture
 def world(tmp_path):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     yield w
     w.close()
 
@@ -74,11 +76,11 @@ def test_recovery_is_announced_too(world):
 def test_the_health_record_survives_a_restart(tmp_path):
     """"当时跑在什么档位上"必须是历史,不是内存里的一个数。"""
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.tick(1)
         world.scheduler.note_subsystem("probe", False, "no api key")
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         events = _health_events(reopened)
         assert [e["payload"]["subsystem"] for e in events] == ["probe"]
         assert "no api key" in events[0]["payload"]["reason"]

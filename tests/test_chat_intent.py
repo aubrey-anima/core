@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 
 import pytest
@@ -48,7 +50,7 @@ def _classification(intent: str, confidence: float, **params: object) -> str:
 
 
 def _world(tmp_path, *classifications: str, replies: tuple[str, ...] = ()) -> tuple:
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     chat = ScriptedLLM(*replies)
     classifier = ScriptedLLM(*classifications)
     world.chat_service._llm = chat
@@ -88,7 +90,7 @@ def test_a_style_rule_is_remembered_across_sessions(tmp_path):
         assert chat.prompts == []
 
     # 换一个进程重开同一个世界:规则还在,而且真的进了提示词。
-    reopened = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    reopened = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     chat = ScriptedLLM("（夏笑了。）霜霜。")
     reopened.chat_service._llm = chat
     with reopened:
@@ -99,7 +101,7 @@ def test_a_style_rule_is_remembered_across_sessions(tmp_path):
 
 def test_a_style_rule_survives_without_the_flag_once_it_is_written(tmp_path):
     """规则是玩家教的,不是运维点亮的能力:分类器关掉也照样生效。"""
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     chat = ScriptedLLM("（夏抬头。）嗯。")
     world.chat_service._llm = chat
     with world:
@@ -126,7 +128,7 @@ def test_directing_a_character_moves_them_in_the_world(tmp_path):
     断言紧跟在导演那一句之后,中间不走 tick:世界自己也会让人走动,一个"过了几百
     tick 之后他们碰上了"的断言分不出是导演生效了还是他们本来就要碰上。
     """
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     with world:
         target = _someone_elsewhere(world, "夏")
         chat = ScriptedLLM()
@@ -223,11 +225,10 @@ def test_the_intent_lands_on_the_user_message_row_not_on_the_reply(tmp_path):
              {"role": "assistant", "content": reply}],
             meta=meta,
         )
-        rows = world.scheduler.event_log.conn.execute(
-            "SELECT role, intent, intent_confidence FROM messages "
-            "WHERE conversation_id = ? ORDER BY id",
-            (conversation_id,),
-        ).fetchall()
+        rows = [
+            (r.get("role"), r.get("intent"), r.get("intent_confidence"))
+            for r in world.chat_store._message_rows(conversation_id)
+        ]
         assert rows[0][0] == "user" and rows[0][1] == "dialogue"
         assert rows[0][2] == pytest.approx(0.9)
         assert rows[1][1] is None, "assistant 那行不该带意图"
@@ -292,7 +293,7 @@ def test_the_burst_path_reports_the_classification_even_when_it_changes_nothing(
 def test_with_the_flag_off_the_classifier_is_never_called(tmp_path, bare_seed):
     # 素配种子:验的是**引擎默认值**是关的。内置橱窗替世界点亮了 intent
     # (那是产品决定),拿它来验"默认关不关"是在验橱窗的布置(见 conftest)。
-    world = World.open(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed, force_mock_llm=True)
     chat = ScriptedLLM("（夏抬头。）嗯。")
     classifier = ScriptedLLM(_classification("style_adjust", 0.99, kind="address_form", value="霜霜"))
     world.chat_service._llm = chat

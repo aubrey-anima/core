@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+from _worldfile import run_cli
+
 import json
-import sqlite3
+import json
 import subprocess
 import sys
 
@@ -17,19 +19,29 @@ import pytest
 
 
 def _play(db, script: str, *extra: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", "play", "--db-path", str(db),
-         "--name", "阿檀", *extra],
-        input=script, capture_output=True, text=True, timeout=180,
-    )
+    from _worldfile import redis_for
+
+    redis_for(db)   # 先把这个"世界路径"的客户端立为当前 —— CLI 连的就是它
+    return run_cli("play", "--world-id", "w",
+         "--name", "阿檀", *extra, input=script)
 
 
-def _rows(db, sql: str):
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    try:
-        return conn.execute(sql).fetchall()
-    finally:
-        conn.close()
+def _events(db, kind: str | None = None):
+    from _worldfile import redis_for
+
+    out = []
+    for raw in (redis_for(db).lrange("anima:w:events", 0, -1) or []):
+        e = json.loads(raw)
+        if kind is None or e.get("type") == kind:
+            out.append(e)
+    return out
+
+
+def _messages(db):
+    from _worldfile import redis_for
+
+    rows = (redis_for(db).hgetall("anima:w:messages") or {}).values()
+    return sorted((json.loads(r) for r in rows), key=lambda r: int(r["id"]))
 
 
 def test_a_play_session_records_the_conversation_into_the_world(tmp_path):
@@ -37,8 +49,7 @@ def test_a_play_session_records_the_conversation_into_the_world(tmp_path):
     result = _play(db, "你好啊\n/quit\n")
     assert result.returncode == 0, result.stderr
 
-    conversations = _rows(db, "SELECT COUNT(*) FROM events WHERE type = 'conversation'")
-    assert conversations[0][0] == 1, "说过的话必须进世界的历史"
+    assert len(_events(db, "conversation")) == 1, "说过的话必须进世界的历史"
 
 
 def test_the_clock_keeps_running_while_you_talk(tmp_path):
@@ -47,8 +58,10 @@ def test_the_clock_keeps_running_while_you_talk(tmp_path):
     result = _play(db, "在吗\n/quit\n")
     assert result.returncode == 0, result.stderr
 
-    clock = _rows(db, "SELECT value FROM db_meta WHERE key = 'clock'")
-    assert clock and int(clock[0][0]) > 0, (
+    from _worldfile import redis_for
+
+    clock = redis_for(db).get("anima:w:clock")
+    assert clock is not None and int(clock) > 0, (
         f"一场对话之后世界时钟还是 0 —— 时钟没在走。stdout:\n{result.stdout}"
     )
 
@@ -59,19 +72,15 @@ def test_slash_commands_do_not_become_dialogue(tmp_path):
     result = _play(db, "/who\n/quit\n")
     assert result.returncode == 0, result.stderr
     assert "第" in result.stdout and "天" in result.stdout, result.stdout
-    assert _rows(db, "SELECT COUNT(*) FROM events WHERE type = 'conversation'")[0][0] == 0
+    assert len(_events(db, "conversation")) == 0
 
 
 def test_switching_who_you_are_talking_to(tmp_path):
     db = tmp_path / "w.db"
     result = _play(db, "/at 遥\n你好\n/quit\n")
     assert result.returncode == 0, result.stderr
-    who = _rows(
-        db,
-        "SELECT DISTINCT json_extract(payload, '$.agent_id') FROM events"
-        " WHERE type = 'conversation'",
-    )
-    assert [w[0] for w in who] == ["遥"]
+    who = sorted({e["payload"].get("agent_id") for e in _events(db, "conversation")})
+    assert who == ["遥"]
 
 
 def test_an_unknown_agent_is_refused_not_silently_swapped(tmp_path):

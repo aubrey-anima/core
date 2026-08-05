@@ -1,18 +1,19 @@
 """记忆 2.0(v2.0 / db 2):三因子检索、加固、遗忘曲线、按强度淘汰、反思。"""
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
-from anima_world.db import open_db
 from anima_world.memory_retrieval import similarity
-from anima_world.memory_store import MemoryStore
+from anima_world.redis_state import RedisMemoryStore
 
 
 @pytest.fixture
-def store(tmp_path):
-    conn = open_db(tmp_path / "w.db")
-    yield MemoryStore(conn)
-    conn.close()
+def store():
+    import fakeredis
+
+    return RedisMemoryStore(fakeredis.FakeStrictRedis(decode_responses=True), "t")
 
 
 def test_bigram_similarity_works_on_chinese():
@@ -52,18 +53,21 @@ def test_decay_weakens_idle_memories_but_not_anchors(store):
 
 
 def test_eviction_removes_weakest_not_oldest(tmp_path):
-    conn = open_db(tmp_path / "w.db")
-    store = MemoryStore(conn, capacity=2)
+    import fakeredis
+
+    store = RedisMemoryStore(
+        fakeredis.FakeStrictRedis(decode_responses=True), "t", capacity=2)
     store.add("夏", tick=0, kind="obs", summary="旧但常被想起", importance=0.5)
     store.retrieve("夏", now_tick=10, k=1)  # 加固最旧那条
     store.add("夏", tick=50, kind="obs", summary="新但没人记得", importance=0.5)
-    conn.execute("UPDATE memories SET strength = 0.1 WHERE summary = '新但没人记得'")
-    conn.commit()
+    for mid, row in store._rows.all().items():
+        if row["summary"] == "新但没人记得":
+            row["strength"] = 0.1
+            store._rows.put(mid, row)
     store.add("夏", tick=100, kind="obs", summary="触发淘汰的第三条", importance=0.5)
     summaries = {m["summary"] for m in store.query("夏")}
     assert "旧但常被想起" in summaries, "淘汰按强度,不再按最旧"
     assert "新但没人记得" not in summaries
-    conn.close()
 
 
 def test_reflection_emerges_from_accumulated_importance(tmp_path):
@@ -71,7 +75,7 @@ def test_reflection_emerges_from_accumulated_importance(tmp_path):
     事件落地 —— LLM 只提案,事件日志记录,重放可重建。"""
     from anima_world.api import World
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.config_set("memory.reflection_threshold", 2.0)
         for i in range(3):
             world.scheduler._record_event({
@@ -95,22 +99,32 @@ def test_reflection_watermark_stays_off_the_tick_hot_path(tmp_path):
     """
     from anima_world.api import World
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         sched = world.scheduler
         if sched.reflector is None or sched._judge_pool is None:
             pytest.skip("这个世界没接反思器")
-        statements: list[str] = []
-        sched.event_log.conn.set_trace_callback(statements.append)
+        reads: list[str] = []
+        real_store = sched.reflection_store
+
+        class CountingStore:
+            def get(self, agent_id):
+                reads.append(agent_id)
+                return real_store.get(agent_id)
+
+            def __getattr__(self, name):
+                return getattr(real_store, name)
+
+        sched.reflection_store = CountingStore()
         try:
             with sched._lock:
                 for i in range(5):
                     sched._note_memory_written("夏", 0.1, "obs")
         finally:
-            sched.event_log.conn.set_trace_callback(None)
+            sched.reflection_store = real_store
 
-        touched = [s for s in statements if "reflection_state" in s]
+        touched = reads
         assert len(touched) <= 1, (
-            f"每条记忆最多允许首次读一次库,实际 {len(touched)} 条 SQL:{touched}"
+            f"每条记忆最多允许首次读一次水位,实际 {len(touched)} 次:{touched}"
         )
         assert sched._reflection_watermark["夏"] == pytest.approx(0.5)
         assert "夏" in sched._reflection_dirty
@@ -121,7 +135,7 @@ def test_reflection_watermark_survives_reopen(tmp_path):
     from anima_world.api import World
 
     db = str(tmp_path / "w.db")
-    world = World.open(db, force_mock_llm=True)
+    world = open_world_at(db, force_mock_llm=True)
     if world.scheduler.reflector is None:
         world.close()
         pytest.skip("这个世界没接反思器")
@@ -129,7 +143,7 @@ def test_reflection_watermark_survives_reopen(tmp_path):
         world.scheduler._note_memory_written("夏", 1.2, "obs")
     world.close()
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         with reopened.scheduler._lock:
             reopened.scheduler._note_memory_written("夏", 0.1, "obs")
         assert reopened.scheduler._reflection_watermark["夏"] == pytest.approx(1.3), (
@@ -168,15 +182,7 @@ def test_decay_uses_no_sql_math_functions(store):
     store.add("夏", tick=900, kind="obs", summary="刚发生的事", importance=0.5)
     store.add("夏", tick=0, kind="obs", summary="锚点不衰减", importance=0.9, anchor=True)
 
-    statements: list[str] = []
-    store._conn.set_trace_callback(statements.append)
-    try:
-        store.decay_pass("夏", now_tick=1000, ticks_per_day=288)
-    finally:
-        store._conn.set_trace_callback(None)
-    assert any("UPDATE memories" in s for s in statements), "得真的衰减了才算数"
-    banned = [s for s in statements if any(f in s.lower() for f in ("pow(", "power(", "exp(", "ln("))]
-    assert banned == [], f"SQL 里不许用数学函数:{banned}"
+    store.decay_pass("夏", now_tick=1000, ticks_per_day=288)
 
     rows = {m["summary"]: m["strength"] for m in store.query(agent_id="夏")}
     assert rows["锚点不衰减"] == 1.0

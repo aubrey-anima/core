@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import asyncio
 
 import pytest
@@ -25,7 +27,7 @@ def _in_async(fn):
 
 
 def test_chat_works_from_inside_a_running_event_loop(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         reply = _in_async(lambda: world.chat_reply(
             "夏", [{"role": "user", "content": "在吗"}],
             player_id="p1", display_name="阿檀",
@@ -34,7 +36,7 @@ def test_chat_works_from_inside_a_running_event_loop(tmp_path):
 
 
 def test_recording_a_turn_works_from_inside_a_running_event_loop(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         def _turn():
             reply = world.chat_reply("夏", [{"role": "user", "content": "在吗"}],
                                      player_id="p1", display_name="阿檀")
@@ -46,15 +48,13 @@ def test_recording_a_turn_works_from_inside_a_running_event_loop(tmp_path):
         conversation_id = _in_async(_turn)
         assert isinstance(conversation_id, int)
         kinds = {
-            row[0] for row in world.scheduler.event_log.conn.execute(
-                "SELECT type FROM events WHERE type = 'conversation'"
-            )
+            e.type for e in world.scheduler.event_log.replay() if e.type == "conversation"
         }
         assert kinds == {"conversation"}, "会话事件必须真的落库,而不是被异常吞掉"
 
 
 def test_closing_a_conversation_works_from_inside_a_running_event_loop(tmp_path):
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         store = world.chat_service.store
         conversation = store.active_or_start("夏", 0, player_id="p1")
         store.add_message(conversation, "user", "在吗", 0)
@@ -64,19 +64,21 @@ def test_closing_a_conversation_works_from_inside_a_running_event_loop(tmp_path)
 def test_opening_a_world_from_inside_a_running_event_loop_still_reaps_orphans(tmp_path):
     """开机补完孤儿会话是自动恢复,不该因为宿主是 async 就默默失效。"""
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         store = world.chat_service.store
         conversation = store.active_or_start("夏", 0, player_id="p1")
         store.add_message(conversation, "user", "留一句没关掉的话", 0)
 
     def _reopen():
-        return World.open(db, force_mock_llm=True)
+        return open_world_at(db, force_mock_llm=True)
 
     reopened = _in_async(_reopen)
     try:
-        open_rows = reopened.scheduler.event_log.conn.execute(
-            "SELECT COUNT(*) FROM conversations WHERE status = 'open'"
-        ).fetchone()[0]
+        open_rows = sum(
+            1 for aid in reopened.scheduler.agents
+            for row in reopened.chat_store.list_conversations(aid)
+            if row.get("status") == "open"
+        )
         assert open_rows == 0, "async 宿主里开机,孤儿会话也必须被补完"
     finally:
         reopened.close()
@@ -93,7 +95,7 @@ def test_achat_streams_on_the_hosts_own_loop(tmp_path):
             chunks.append(token)
         return "".join(chunks)
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         assert asyncio.run(_main(world)).strip()
 
 
@@ -130,7 +132,7 @@ def test_the_intent_classifier_awaits_on_the_hosts_loop(tmp_path):
             chunks.append(token)
         return "".join(chunks), meta
 
-    with World.open(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         classifier = SlowClassifier()
         world.chat_service._background_llm = classifier
         world.config_set("chat.intent.enabled", True)

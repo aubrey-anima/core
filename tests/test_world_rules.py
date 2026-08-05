@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 
 import pytest
@@ -31,6 +33,12 @@ def _seed(tmp_path, *, stocks=None, rules=None, name="seed.json") -> str:
         seed["stocks"] = stocks
     if rules is not None:
         seed["rules"] = rules
+    if stocks is not None or rules is not None:
+        # 换掉量与规律就等于换了一个世界,橱窗的本体声明(那棵中文名的树)对它不再
+        # 成立。剥掉它 = 这些微型世界**不声明本体**,于是走"警告不拒绝"那条老路 ——
+        # 这一整套测试盯的是规律引擎本身,本体闸在 test_ontology 那边。
+        seed.pop("kinds", None)
+        seed.pop("entities", None)
     path = tmp_path / name
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
     return str(path)
@@ -50,7 +58,7 @@ GROWTH = {
 
 def test_a_tree_grows_on_its_own(tmp_path):
     path = _seed(tmp_path, stocks=[TREE], rules=[GROWTH])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         assert world.stock("tree:oak_01", "size") == pytest.approx(0.5)
         world.tick(120)
         assert world.stock("tree:oak_01", "size") > 0.5, "时钟走了,树却没长"
@@ -58,7 +66,7 @@ def test_a_tree_grows_on_its_own(tmp_path):
 
 def test_growth_stops_at_the_cap(tmp_path):
     path = _seed(tmp_path, stocks=[TREE], rules=[GROWTH])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(2000)
         assert world.stock("tree:oak_01", "size") == pytest.approx(10.0)
 
@@ -78,7 +86,7 @@ def test_evaluation_frequency_causes_no_drift(tmp_path):
     for index, interval in enumerate((1, 12, 144)):
         rule = {**GROWTH, "every": {"ticks": interval}}
         path = _seed(tmp_path, stocks=[tall], rules=[rule], name=f"s{index}.json")
-        with World.open(str(tmp_path / f"w{index}.db"), seed_path=path,
+        with open_world_at(str(tmp_path / f"w{index}.db"), seed_path=path,
                         force_mock_llm=True) as world:
             world.tick(577)
             results.append(round(world.stock("tree:oak_01", "size"), 6))
@@ -90,7 +98,7 @@ def test_throttling_costs_lag_but_never_accuracy(tmp_path):
     tall = {"owner": "tree:oak_01",
             "values": {"size": 0.5, "growth_rate": 0.02, "max_size": 1000}}
     path = _seed(tmp_path, stocks=[tall], rules=[{**GROWTH, "every": {"ticks": 144}}])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(500)                       # 落在两次求值之间
         lagging = world.stock("tree:oak_01", "size")
         world.tick(77)                        # 推到下一个求值点(577)
@@ -105,7 +113,7 @@ def test_a_freshly_planted_tree_does_not_jump_to_full_size(tmp_path):
     否则在一个跑了半年的世界里种一棵树,它会在下一次求值时一次性长成参天大树。
     """
     path = _seed(tmp_path, stocks=[], rules=[GROWTH])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(2000)                                    # 世界先跑很久
         world.set_stocks("tree:sapling", {"size": 0.5, "growth_rate": 0.02, "max_size": 10})
         world.tick(12)
@@ -120,7 +128,7 @@ def test_a_threshold_event_fires_once_not_every_evaluation(tmp_path):
     而那正是把事件日志淹掉的方式(needs 有过 19.7 倍事件量的教训)。"""
     rule = {**GROWTH, "emit": [{"when": "size >= max_size", "type": "tree_matured"}]}
     path = _seed(tmp_path, stocks=[TREE], rules=[rule])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(3000)   # 早就长满了,而且之后又过了很久
         matured = [e for e in world.history()["events"] if e["type"] == "tree_matured"]
         assert len(matured) == 1, f"门槛事件发了 {len(matured)} 次"
@@ -130,7 +138,7 @@ def test_a_threshold_event_fires_once_not_every_evaluation(tmp_path):
 def test_continuous_change_writes_no_events_at_all(tmp_path):
     """连续变化不发事件 —— 这是这套东西能 scale 的前提。"""
     path = _seed(tmp_path, stocks=[TREE], rules=[GROWTH])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         before = len(world.history()["events"])
         world.tick(600)
         after = world.history()["events"]
@@ -147,7 +155,7 @@ def test_a_condition_can_stop_the_world_from_evolving(tmp_path):
     rule = {**GROWTH, "when": ["world_season != 3"]}
     path = _seed(tmp_path, stocks=[TREE, {"owner": "world", "values": {"season": 3}}],
                  rules=[rule])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(600)
         assert world.stock("tree:oak_01", "size") == pytest.approx(0.5), "冬天不该长"
 
@@ -169,7 +177,7 @@ def test_the_same_hour_of_work_pays_differently_by_skill(tmp_path):
         {"owner": "agent:夏", "values": {"power": 0, "level": 1}},
         {"owner": "agent:遥", "values": {"power": 0, "level": 3}},
     ])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(600)
         low, high = world.stock("agent:夏", "power"), world.stock("agent:遥", "power")
         assert low > 0 and high > 0, "没人修炼成功(前提:得有人在 work)"
@@ -191,7 +199,7 @@ def test_rules_do_not_see_each_others_writes_within_a_round(tmp_path):
         {"id": "b_reads", "for_each": {"owner": "box"}, "set": {"y": "x"}},
     ]
     path = _seed(tmp_path, stocks=[{"owner": "box", "values": {"x": 0, "y": -1}}], rules=rules)
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(1)
         assert world.stock("box", "x") == pytest.approx(1.0)
         assert world.stock("box", "y") == pytest.approx(0.0), (
@@ -207,7 +215,7 @@ def test_a_broken_formula_refuses_to_boot(tmp_path):
     bad = {**GROWTH, "set": {"size": "size + + *"}}
     path = _seed(tmp_path, stocks=[TREE], rules=[bad])
     with pytest.raises(RuleError):
-        World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True)
+        open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True)
 
 
 def test_dangerous_expressions_are_refused(tmp_path):
@@ -245,7 +253,7 @@ def test_a_rule_that_reads_a_missing_stock_skips_itself_and_says_so(tmp_path):
     """
     rule = {**GROWTH, "set": {"size": "size + 未定义的量"}}
     path = _seed(tmp_path, stocks=[TREE], rules=[rule])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(60)
         assert world.world_time().minute_of_day >= 0, "世界被一条坏规律停掉了"
         stats = world.rule_stats()
@@ -256,7 +264,7 @@ def test_a_rule_that_reads_a_missing_stock_skips_itself_and_says_so(tmp_path):
 def test_dividing_by_zero_is_survivable(tmp_path):
     rule = {**GROWTH, "set": {"size": "size / (max_size - max_size)"}}
     path = _seed(tmp_path, stocks=[TREE], rules=[rule])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         world.tick(60)
         assert world.rule_stats()["skipped"] > 0
         assert world.stock("tree:oak_01", "size") == pytest.approx(0.5), "坏规律不该写坏值"
@@ -268,12 +276,12 @@ def test_dividing_by_zero_is_survivable(tmp_path):
 def test_stocks_and_rules_survive_a_reopen(tmp_path):
     db = str(tmp_path / "w.db")
     path = _seed(tmp_path, stocks=[TREE], rules=[GROWTH])
-    with World.open(db, seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(db, seed_path=path, force_mock_llm=True) as world:
         world.tick(600)
         grown = world.stock("tree:oak_01", "size")
         assert grown > 0.5
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.stock("tree:oak_01", "size") == pytest.approx(grown)
         assert [r["id"] for r in reopened.rules()] == ["tree_growth"], "规律没跟着 db 走"
 
@@ -284,7 +292,7 @@ def test_a_world_without_rules_is_unaffected(tmp_path, bare_seed):
     素配种子:内置橱窗**自己带了规律**(门口那棵树在长),拿它来验"没有规律会怎样"
     是自相矛盾(见 conftest)。
     """
-    with World.open(str(tmp_path / "w.db"), seed_path=bare_seed,
+    with open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed,
                     force_mock_llm=True) as world:
         world.tick(50)
         assert world.rules() == []
@@ -311,7 +319,7 @@ def test_a_rule_reading_an_unreachable_name_is_named_at_boot(tmp_path, caplog):
     ]
     path = _seed(tmp_path, stocks=stocks, rules=rules)
     with caplog.at_level("WARNING"):
-        World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True).close()
+        open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True).close()
 
     warned = [r.getMessage() for r in caplog.records if "够不着" in r.getMessage()]
     assert len(warned) == 1, f"该点名一条(bad),实际 {len(warned)} 条:{warned}"
@@ -334,7 +342,7 @@ def test_the_engine_scales_to_many_entities(tmp_path):
     rule = {"id": "g", "every": {"ticks": 12}, "for_each": {"kind": "tree"},
             "set": {"size": "min(size + rate * dt, cap)"}}
     path = _seed(tmp_path, stocks=[], rules=[rule])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         for index in range(1000):
             world.set_stocks(f"tree:t{index}", {"size": 0.5, "rate": 0.01, "cap": 20})
 
@@ -358,7 +366,7 @@ def test_batching_did_not_change_the_numbers(tmp_path):
     rule = {"id": "g", "every": {"ticks": 12}, "for_each": {"kind": "tree"},
             "set": {"size": "min(size + rate * dt, cap)"}}
     path = _seed(tmp_path, stocks=[], rules=[rule])
-    with World.open(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
         for index in range(5):
             world.set_stocks(f"tree:t{index}", {"size": 0.5, "rate": 0.01, "cap": 20})
         world.tick(120)

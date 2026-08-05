@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at, run_cli
+
 import json
 import subprocess
 import sys
@@ -23,22 +25,19 @@ from anima_world.sim_report import REPORT_FORMAT_VERSION
 
 
 def _report(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "anima_world", "report", *args],
-        capture_output=True, text=True,
-    )
+    return run_cli("report", *args)
 
 
 @pytest.fixture
 def lived_in(tmp_path):
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.fast_forward(288 * 2)
     return db
 
 
 def test_it_reads_a_world_that_is_not_running(lived_in):
-    result = _report("--db-path", str(lived_in), "--json")
+    result = _report("--world-id", "w", "--json")
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["report_format_version"] == REPORT_FORMAT_VERSION
@@ -46,25 +45,30 @@ def test_it_reads_a_world_that_is_not_running(lived_in):
     assert len(payload["world"]["agents"]) == 3
 
 
-def test_a_missing_file_is_refused_and_nothing_is_created(tmp_path):
-    """路径打错时最坏的结局不是报错,是"建一个空世界然后说它很健康"。"""
-    missing = tmp_path / "nope.db"
-    result = _report("--db-path", str(missing), "--json")
+def test_a_missing_world_is_refused_and_nothing_is_created():
+    """名字打错时最坏的结局不是报错,是"建一个空世界然后说它很健康"。"""
+    from _worldfile import current_client
+
+    result = _report("--world-id", "nope", "--json")
 
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
-    assert not missing.exists(), "读一个不存在的世界不该把它创建出来"
-    assert not (tmp_path / "nope.db.key").exists(), "更不该顺手生成一把密钥"
+    assert not list(current_client().scan_iter(match="anima:nope:*")), (
+        "读一个不存在的世界不该把它创建出来"
+    )
 
 
 def test_it_does_not_write_to_the_world_it_reads(lived_in):
-    before = lived_in.stat().st_mtime_ns
-    assert _report("--db-path", str(lived_in), "--json").returncode == 0
-    assert lived_in.stat().st_mtime_ns == before, "只读命令不该动那个文件"
+    from _worldfile import redis_for
+
+    client = redis_for(lived_in)
+    before = int(client.llen("anima:w:events") or 0)
+    assert _report("--world-id", "w", "--json").returncode == 0
+    assert int(client.llen("anima:w:events") or 0) == before, "只读命令不该动世界"
 
 
 def test_the_human_output_says_the_things_a_three_day_trial_asks(lived_in):
-    result = _report("--db-path", str(lived_in))
+    result = _report("--world-id", "w")
     assert result.returncode == 0, result.stderr
     assert "事件" in result.stdout
     assert "世界日" in result.stdout
@@ -73,10 +77,10 @@ def test_the_human_output_says_the_things_a_three_day_trial_asks(lived_in):
 def test_it_uses_the_worlds_own_minutes_per_tick(tmp_path):
     """口径要跟着世界走,不是跟着默认值走 —— 不然"第几天"整个错位。"""
     db = tmp_path / "w.db"
-    with World.open(str(db), force_mock_llm=True) as world:
+    with open_world_at(str(db), force_mock_llm=True) as world:
         world.config_set("world.minutes_per_tick", 10)
         world.fast_forward(288)
 
-    payload = json.loads(_report("--db-path", str(db), "--json").stdout)
+    payload = json.loads(_report("--world-id", "w", "--json").stdout)
     assert payload["world"]["minutes_per_tick"] == 10
     assert payload["world"]["ticks_per_day"] == 144

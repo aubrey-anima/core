@@ -6,6 +6,8 @@ dogfooding 观察到的"假"不在提示词,在**结构**:100% 响应率、零�
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import AgentUnavailable, World
@@ -39,7 +41,7 @@ class ScriptedLLM:
 
 
 def _world(tmp_path, *replies: str, tools: bool = True) -> tuple[World, ScriptedLLM]:
-    world = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     llm = ScriptedLLM(*replies)
     world.chat_service._llm = llm
     world.config_set("chat.tools.enabled", tools)

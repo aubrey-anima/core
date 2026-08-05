@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import json
 
 import pytest
@@ -41,7 +43,7 @@ class PromptSpy:
 def _world(tmp_path, bare_seed, **kwargs) -> World:
     """素配种子:内置橱窗自己带了存量/规律/可见性声明,拿它来验"没声明会怎样"
     是自相矛盾(见 conftest)。"""
-    return World.open(str(tmp_path / "w.db"), seed_path=bare_seed,
+    return open_world_at(str(tmp_path / "w.db"), seed_path=bare_seed,
                       force_mock_llm=True, **kwargs)
 
 
@@ -217,7 +219,7 @@ def test_what_she_perceives_reaches_her_autonomous_decision(tmp_path, bare_seed)
         async def stream(self, messages):
             yield await self.complete(messages)
 
-    world = World.open(str(tmp_path / "w.db"), agents=1, force_mock_llm=True)
+    world = open_world_at(str(tmp_path / "w.db"), agents=1, force_mock_llm=True)
     with world:
         world.declare_visibility("world", "粮价", "public")
         world.set_stock("world", "粮价", 7)
@@ -251,10 +253,13 @@ def test_visibility_can_be_declared_in_the_seed(tmp_path, bare_seed):
         {"kind": "world", "key": "season", "visible": "public"},
         {"kind": "agent", "key": "功力", "visible": "self"},
     ]
+    # 这个世界自己定义可见性,不要橱窗那棵树的声明掺进来(种类声明同时就是可见性
+    # 声明 —— 那条正是 test_ontology 在验的,这里验的是显式声明那一段)。
+    seed.pop("kinds", None), seed.pop("entities", None)
     path = tmp_path / "seed.json"
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
 
-    with World.open(str(tmp_path / "w.db"), seed_path=str(path),
+    with open_world_at(str(tmp_path / "w.db"), seed_path=str(path),
                     force_mock_llm=True) as world:
         declared = {(r["kind"], r["key"]): r["visibility"] for r in world.visibility_rules()}
         assert declared == {("world", "season"): "public", ("agent", "功力"): "self"}
@@ -272,10 +277,11 @@ def test_a_bad_visibility_value_is_dropped_not_fatal(tmp_path, bare_seed):
         {"kind": "world", "key": "season", "visible": "所有人都能看见"},
         {"kind": "world", "key": "粮价", "visible": "public"},
     ]
+    seed.pop("kinds", None), seed.pop("entities", None)
     path = tmp_path / "seed.json"
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
 
-    with World.open(str(tmp_path / "w.db"), seed_path=str(path),
+    with open_world_at(str(tmp_path / "w.db"), seed_path=str(path),
                     force_mock_llm=True) as world:
         declared = {r["key"] for r in world.visibility_rules()}
         assert declared == {"粮价"}, "坏的那条该被丢掉,好的那条该留下"
@@ -283,8 +289,8 @@ def test_a_bad_visibility_value_is_dropped_not_fatal(tmp_path, bare_seed):
 
 def test_declarations_survive_a_reopen(tmp_path, bare_seed):
     db = str(tmp_path / "w.db")
-    with World.open(db, seed_path=bare_seed, force_mock_llm=True) as world:
+    with open_world_at(db, seed_path=bare_seed, force_mock_llm=True) as world:
         world.declare_visibility("world", "season", "public")
         world.set_stock("world", "season", 4)
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.perception("夏")["public"] == {"season": 4.0}

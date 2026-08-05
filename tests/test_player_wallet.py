@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import open_world_at
+
 import pytest
 
 from anima_world.api import World
@@ -21,7 +23,7 @@ from anima_world.api import World
 
 @pytest.fixture
 def world(tmp_path):
-    w = World.open(str(tmp_path / "w.db"), force_mock_llm=True)
+    w = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
     w.config_set("economy.enabled", "true")
     yield w
     w.close()
@@ -66,11 +68,11 @@ def test_a_purchase_you_cannot_afford_is_refused_by_the_ledger(world):
 def test_the_balance_survives_a_restart(tmp_path):
     """内存那份重启即失效 —— 而钱是世界的一部分,不是会话的一部分。"""
     db = str(tmp_path / "w.db")
-    with World.open(db, force_mock_llm=True) as world:
+    with open_world_at(db, force_mock_llm=True) as world:
         world.config_set("economy.enabled", "true")
         world.player_topup("p1", 30)
 
-    with World.open(db, force_mock_llm=True) as reopened:
+    with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.balance(_holder("p1")) == 30.0
 
 

@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `.cyberworld`。创作已拆成独立的桌面程序 `anima-studio`(`../tool`),原因见下。
 
 **引擎是纯库,没有 HTTP。** 任何要用世界的模块 import 本包,通过 `anima_world.api.World`
-的函数操作 `world.db`;世界活在调用方进程里。一个 `world.db` 就是一个世界。
+的函数操作世界;世界住在 **Redis**(键前缀 `anima:{world_id}:`),`world_id` 就是
+世界的名字。SQLite/world.db 已整体退役(2026-08):没有世界文件,只有键前缀。
 
 `README.md` 是本仓库最准的文档,`docs/REFERENCE.md` 是逐函数/逐命令的参考,改架构前先读。
 
@@ -18,7 +19,7 @@ ANIMA 是多个**互相独立**的仓库。协作方式:**Python 宿主 import �
 非 Python 端与跨版本场景走 **CLI 子进程 + `.cyberworld` 文件**:
 
 ```
-任何 Python 宿主(如网站后端)──import anima_world.api──▶ world.db(世界在宿主进程里活)
+任何 Python 宿主(如网站后端)──import anima_world.api──▶ Redis 上的世界(宿主进程驱动)
 anima-operator(运维台,Node)──CLI / .cyberworld 文件──▶ 本包
 anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ .cyberworld
 ```
@@ -39,7 +40,7 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 | `anima_world/world_package.py` | `.cyberworld` 数据包格式 | 运维台 `lib/worldPackage.js` |
 | `anima_world/world_seed.py` | 种子 schema 校验 | 运维台 `lib/worldSeed.js` |
 | `anima_world/beats.py` | 节拍脚本严格校验 | (无镜像;创作台经 CLI 委托校验) |
-| `anima_world/db.py` 的 `DB_FORMAT_VERSION` / `SCHEMA_REVISION` | 世界文件的可挂载性与加法修订 | 运维台读 `contract --json` 的 `db.*` |
+| `contract --json` 的 `storage` 段 | 存储契约:Redis 键前缀 / MySQL 表与表前缀(db.* 段随 world.db 退役) | 运维台镜像要改读 `storage.*` |
 
 `docs/FOR-STUDIO.md` 是给创作台的能力说明 —— **它那侧的判据是"有没有 CLI 出口"**
 (库里有而 CLI 上没有,对它等于不存在)。教训是流程的:创作台的
@@ -63,51 +64,66 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 464 项;pyproject 的 addopts 已屏蔽 ROS 的 pytest 插件
+python3.13 -m pytest -q               # 687 项(fakeredis,无需真 Redis);addopts 已屏蔽 ROS 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
-# 给人用的三个命令(onboarding.py + __main__.py 的 run_start/run_config/run_doctor)
-anima-world start                     # 引导配 LLM → 建世界 → 前台运行;新世界用演示速度
-anima-world doctor                    # 体检:密钥文件、db 格式、真调一次 LLM、时钟翻译成人话
-anima-world config set llm.api_key sk-…   # 改配置不用写代码(按声明类型强转后再写)
+# 世界住在 Redis:每个命令都吃 --redis URL(默认 $ANIMA_REDIS_URL 或
+# redis://127.0.0.1:6379/0)与 --world-id(默认 $ANIMA_WORLD_ID 或 world);
+# 可选 --mysql DSN 让无限增长的四样进 MySQL。
+
+# 给人用的三个命令
+anima-world start                     # 引导配 LLM → 创世 → 前台运行;新世界用演示速度
+anima-world doctor                    # 体检:Redis 持久化、密钥、真调一次 LLM、时钟翻译成人话
+anima-world config set llm.api_key sk-…   # 机器键自动进 ~/.anima-world,世界键进 :config
 
 # 给改提示词的人用的(run_prompt / World.debug_prompt)
-anima-world prompt --db-path w.db --agent 夏   # 她收到的提示词,逐块带来源 + 少了哪块为什么
-# 提示词是这套东西最不可见又最容易出错的一层(1.3 四个 bug 有三个在这儿)。
+anima-world prompt --world-id w --agent 夏   # 她收到的提示词,逐块带来源 + 少了哪块为什么
 # 它和真聊天共用 `ChatService.prompt_blocks` —— **调试视图另写一遍拼装就会撒谎**。
 
-anima-world map --db-path w.db --day 2 --agent 夏   # 地图 + 谁去了哪儿;--now 只看此刻
-# 位移此前只在事件日志里躺着,而看不见的东西没人会去查。**渲染是赠品,`--json` 才是
-# 契约** —— 本包无 HTML,好看的图归创作台/网站。四件差点画错的事见 `mapview.py`。
+anima-world map --world-id w --day 2 --agent 夏   # 地图 + 谁去了哪儿;--now 只看此刻
+# **渲染是赠品,`--json` 才是契约**。只读命令对不存在的 world_id 一律拒绝 ——
+# 抄错名字会当场创世,你看到的是一张"排版正常、时钟 0"的地图(5ce6aed 的教训)。
+
+anima-world ontology --world-id w [--kind tree] [--json]   # 有哪些种类、什么量、能干什么
+# **能力表只有这里问得到**:`stocks` 给得出数字,数字不告诉你 `tend` 这个词存不存在。
+# 猜一份动词表出来是这一层最容易犯的错 —— 猜错了不报错,按钮点下去才发现世界不认。
 
 # 给部署/脚本用的
-anima-world run --db-path saves/world.db               # 前台宿主,Ctrl-C 停
-anima-world simulate --db-path w.db --ticks 288        # 无头快进
-anima-world world export --seed seed.json --output my.cyberworld \
-    --world-id my-world --name "我的世界" --mode template
-anima-world world import my.cyberworld --destination ./instances
+anima-world run --world-id w                          # 前台宿主,Ctrl-C 停
+anima-world simulate --world-id w --ticks 288         # 无头快进;--ticks 0 = 只创世
+anima-world world export --world-id w --output my.cyberworld \
+    --package-id my-world --name "我的世界"
+anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
 ```
 
-嵌入到应用里(主要用法):`from anima_world.api import World` → `World.open(db_path)`。
+嵌入到应用里(主要用法):`from anima_world.api import World` →
+`World.open(world_id, redis=redis.Redis.from_url(url, decode_responses=True), mysql=None)`。
+**`decode_responses=True` 是契约的一部分**:裸 bytes 客户端下量名变成 `b'树高'`,
+规律静默失配。
 
 ## 关键不变量
 
 - **`start` 是人的门,`run`/`World.open` 是程序的门**:`start` 会引导配置 LLM、给新世界
   换成演示速度(1 tick/秒);`run` 和 `World.open` 一概不做。改 onboarding 时别把这
   两条路径搅在一起。
-- **一个 SQLite 世界独占它的 world.db**:那种世界的真相一半在内存(时钟/投影/锁/线程池),
-  第二个进程绕过 `World` 直接写同一个 db 会立刻分叉。离线处置(打包/快进)在世界关闭
-  后进行。**一个进程一个引擎版本;信任边界是进程边界**(`api.py` docstring 的三条纪律)。
-- **给了 `redis=` 的世界不再独占**:运行时状态整个住进 Redis(黑板/时钟/在途/当前动作/
-  规划/需求/意图/关系图/姿态/量与规律),很多进程可以同时操作同一个世界,`act()`/`intend()`
-  在一把跨进程的世界锁下执行。**接上一个已经在跑的世界不许把她按回原点** —— 搬家只填
-  Redis 里还没有的键(逐键 `HSETNX`),整份写回等于拿创世快照倒带她;时钟那边的 `setnx`
-  是同一条道理,而黑板曾经漏了这一条(第二个 `World.open` 会悄悄把她挪回 cafe,两边都不
-  报错)。**记忆投影仍在进程里,是有意的**:派生数据存两份只会多一种不一致的坏法,重折
-  廉价且必然正确(`catch_up_projection`)。
-- **给了 `mysql=` 的世界把无限增长的那几样放出内存**:`events` / `memories` /
-  `conversations` / `messages`。**判据最终是"她带不带得进上下文"**:Redis 装的是
+- **世界住在 Redis 里,`redis=` 是必填**:黑板/时钟/在途/当前动作/规划/需求/意图/
+  关系图/姿态/量/转录(无 MySQL 时)全在 `anima:{world_id}:*` 下,很多进程可以同时
+  操作同一个世界,`act()`/`intend()` 在一把跨进程的世界锁(`:lock`)下执行。
+  **创世与重连共用一条纪律:只填缺,不覆盖** —— 黑板 `seed_missing`、时钟 `setnx`、
+  每个 seed 函数空 store 才播;整份写回等于拿创世快照倒带她。这条踩过两次:黑板搬家
+  漏过它(第二个 `World.open` 悄悄把她挪回 cafe),`_WorldView` 用投影"恢复"位置又
+  踩了一次(投影是重折出来的**过去**,黑板上可能躺着别的进程写下的**现在**)。
+  **黑板接入必须晚于事件重放**(`build_serve_scheduler` 尾部),否则重放会把 Redis
+  里的现在盖回创世值。**记忆投影仍在进程里,是有意的**:派生数据存两份只会多一种
+  不一致的坏法,重折廉价且必然正确(`catch_up_projection`)。
+  **一个进程一个引擎版本;信任边界是进程边界**(`api.py` docstring 的三条纪律)。
+  开机会点名这个 Redis 的持久化(`durability_warning`):AOF 关着的 Redis 一重启,
+  世界退回创世那一刻,而且不报错。
+- **给了 `mysql=` 的世界把无限增长的那几样交给 MySQL**(`{world_id}_` 表前缀):
+  `events` / `memories` / `conversations` / `messages`;没给 MySQL 时它们住 Redis
+  (转录走 `RedisChatStore`),接受随时间增长的账。归 MySQL 后 Redis 里的旧拷贝
+  会被删掉 —— 两份真相里一份不更新,是这个仓库最怕的坏法。**判据最终是"她带不带得进上下文"**:Redis 装的是
   她此刻要带进提示词的东西,而 LLM 的上下文本来就有上限 —— 两个"有上限"是同一个上限。
 
       进得了提示词的  →  必须有界  →  Redis
@@ -119,29 +135,33 @@ anima-world world import my.cyberworld --destination ./instances
   会 → 那它必须有界。⚠️ **`edges` 一度被分错**(照着"像不像历史"分的):它有
   `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,**按世界的规模封顶** ——
   它属于 Redis。而那个闭集是承重的,放开谓词就要重算这笔账。
+  ⚠️ 而**有界性是渲染器的属性,不是存储的属性**:本体层进来之后世界里可以有一万棵树,
+  它们住 Redis 还是 MySQL 一样把提示词撑爆。所以"每个能进提示词的类型必须声明一个带
+  上限的选择器"这条归渲染那一层(`perception.perceive` 的 budget、`Ontology.budget_of`),
+  不归分家那张表。**截断了必须吭声**(`Perception.overflow` → "你没细看"):不说的话
+  她在一个"她以为只有三棵树"的世界里做决定,而她永远不会知道自己被骗了。
   ⚠️ **`mysql=` 传工厂,别传裸连接**(`mysql=lambda: pymysql.connect(...)`,引擎自动
   包成每线程一条):`pymysql` 的 threadsafety 是 1 而引擎有线程池,共用一条会让协议帧
   交叉、连接作废 —— **而且不是必现**,所以开机时当场点名,不指望人记得。
 - **LLM 的钥匙住在这台机器上,不住在世界里**(`machine_config`,`~/.anima-world/config.json`,
   0600)。解析顺序:环境变量 → 机器配置 → 世界配置(旧世界兼容,`doctor` 点名)→ 默认值。
   **人不手写环境变量**:`config set` 与 `World.config_set` 自动路由,`start` 的引导直接写它。
-  理由是 `.cyberworld` 是**分发物** —— 打包发出去的世界不该带着作者的钥匙;而 `llm.api_key`
-  又是唯一声明为密文的键,所以搬走之后**世界里一个 secret 都没有**,那条"Fernet 密钥必须随
-  db 搬迁、丢了全线降级 Mock"的老不变量整个不再需要:新世界不生成 `world.db.key`。
-  旧世界照旧能读,而**真丢了钥匙仍然报警**(`undecryptable_secrets()`;判据是"这个世界有没有
-  过 keyfile",缺省保守 —— 漏报比误报坏)。降级照旧不许无声:`World.state()` 的
-  `runtime.llm.degraded_reason` 常驻。
-- **世界文件里只存作者动过的**(1.4.0):创世**不播**引擎默认值,读的时候按
-  环境变量 → 机器配置 → 世界文件 → `_DEFAULTS` 解析,`config list` / `prompt_list`
-  每行带 `source`。理由是播下去的那份是**创世那天的快照**:引擎把 `chat.recall_k`
+  理由是 `.cyberworld` 是**分发物** —— 打包发出去的世界不该带着作者的钥匙。
+  **世界里一个 secret 都没有**:Fernet/keyfile 已随 SQLite 整体退役,往世界里写
+  非空密文值现在是**当场 `RuntimeError`**(不是加密,引擎手里已没有钥匙),
+  `config set llm.api_key` 自动路由进机器配置。降级照旧不许无声:`World.state()`
+  的 `runtime.llm.degraded_reason` 常驻。
+- **世界里只存作者动过的**(1.4.0;如今在 `:config` / `:prompts` 两个 hash):
+  创世**不播**引擎默认值,读的时候按环境变量 → 机器配置 → 世界 → `_DEFAULTS` 解析,
+  `config list` / `prompt_list` 每行带 `source`。理由是播下去的那份是**创世那天的快照**:引擎把 `chat.recall_k`
   从 3 改成 99,已有的世界一个都吃不到,而 `config list` 看上去一模一样。
-  于是 `config` 表里剩下的就是作者的意见(内置种子的世界 = 8 行,毛坯 = 0 行),
-  `prompt_templates` 是 0 行。两个连带纪律:
+  于是 `:config` 里剩下的就是作者的意见(内置种子的世界 = 8 行,毛坯 = 0 行),
+  `:prompts` 是 0 行。两个连带纪律:
   - **判据是"引擎声明过什么",不是"表里有没有行"** —— `has` / `meta` / `list` / `set`
     四个都要回落。`set` 曾经漏了:一个新世界的表是空的,于是
     `set("llm.api_key", …)` 拿不到 `is_secret`,**密钥明文写进世界文件而且一声不吭**。
-  - **搬进 Redis 时只搬作者动过的**:`list()` 是合并视图,整份搬过去等于把刚拆掉的
-    快照在 Redis 里原样重建(实测 31 条默认模板全进了 Redis)。
+  - **落库的永远是作者动过的**:`list()` 是合并视图,整份落库等于把刚拆掉的
+    快照原样重建(31 条默认模板的教训)。
   `tests/test_config_provenance.py` 是这几条的闸。
 - **scheduler 持有进程内唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。跨进程那把
   是 `RedisLock`,**在它之外不是替代** —— RLock 还被 `threading.Condition` 用着(等规划落地),
@@ -166,26 +186,12 @@ anima-world world import my.cyberworld --destination ./instances
   回来敲门(`agent_followups` → `agent_hail`),`narrative_direction` 真的把人挪过来。
   只改提示词的版本("她走了"但下一 tick 还站在原地)就是这几条 issue 要修的病本身。
 - **LLM 客户端注入**,**永不在 tick 线程调用**;叙事、规划、关系判定各自跑在线程池上。
-- **版本即契约(硬钉版模型)**:一个 core 版本 = (引擎代码, db format 版本, 包格式版本)
-  一起冻结。宿主装上某个版本后就只依赖该版本,不做跨版本迁移。
-  - `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
-  - **主版本号 = db 格式 = 可挂载性**:让老引擎**读不了**世界文件的改动(改列义/拆表/
-    换单位)才升第一位;第二位加能力,第三位纯修 bug
-  - **加法修订 `SCHEMA_REVISION`(1.3.0 = 3)**:纯加法的 schema 变化(新表、新的可空列)
-    不改可挂载性,跟着**次版本号**走,戳在 `db_meta.schema_revision`,**只增不减**。
-    1.3.0 破的是"schema 一变就升主版本"那条 —— 那会把已有的世界为一批加法全作废;守的
-    是"版本号能告诉你两个文件互不互通"这条,后者才是联锁真正在保护的东西。
-    加表时问自己一句:**老引擎打开这个文件还能跑吗?** 能 → 加法修订 + 次版本;
-    不能 → 那是 db 格式变更,升主版本。`tests/test_version_contract.py` 里
-    "更高修订的世界仍然能挂"那条测试就是这道闸。
-    1.3.0 内部走过 2 → 3(第一批 chat-agent,第二批 world-rules 与认知层)——
-    一个版本号对应两个修订只因为这一版从没发布过,别当成先例。**闸在
-    `SCHEMA_TABLES_AT_REVISION_3`**:表集合被钉住,加一张表就必须动那一行,
-    于是"顺手加表却忘了升戳"不可能再悄悄发生(它就这么发生过一次,全量测试没红)。
-  - 这个戳存在的唯一理由是**让降级看得见**(1.3 的世界跑在 1.2 引擎上照跑,但 stance /
-    静音 / 拒谈话题整套缺席);`contract --json` 与 `doctor` 都报它,**运维台镜像要同步读**
-  - `db.py` 的 `DB_FORMAT_VERSION` / `MIN_SUPPORTED_DB_FORMAT` 是运行期安全联锁:两者相等即
-    "硬不兼容",挂错卷会当场拒绝而不是静默写坏(见 `tests/test_db_format.py`)
+- **版本即契约(硬钉版模型的新形态)**:db 格式联锁(`DB_FORMAT_VERSION` /
+  `SCHEMA_REVISION` / 表集合钉扎)随 world.db 整体退役 —— 世界不再是一个可挂载的
+  文件,键前缀就是格式。留下的两条由 `tests/test_version_contract.py` 守:
+  `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取);
+  `contract --json` 自报 `storage` 段与包格式版本(v2),镜像端照它对齐。
+  改 Redis 键形状 / MySQL 表形状 = 改跨仓库契约,和改包格式同一级别。
 - `world_seed.json` 是本包**唯一的 package data**,随 wheel 分发
   (`tests/test_packaging.py` 盯着,漏了会让宿主环境里少文件)。
 - **内置种子是橱窗,不是毛坯**(1.3.0):它用 `"config": {...}` 替这个世界点亮了
@@ -209,15 +215,23 @@ anima-world world import my.cyberworld --destination ./instances
 
 ## 当前状态
 
-**1.4.0(db 格式 1,schema 加法修订 3)。** PyPI 上已发布到 1.3.0(tag `v1.3.0`)。
-版本规则由 `tests/test_version_contract.py` 机器强制。
+**2.0 改造完成(未发版):world.db 整体退役,世界只住 Redis(+可选 MySQL)。**
+PyPI 上已发布到 1.3.0(tag `v1.3.0`);`__version__` 还停在 1.4.0,发版前要定版本号
+(按硬钉版纪律这是主版本级变更 —— World.open 签名、包格式、CLI 参数全破)。
 
-1.4.0 是**纯加法**:一张 SQLite 表都没动,db 格式与 schema 修订都不变,不给
-`redis=` / `mysql=` 的世界行为逐字不变。它加的是"世界可以不住在一个进程里" ——
-运行时状态整个进 Redis(十一步),随时间无限增长的那几样进 MySQL,外面的进程有了
-改变世界的入口(`World.act()` / `World.intend()` / `body` 面的动词)。分家的判据是
-**"她带不带得进上下文"**:进得了提示词的必须有界(Redis),进不了的可以无限
-(MySQL,按 k 取回来)—— 这条可验,`tests/test_bounded.py` 是闸。
+这一轮删掉的:`db.py`、`small_stores.py`、`graph.py`、全部 SQLite store 实现、
+Fernet/keyfile、db 格式联锁、`--db-path`。补上的:`RedisChatStore`(无 MySQL 时
+转录的家)、`RedisConfigBackend`(`:config`)、`RedisRulesStore`(`:world_rules`)、
+`meta_rows`(`:meta`:创世出生证明、占用标记)、RedisMemoryStore 的容量淘汰与
+锚定不衰减(删的时候测试逮出来两处 Redis 版行为缺口)。`.cyberworld` 升 v2:
+`world.db` 成员换成 `world_state.json`(Redis 键的类型化 dump + 可选 MySQL 段),
+template 模式删除,导入只进空 world_id。创世 = 种子直写各 Redis store,空 store
+才播;测试套件全量跑在 fakeredis 上(687 项,无需真 Redis 服务)。
+
+同一轮加进来的是**本体层**(`ontology.py` / `RedisOntologyStore` / `anima-world ontology`
+/ `World.kinds()` / `World.entities()` / `StockCondition` BT 叶子),纪律见上。
+三份文档已跟着 2.0 对过一遍(REFERENCE 的 world.db / Fernet / template / db 格式联锁
+描述全清掉了,§8 新增一张**键清单**当名字的权威;FOR-STUDIO 记了 `ontology` 这一笔)。
 
 原路线图(docs/ROADMAP.md)的 2.0–5.0 四大机制已并入首发,全部带默认关闭的开关:
 
@@ -246,6 +260,52 @@ anima-world world import my.cyberworld --destination ./instances
 三条硬纪律:**绝不 `eval`**(AST 白名单 + 自写解释器,`expressions.py`)、
 **连续变化不发事件**(只有 `emit` 的门槛跨过去才发,且边沿触发)、
 **双缓冲**(同一轮读上一轮的值,规律之间与顺序无关)。跑在 tick 线程上 —— 纯算术。
+
+**本体层**(ontology,2.0):`kinds` 声明"这个世界有哪些**种类**的东西"(量、能力、
+提示词预算),`entities` 只装每一个的 id/name/gloss/location —— Type Object,声明写一遍,
+提示词引种类而不重复它。**这是有界性的来源**。五条:
+
+- **声明本身就是开关**,和 perception 逐字同构:不写 `kinds` 的世界这一层整个缺席,
+  行为与从前逐位相同。一旦作者写下 `kinds`,他就是在说"我已经声明了这个世界有什么" ——
+  于是建议变成闸:量名拼错(`树髙` vs `树高`)**当场开不了机**。放行的样子是这个仓库最怕
+  的那种:安静地建成第二个量,规律照跑、日志干净,作者要到发现那棵树三个月没长才知道。
+- **加载时严格、运行期降级**:坏声明拒绝整个世界并**一次列全**(所以 `--ticks 0` 能当
+  校验用);运行期出错只跳过一条规律。
+- **能力(affordance)不是规律**:规律有意拒绝跨实体写(双缓冲下扇入没有意义),而一次
+  能力调用是"一个人、一个东西、一个瞬间",那条反对不适用。走 `act(agent, "interact",
+  {"target","verb"}, surface="body")` 这一条统一路径。⚠️ **一次交互是一下子的事,不是
+  一个状态** —— 让 `interact` 赖在 `_current_action` 上,按跃迁发事件的那一处就只会发一次,
+  然后永远沉默。
+- **两道闸,别混**:能力调用上的是**同处一地**(`perform_affordance` 的 `absent`,
+  两头都说 —— 只说"它在 cafe"会读成一句谎,真正的原因可能是引擎不知道**她**在哪);
+  排班按量分支上的是**感知**(`_settle_stock_watches`)。后者的理由是她拿一个自己感知
+  不到的量做决定,和她说出矿里还有多少矿一样出戏,而且**连提示词痕迹都不留**。
+  这三个理由要分得开:`hidden`/`not_mine` 是作者的静态错误(警告一次,然后永远写
+  `None` —— 留旧值等于让她按上一次路过时看到的数字决定),`elsewhere` 是正常且短暂的
+  (闭嘴)。而 `perform_affordance` 的 `conditions`(果子还没熟)与其余理由也要分开:
+  混成一个,她就不知道该等一会儿还是该换件事做。
+- **能力是施动者与对象之间的关系,不是对象单方面的属性**(Gibson;`requires` / `costs` /
+  `me_` 前缀)。之前能力只读得到对象身上的量,于是谁都一样能干 —— 一个人可以连着照料
+  一百棵树而不累。而**一个总能成功的动作产生不了任何决策**:没有理由挑先做哪件、
+  没有理由歇一会儿、也没有理由变强。挡住它需要"她身上也有量",所以 `agent` 是唯一能在
+  数据里被扩写的内置种类,而且**只能扩写 `quantities`**(她不是一样可以被 `tend` 的东西;
+  她的能力在行为树和聊天工具里)。四条硬纪律:**`requires` 只准读 `me_*`**(不成立永远
+  只有一个意思——「你做不了」;能读对象的量它就和 `when` 分不开,而分得开正是它存在的
+  全部理由)、**`me_X` 必须声明过**(否则恒为 0,门要么永远开着要么永远关着)、
+  **`costs` 与 `set` 读同一份旧值**(双缓冲,和规律那一层同一条)、**拒绝时一个字都不写**。
+  拒绝理由因此是**三**类:`conditions`(这会儿不行 → 等)、`incapable`(她做不了 → 去歇着)、
+  讲不通的那一摞。合成一个的话,一个累坏了的人会挨棵树轮着试过去,每一棵都回她"再等等"。
+  她身上的量住 `stock:agent:{id}`,和树的量同一个后端、同一套可见性 —— 于是**声明成
+  `self` 她自己感知得到、声明成 `here` 别人看得见**,零额外接线。两个落点各只有一个:
+  量的播种在 `Scheduler.register`(角色不在 `ontology.entities` 里,而她可能在世界跑起来
+  之后才出现——开机名册 / 节拍 `agent_join` / 重启中途加入的唯一共同窄口),她此刻在哪
+  同步进可见性表在 tick 循环的 `_settle_actor_place`(`loc` 有五处写点,挨个加等于给未来
+  的第六处留一个静默的洞)。
+
+创世那一刻两条(都踩过):**默认值逐个量填,不是逐个实体填** —— 按实体跳的话,种子里给
+某棵树写了一个 `树高` 就会让它声明过的其余量一个都不落地,于是 `tend` 的条件求不出值、
+生长规律算不动,两件事都只是安静地不发生。**顺序是规律 → 本体 → 种子显式值 → 声明默认值**:
+本体要拿规律去查引用;作者写的 3.2 必须先落,否则被声明的 1.0 盖掉。
 
 外加一个第五个开关,补上"没人跟她说话时她也能主动"这一半:`autonomy.enabled`
 (调度器 tick 上每隔 `autonomy.interval_ticks` 问一次她要不要做点什么,决定与执行

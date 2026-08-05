@@ -1,5 +1,14 @@
 # 给创作台的引擎能力说明(anima-world → anima-studio)
 
+> **⚠️ 2.0 破坏性变更(未发版,先记在这儿)**:world.db 退役,世界住 Redis。
+> CLI 的 `--db-path` 全线换成 `--redis URL` + `--world-id`(+可选 `--mysql DSN`);
+> `world export` 的世系参数改名 `--package-id`(`--world-id` 现在指源世界);
+> `world import` 改为导入进一个**空的** `--world-id`,不再解包成目录;
+> `.cyberworld` 包格式升 **v2**(`world.db` 成员 → `world_state.json`,template
+> 模式删除);`contract --json` 的 `db.*` 段换成 `storage.*`。创作台在拿到带这
+> 一版引擎的 venv 之前不受影响 —— 但对接前先按本条对齐子进程调用。
+
+
 | | |
 |---|---|
 | 发出方 | anima-world(世界引擎),1.3.0 |
@@ -27,9 +36,9 @@
 在 CLI 上了**。你们的 P1(C3 三日试炼 / C5 一键试玩 / B3 性格试镜)不必再等:
 
 ```bash
-anima-world report --db-path w.db --json      # 诉求 A:结构化运行摘要
-anima-world simulate --db-path w.db --ticks 864 --report r.json   # 或者跑完直接落文件
-anima-world chat --db-path w.db --agent 夏 --name 作者             # 诉求 B:本地试聊
+anima-world report --world-id w --json      # 诉求 A:结构化运行摘要
+anima-world simulate --world-id w --ticks 864 --report r.json   # 或者跑完直接落文件
+anima-world chat --world-id w --agent 夏 --name 作者             # 诉求 B:本地试聊
 ```
 
 这是我这边的流程问题:交付了没有回执。这份文档就是那个回执,以后新能力我在
@@ -56,7 +65,7 @@ CHANGELOG 之外单独在这里记一笔。
 你们要的是:
 
 ```bash
-anima-world chat --db-path w.db --agent 昀 --message "十九年前那份报告是谁签的字?"
+anima-world chat --world-id w --agent 昀 --message "十九年前那份报告是谁签的字?"
 ```
 
 现在的 `chat` **没有 `--message`**,只有交互式 REPL。子进程驱动 REPL 要喂 stdin、
@@ -65,10 +74,10 @@ anima-world chat --db-path w.db --agent 昀 --message "十九年前那份报告�
 
 ---
 
-## 1. 现在 CLI 上有什么(14 个子命令)
+## 1. 现在 CLI 上有什么(15 个子命令)
 
 ```
-start  config  doctor  chat  prompt  map  run  simulate  events  report  validate  play  contract  world
+start  config  doctor  chat  prompt  map  ontology  run  simulate  events  report  validate  play  contract  world
 ```
 
 按你们用得上的顺序:
@@ -82,6 +91,7 @@ start  config  doctor  chat  prompt  map  run  simulate  events  report  validat
 | `chat --agent X` | 本地试聊(免 claim) | B3 性格试镜 |
 | `prompt --agent X` | **看她收到的提示词,逐块带来源** | 1.3.0 新增,见 §3 |
 | `map [--json]` | **地图 + 谁在哪 + 谁去了哪儿** | 1.4.0 新增,见 §3.6 —— `--json` 出数据,你们自己渲染 |
+| `ontology [--json]` | **有哪些种类的东西、身上有哪些量、能对它们做什么**,以及**一件事要她付出什么**(`requires` / `costs`) | 2.0 新增,见 §3.7 —— 能力表**只有这里问得到**,猜不出来 |
 | `world export/import` | `.cyberworld` 打包 | 出厂 |
 | `events export` | 事件流 JSONL | 连续性通路(只导出,不重放) |
 | `doctor` | 体检 | 装完 core 自检 |
@@ -192,10 +202,18 @@ start  config  doctor  chat  prompt  map  run  simulate  events  report  validat
 ```
 
 **CLI 可达性**:✅ 种子写进去、`validate` 校验、`simulate` 跑。
-❌ **没有任何 CLI 能读一个世界当前的量或规律**(`World.stock/stocks/rules/rule_stats`
-只有 Python)。你们做"世界工坊"要给作者看"树现在多高了",现在够不着。**请提 issue。**
-❌ **也没有 CLI 能改一条规律** —— 规律只能在创世时从种子进,改一条要重建世界。
-(这一条我自己也认为是洞,已经排进 1.4.0。)
+
+✅ **"读一个世界当前的量"这条洞补上了。** 原文是"❌ 没有任何 CLI 能读…… 你们做
+世界工坊要给作者看'树现在多高了',现在够不着":
+
+```bash
+anima-world ontology --world-id w --json     # 每个实体此刻的量,连声明一起
+```
+
+细节见 §3.7 —— 那道命令同时把"能对它做什么"也交出来了,而那一栏你们**猜不出来**。
+
+❌ **仍然没有 CLI 能读或改一条规律**(`World.rules/rule_stats` 只有 Python)。
+规律也只能在创世时从种子进,改一条要重建世界 —— 这一条我自己也认为是洞。
 
 ### 3.3 认知层(perception):客观存在 ≠ 她知道
 
@@ -226,7 +244,10 @@ start  config  doctor  chat  prompt  map  run  simulate  events  report  validat
 ⚠️ `hidden` 目前是**绝对不可知** —— "有人告诉她"那条路还没接。
 
 **CLI 可达性**:✅ 种子写、`prompt --agent X` 能**看见**感知块进没进提示词。
-❌ `World.perception()` / `visibility_rules()` 没有 CLI 出口。
+✅ `ontology --json` 报每个量声明成了哪一档(`quantities[].visibility`)——
+"我以为她知道 / 其实她不知道"是这一层最容易的错,现在查得了。**她自己身上的量走同一套**
+(`kinds` 里那个 `agent`):`self` = 只有她知道,`here` = 站在她旁边的人也看得见"她累了"。
+❌ `World.perception(agent_id)`(**她此刻**感知到什么,随她走动而变)还没有 CLI 出口。
 
 ### 3.4 定时轮次(autonomy):没人跟她说话时她也能主动
 
@@ -248,9 +269,9 @@ start  config  doctor  chat  prompt  map  run  simulate  events  report  validat
 **这一条你们可能最用得上,而且我猜你们还不知道它存在。**
 
 ```bash
-anima-world prompt --db-path w.db --agent 夏 --name 作者     # 摘要
-anima-world prompt --db-path w.db --agent 夏 --full          # 连正文
-anima-world prompt --db-path w.db --agent 夏 --json          # 给程序
+anima-world prompt --world-id w --agent 夏 --name 作者     # 摘要
+anima-world prompt --world-id w --agent 夏 --full          # 连正文
+anima-world prompt --world-id w --agent 夏 --json          # 给程序
 ```
 
 ```
@@ -288,8 +309,8 @@ anima-world prompt --db-path w.db --agent 夏 --json          # 给程序
 位移此前只在事件日志里躺着 —— 一行 `state_change/location_join`,谁也不会去翻。
 
 ```bash
-anima-world map --db-path w.db --day 2 --agent 夏     # 给人看
-anima-world map --db-path w.db --json                 # 给你们渲染
+anima-world map --world-id w --day 2 --agent 夏     # 给人看
+anima-world map --world-id w --json                 # 给你们渲染
 ```
 
 `--json` 出四块,几何**已经换算成绝对画布坐标**(0~1):
@@ -322,6 +343,95 @@ anima-world map --db-path w.db --json                 # 给你们渲染
    位移:画成「自 X」。实测第 2 天,三个人里两个的起点在第 1 天。
 
 终端那张图是赠品(本包无 HTTP、无 HTML),你们不必照抄它的样子。
+
+### 3.7 本体层:世界里有哪些**种类**的东西,以及能对它们做什么(`anima-world ontology`)
+
+§3.2 把量做成了数据,但 owner 那一栏是**任意字符串** —— `tree:oak` 和 `tree:oka`
+是两棵毫不相干的树,`树高` 写成 `树髙` 会安静地新建一个量,规律照跑、日志干净。
+这一层是那道闸:**先声明种类,实例只能引用声明过的种类,量只能是种类声明过的量。**
+
+种子里(两段都是可选的;不写 `kinds` 的世界这一整层不存在,行为逐字和以前一样):
+
+```jsonc
+"kinds": [{
+  "id": "agent",                                      // 唯一能扩写的内置种类,且**只能扩写量**
+  "quantities": {
+    "体力": {"default": 100, "visibility": "self", "unit": "点"},
+    "手艺": {"default": 1.0, "visibility": "here"}
+  }
+}, {
+  "id": "tree",
+  "gloss": "一棵树",                                  // 一行人话。**进提示词的是它,不是属性表**
+  "quantities": {
+    "树高": {"default": 1.0, "visibility": "here", "unit": "米"},
+    "最大树高": 12                                    // 简写 = 只有默认值,默认 hidden
+  },
+  "affordances": {
+    "look": {},                                       // 什么也不改
+    "tend": {"when":     ["树高 < 最大树高"],          // 关于**树**:不成立 = 这会儿不行
+             "set":      {"树高": "min(树高 + 0.05 * me_手艺, 最大树高)"},
+             "requires": ["me_体力 >= 15"],            // 关于**她**:不成立 = 她做不了
+             "costs":    {"体力": "me_体力 - 15"}}     // 做完从她身上扣
+  },
+  "prompt": {"budget": 3}                             // 同一个地方最多带几个进提示词
+}],
+"entities": [{"id": "tree:harbor_oak", "name": "门口那棵老橡树", "location": "cafe"}]
+```
+
+声明了 `kinds` 之后,`stocks` / `stock_visibility` / `stock_places` 三段大多可以不写 ——
+默认值、可见档、位置都从声明里推出来。**这对你们生成种子是省事的**:一类树声明一次,
+一千棵树只写 id 和名字。
+
+**CLI 可达性**:✅ 全部。
+
+```bash
+anima-world ontology --world-id w            # 给人看
+anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entities": [...]}
+```
+
+`entities[]` 每行带 `values`(此刻的量),`kinds[]` 每行带 `quantities` 与
+`affordances`(含 `conditions` / `sets` / `requires` / `costs` 的**源表达式字符串**,
+照作者写的样子,外加一个 `needs_actor` 布尔告诉你这条能力看不看施动者)。
+声明过量的 `agent` 一直在 `kinds[]` 里(不必加 `--builtin`)—— `me_体力` 的出处在那儿。
+
+**四件对你们要紧的事:**
+
+1. **能力表只有这一个地方问得到。** `stocks` 只给得出数字,而数字不告诉你 `tend`
+   这个词存不存在。做"世界工坊"要给作者一个"她能对这棵树做什么"的界面时,**别猜
+   一份动词表** —— 猜错了不报错,按钮点下去才发现世界不认。
+2. **坏声明在世界启动前整体拒绝**(`OntologyError`),而且**一次报全部错**,不是修
+   一条报一条。和节拍脚本、规律同一条纪律。所以你们可以拿 `--ticks 0` 当校验用。
+3. **量名拼错现在开不了机。** 种子里给 `tree:a` 写一个 `tree` 没声明过的量会被拒,
+   错误信息带上"声明过的是 [...]" —— 差一个字的名字要摆在一起才看得出。
+   ⚠️ 这条只对声明了 `kinds` 的世界生效:没声明时引擎无从判断那是笔误还是新造的量。
+4. **能力是"她和它之间"的关系,所以拒绝分三类,做界面时别合并。** 同一把斧头对有
+   力气的人是"能砍",对没力气的人不是 —— `requires` / `costs` 就是这一半。
+   `act(..., "interact", ...)` 失败时 `reason` 有三摞,**她接下来该做的事完全不同**:
+   `conditions`(树还没长好 → 等等,或换一棵)、`incapable`(她没体力了 → 去歇着,
+   或先变强)、以及 `unknown_entity` / `unknown_verb` / `absent` / `no_ontology`
+   (这个调用本身讲不通 → 作者或模型的事)。合成一句"做不了"的话,一个累坏了的人
+   会挨棵树轮着试过去,每一棵都回她"再等等"。
+   两条你们写声明时会撞上的硬规则:**`requires` 只准读 `me_*`**(它要是也能读树身上的
+   量就和 `when` 分不开了,而分得开正是它存在的全部理由),**`me_X` 和 `costs` 的键
+   都必须在 `agent` 的 `quantities` 里声明过**(否则读到的恒为 0,那道门要么永远开着
+   要么永远关着)。两条都是**开不了机**级别的错,一次报全。
+**排班也能按量分支了**(`when_stock`)—— 钟点排班("八点到六点半照看店里")是这个
+引擎在这之前能表达的全部,而人不是那样活的:
+
+```jsonc
+{"name": "tend_oak", "start": "08:00", "end": "08:30",
+ "kind": "interact", "params": {"target": "tree:harbor_oak", "verb": "tend"},
+ "when_stock": {"owner": "tree:harbor_oak", "key": "树高", "op": "<", "value": 6}}
+```
+
+比较符六个(`< <= > >= == !=`),打错**当场抛**(打错一个符号的静默后果是这条分支
+永不触发,而世界照跑、日志干净)。闸门**先过一遍感知**(§3.3):她感知不到的量不会
+进黑板 —— 一条读得到"隔着半个地图那棵树的高度"的排班等于让她用她不可能知道的事做
+决定,而那**连一行提示词都不留**。
+
+橱窗种子里已经演了整条链:声明一棵树 → 规律让它长 → 感知让她看见 → 排班按树高分支 →
+`tend` 真的改到量、也真的花掉她的体力 → 累光了当场 `incapable` → 过一个世界日缓过来。
+`anima-world ontology --world-id w` 一眼看全。
 
 ## 4. 旧特性速查(1.0 ~ 1.2,你们大概已经在用)
 

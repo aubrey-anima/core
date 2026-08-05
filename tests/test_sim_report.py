@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from _worldfile import run_cli
+
 import json
 import subprocess
 import sys
@@ -49,7 +51,7 @@ def test_report_declares_its_own_format_version_separately_from_the_engine():
     """统计口径变了不该逼消费方升引擎,反过来也一样。"""
     report = build_run_report([], ticks=0)
     assert report["report_format_version"] == REPORT_FORMAT_VERSION
-    assert report["engine_version"] and report["db_format_version"] >= 1
+    assert report["engine_version"]
 
 
 def test_leaving_ends_the_encounter_at_departure_not_at_arrival():
@@ -253,11 +255,8 @@ def test_simulate_writes_a_report_a_tool_can_read(tmp_path):
     """端到端:创作台拿到的是这份文件,不是 stdout 里的一行告警。"""
     db = tmp_path / "w.db"
     report_path = tmp_path / "nested" / "report.json"
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "simulate", "--db-path", str(db),
-         "--ticks", "300", "--llm", "mock", "--report", str(report_path)],
-        capture_output=True, text=True,
-    )
+    result = run_cli("simulate", "--world-id", "w",
+         "--ticks", "300", "--llm", "mock", "--report", str(report_path))
     assert result.returncode == 0, result.stderr
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["report_format_version"] == REPORT_FORMAT_VERSION

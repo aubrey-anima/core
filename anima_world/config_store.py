@@ -1,72 +1,30 @@
 """ConfigStore: runtime-tunable scalar configuration (M5).
 
 Every value that used to be a Python constant or an env-var-only setting
-(LLM credentials, scheduler timing, chat/memory thresholds) now lives in the
-`config` table and is read live at the point of use, so an admin editing it
-via `World.config_set` takes effect on the next call with no process restart (see
-design.md D2/D3). Secret values (`is_secret=1`) are encrypted at rest with
-Fernet; the encryption key lives in a sibling keyfile next to the database,
-never in the database itself (design.md D4) — losing that keyfile makes
-existing secrets unrecoverable, so a decrypt failure degrades to "unset"
-rather than crashing the process.
+(scheduler timing, chat/memory thresholds) lives in the world's `:config`
+rows and is read live at the point of use, so an admin editing it via
+`World.config_set` takes effect on the next call with no process restart.
+
+**世界里没有 secret。** `llm.api_key` 是唯一声明为密文的键,它住机器配置
+(`machine_config`,~/.anima-world/config.json)。world.db 时代的 Fernet
+加密与随库搬迁的 keyfile 随 SQLite 一起退役 —— 往世界里写一个非空 secret
+现在是**当场报错**,不是加密,因为世界是分发物,而引擎已没有钥匙可用。
+
+存取分离:ConfigStore 拿一个 `backend`(`all() -> {key: row}` /
+`put(key, row)`,见 `redis_state.RedisConfigBackend`),自己只负责类型、
+声明回落与解析顺序。
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import sqlite3
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-
-from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger(__name__)
 
 _VALUE_TYPES = {"str", "int", "float", "bool"}
-
-
-def has_keyfile(db_path: str | Path) -> bool:
-    """这个世界原本有没有自己的密钥文件。
-
-    **判据不是密文长什么样,是这个世界有没有过 keyfile。** 没有 keyfile 就说明
-    它从来没存过真 secret(1.3.0 之后的世界都是这样),那么解不开只可能是解一个
-    创世播下的空串 —— 那不是丢钥匙,报警是假警报。
-    """
-    return Path(str(db_path) + ".key").exists() or bool(os.getenv("ANIMA_SETTINGS_KEY"))
-
-
-def load_or_create_key(db_path: str | Path, *, create: bool = True) -> bytes:
-    """Resolve the Fernet key for secret config values.
-
-    Precedence: `ANIMA_SETTINGS_KEY` env var > existing sibling keyfile >
-    freshly generated keyfile. The keyfile is `<db_path>.key`, mode 0600,
-    and MUST NOT be committed to version control (see `.gitignore`).
-
-    `create=False` 时:没有 keyfile 就**不造一个**,返回一把只活在内存里的临时密钥。
-
-    为什么要有这个开关 —— **世界里已经没有 secret 了。** `llm.api_key` 是唯一
-    声明为密文的键,而它归了机器配置(`machine_config`)。于是一个新世界不再需要
-    keyfile,而那条"**Fernet 密钥必须随 db 搬迁**,丢了就全线降级 Mock"的不变量
-    整个不需要成立 —— 那条链的根就是把一把 API key 存进了世界文件。
-
-    **旧世界照旧**:keyfile 还在就照读,里面那把旧钥匙解得开旧密文。
-    """
-    env_key = os.getenv("ANIMA_SETTINGS_KEY")
-    if env_key:
-        return env_key.encode()
-    keyfile = Path(str(db_path) + ".key")
-    if keyfile.exists():
-        return keyfile.read_bytes()
-    key = Fernet.generate_key()
-    if not create:
-        # 只活在这一个进程里:没有密文要存,也就没有东西需要下次解得开。
-        return key
-    keyfile.write_bytes(key)
-    keyfile.chmod(0o600)
-    return key
 
 
 def _coerce(raw_value: str, value_type: str) -> Any:
@@ -128,77 +86,48 @@ def mask_secret(value: str) -> str:
 
 
 class ConfigStore:
-    """SQLite-backed, in-memory-cached store for typed scalar config values.
+    """Backend-agnostic, in-memory-cached store for typed scalar config values.
 
-    All access is serialized through `lock` (defaults to its own RLock; the
-    web server passes the scheduler's shared lock since the connection is
-    shared across threads, same pattern as `MemoryStore`/`ChatStore`).
+    `backend` 只有两个动作:`all()` 取全部行、`put(key, row)` 写一行
+    (`redis_state.RedisConfigBackend` 是唯一的生产实现;测试给个 dict 包装就行)。
+    All access is serialized through `lock`(缺省自带 RLock;宿主可传调度器
+    共享锁,和 `MemoryStore` 同一个模式)。
     """
 
     def __init__(
         self,
-        conn: sqlite3.Connection,
-        fernet_key: bytes | None = None,
+        backend: Any,
         lock: Any | None = None,
-        had_keyfile: bool = True,
     ) -> None:
-        self._conn = conn
+        self._backend = backend
         self._lock = lock if lock is not None else threading.RLock()
-        self._fernet = Fernet(fernet_key) if fernet_key else None
-        # 这个世界原本有没有自己的密钥文件。没有就说明它从来没存过真 secret
-        # (1.3.0 之后的世界都是这样),那么"解不开"只可能是解一个创世播下的空串
-        # —— 报"你的钥匙丢了"是假警报,而假警报会让人学会忽略真警报。
-        # 缺省 True 是**保守的**:不知道来历就照旧报警,漏报比误报坏。
-        self._had_keyfile = had_keyfile
         self._cache: dict[str, Any] = {}
         self._meta: dict[str, dict[str, Any]] = {}
-        # Secrets that are STORED but unreadable (almost always a lost keyfile).
-        # They decode to None, which every caller reads as "unset" — without
-        # this set there is no way to tell an unconfigured key from a broken
-        # one, and the world silently degrades to Mock either way.
-        self._undecryptable: set[str] = set()
         self._hydrate()
 
     def _hydrate(self) -> None:
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT key, value, value_type, category, is_secret, description FROM config"
-            )
-            rows = cur.fetchall()
-        for key, raw_value, value_type, category, is_secret, description in rows:
-            is_secret = bool(is_secret)
+            rows = self._backend.all()
+        for key, row in rows.items():
+            is_secret = bool(row.get("is_secret"))
+            value_type = row.get("value_type") or "str"
             self._meta[key] = {
                 "value_type": value_type,
-                "category": category,
+                "category": row.get("category"),
                 "is_secret": is_secret,
-                "description": description,
+                "description": row.get("description"),
             }
-            self._cache[key] = self._decode(key, raw_value, value_type, is_secret)
-
-    def _decode(self, key: str, raw_value: str, value_type: str, is_secret: bool) -> Any:
-        if is_secret:
-            if self._fernet is None:
-                # 没有密钥又没有过 keyfile = 这个世界从来没存过真 secret(1.3.0 之后
-                # 都是这样)。那不是"读不出来",是"本来就没有" —— 报警是噪音,
-                # 而每次开机都来一遍的噪音会让人学会忽略真警告。
-                if not self._had_keyfile:
-                    return None
-                logger.warning("config %s is a secret but no encryption key is configured", key)
-                self._undecryptable.add(key)
-                return None
-            try:
-                raw_value = self._fernet.decrypt(raw_value.encode()).decode()
-            except InvalidToken:
-                # **解不开一个空值不算丢了钥匙。** 创世会给每个 secret 键播一行
-                # (加密过的空串),而新世界不再生成 keyfile —— 于是每次开机都会用
-                # 一把临时钥匙去解那个空串,解不开。报"你的钥匙丢了"是假警报,
-                # 而假警报会让人学会忽略真警报。
-                if not self._had_keyfile:
-                    return None
-                logger.warning("config %s could not be decrypted (missing/corrupted keyfile)", key)
-                self._undecryptable.add(key)
-                return None
-        return _coerce(raw_value, value_type)
+            raw_value = row.get("value")
+            # 世界里不该有 secret(见模块 docstring);真读到一个就当没配,
+            # 并点名 —— 静默用一个不该在这儿的密钥比报警坏。
+            if is_secret and raw_value:
+                logger.warning(
+                    "config %s 是 secret 却存在世界里 —— 忽略;它属于机器配置"
+                    "(anima-world config set %s …)", key, key,
+                )
+                self._cache[key] = None
+                continue
+            self._cache[key] = _coerce(raw_value or "", value_type)
 
     def get(self, key: str, default: Any = None) -> Any:
         """解析顺序:**环境变量 → 机器配置 → 世界配置 → 引擎默认值。**
@@ -291,21 +220,20 @@ class ConfigStore:
                 is_secret = False
 
             raw = _stringify(value, value_type)
-            if is_secret:
-                if self._fernet is None:
-                    raise RuntimeError(f"cannot store secret '{key}': no encryption key configured")
-                raw = self._fernet.encrypt(raw.encode()).decode()
+            if is_secret and raw:
+                # 世界是分发物,而引擎已没有加密钥匙 —— 明文落进世界文件的对应物
+                # 正是当年那个"密钥无声写进 config 表"的事故。当场拒绝,并指路。
+                raise RuntimeError(
+                    f"cannot store secret '{key}' in a world: secrets live in "
+                    f"machine config (anima-world config set {key} …)"
+                )
 
             updated_at = datetime.now(timezone.utc).isoformat()
-            self._conn.execute(
-                "INSERT INTO config (key, value, value_type, category, is_secret, description, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET "
-                "value=excluded.value, value_type=excluded.value_type, category=excluded.category, "
-                "is_secret=excluded.is_secret, description=excluded.description, updated_at=excluded.updated_at",
-                (key, raw, value_type, category, int(is_secret), description, updated_at),
-            )
-            self._conn.commit()
+            self._backend.put(key, {
+                "value": raw, "value_type": value_type, "category": category,
+                "is_secret": bool(is_secret), "description": description,
+                "updated_at": updated_at,
+            })
             self._meta[key] = {
                 "value_type": value_type,
                 "category": category,
@@ -313,18 +241,11 @@ class ConfigStore:
                 "description": description,
             }
             self._cache[key] = value
-            self._undecryptable.discard(key)  # rewritten under the current key
 
     def undecryptable_secrets(self) -> list[str]:
-        """Secret keys that are stored but could not be read back.
-
-        `get()` returns None for these, exactly as it does for a key that was
-        never set — so callers see "unset" and degrade quietly. Boot checks and
-        `World.state()` use this to tell the two apart and name the real cause
-        (a `<db>.key` that did not travel with the database).
-        """
-        with self._lock:
-            return sorted(self._undecryptable)
+        """世界里读不回来的 secret。SQLite 与 keyfile 退役后这个集合恒空 ——
+        方法留着是因为 `World.state()` / doctor 的报告面还在问。"""
+        return []
 
     def has(self, key: str) -> bool:
         """这个键**存在** —— 世界文件里有一行,或者引擎声明过它。
@@ -389,6 +310,7 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "llm.timeout": (30.0, "float", "llm", False, "LLM request timeout (seconds)"),
     "llm.max_retries": (2, "int", "llm", False, "LLM SDK max retries"),
     "scheduler.tick_rate": (1 / 300, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),
+    "scheduler.max_agents": (100, "int", "scheduler", False, "Roster cap, a performance guardrail; 0 = unlimited. The operator's number, not the authoring tool's"),
     "agent.idle_timeout": (30.0, "float", "scheduler", False, "BT idle watchdog threshold (seconds)"),
     "world.minutes_per_tick": (5, "int", "scheduler", False, "World minutes one tick represents (5 → a world day is 288 ticks)"),
     "world.travel_minutes_per_unit": (60, "int", "scheduler", False, "World minutes to cross one canvas unit on foot (the old harbour district is walkable)"),
