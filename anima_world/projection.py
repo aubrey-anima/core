@@ -111,8 +111,17 @@ def _apply_agent_join(proj: Projection, e: Event) -> None:
     spec = payload.get("spec", {})
     location = payload.get("location")
     proj.agents[agent_id] = AgentState(
-        spec=spec,
-        state=payload.get("state", {}),
+        # **拷一份,别拿事件那个 dict 当自己的状态。** 投影是从事件折出来的**派生
+        # 数据**,而事件是已经发生过的**事实** —— 共用一个可变 dict 的话,后来的
+        # 一条 `persona_update` 会顺着 `agent.spec.update(...)` 就地改写那条创世
+        # `agent_join` 在内存里的样子。于是"那条事件说了什么"有两个答案:
+        # `World.events()`(内存窗口)说有 goals,`events export` 与任何一次重放说
+        # 没有 —— 而日志才是对的。
+        #
+        # 没造成过数据损失(goals 自己有一条 persona_update 事件),但这是个地雷:
+        # 投影往后加的任何一处写,都会静默地改写"历史显示成什么样"。
+        spec=dict(spec) if isinstance(spec, dict) else spec,
+        state=dict(payload.get("state") or {}),
         location=location,
         joined_at=e.ts,
         updated_at=e.ts,

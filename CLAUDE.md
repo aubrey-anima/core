@@ -206,6 +206,13 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
   - **落库的永远是作者动过的**:`list()` 是合并视图,整份落库等于把刚拆掉的
     快照原样重建(31 条默认模板的教训)。
   `tests/test_config_provenance.py` 是这几条的闸。
+- **投影拷一份,别拿事件那个 dict 当自己的状态**(`_apply_agent_join`)。投影是从事件
+  折出来的**派生数据**,事件是已经发生过的**事实**;共用一个可变 dict 的话,后来的一条
+  `persona_update` 会顺着 `agent.spec.update(...)` **就地改写那条创世 `agent_join` 在内存
+  里的样子** —— 于是"那条事件说了什么"有两个答案:`World.events()`(内存窗口)一个,
+  `events export` 与任何一次重放另一个,而日志才是对的。没造成过数据损失(goals 自己有
+  一条 `persona_update` 事件),但它是地雷:投影往后加的任何一处写都会静默改写历史的
+  显示。`tests/test_event_log_fidelity.py` 守这条。
 - **scheduler 持有进程内唯一的 RLock**(世界时钟 / 邮箱);别再引入第二把锁。跨进程那把
   是 `RedisLock`,**在它之外不是替代** —— RLock 还被 `threading.Condition` 用着(等规划落地),
   而 Condition 要一把真线程锁。

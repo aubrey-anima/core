@@ -133,3 +133,34 @@ def test_a_replayed_player_action_keeps_the_shape_the_live_stream_had(tmp_path):
             assert replayed[-1].get(key) == live[key], (
                 f"重放后 {key} 是 {replayed[-1].get(key)!r},实时流里是 {live[key]!r}"
             )
+
+
+def test_投影不许就地改写一条已经发生过的事件(tmp_path):
+    """**"那条事件说了什么"只能有一个答案。**
+
+    `_apply_agent_join` 曾经把事件 payload 里那个 `spec` 直接拿去当投影的状态
+    (同一个 dict,没拷贝)。于是后来的一条 `persona_update` 顺着
+    `agent.spec.update(...)` **就地改写了那条创世 `agent_join` 在内存里的样子** ——
+    `World.events()`(内存窗口)看到的 payload 里多出了 goals,而 `events export`
+    与任何一次重放都没有。日志才是对的,内存那份是被改过的。
+
+    没造成过数据损失(goals 自己有一条 persona_update 事件),但它是个地雷:
+    投影往后加的任何一处写,都会静默地改写"历史显示成什么样"。
+    """
+    import fakeredis
+
+    from anima_world.api import World
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with World.open("fidelity", redis=client, force_mock_llm=True) as world:
+        shown = [e for e in world.events()
+                 if e["type"] == "agent_join" and e["who"] == "夏"][0]
+        logged = [
+            json.loads(raw) for raw in client.lrange("anima:fidelity:events", 0, -1)
+        ]
+        written = [e for e in logged
+                   if e.get("type") == "agent_join" and e.get("who") == "夏"][0]
+
+    assert shown["payload"] == written["payload"], (
+        "内存窗口里的事件和日志里的对不上 —— 有人在事后改写了已经发生过的事"
+    )
