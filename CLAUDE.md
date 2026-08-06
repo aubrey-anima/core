@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 先读总图,以及你的角色
+
+开工前先读 `/home/super/src/vibecoding/Anima正式版/docs/ANIMA-分工与协作.md` ——
+四个仓库各自管什么、每条跨仓库契约的权威在哪、协作纪律,都定义在那里。
+本文件只讲本仓库内部;凡是涉及别的仓库的判断,以总图为准。
+
+**在这个目录里开的会话是 ANIMA 的统领**:既管引擎本身,也管整个系统的跨仓库
+架构 —— 契约怎么定、职责怎么划、发版节奏、仓库间的争议裁决。涉及两个以上仓库的
+设计决定在这里做,做完落进总图或对应仓库的同步记录。两条随之而来的责任:
+**交付要回执**(加了 CLI 出口去 FOR-STUDIO 记一笔,诉求文档的状态要更新),
+**改线格式要牵头同步镜像端**(契约表在总图里)。
+
 ## 这个仓库是什么
 
 **anima-world —— ANIMA 世界引擎**,可发布的 pip 包。**只做引擎**:跑世界、快进、打包成
