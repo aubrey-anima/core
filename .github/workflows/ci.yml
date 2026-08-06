@@ -30,6 +30,15 @@ jobs:
     # A wheel can still differ from it — a missing package-data entry is invisible
     # until something installs the artifact and finds the file gone.
     runs-on: ubuntu-latest
+    services:
+      # 2.0: the world lives on Redis — a real server, not fakeredis, on purpose:
+      # this job exists to exercise the artifact the way a host would, and a host
+      # brings a real Redis. It also proves the wheel's redis-py dependency pin
+      # actually satisfies the client the engine uses.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v7
 
@@ -50,16 +59,20 @@ jobs:
           /tmp/clean/bin/pip install dist/*.whl
           cd /tmp
           /tmp/clean/bin/python -c "
+          import redis
           from anima_world.api import World
-          with World.open('ci.db', force_mock_llm=True) as w:
+          def conn():
+              return redis.Redis.from_url('redis://127.0.0.1:6379/0', decode_responses=True)
+          with World.open('ci', redis=conn(), force_mock_llm=True) as w:
               before = w.tick(50)
               assert len(w.state()['agents']) == 3
-          with World.open('ci.db', force_mock_llm=True) as w:
+          with World.open('ci', redis=conn(), force_mock_llm=True) as w:
               assert w.state()['world_time']['tick'] == before, 'clock must survive a restart'
           print('wheel works, clock persists')
           "
           /tmp/clean/bin/anima-world --help > /dev/null
-          /tmp/clean/bin/anima-world simulate --db-path /tmp/ci2.db --ticks 20 --llm mock
+          /tmp/clean/bin/anima-world simulate --redis redis://127.0.0.1:6379/0 \
+              --world-id ci2 --ticks 20 --llm mock
 
       - uses: actions/upload-artifact@v7
         with:
