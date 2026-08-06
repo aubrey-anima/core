@@ -1391,6 +1391,23 @@ anima-world ontology --world-id w --check         # 逐个跑出生自检;有问
 人话,而排错时要对得上的正是这两者。带 `duration` 的能力多印一行"要花几个 tick,
 这期间她腾不腾得出手"(§2.9.6.3)。
 
+#### `anima-world world drop` —— 把一个世界整个抹掉
+
+```bash
+anima-world world drop --world-id w          # 只数:会删多少个键,然后退出 0
+anima-world world drop --world-id w --yes    # 真删
+```
+
+抹掉 `anima:{world_id}:*` 下的一切(给了 `--mysql` 的话连那四张表一起 drop)。
+
+**为什么这是引擎的出口**:键前缀是引擎定义的形状,让调用方自己去 `SCAN` + `DEL`
+等于让每个宿主持有一份对键形状的猜测,而键形状是跨仓库契约。创作台跑试炼要一个
+用完即弃的世界(它的纪律是"演化过程不落盘"),没有这道出口它只能把垃圾世界永久
+留在 Redis 上,或者自己去删键。
+
+**默认只数不删**是有意的:一个打错的 `--world-id` 在这里的代价是抹掉另一个世界,
+而那不可逆。只读命令那条"对不存在的 world_id 一律拒绝"在这里同样生效。
+
 ### 4.3 anima-world run —— 无引导的前台宿主
 
 不引导、不改时钟,打开世界让时钟跑,Ctrl-C 停。给部署和脚本;程序里嵌入请直接用
@@ -1488,6 +1505,7 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 anima-world world export --world-id w --output my.cyberworld \
     --package-id my-world --name "我的世界" [--seed seed.json] [--beats beats.json]
 anima-world world import my.cyberworld --world-id w2      # 目标必须是空世界
+anima-world world drop   --world-id w --yes               # 整个抹掉一个世界
 anima-world world inspect my.cyberworld [--json]          # 它需要什么引擎?
 ```
 

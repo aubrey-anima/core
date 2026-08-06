@@ -22,7 +22,15 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 `db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
 spot rather than silently written to.
 
-## [Unreleased]
+## [2.0.0] —— 世界搬进 Redis,东西有了种类,文件只剩一种
+
+**主版本 = 可挂载性。** 这一版把三件事一起破了,所以只破一次:`World.open` 的签名
+(`redis=` 必填、`seed_path` → `world_file`)、存储(world.db → Redis 键前缀)、
+世界文件格式(zip v1/v2 → gzip JSONL v3)。1.x 的世界文件挂不上 2.0,反之亦然 ——
+这是硬钉版纪律的正常形态,不是遗憾:世界钉死在生成它的引擎版本上,不做跨版本迁移。
+
+1.3.0 及更早版本以 Apache-2.0 发布并维持原许可;自本版本起是 **AGPL-3.0-or-later**。
+
 
 ### Added —— 世界里有哪些**种类**的东西(本体层,`anima-world ontology`)
 
@@ -173,6 +181,30 @@ Gibson 的 affordance 存在于**施动者与环境的配对**里:同一把斧�
 "你可以对它:端详、brew"里的 brew 是噪音,她还得照着它行动)。**人话也调得动**
 (`{"verb": "照料"}` 和 `{"verb": "tend"}` 是同一件事),反查按**这个东西的种类**做而
 不是全世界一张表 —— 两个种类各有一个"照料"时,全局表只留得下一个。
+
+### Added —— `anima-world world drop`:把一个世界从 Redis 上整个抹掉
+
+键前缀是这个引擎定义的形状(`anima:{world_id}:*`),所以"抹掉一个世界"就是"抹掉那个
+前缀下的一切" —— 让调用方自己去 `SCAN` + `DEL`,等于让每个宿主都持有一份对键形状的
+猜测,而键形状是跨仓库契约。
+
+**为什么现在需要它**:创作台跑试炼要一个**用完即弃**的世界(它的纪律是"演化过程不
+落盘":那次运行是预览,不是交付物)。1.x 时代这是"拷一份 world.db",而 2.0 的世界是
+一个键前缀 —— 没有这道出口,创作台要么把垃圾世界永久留在 Redis 上,要么自己去删键。
+
+**默认只数不删**:`--yes` 才真删。一个打错的 `--world-id` 在这里的代价是抹掉另一个
+世界,而那不可逆。给了 `--mysql` 的话连那四张表一起 drop —— 一个世界没了,它的表也就
+没有主人了。测试盯着最容易犯的那个形状:抹 `alpha` 不许把 `alphabet` 一起抹了。
+
+### Fixed —— 版本号有两个来源,而其中一个会过期
+
+`_engine_version()` 先问已安装包的元数据、问不到才回落模块。那是**第二个真相**:
+pyproject 本来就是动态读 `__version__` 的,打成 wheel 时两者恒等 —— 唯一能分叉的
+场合是 editable 安装下改了版本号还没重装,而那时元数据给的是**过期的那个**。
+
+症状很难看:世界文件的 `engine_min` 盖的是新版本(模块读的),而"我跑不跑得了"问的
+是旧版本(元数据读的),于是**引擎判定自己刚导出的包自己跑不了**。发现于 2.0.0 定版
+的那一刻。
 
 ### Fixed —— 投影就地改写了一条已经发生过的事件
 

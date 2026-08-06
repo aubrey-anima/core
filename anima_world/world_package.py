@@ -24,7 +24,6 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib import metadata
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -64,7 +63,6 @@ class PackageValidationError(ValueError):
     """Raised when a world archive fails the portable package contract."""
 
 
-@dataclass(frozen=True)
 class WorldPackageManifest:
     package_format_version: int
     engine_min: str
@@ -214,7 +212,6 @@ class WorldPackageManifest:
         }
 
 
-@dataclass(frozen=True)
 class ImportedWorld:
     """v2 起没有实例目录了:世界装进 Redis(可选 MySQL)。
 
@@ -230,12 +227,17 @@ class ImportedWorld:
 
 
 def _engine_version() -> str:
-    try:
-        return metadata.version("anima-world")
-    except metadata.PackageNotFoundError:
-        from anima_world import __version__
+    """这个引擎是哪一版。**只有一个来源:`anima_world.__version__`。**
 
-        return __version__
+    从前这里先问已安装包的元数据、问不到才回落模块。那是**第二个真相**:pyproject
+    本来就是动态读 `__version__` 的,所以打成 wheel 时两者恒等 —— 唯一能分叉的场合
+    是 editable 安装下改了版本号还没重装,而那时元数据给的是**过期的那个**。
+    症状很难看:世界文件的 `engine_min` 盖的是新版本(模块读的),而"我跑不跑得了"
+    问的是旧版本(元数据读的),于是引擎判定自己导出的包自己跑不了。
+    """
+    from anima_world import __version__
+
+    return __version__
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:
@@ -243,17 +245,6 @@ def _version_tuple(value: str) -> tuple[int, int, int]:
     if match is None:
         raise PackageValidationError(f"invalid engine version: {value}")
     return tuple(int(part) for part in match.groups())
-
-
-def _engine_min_for(engine_version: str) -> str:
-    """The lower bound a package gets stamped with: current engine 截到次版本。
-
-    v2 只有 snapshot。状态是 JSON 快照,它的形状随**次版本**演进(键是引擎写进
-    Redis 的键),补丁版本按定义不改形状 —— 所以下限是 `major.minor.0`,上限照旧
-    是下一个主版本。
-    """
-    major, minor, _patch = _version_tuple(engine_version)
-    return f"{major}.{minor}.0"
 
 
 _STATE_REDIS_VALUE_TYPES = {"hash": dict, "list": list, "string": str, "set": list}
@@ -707,3 +698,37 @@ def inspect_world_file(path: str | Path) -> dict[str, Any]:
         "runnable": runnable,
         "size_bytes": Path(path).stat().st_size,
     }
+
+
+def drop_world(redis: Any, world_id: str, *, confirm: bool = False, mysql: Any = None) -> int:
+    """把一个世界从 Redis 上整个抹掉。返回它有多少个键(`confirm=False` 时只数不删)。
+
+    **为什么这是引擎的活。** 键前缀是这个引擎定义的形状(`anima:{world_id}:*`),
+    "抹掉一个世界"就是"抹掉那个前缀下的一切" —— 让调用方自己去 `SCAN` + `DEL`,
+    等于让每个宿主都持有一份对键形状的猜测,而键形状是跨仓库契约。
+
+    **为什么调用方需要它。** 创作台跑试炼要一个用完即弃的世界(它的纪律是"演化过程
+    不落盘":那次运行是预览,不是交付物)。没有这道出口,它要么把垃圾世界永久留在
+    Redis 上,要么自己去删键。
+
+    `confirm=False` 是默认:先数给你看。一个打错的 `--world-id` 在这里的代价是
+    抹掉另一个世界,而那是不可逆的。
+    """
+    prefix = _world_prefix(world_id)
+    keys = list(redis.scan_iter(match=f"{_glob_escape(prefix)}*", count=500))
+    if not confirm:
+        return len(keys)
+    for chunk in (keys[i:i + 500] for i in range(0, len(keys), 500)):
+        if chunk:
+            redis.delete(*chunk)
+    if mysql is not None:
+        # 无限增长的那四样住在 `{world_id}_` 前缀的表里。**drop 掉整张表**,
+        # 而不是 DELETE 行:一个世界没了,它的表也就没有主人了。
+        from anima_world.mysql_state import as_connection
+
+        conn = as_connection(mysql)
+        with conn.cursor() as cur:
+            for table in _GROWING_TABLES:
+                cur.execute(f"DROP TABLE IF EXISTS `{world_id}_{table}`")
+        conn.commit()
+    return len(keys)

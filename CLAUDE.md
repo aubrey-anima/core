@@ -135,6 +135,7 @@ anima-world simulate --world-id w --ticks 288         # 无头快进;--ticks 0 =
 anima-world world export --world-id w --output my.cyberworld \
     --package-id my-world --name "我的世界"
 anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
+anima-world world drop --world-id w --yes             # 整个抹掉一个世界(不带 --yes 只数)
 anima-world world inspect my.cyberworld               # 只读第一行:要哪个引擎、多大
 anima-world validate world my.cyberworld              # 不建世界就查作者层
 # `.cyberworld` 是 gzip JSONL:`zcat x.cyberworld | grep '"type":"entity_spawn"'` 真的能用。

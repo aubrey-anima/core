@@ -338,3 +338,42 @@ def test_接不接_MySQL_导出来长得一样(tmp_path):
         kinds.add(_json.loads(line)["kind"])
     # 这个世界没接 MySQL,但事件照样是 event 记录(而不是 redis list)
     assert "event" in kinds
+
+
+def test_抹掉一个世界要先说清会抹掉多少(tmp_path):
+    """**默认只数不删。** 一个打错的 `--world-id` 在这里的代价是抹掉另一个世界,
+    而那不可逆 —— 所以"删"必须是显式的第二步,不是默认行为。"""
+    import fakeredis
+
+    from anima_world.api import World
+    from anima_world.world_package import drop_world
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with World.open("doomed", redis=client, force_mock_llm=True) as world:
+        world.tick(3)
+
+    counted = drop_world(client, "doomed")
+    assert counted > 0
+    assert list(client.scan_iter(match="anima:doomed:*")), "只数不该删掉任何东西"
+
+    dropped = drop_world(client, "doomed", confirm=True)
+    assert dropped == counted
+    assert not list(client.scan_iter(match="anima:doomed:*"))
+
+
+def test_抹掉一个世界不碰别的世界(tmp_path):
+    """键前缀是这个引擎定义的形状,而"抹掉一个世界"必须**恰好**是那个前缀 ——
+    一个 Redis 上跑十个世界是常态,多删一个字符就是别人的世界没了。"""
+    import fakeredis
+
+    from anima_world.api import World
+    from anima_world.world_package import drop_world
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    for name in ("alpha", "alphabet"):      # 前缀是另一个的真前缀 —— 最容易多删的形状
+        with World.open(name, redis=client, force_mock_llm=True) as world:
+            world.tick(1)
+
+    drop_world(client, "alpha", confirm=True)
+    assert not list(client.scan_iter(match="anima:alpha:*"))
+    assert list(client.scan_iter(match="anima:alphabet:*")), "把另一个世界一起抹了"

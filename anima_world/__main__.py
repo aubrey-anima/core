@@ -371,6 +371,15 @@ def _build_parser() -> argparse.ArgumentParser:
     world_import.add_argument("package", help="Package archive path")
     _add_world_args(world_import)
 
+    world_drop = world_commands.add_parser(
+        "drop", help="把一个世界从 Redis 上整个抹掉(键前缀下的一切)"
+    )
+    _add_world_args(world_drop)
+    world_drop.add_argument(
+        "--yes", action="store_true",
+        help="不问就删 —— 脚本用;不给这个参数时只报会删多少个键然后退出",
+    )
+
     return parser
 
 
@@ -3490,6 +3499,7 @@ def run_world_package(args: argparse.Namespace) -> int:
     from anima_world.world_file import WorldFileError
     from anima_world.world_package import (
         PackageValidationError,
+        drop_world,
         import_world_file,
         inspect_world_file,
     )
@@ -3523,6 +3533,20 @@ def run_world_package(args: argparse.Namespace) -> int:
                 "output": str(args.output),
                 "engine_min": manifest.engine_min,
             }
+        elif args.world_command == "drop":
+            redis, world_id, mysql = _world_args(args)
+            if not _require_existing_world(redis, world_id, "world drop"):
+                return 2
+            n = drop_world(redis, world_id, confirm=bool(args.yes), mysql=mysql)
+            result = {
+                "operation": "drop", "world_id": world_id,
+                "keys": n, "dropped": bool(args.yes),
+            }
+            if not args.yes:
+                print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+                print(f"[world drop] 没有 --yes,什么也没删。加上它会抹掉这 {n} 个键。",
+                      file=sys.stderr)
+                return 0
         else:
             redis, world_id, mysql = _world_args(args)
             manifest = import_world_file(

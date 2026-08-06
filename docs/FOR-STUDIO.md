@@ -94,7 +94,8 @@ start  config  doctor  chat  prompt  map  ontology  run  simulate  events  repor
 | `prompt --agent X` | **看她收到的提示词,逐块带来源** | 1.3.0 新增,见 §3 |
 | `map [--json]` | **地图 + 谁在哪 + 谁去了哪儿** | 1.4.0 新增,见 §3.6 —— `--json` 出数据,你们自己渲染 |
 | `ontology [--json] [--check]` | **有哪些种类的东西、身上有哪些量、能对它们做什么**,以及**一件事要她付出什么**(`requires` / `costs` / `consumes` / `duration`)。`--check` 跑出生自检 | 2.0 新增,见 §3.7 —— 能力表**只有这里问得到**,猜不出来;动词现在是**你们声明的**,不是引擎的十个;世界能自己长出新东西(`spawn`) |
-| `world export/import` | `.cyberworld` 打包 | 出厂 |
+| `world export/import/inspect` | `.cyberworld` 打包 | 出厂 |
+| `world drop --yes` | **把一个世界从 Redis 上整个抹掉** | 2.0 新增 —— 试炼跑在用完即弃的世界上,跑完抹掉;不带 `--yes` 只数不删 |
 | `events export` | 事件流 JSONL | 连续性通路(只导出,不重放) |
 | `doctor` | 体检 | 装完 core 自检 |
 | `play` | 交互式跑 | 人手动玩 |
@@ -529,6 +530,14 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
    调试、diff 都方便。引擎导出时才压。
 4. CLI:`--seed` 全线换成 `--world-file`;`validate seed` 换成 `validate world`
    (`seed` 保留为别名);`validate beats --seed` 换成 `--world-file`。
+   世界的寻址从 `--db-path <文件>` 换成 `--redis <url> --world-id <名字>` ——
+   **两个都要给全**,少给 `--world-id` 时引擎用默认名 `world`,于是两个作业的世界
+   共用一个键前缀**而且不报错**。
+5. **`validate world` 不建世界、不碰 Redis**,所以"检查这份世界写对了吗"从
+   "跑一次 `simulate --ticks 0`"降级成一次纯读 —— 你们的主线因此不需要任何服务。
+6. **新出口 `world drop`**:把一个世界从 Redis 上整个抹掉(键前缀下的一切)。
+   给你们跑用完即弃的试炼用 —— 不带 `--yes` 时只数给你看会删多少个键然后退出,
+   因为一个打错的 `--world-id` 在这里的代价是抹掉另一个世界。
 
 **顺带你们白得一个能力**:把一份只含 `author` 记录的文件装进一个**已有**的世界,
 就是一次编辑 —— 加一个地点、补三个实体、改一条规律,都是往里灌几行。
