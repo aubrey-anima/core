@@ -1,42 +1,41 @@
 # anima-world
 
-**A world-simulation engine for LLM-driven agents.** Characters wake up, get hungry,
-go to work, gossip about each other, form cliques, spend money, remember what happened
-last week, and change how they feel about you. One SQLite file is one world.
+**多 agent 共同生活的世界引擎。** 以形式本体论为地基——声明什么存在、能对它做什么、
+要付什么代价——让角色的每个决定从世界里长出来,而不是从提示词里编出来。角色会醒来、
+会饿、会去上班、会背后议论别人、会抱团、会花钱、会记得上周发生的事、会改变对你的
+看法;世界里的东西会生长,也会生灭。
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/aubrey-anima/core/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](https://github.com/aubrey-anima/core/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://github.com/aubrey-anima/core/blob/main/pyproject.toml)
 [![PyPI](https://img.shields.io/pypi/v/anima-world.svg)](https://pypi.org/project/anima-world/)
 
-English | [中文](https://github.com/aubrey-anima/core/blob/main/README.zh-CN.md)
-
 ---
 
-## What this is
+## 这是什么
 
-Most "AI agent" frameworks give you a chatbot with tools. This gives you a **place** —
-one that keeps running whether or not anyone is watching, and remembers what happened
-while they were away.
+大多数"AI agent"框架给你的是一个带工具的聊天机器人。这个引擎给你的是一个**地方** ——
+没人看着它也在跑,而且记得没人看着的时候发生过什么。
 
-A world is a tick-driven simulation. On every tick each character runs a behavior tree
-against its own needs and the state of the world, and acts. Those acts become events in
-an append-only log, which is the world's only source of truth — balances, relationships,
-and locations are all *projections* of that log, never separately stored rows that could
-drift out of sync.
+它不是多 agent **协作**框架(消息编排、任务分解是 AutoGen / CrewAI 那条赛道)。
+这里的协作不是编排出来的,是从共享的世界里长出来的:同一棵树、同一个经济、
+同一张关系图。
 
-The LLM sits beside the simulation, not inside it. It writes the narration, plans what a
-character does with free time, and judges how a conversation changed a relationship —
-all on background threads. **The clock never blocks on a network call.** Take the LLM
-away entirely and the world still runs; it just narrates in templates.
+世界是 tick 驱动的模拟:每个 tick,每个角色拿自己的需求和世界此刻的状态跑一遍
+行为树,然后行动。行动变成事件,进一条只追加的日志 —— 日志是世界唯一的真相,
+余额、关系、位置全是它的**投影**,不存在第二份可能失配的账。
 
-The engine is **a library, not a service.** There is no HTTP server and no port. Your
-application imports it, and the world lives inside your process:
+LLM 在模拟**旁边**,不在里面:它负责叙事、给角色安排空闲时间、判定一场对话如何
+改变了关系,全跑在后台线程上。**时钟永远不等网络。** 把 LLM 整个拿掉,世界照样跑,
+只是文本变成模板。
+
+引擎是**一个库,不是一个服务**。没有 HTTP、没有端口:你的应用 import 它,
+世界住在 Redis 上:
 
 ```
-your app  ──import anima_world.api──▶  the world on Redis (anima:{world_id}:*)
+你的应用 ──import anima_world.api──▶ Redis 上的世界(anima:{world_id}:*)
 ```
 
-## See it run
+## 30 秒看它跑起来
 
 ```console
 $ pip install anima-world
@@ -59,43 +58,33 @@ $ anima-world start
 
   [第0天 00:10] 遥:遥四处走了走
   [第0天 00:10] 夏:夏睡下了
-  [第0天 00:35] 遥:遥睡下了
   ^C
-  世界已停下,快照已保存。下次接着跑:anima-world start
+  世界已停下。下次接着跑:anima-world start
 ```
 
-`start` configures the LLM, creates the world, and runs it — in that order, with no
-documentation required first. Without an API key everything still works; narration is
-templated and characters have no plans. That degradation is deliberate, and it is never
-silent (`anima-world doctor` will tell you, and `World.state()` carries the reason).
+`start` 依次做三件事 —— 引导配 LLM、创世、前台运行 —— 不用先读任何文档。
+没有 API key 一切照常,只是叙事变模板、角色没有计划。这个降级是有意的,
+而且**绝不无声**:`anima-world doctor` 会点名,`World.state()` 里常驻降级理由。
 
-> **Heads up on language:** the engine speaks Chinese. CLI output, the built-in seed
-> world, and the reference docs are all in Chinese. The API itself is English
-> (`World.open`, `world.tick`, `world.chat`), and every piece of text a world *says* —
-> worldview, prompts, and the no-key narration templates — comes from the seed, not from
-> the engine. So an English world is a matter of supplying an English seed.
-
-## Install
+## 安装
 
 ```bash
-pip install anima-world          # Python 3.11+
+pip install anima-world          # Python 3.11+;世界住 Redis,测试/试玩可用 fakeredis
 ```
 
-Three runtime dependencies, chosen to stay out of your way since they land in every host
-that embeds a world: `cryptography` (encrypts the API key at rest), `openai` (any
-OpenAI-compatible endpoint), `httpx`.
+运行时依赖三个,都是嵌入方无法回避的:`redis`(世界的家)、`openai`
+(任何 OpenAI 兼容端点)、`httpx`。要 MySQL 的装 `anima-world[mysql]`。
 
-From source:
+从源码:
 
 ```bash
 git clone https://github.com/aubrey-anima/core.git anima-world
 cd anima-world && pip install -e ".[dev]" && python -m pytest
 ```
 
-## Use it in your app
+## 嵌进你的应用
 
-This is the main interface. `World` is a plain object with a lifetime — open it, drive
-it, close it.
+这是主接口。`World` 是一个有生命周期的普通对象:打开、驱动、关闭。
 
 ```python
 from anima_world.api import World
@@ -104,15 +93,15 @@ import redis
 
 client = redis.Redis.from_url("redis://127.0.0.1:6379/0", decode_responses=True)
 with World.open("world", redis=client) as world:
-    world.start_clock()                        # background clock; or drive it yourself
+    world.start_clock()                        # 后台时钟;或者自己驱动
     print(world.state()["world_time"])         # {'day': 0, 'hour': 6, 'minute': 25, ...}
 
-    # Talk to a character on a player's behalf. Streams; your app owns the transcript.
+    # 替玩家和角色说话。流式;完整转录归你的应用管。
     for chunk in world.chat("夏", [{"role": "user", "content": "你好"}],
                             player_id="p1", display_name="阿宇"):
         print(chunk, end="")
 
-    # Commit a finished exchange: summary + one world event + a relationship verdict
+    # 提交一轮结束的对话:摘要 + 一个世界事件 + 一次关系判定
     world.record_chat_turn("夏", "p1", [
         {"role": "user", "content": "你好"},
         {"role": "assistant", "content": "你好呀"},
@@ -122,305 +111,237 @@ with World.open("world", redis=client) as world:
     world.config_set("scheduler.tick_rate", 1.0)
 ```
 
-For batch work, drive the clock yourself — `world.tick(n)` is synchronous and
-deterministic, which is what makes fast-forwarding and testing possible:
+批处理就自己驱动时钟 —— `world.tick(n)` 是同步且确定的,快进和测试都靠这一点:
 
 ```python
-with World.open("w.db") as world:
-    world.tick(288)                     # one world day
-    print(world.memories("夏"))         # what she remembers, ranked
+with World.open("world", redis=client) as world:
+    world.tick(288)                     # 一个世界日
+    print(world.memories("夏"))         # 她记得什么,按分排好
     print(world.needs("夏"))            # {'energy': 0.59, 'hunger': 0.16, ...}
-    print(world.cliques())              # who has clustered together
+    print(world.cliques())              # 谁和谁抱了团
 ```
 
-## What a world contains
+## 一个世界里有什么
 
-Four subsystems, each an opt-in flag except memory. They are off by default because a
-world that only walks around and talks is a legitimate world, and every mechanism you
-enable is more LLM spend and more surface to reason about.
+四个子系统,除记忆外全是默认关闭的开关。默认关是因为一个只会走动和说话的世界
+也是正当的世界,而每开一个机制都是更多 LLM 开销、更多要想清楚的面。
 
-| Subsystem | Flag | What it adds |
+| 子系统 | 开关 | 加了什么 |
 |---|---|---|
-| **Memory** | always on | Retrieval scored on relevance × recency × importance, periodic reflection that writes higher-order memories, and a forgetting curve |
-| **Needs** | `needs.enabled` | `energy` / `hunger` / `social` decay per tick and drive an urgency band in the behavior tree — a tired character stops what it is doing and goes to sleep |
-| **Economy** | `economy.enabled` | Items, money, shops, wages, and price drift. The ledger is a projection of `payment` events, so balances cannot be forged |
-| **Social** | `social.enabled` | Three-axis relationships (always on) plus gossip that propagates second-hand with confidence decay, and emergent cliques |
+| **记忆** | 常开 | 相关性 × 新近度 × 重要性的三因子检索、定期反思写出更高阶的记忆、遗忘曲线 |
+| **需求** | `needs.enabled` | `energy` / `hunger` / `social` 逐 tick 衰减,驱动行为树的紧急带 —— 累了的角色会放下手里的事去睡觉 |
+| **经济** | `economy.enabled` | 物品、钱、店铺、工资、价格漂移。账本是 `payment` 事件的投影,余额造不了假 |
+| **社交** | `social.enabled` | 三轴关系(常开)+ 二手传播、置信度衰减的八卦 + 涌现的小团体 |
 
 ```bash
 anima-world config set needs.enabled true --world-id world
 ```
 
-### Choices of her own (1.3.0, four more flags, all off)
+### 她自己的选择(1.3.0,四个开关,默认关)
 
-In a 1.2 chat turn a character had exactly one thing she could do: **continue the
-sentence**. She had no action to choose (saying "I'm leaving" left her standing there),
-no relational intent behind her words, and no way to tell whether your message was
-addressed to her or was you directing the scene. These four flags are that missing half.
+1.2 的聊天轮次里,角色只有一件事可做:**把句子接下去**。说"我走了"之后还站在原地,
+话背后没有关系性的意图,也分不清你是在跟她说话还是在导演场景。这四个开关是缺的那一半:
 
-| Flag | What she gains |
+| 开关 | 她多了什么 |
 |---|---|
-| `chat.stance.enabled` | She picks an explicit **stance** before replying — placate, provoke, probe, avoid, vent, seduce, defer, neutral. Stored per (character, target): she can be prickly with you and sweet to someone else |
-| `chat.tools.enabled` | She can **call capabilities** mid-chat: mute you, end the conversation, say "later" (and actually come back), walk away (a real journey, not a line of prose), refuse a topic, broadcast |
-| `chat.intent.enabled` | Each of your messages is classified first: `dialogue` / `narrative_direction` (you're directing the scene — it changes the world, not the prompt) / `style_adjust` ("call me 霜霜" — written into her persona for this player, permanently) |
-| `chat.loop.enabled` | `world.chat_burst()` keeps generating until **she** decides to stop: explicit yield, a question, budget exhausted, or a tool that ends the turn |
+| `chat.stance.enabled` | 回话前先选一个**姿态** —— 讨好、讨坏、试探、回避、宣泄、挑逗、顺从、中性。按(角色,对方)存:她可以对你刺、对别人甜 |
+| `chat.tools.enabled` | 聊天中途**调能力**:静音你、结束对话、"等会儿再说"(到点真的回来)、走开(一段真的路程,不是一句散文)、拒谈话题、广播 |
+| `chat.intent.enabled` | 你的每条消息先分类:对话 / 导演场景(改的是世界,不是提示词)/ 改对话规则("叫我霜霜" —— 写进她对这个玩家的 persona,永久) |
+| `chat.loop.enabled` | `world.chat_burst()` 一直生成到**她**自己想停:明确让位、一个反问、预算耗尽、或一个结束轮次的能力 |
 
-Calls ride as inline markers in the reply stream (`〔tool:mute {"minutes": 5}〕`) rather
-than OpenAI's `tools=` field, because the default state has to work: with no key a world
-runs on Mock, and function-calling support across local and OpenAI-compatible endpoints is
-uneven. Prose still streams a character at a time; not one marker leaks to the player.
+能力调用走回复流里的行内标记(`〔tool:mute {"minutes": 5}〕`),不走 OpenAI 原生
+`tools=`,因为默认状态必须能用:没 key 的世界跑在 Mock 上,而本地端点的 function
+calling 支持参差。正文照样逐字流出,一个标记都不会漏给玩家。
 
-```python
-with World.open("world", redis=client) as world:
-    meta = {}
-    reply = world.chat_reply("夏", turn, player_id="p1", display_name="阿宇", meta=meta)
-    meta["stance"]        # 'provoke' — and meta['stance_declared'] tells you she chose it
-    meta["tool_calls"]    # [{'tool': 'walk_away', 'ok': True, 'detail': {'to': 'home'}}]
-    world.record_chat_turn("夏", "p1", turn[-2:], meta=meta)   # observability onto the rows
+她不理某个玩家时 `world.chat()` 抛 `AgentUnavailable` —— 空回复和 LLM 挂了
+在界面上分不出来,而这两件事该有不同的 UI。
 
-    for step in world.chat_burst("夏", turn, player_id="p1"):   # she may say three things
-        if step["kind"] == "message":
-            print(step["text"])
-```
+### 不是人的东西(2.0:本体层)
 
-`world.chat()` raises `AgentUnavailable` while she is ignoring that player — an empty reply
-would be indistinguishable from an LLM outage, and those two deserve different UI.
-
-### Things that are not people (2.0)
-
-Until 2.0 a world contained characters, places, and items you could carry. There were
-quantities on things — but nothing said what a *tree* was, so nothing could say what you
-could *do* to one. Declaring a **kind** does both, once, for every instance of it:
+2.0 之前,世界里有角色、地点、能带走的物件,东西身上也有量 —— 但没有任何地方
+说得清"一棵树"**是**什么,于是也说不清能对它**做**什么。声明一个**种类**,
+两件事一次说清,所有实例共享:
 
 ```jsonc
 {
   "kinds": [{
     "id": "agent",
     "quantities": {
-      "stamina": {"default": 100, "visibility": "self", "unit": "pt"},
-      "skill":   {"default": 1.0, "visibility": "here"}
+      "体力": {"default": 100, "visibility": "self", "unit": "点"},
+      "手艺": {"default": 1.0, "visibility": "here"}
     }
   }, {
     "id": "tree",
-    "gloss": "a tree",
+    "gloss": "一棵树",
     "quantities": {
-      "height":     {"default": 1.0, "visibility": "here", "unit": "m"},
-      "max_height": 12.0
+      "树高":   {"default": 1.0, "visibility": "here", "unit": "米"},
+      "最大树高": 12.0
     },
     "affordances": {
       "look": {},
-      "tend": {"when":     ["height < max_height"],
-               "set":      {"height": "min(height + 0.3 * me_skill, max_height)"},
-               "requires": ["me_stamina >= 15"],
-               "costs":    {"stamina": "me_stamina - 15"}}
+      "tend": {"when":     ["树高 < 最大树高"],
+               "set":      {"树高": "min(树高 + 0.05 * me_手艺, 最大树高)"},
+               "requires": ["me_体力 >= 15"],
+               "costs":    {"体力": "me_体力 - 15"}}
     },
     "prompt": {"budget": 3}
   }],
-  "entities": [{"id": "tree:oak", "name": "the old oak", "location": "yard"}]
+  "entities": [{"id": "tree:oak", "name": "门口那棵老橡树", "location": "yard"}]
 }
 ```
 
-The declaration lives on the kind; an instance carries only its id, name, and where it is.
-That split is what buys **boundedness**: her prompt names the kind once instead of
-repeating the schema per tree, and `prompt.budget` caps how many of them she can see at
-once — a world with 3000 trees and a world with 20 send her the same number of characters.
-When the cap truncates, it says so ("there were 2997 other things here you didn't look at
-closely"); a silent truncation would have her decide inside a world she believes has three
-trees, and she would never find out.
+声明住在种类上,实例只带 id、名字、在哪。这一刀买到的是**有界性**:提示词里
+种类只出现一遍,`prompt.budget` 封顶她一次看得见几个 —— 3000 棵树的世界和
+20 棵树的世界发给她一样多的字。截断了会明说("这里还有 2997 样东西你没细看");
+静默截断会让她在一个"她以为只有三棵树"的世界里做决定,而且永远不会发现。
 
-**Declaring is the switch.** A world with no `kinds` behaves exactly as it did before —
-this whole layer is absent. Write `kinds` and you have said "I have declared what exists
-here", so suggestions become gates: a typo'd quantity name (`heigth`) refuses to start the
-world and names the ones you did declare. Accepting it would quietly create a second
-quantity while the real one sat at its default, with clean logs, until you noticed months
-later that the tree had not grown.
+**声明本身就是开关。** 不写 `kinds` 的世界行为逐位如旧 —— 这一层整个缺席。
+写下 `kinds` 就等于说"我已经声明了这里有什么",于是建议变成闸:量名拼错
+(`树髙`)当场开不了机,报错里带着你声明过的那些名字。放行的话,它会安静地
+建成第二个量,而真的那个停在默认值上,日志干净,直到几个月后你发现那棵树没长过。
 
-**An affordance is a relation between an actor and a thing, not a property of the thing.**
-The same axe affords chopping to someone strong and not to someone weak. So `when` and
-`set` (about the tree) have a second half: `requires` and `costs` (about her), reading her
-own quantities through the `me_` prefix. Without it every action always succeeds — and *an
-action that always succeeds produces no decisions*: no reason to pick what to do first, no
-reason to rest, no reason to get better at anything. With it, six turns of tending run her
-out of stamina, the seventh comes back `incapable`, and she has to go do something else.
+**能力是施动者与对象之间的关系,不是对象单方面的属性。** 同一把斧头对有力气的人
+是"能砍",对没力气的人不是。所以 `when` / `set`(关于树)有另一半:`requires` /
+`costs`(关于她),通过 `me_` 前缀读她自己的量。没有这一半,每个动作都总能成功 ——
+而**一个总能成功的动作产生不了任何决策**:没有理由挑先做哪件、没有理由休息、
+没有理由变强。有了它,照料六次她力气见底,第七次回她 `incapable`,她得去做点别的。
 
-`agent` is the one built-in kind you may extend, and only its `quantities` — she is not
-another thing you can `tend`; her verbs live in the behaviour tree and the chat tools.
-Her quantities live in the same store as the tree's, under the same visibility rules, so
-declaring one `self` means she perceives it and declaring one `here` means anyone standing
-next to her does. `requires` may read only `me_*`, on purpose: a failed `requires` must
-always mean exactly one thing — *you can't* — and that is the whole reason it exists
-separately from `when`. `costs` and `set` read the same pre-action values (double
-buffering), and a refusal writes nothing at all.
-
-Three different gates, and they refuse for different reasons. Acting on a thing requires
-being **in the same place as it** — `tend` a tree from across town comes back naming both
-where the tree is and where she is, because "it's in the yard" reads as a lie when the real
-problem is that she is on the road and the engine does not know where she is. Branching a
-*duty* on a quantity is gated on **perception** instead: a schedule that reads a value her
-`visibility` keeps from her would have her decide on something she cannot know — the same
-break of character as blurting out a mine's reserves, except it leaves no trace in the
-prompt at all. So that branch is warned about once at startup and reads `None` forever
-after, rather than silently using whatever she saw last time she walked past.
-
-**Tools, materials, and time are costs too.** Gibson's own example is an *axe* — something
-she carries — and that could not appear in a declaration at all when `requires` could only
-read quantities. `have_<item>` reads how many of a thing she is carrying (from the ledger
-projection; nothing carried reads as **0**, not as an error — someone who never owned
-shears and someone who just put them down are in the same position). `consumes` spends
-materials and brings its own *you must have these* gate, so you never write the `requires`
-line twice; writing it twice is what lets you write it once, and a world that only wrote
-`consumes` would let her finish the job with a bag of fertiliser that does not exist —
-stock does not go negative, so the books would look fine.
-
-`duration` is the one cost that cannot be slept off. Quantities come back, materials can be
-bought, but a stretch of time simply has to pass — which is why growing a new thing has to
-hang off it. Ten months of pregnancy is not a gate because it is expensive; it is a gate
-because it is long.
+**工具、材料、时间也是代价。** `have_剪刀 >= 1` 读她随身带着几把剪刀(库存投影;
+没带的读作 0,不是报错 —— 从没拿过剪刀的人和刚放下剪刀的人,在"现在能不能修枝"
+上没有区别)。`consumes` 花掉材料,自带一道"你得有"的门。`duration` 是唯一
+睡不回来的代价:量会恢复、材料能再买,而一段时间过不去就是过不去 —— 十月怀胎
+拦得住,不是因为它贵,是因为它长。
 
 ```jsonc
-"make": {"duration": 8640,      // ticks; 0 (the default) means instantaneous
-         "occupies": false,     // whether she's tied up meanwhile; default true
-         "consumes": {"timber": 3}, "costs": {"stamina": "me_stamina - 40"},
-         "set": {"quality": "quality + 1"}}
+"打椅子": {"duration": 8640,          // tick;0(默认)= 一下子的事
+          "occupies": false,          // 这期间她占不占用;默认 true
+          "consumes": {"木料": 3}, "costs": {"体力": "me_体力 - 40"},
+          "set": {"成色": "成色 + 1"}}
 ```
 
-The cost is paid **up front** and the effect lands **when the time is up** — paying at the
-end would make starting-and-abandoning free, and a promise you can walk away from without
-a trace is not a promise. The gates are checked **only at the start**: being refused after
-ten months, with the price already paid, is a failure she had no way to prevent, and a
-failure you cannot prevent teaches nothing. `occupies` is a property of the *task*, not a
-state of hers — building a chair ties her up, carrying a child does not, and both take ten
-months. While she is tied up, any affordance call is refused with `reason == "busy"`: a
-fourth class, because she should wait for what she is holding rather than try another tree
-or go rest. Ask `world.engagements()` what anyone is in the middle of.
+代价**当场付**,效果**到点落** —— 付在收尾的话,起个头再放弃就是免费的,而一个
+可以随时反悔且不留痕的承诺不是承诺。关口**只在起头查**:付了十个月再被一句
+"这会儿不行"拒掉,是她没有任何办法预防的失败,而预防不了的失败教不会她任何东西。
+`occupies` 是这件事的属性,不是她的状态 —— 做椅子占用她,怀胎不占用,两者都要
+十个月。被占用时任何能力调用拒绝成 `busy`:第四类理由,她该等手上这件做完,
+既不是换一棵树,也不是去歇着。`world.engagements()` 报谁正在做什么。
 
-**Verbs belong to the author.** They used to be a closed set of ten, justified by "the
-engine has to implement the effect" — which stopped being true once `set`/`costs`/`consumes`
-made effects data. Declare `酿` or `brew` and it exists; misspell it elsewhere and the world
-still refuses to start. An ASCII verb must carry a `label`, because what she reads in her
-prompt is those characters and "you may: look at it, brew" is noise she then has to act on.
+**动词是作者的。** 声明 `酿` 或 `brew` 它就存在,别处拼错照样开不了机;
+纯 ASCII 的动词必须给一行 `label`,因为她提示词里读到的就是那几个字,
+"你可以对它:端详、brew"里的 brew 是噪音,而她还得照着它行动。
 
-**The world can grow new things, and lose them.** Until 2.0 `entities` was a closed set
-fixed at genesis: a tree could not be planted, a cup could not be broken. A world that
-cannot grow anything new is a diorama — and *laying out entities by rule* is what
-generating a world actually is.
+**世界自己长得出新东西,也抹得掉。** 2.0 之前 `entities` 是创世时钉死的闭集:
+树不能被种下,杯子不能被打碎。一个不能长出新东西的世界是个西洋镜 ——
+而"按规则铺开实体"正是"生成一个世界"这件事本身。
 
 ```jsonc
-"raise_seedling": {"duration": 24, "when": ["height >= 3"],
-                   "requires": ["me_stamina >= 20"], "consumes": {"fertiliser": 1},
-                   "costs": {"stamina": "me_stamina - 20"},
-                   "spawn": {"kind": "sapling", "name": "a new seedling"}},
-"pull_up": {"costs": {"stamina": "me_stamina - 5"}, "destroys_target": true}
+"育苗": {"duration": 24, "when": ["树高 >= 3"],
+        "requires": ["me_体力 >= 20"], "consumes": {"肥料": 1},
+        "costs": {"体力": "me_体力 - 20"},
+        "spawn": {"kind": "sapling", "name": "新育的树苗"}},
+"拔掉": {"costs": {"体力": "me_体力 - 5"}, "destroys_target": true}
 ```
 
-**Spawning must cost something, and the author decides what.** Declaring `spawn` or
-`destroys_target` without any of `costs` / `consumes` / `duration` refuses to start the
-world. The engine does not hand out quotas instead: a quota is the *engine's* ceiling, and
-when she hits it the refusal means nothing inside the world — "this world allows at most a
-hundred trees" is not something she can understand or act on, and she will never learn it.
-A cost is the *world's* reason: she knows why she can't, and what she'd have to replenish
-first. But a cost only bounds the *rate*, never the *stock* — stamina refills nightly, so a
-hundred days is a hundred children. Real worlds bound themselves by birth and death
-together, which is why `destroys_target` shipped in the same round.
+**生成必须要代价,而代价由作者写。** 声明了 `spawn` / `destroys_target` 却没写
+`costs` / `consumes` / `duration` 里任何一样,开不了机。引擎不发配额:配额是
+**引擎的**天花板,撞上去时她收到的拒绝在世界里没有意义 —— "这个世界最多一百棵树"
+不是她能理解、能应对的东西,她也永远学不会。代价是**世界的**理由:她知道自己
+为什么做不到,也知道要做到得先补什么。但代价只封得住速率,封不住存量 ——
+体力天天回满,一百天就是一百个孩子。真实世界靠生灭成对,所以这两样是一起发的。
 
-**Every birth is checked, and a failed check is not born.** A thing created at runtime does
-not go through genesis, so none of the genesis gates apply to it. Without the check a
-newborn can look perfectly fine in `entities` while not one of its quantities landed — its
-conditions then evaluate against zero, its rules compute nothing, and both simply fail to
-happen, quietly, until someone notices months later that the tree never grew. So the engine
-dry-runs it: are the quantities there, does every affordance produce a *nameable* outcome,
-is it actually present where its visibility claims. Nameable, not successful — "not ripe
-yet" and "she can't" are the world talking normally. Anything that fails is rolled back
-whole and reported as `entity_stillborn`, and the cost is *not* refunded: she really did
-pay, and refunding would erase the author's bug from the books too.
+**每一次出生都要过自检,没过的不算生。** 运行期生出来的东西不走创世那条路,
+创世的闸对它一条都不生效。不验的话,一个新生的东西可以在 `entities` 里看着
+好好的,量却一个都没落地 —— 条件对着 0 求值、规律算不动,两件事都安静地不发生,
+直到几个月后有人发现那棵树没长过。所以引擎空跑一遍:量在不在、每条能力算不算
+得出一个**叫得出名字的**结论、按声明的可见性在不在场。是"叫得出名字",不是
+"成功" —— "还没熟"和"她做不了"都是世界在正常说话。没过的整个撤回,报
+`entity_stillborn`,而**代价不退**:她确实付过了,退钱会把作者的 bug 从账面上
+也抹掉。
 
-Ask the CLI what a world actually declares, or whether what's in it is alive:
+问 CLI 这个世界声明了什么、里面的东西活不活得了:
 
 ```bash
-anima-world ontology --world-id world --json    # kinds, quantities, verbs, live values
-anima-world ontology --world-id world --check   # run the birth check over every entity
+anima-world ontology --world-id world --json    # 种类、量、动词、此刻的值
+anima-world ontology --world-id world --check   # 逐个实体跑出生自检
 ```
 
-The verb table is only obtainable here. `stocks` gives you numbers, and a number does not
-tell you whether the word `tend` exists.
+**能力表只有这里问得到。** `stocks` 给得出数字,而数字不告诉你 `tend` 这个词
+存不存在。
 
-## How it is built
+## 它是怎么搭的
 
-**One key prefix is one world.** The world lives on Redis under `anima:{world_id}:*`
-(events, chats, memories, config, the map, her blackboard). Pass `mysql=` and the four
-unbounded tables (events / memories / conversations / messages) move to MySQL. The LLM
-key lives on the machine (`~/.anima-world/config.json`, 0600) — never inside a world,
-so a packaged world carries no secrets by construction.
+**一个键前缀就是一个世界。** 世界住在 Redis 的 `anima:{world_id}:*` 下(事件、
+聊天、记忆、配置、地图、她的黑板)。传 `mysql=` 则无限增长的四样(events /
+memories / conversations / messages)搬去 MySQL。LLM 的钥匙住在这台机器上
+(`~/.anima-world/config.json`,0600)—— 永不进世界,所以打包发出去的世界
+在构造上就不带 secret。
 
-**The event log is the only truth.** There is no `balances` table, because two sources
-of truth eventually disagree and you cannot tell which one is right. The world does not
-store "夏 has 50 coins" — it stores *why* she has 50 coins. Reconciliation is replay.
+**事件日志是唯一的真相。** 没有 `balances` 表,因为两份真相迟早不一致,而你分不出
+哪份是对的。世界不存"夏有 50 块",存的是**她为什么**有 50 块。对账 = 重放。
 
-**Many processes, one world.** The clock, her blackboard, and everything she carries
-into a prompt live on Redis, so a second process with nothing but a Redis connection
-sees — and can change — the same world, under one cross-process lock. Joining a running
-world never rewinds it: every write on the way in is fill-if-missing.
+**多进程,一个世界。** 时钟、黑板、她要带进提示词的一切都在 Redis 上,所以第二个
+只有 Redis 连接的进程看得见、也改得动同一个世界,在一把跨进程锁下。中途加入永不
+倒带:进门路上的每一笔写都是只填缺。
 
-**Version is contract.** One release freezes (engine code, storage shape, package
-format) together. `anima-world contract --json` reports the storage contract (the Redis
-key prefix, the MySQL table set) and the package format version, so a repository holding
-a mirror can diff itself against the engine instead of quietly falling behind.
+**版本即契约。** 一次发版把引擎代码、存储形状、包格式一起冻结;**世界钉死在生成
+它的引擎版本上,不做跨版本迁移** —— 这是显著特性,不是脚注。`anima-world contract
+--json` 自报存储契约与包格式版本,持有镜像实现的仓库拿它对账,而不是安静地掉队。
 
-## Ship a world to someone else
+## 把世界发给别人
 
-Worlds package into a single `.cyberworld` file — a snapshot of a world that has
-lived (its full Redis state, plus the MySQL history when there is one), together with
-its genesis seed as a birth certificate.
+世界打成单个 `.cyberworld` 文件 —— 一个活过的世界的快照(完整 Redis 状态,
+有 MySQL 就带上历史),连同它的创世种子作为出生证明。
 
 ```bash
 anima-world world export --world-id world --output my.cyberworld \
     --package-id my-world --name "我的世界"
 
-anima-world world import my.cyberworld --world-id restored   # must be an empty world id
+anima-world world import my.cyberworld --world-id restored   # 目标必须是空世界
 ```
 
-A package says what it needs without your having to be able to run it — the launcher
-managing several engine versions is exactly the caller who cannot yet:
+包自己说清它需要什么,不需要你能跑它 —— 管着多个引擎版本的启动器正是那个
+还跑不了它的调用方:
 
 ```bash
 anima-world world inspect my.cyberworld --json
 # {"world_id": "my-world", "engine_min": "2.0.0", …, "current_engine_version": "1.1.0",
-#  "runnable": false}          # answers, exit 0 — refusing here would defeat the format
+#  "runnable": false}          # 照样回答,退出码 0 —— 在这里拒绝就违背了这个格式的意义
 ```
 
-## Commands
+## 命令
 
 ```bash
-anima-world start          # create + run, with guided setup — start here
-anima-world chat           # talk to a character; no --agent lists who lives there
-anima-world prompt         # see the prompt a character receives, block by block
-anima-world map            # the map, who is where, and where they went (--json)
-anima-world ontology       # what kinds of things exist, their quantities and verbs (--json)
-anima-world doctor         # health check: Redis durability, keys, a real LLM call, clock speed
-anima-world config         # read/write settings; api keys route to this machine, not the world
-anima-world run            # foreground host, no onboarding (for deployment)
-anima-world simulate       # headless fast-forward (--report writes a run summary)
-anima-world world          # export / import / inspect .cyberworld packages
+anima-world start          # 创建 + 运行,带引导 —— 从这里开始
+anima-world chat           # 和角色说话;不带 --agent 列出谁住在这里
+anima-world prompt         # 她收到的提示词,逐块带来源
+anima-world map            # 地图、谁在哪、谁去了哪儿(--json)
+anima-world ontology       # 有哪些种类的东西、量与动词(--json / --check)
+anima-world doctor         # 体检:Redis 持久化、密钥、真调一次 LLM、时钟
+anima-world config         # 读写配置;api key 自动进机器配置,不进世界
+anima-world run            # 无引导前台宿主(部署用)
+anima-world simulate       # 无头快进(--report 落一份运行摘要)
+anima-world world          # export / import / inspect .cyberworld
 ```
 
-## Documentation
+## 文档
 
 | | |
 |---|---|
-| [docs/REFERENCE.md](https://github.com/aubrey-anima/core/blob/main/docs/REFERENCE.md) | Every command, every `World` method, every config key, the beat-script format 🇨🇳 |
-| [docs/ARCHITECTURE.md](https://github.com/aubrey-anima/core/blob/main/docs/ARCHITECTURE.md) | Why it is shaped this way: the truth model, the tick frame, threads and locks, invariants, known debt 🇨🇳 |
-| [CONTRIBUTING.md](https://github.com/aubrey-anima/core/blob/main/CONTRIBUTING.md) | Development setup, the invariants a patch must not break, how to propose changes |
-| [CHANGELOG.md](https://github.com/aubrey-anima/core/blob/main/CHANGELOG.md) | Release history |
+| [docs/REFERENCE.md](https://github.com/aubrey-anima/core/blob/main/docs/REFERENCE.md) | 逐命令、逐 `World` 方法、逐配置键、节拍脚本格式 |
+| [docs/ARCHITECTURE.md](https://github.com/aubrey-anima/core/blob/main/docs/ARCHITECTURE.md) | 为什么长这样:真相模型、tick 帧、线程与锁、不变量、已知债务 |
+| [CONTRIBUTING.md](https://github.com/aubrey-anima/core/blob/main/CONTRIBUTING.md) | 开发环境、补丁不许破坏的不变量、怎么提变更 |
+| [CHANGELOG.md](https://github.com/aubrey-anima/core/blob/main/CHANGELOG.md) | 发版历史 |
 
-## Contributing
+## 参与
 
-Issues and pull requests are welcome. Start with [CONTRIBUTING.md](https://github.com/aubrey-anima/core/blob/main/CONTRIBUTING.md) —
-it lists the handful of invariants that a change must not break (there is exactly one
-lock in the system, the LLM is never called on the tick thread, and a few file formats
-are mirrored by other repositories).
+欢迎 issue 和 PR。先读 [CONTRIBUTING.md](https://github.com/aubrey-anima/core/blob/main/CONTRIBUTING.md) ——
+里面列了改动不许破坏的那几条不变量(系统里只有一把锁、LLM 永不在 tick 线程上被
+调用、几个文件格式被别的仓库镜像着)。
 
-## License
+## 许可
 
-[Apache License 2.0](https://github.com/aubrey-anima/core/blob/main/LICENSE). Use it, modify it, ship it inside closed-source products;
-keep the copyright notice and state what you changed. Apache rather than MIT for the
-patent grant, and permissive rather than copyleft because an engine that hosts embed
-cannot be copyleft without infecting every host that embeds it.
+[GNU AGPL-3.0](https://github.com/aubrey-anima/core/blob/main/LICENSE)。**用了它,
+你的东西也得开源** —— 包括把它跑成网络服务:AGPL 与 GPL 的差别正在这一条,
+世界引擎最常见的用法是被服务包着,GPL 管不到那种用法,AGPL 管得到。
+修改与衍生同样必须以 AGPL 开源。1.3.0 及更早版本曾以 Apache-2.0 发布,
+那些版本维持原许可;自本版本起为 AGPL-3.0-or-later。

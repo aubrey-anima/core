@@ -10,7 +10,7 @@ dynamic = ["version"]
 description = "A world-simulation engine for LLM-driven agents: event-sourced core, behavior-tree scheduling, memory and relationships, packaged as portable .cyberworld files"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "ANIMA", email = "aubrey@animametaverse.com" }]
 keywords = ["simulation", "agents", "llm", "event-sourcing", "behavior-tree", "worldbuilding"]
