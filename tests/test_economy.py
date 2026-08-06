@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from _worldfile import open_world_at
+from _worldfile import read_seed_file, bundled_seed, open_world_at
 
 import json
 import pathlib
@@ -124,7 +124,7 @@ def test_ledger_survives_reopen_via_replay(tmp_path):
 def _seed_with_material(tmp_path, bare_seed) -> str:
     # 建在素配种子上:这条验的是"作者写了就按作者的、没写的回落默认",而内置
     # 橱窗给每个角色都写了钱,第三个角色就再也测不到那个默认值(见 conftest)。
-    seed = json.loads(pathlib.Path(bare_seed).read_text(encoding="utf-8"))
+    seed = read_seed_file(bare_seed)
     seed["items"] = [
         {"id": "coal", "name": "煤", "kind": "consumable", "base_price": 3.0,
          "restores": {"energy": 0.2}},
@@ -175,9 +175,7 @@ def test_broken_material_entries_are_dropped_one_by_one_not_fatally(tmp_path):
     """坏条目逐条丢弃、绝不拦启动 —— 种子只读进空库一次,半个世界比没世界更糟。"""
     from importlib import resources
 
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     seed["items"] = [
         {"id": "ok", "name": "好东西", "kind": "durable"},
         {"id": "bad_kind", "kind": "不存在的种类"},   # 违反 item_defs 的 CHECK
@@ -219,7 +217,7 @@ def test_一样什么也补不回来的东西不是饭(tmp_path, bare_seed):
     于是一包 4 块的肥料会排在 6 块的咖啡前面,她把肥料当午饭吃掉,而且吃得很饱
     (需求照样归零)。判据得是"它补得回什么吗"。
     """
-    seed = json.loads(pathlib.Path(bare_seed).read_text(encoding="utf-8"))
+    seed = read_seed_file(bare_seed)
     seed["items"] = [
         {"id": "fertilizer", "name": "一包肥", "kind": "consumable", "base_price": 4.0},
         {"id": "coffee", "name": "咖啡", "kind": "consumable", "base_price": 6.0,
@@ -251,7 +249,7 @@ def test_新世界折一次就够了不许折两遍(tmp_path, open_world, bare_s
     这个世界的那个进程**里(重开一次读到的是对的)、日志本身一条不错。所以
     账面上永远看不出来 —— 事件重放出来的数和内存里的数不一样,而没人会去比。
     """
-    seed = json.loads(pathlib.Path(bare_seed).read_text(encoding="utf-8"))
+    seed = read_seed_file(bare_seed)
     seed["agents"][0]["money"] = 100
     seed["agents"][0]["inventory"] = [{"item": "怀表", "qty": 2}]
     who = seed["agents"][0]["id"]

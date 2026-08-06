@@ -213,16 +213,17 @@ def test_clock_deficit_never_accumulates_across_restarts(tmp_path):
 
 
 def test_explicit_seed_that_cannot_be_read_fails_loudly(tmp_path):
-    """回归:显式指定的种子读不了,必须当场报错,不能静默换成内置演示世界。
+    """回归:显式指定的世界文件读不了,必须当场报错,不能静默换成内置演示世界。
 
-    种子只在空库首启读一次 —— 静默降级因此不可挽回:路径打错一个字母,你
+    作者层只在空库首启读一次 —— 静默降级因此不可挽回:路径打错一个字母,你
     拿到的是内置三人世界(夏/遥/柔),而且改对路径重开也救不回来(库已非空,
-    seed 被忽略)。CLI 那边更糟:`simulate --seed typo.json` 退出码 0,部署
-    脚本会以为成功了。坏节拍脚本一直是当场硬失败,种子没有理由更宽松。
+    作者层被忽略)。CLI 那边更糟:`simulate --world-file typo.cyberworld`
+    退出码 0,部署脚本会以为成功了。坏节拍脚本一直是当场硬失败,世界文件
+    没有理由更宽松。
     """
-    from anima_world.world_seed import WorldSeedError
+    from anima_world.world_file import WorldFileError
 
-    with pytest.raises(WorldSeedError) as excinfo:
+    with pytest.raises(WorldFileError) as excinfo:
         open_world_at(
             str(tmp_path / "w.db"),
             seed_path=str(tmp_path / "typo.json"),

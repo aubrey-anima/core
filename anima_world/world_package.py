@@ -1,49 +1,43 @@
-"""Portable, data-only Cyberworld bundle export and import.
+"""把一个世界装进 / 取出 `.cyberworld`(v3)。
 
-v2(去 SQLite):世界状态是一份 JSON 快照(`world_state.json`),不再有 `world.db`。
-一个包 = 信封(manifest + checksums)+ 种子(创作契约)+ 状态(Redis 全量 dump,
-可选 MySQL 四表)+ 可选节拍脚本。只有 snapshot 一种模式 —— template 随 v1 退役
-(分发全走 snapshot 环;真要复活它属于线格式变更,升主版本再谈)。
+**线格式在 `world_file.py`,这里只管落库那一层。** 分工是刻意的:格式模块不认识
+Redis,落库模块不认识 gzip —— 两边各自能被单独测,而"换一种容器"不必碰存储语义。
+
+v3 与 v2 的差别不只是 zip → gzip JSONL:
+
+- **种子这个概念没有了。** v2 的包里有 `world_seed.json`(人写的世界描述)和
+  `world_state.json`(机器的 dump),它们是同一件东西的两种写法。v3 把它们合成
+  一个文件、两层记录,于是**创世和还原是同一个动作**。
+- **导出与导入都是流式的。** v2 的 `_dump_mysql_section` 是全量 `replay()` 再
+  `SELECT *`,没有任何上限 —— 一个跑了两年的世界导一次包要把整段历史塞进内存。
+- **没有成员白名单、没有解压炸弹比率。** 一条流,三个上限(见 `world_file`)。
+
+带走什么、不带走什么没变,那几条是安全条款不是格式细节:包里零 secret、
+不带 `lock`、不带占用标记。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import os
 import re
-import stat
-import tempfile
 import uuid
-import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import metadata
-from pathlib import Path, PurePosixPath
-from typing import Any
-
-from anima_world.world_seed import world_seed_errors
+from pathlib import Path
+from typing import Any, Iterable, Iterator
 
 logger = logging.getLogger(__name__)
 
-PACKAGE_FORMAT_VERSION = 2
-STATE_FORMAT_VERSION = 2
-DEFAULT_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
-DEFAULT_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
-DEFAULT_MAX_FILES = 128
-DEFAULT_MAX_COMPRESSION_RATIO = 200
+PACKAGE_FORMAT_VERSION = 3   # = world_file.WORLD_FILE_VERSION
 
 _WORLD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
-_FIXED_MEMBERS = {
-    "manifest.json", "checksums.json", "world_seed.json", "world_state.json", "beats.json",
-}
-_ASSET_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".json", ".txt"}
 
-# 随时间无限增长的四样(判据是"她带不带得进上下文",见 CLAUDE.md)。它们在包里
-# 可能出现在 redis 段(没给 mysql= 的世界)或 mysql 段 —— 导入时按目标后端改道,
-# 这张清单是两边共同的名字。
+# 随时间无限增长的四样(判据是"她带不带得进上下文",见 CLAUDE.md)。文件里它们
+# 可能是 `redis` 记录(没接 MySQL 的世界)或 `event`/`mysql` 记录 —— 装载时
+# **按目标后端改道**,这张清单是两边共同的名字。
 _GROWING_TABLES = ("events", "memories", "conversations", "messages")
 
 # 三张行表在 MySQL 里的列 —— 与 `mysql_state.SCHEMA` 逐列相同,也与
@@ -63,6 +57,7 @@ _MYSQL_COLUMNS = {
     ),
 }
 _JSON_COLUMNS = {"source_ids", "participants", "tool_calls"}
+_STATE_REDIS_VALUE_TYPES = {"hash": dict, "list": list, "string": str, "set": list}
 
 
 class PackageValidationError(ValueError):
@@ -261,301 +256,7 @@ def _engine_min_for(engine_version: str) -> str:
     return f"{major}.{minor}.0"
 
 
-def _seed_schema_error(seed: Any) -> str | None:
-    """The seed's schema problems as one line, or None when it is valid.
-
-    `world_seed_errors` already names the offending entry and key — the
-    package layer used to call the boolean `is_valid_world_seed` and throw
-    that away, leaving an author who cannot open the archive with nothing to
-    act on (#10).
-    """
-    errors = world_seed_errors(seed)
-    if not errors:
-        return None
-    shown = "; ".join(errors[:3])
-    if len(errors) > 3:
-        shown += f" (+{len(errors) - 3} more)"
-    return f"world_seed.json failed schema validation: {shown}"
-
-
-def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
-
-
-def _read_json_bytes(raw: bytes, label: str) -> Any:
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PackageValidationError(f"{label} is not valid UTF-8 JSON") from exc
-
-
-def _safe_member_name(name: str) -> str:
-    if not name or "\\" in name or "\x00" in name:
-        raise PackageValidationError("archive contains an unsafe path")
-    path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts or str(path) != name or name.endswith("/"):
-        raise PackageValidationError("archive contains an unsafe path")
-    if name not in _FIXED_MEMBERS:
-        if not name.startswith("assets/") or path.suffix.lower() not in _ASSET_EXTENSIONS:
-            raise PackageValidationError(f"archive member is not allowed: {name}")
-    return name
-
-
-def _validate_zip_members(
-    archive: zipfile.ZipFile,
-    *,
-    max_uncompressed_bytes: int,
-    max_files: int,
-    max_compression_ratio: int,
-) -> dict[str, zipfile.ZipInfo]:
-    infos = archive.infolist()
-    if len(infos) > max_files:
-        raise PackageValidationError("archive has too many files")
-    result: dict[str, zipfile.ZipInfo] = {}
-    total = 0
-    for info in infos:
-        name = _safe_member_name(info.filename)
-        if name in result:
-            raise PackageValidationError("archive contains duplicate filenames")
-        mode = info.external_attr >> 16
-        if stat.S_ISLNK(mode):
-            raise PackageValidationError("archive contains a symbolic link")
-        if info.flag_bits & 0x1:
-            raise PackageValidationError("encrypted archive members are not supported")
-        total += info.file_size
-        if total > max_uncompressed_bytes:
-            raise PackageValidationError("archive uncompressed size exceeds limit")
-        if info.file_size and (
-            info.compress_size == 0 or info.file_size / info.compress_size > max_compression_ratio
-        ):
-            raise PackageValidationError("archive compression ratio exceeds limit")
-        result[name] = info
-    return result
-
-
-def _sha256_stream(stream: Any) -> str:
-    digest = hashlib.sha256()
-    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-        digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _verify_checksum_index(
-    archive: zipfile.ZipFile,
-    infos: dict[str, zipfile.ZipInfo],
-    *,
-    only: set[str] | None = None,
-) -> None:
-    """Check `checksums.json` describes exactly this archive, then hash members.
-
-    The index check (algorithm, one entry per member, no extras) is always
-    full — it is cheap and it is what makes a partial digest pass meaningful.
-    `only` narrows which members get hashed; `None` means all of them.
-    """
-    if "checksums.json" not in infos:
-        raise PackageValidationError("checksums.json is missing")
-    checksums = _read_json_bytes(archive.read("checksums.json"), "checksums.json")
-    entries = checksums.get("files") if isinstance(checksums, dict) else None
-    if not isinstance(entries, dict):
-        raise PackageValidationError("checksum manifest is invalid: 'files' must be an object")
-    if checksums.get("algorithm") != "sha256":
-        raise PackageValidationError(
-            f"checksum manifest is invalid: algorithm must be sha256, "
-            f"got {checksums.get('algorithm')!r}"
-        )
-    expected_names = set(infos) - {"checksums.json"}
-    if set(entries) != expected_names:
-        detail = []
-        unlisted = sorted(expected_names - set(entries))
-        phantom = sorted(set(entries) - expected_names)
-        if unlisted:
-            detail.append(f"in archive but unlisted: {', '.join(unlisted)}")
-        if phantom:
-            detail.append(f"listed but not in archive: {', '.join(phantom)}")
-        raise PackageValidationError(
-            f"checksum file list does not match archive ({'; '.join(detail)})"
-        )
-    for name in sorted(expected_names if only is None else expected_names & only):
-        entry = entries[name]
-        if not isinstance(entry, dict) or entry.get("size") != infos[name].file_size:
-            raise PackageValidationError(f"checksum size mismatch for {name}")
-        with archive.open(infos[name]) as stream:
-            actual = _sha256_stream(stream)
-        if entry.get("sha256") != actual:
-            raise PackageValidationError(f"checksum mismatch for {name}")
-
-
-def read_package_manifest(
-    package_path: str | Path,
-    *,
-    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
-    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-    max_files: int = DEFAULT_MAX_FILES,
-    max_compression_ratio: int = DEFAULT_MAX_COMPRESSION_RATIO,
-) -> WorldPackageManifest:
-    """Read the outer envelope: what does this package say it is and needs? (#3)
-
-    Deliberately weaker than `inspect_world_package`: it checks the archive is
-    safe to open, that `checksums.json` describes exactly this archive, and
-    that `manifest.json` is the one that was signed — then parses the manifest
-    structurally. It does NOT check the engine range, the seed schema, or the
-    world state, because a launcher managing several engine versions has to be
-    able to ask "which engine does this need?" *before* it has that engine.
-
-    Member digests other than `manifest.json` are left to
-    `inspect_world_package`, so answering this question never costs a hash of
-    a multi-hundred-megabyte snapshot.
-    """
-    package_path = Path(package_path)
-    try:
-        size = package_path.stat().st_size
-    except OSError as exc:
-        raise PackageValidationError(f"package cannot be read: {exc}") from exc
-    if size > max_archive_bytes:
-        raise PackageValidationError("archive compressed size exceeds limit")
-    try:
-        with zipfile.ZipFile(package_path) as archive:
-            infos = _validate_zip_members(
-                archive,
-                max_uncompressed_bytes=max_uncompressed_bytes,
-                max_files=max_files,
-                max_compression_ratio=max_compression_ratio,
-            )
-            required = {"manifest.json", "checksums.json", "world_seed.json"}
-            missing = sorted(required - set(infos))
-            if missing:
-                raise PackageValidationError(
-                    f"archive is missing required files: {', '.join(missing)}"
-                )
-            _verify_checksum_index(archive, infos, only={"manifest.json"})
-            return WorldPackageManifest.from_dict(
-                _read_json_bytes(archive.read("manifest.json"), "manifest.json")
-            )
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise PackageValidationError(f"package is not a readable ZIP archive: {exc}") from exc
-
-
-# ── world_state.json 的形状 ──────────────────────────────────────────────────
-
 _STATE_REDIS_VALUE_TYPES = {"hash": dict, "list": list, "string": str, "set": list}
-
-
-def _validate_world_state(state: Any) -> None:
-    """world_state.json 的结构校验 —— 装进 Redis/MySQL 之前把坏形状挡在门口。"""
-    if not isinstance(state, dict):
-        raise PackageValidationError("world_state.json must be an object")
-    version = state.get("state_format_version")
-    if version != STATE_FORMAT_VERSION:
-        raise PackageValidationError(
-            f"unsupported world state format version: {version!r}"
-            f" (this engine reads {STATE_FORMAT_VERSION})"
-        )
-    if not isinstance(state.get("world_id"), str) or not state["world_id"].strip():
-        raise PackageValidationError("world_state.json world_id must be a non-empty string")
-    redis_section = state.get("redis")
-    if not isinstance(redis_section, dict) or not redis_section:
-        raise PackageValidationError("world_state.json redis section must be a non-empty object")
-    for short, entry in redis_section.items():
-        if not isinstance(short, str) or not short:
-            raise PackageValidationError("world_state.json redis keys must be non-empty strings")
-        if not isinstance(entry, dict) or "type" not in entry or "value" not in entry:
-            raise PackageValidationError(
-                f"world_state.json redis entry {short!r} must be {{type, value}}"
-            )
-        expected = _STATE_REDIS_VALUE_TYPES.get(entry["type"])
-        if expected is None:
-            raise PackageValidationError(
-                f"world_state.json redis entry {short!r} has unknown type {entry['type']!r}"
-            )
-        if not isinstance(entry["value"], expected):
-            raise PackageValidationError(
-                f"world_state.json redis entry {short!r} value does not match its type"
-            )
-    mysql_section = state.get("mysql")
-    if mysql_section is None:
-        return
-    if not isinstance(mysql_section, dict):
-        raise PackageValidationError("world_state.json mysql section must be an object")
-    if set(mysql_section) - set(_GROWING_TABLES):
-        raise PackageValidationError(
-            "world_state.json mysql section contains an unknown table "
-            f"(allowed: {', '.join(_GROWING_TABLES)})"
-        )
-    for table, rows in mysql_section.items():
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise PackageValidationError(
-                f"world_state.json mysql.{table} must be a list of row objects"
-            )
-    for event in mysql_section.get("events") or []:
-        if not {"seq", "ts", "type"} <= set(event):
-            raise PackageValidationError(
-                "world_state.json mysql.events rows must carry seq/ts/type"
-            )
-
-
-def inspect_world_package(
-    package_path: str | Path,
-    *,
-    check_engine_range: bool = True,
-    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
-    max_uncompressed_bytes: int = DEFAULT_MAX_UNCOMPRESSED_BYTES,
-    max_files: int = DEFAULT_MAX_FILES,
-    max_compression_ratio: int = DEFAULT_MAX_COMPRESSION_RATIO,
-) -> WorldPackageManifest:
-    """Fully validate a package without installing it and return its manifest.
-
-    `check_engine_range=False` skips only the "can THIS engine run it" gate —
-    every integrity and schema check still runs. Import keeps the gate on;
-    `world inspect` turns it off so it can report the answer instead of
-    refusing to speak (#3).
-    """
-    package_path = Path(package_path)
-    try:
-        size = package_path.stat().st_size
-    except OSError as exc:
-        raise PackageValidationError(f"package cannot be read: {exc}") from exc
-    if size > max_archive_bytes:
-        raise PackageValidationError("archive compressed size exceeds limit")
-    try:
-        with zipfile.ZipFile(package_path) as archive:
-            infos = _validate_zip_members(
-                archive,
-                max_uncompressed_bytes=max_uncompressed_bytes,
-                max_files=max_files,
-                max_compression_ratio=max_compression_ratio,
-            )
-            required = {"manifest.json", "checksums.json", "world_seed.json", "world_state.json"}
-            missing = sorted(required - set(infos))
-            if missing:
-                raise PackageValidationError(
-                    f"archive is missing required files: {', '.join(missing)}"
-                )
-            _verify_checksum_index(archive, infos)
-            manifest = WorldPackageManifest.from_dict(
-                _read_json_bytes(archive.read("manifest.json"), "manifest.json")
-            )
-            if check_engine_range:
-                manifest.validate_engine_range()
-            seed = _read_json_bytes(archive.read("world_seed.json"), "world_seed.json")
-            seed_error = _seed_schema_error(seed)
-            if seed_error is not None:
-                raise PackageValidationError(seed_error)
-            undeclared = sorted(set(manifest.files.values()) - set(infos))
-            if undeclared:
-                raise PackageValidationError(
-                    f"manifest references a missing file: {', '.join(undeclared)}"
-                )
-            _validate_world_state(
-                _read_json_bytes(archive.read("world_state.json"), "world_state.json")
-            )
-            if "beats.json" in infos:
-                _read_json_bytes(archive.read("beats.json"), "beats.json")
-            return manifest
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise PackageValidationError(f"package is not a readable ZIP archive: {exc}") from exc
-
-
-# ── 导出:dump ───────────────────────────────────────────────────────────────
 
 
 def _text(value: Any) -> str:
@@ -602,48 +303,6 @@ def _strip_secret_config_rows(rows: dict[str, str]) -> dict[str, str]:
     return kept
 
 
-def _dump_redis_section(redis: Any, world_id: str) -> dict[str, dict[str, Any]]:
-    """SCAN `anima:{world_id}:*` 全部键,按类型 dump。
-
-    通用 dump 天然完整:计数器(`:id` 键)、黑板、全部 store 一个不漏。键名存
-    **去前缀后的部分** —— 导入方装到自己的目标前缀下,世界因此可以换名字落地。
-
-    有两样**故意不带走**,它们是进程协调状态,不是世界状态:
-
-    - `lock`:跨进程互斥的临时钥匙(带 TTL)。JSON 快照存不了 TTL,原样装回去
-      就是一把没有过期时间的死锁,新世界第一次 `act()` 就撞上它。
-    - `meta` 里的 `owner_pid` / `owner_host`:导出那一刻源世界的占用标记。装进
-      新世界等于让一个还没人跑过的世界自称"有人在跑"。
-    """
-    prefix = _world_prefix(world_id)
-    out: dict[str, dict[str, Any]] = {}
-    for key in sorted(_scan_world_keys(redis, world_id)):
-        short = key[len(prefix):]
-        if short == "lock":
-            continue
-        ktype = _text(redis.type(key))
-        value: Any
-        if ktype == "hash":
-            value = {_text(f): _text(v) for f, v in (redis.hgetall(key) or {}).items()}
-            if short == "config":
-                value = _strip_secret_config_rows(value)
-            elif short == "meta":
-                for transient in ("owner_pid", "owner_host"):
-                    value.pop(transient, None)
-        elif ktype == "list":
-            value = [_text(v) for v in (redis.lrange(key, 0, -1) or [])]
-        elif ktype == "string":
-            value = _text(redis.get(key))
-        elif ktype == "set":
-            value = sorted(_text(v) for v in (redis.smembers(key) or ()))
-        else:
-            raise PackageValidationError(
-                f"打不成包:键 {key} 的类型 {ktype!r} 不在打包格式里(hash/list/string/set)"
-            )
-        out[short] = {"type": ktype, "value": value}
-    return out
-
-
 def _parse_json_column(value: Any) -> Any:
     if isinstance(value, (bytes, str)):
         try:
@@ -665,187 +324,6 @@ def _select_all_rows(conn: Any, table: str) -> list[dict[str, Any]]:
                     row[col] = _parse_json_column(row[col])
             rows.append(row)
     return rows
-
-
-def _dump_mysql_section(mysql: Any, world_id: str) -> dict[str, list[dict[str, Any]]]:
-    from anima_world.mysql_state import MySQLEventLog, as_connection, ensure_schema
-
-    conn = as_connection(mysql)
-    prefix = f"{world_id}_"
-    ensure_schema(conn, prefix)  # 幂等;空世界(还没写过一行)也能导出
-    section: dict[str, list[dict[str, Any]]] = {
-        "events": [
-            {"seq": int(e.seq), "ts": int(e.ts), "type": e.type,
-             "who": e.who, "loc": e.loc, "payload": e.payload}
-            for e in MySQLEventLog(conn, prefix).replay()
-        ]
-    }
-    for table in ("memories", "conversations", "messages"):
-        section[table] = _select_all_rows(conn, f"{prefix}{table}")
-    return section
-
-
-def dump_world_state(*, redis: Any, world_id: str, mysql: Any = None) -> dict[str, Any]:
-    """一份完整的世界状态快照(`world_state.json` 的内容),纯读。
-
-    独立成函数是给活体导出用的:`World.export_snapshot` 在世界锁内只做这一步,
-    打包(压缩、校验、落盘)在锁外进行 —— 锁只挡 dump 那一瞬。
-    """
-    redis_section = _dump_redis_section(redis, world_id)
-    if not redis_section:
-        # 打包一个空壳比打包失败坏得多:抄错 world_id 时 SCAN 安静地返回零个键,
-        # 产出的包能装能开,但里面什么都没有 —— 而它会被发给别人。当场拒。
-        raise PackageValidationError(
-            f"打不成包:Redis 上没有 anima:{world_id}:* 的任何键 —— world_id 抄错了?"
-        )
-    state: dict[str, Any] = {
-        "state_format_version": STATE_FORMAT_VERSION,
-        "world_id": world_id,
-        "redis": redis_section,
-    }
-    if mysql is not None:
-        state["mysql"] = _dump_mysql_section(mysql, world_id)
-    return state
-
-
-def _resolve_seed(redis: Any, world_id: str, seed_path: str | Path | None) -> Any:
-    """种子解析:显式 seed_path → 世界 `:meta` 的创世出生证明 → 内置种子(记警告)。"""
-    if seed_path is not None:
-        try:
-            return json.loads(Path(seed_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise PackageValidationError(f"seed file is not valid JSON: {exc}") from exc
-    from anima_world.redis_state import meta_rows
-
-    genesis = meta_rows(redis, world_id).get("world_seed")
-    if genesis is not None:
-        if isinstance(genesis, str):
-            try:
-                genesis = json.loads(genesis)
-            except json.JSONDecodeError as exc:
-                raise PackageValidationError(
-                    "the world's genesis seed (meta.world_seed) is not valid JSON"
-                ) from exc
-        return genesis
-    import anima_world
-
-    logger.warning(
-        "这个世界没有创世种子出生证明(meta.world_seed);包里带的是**内置种子** —— "
-        "传 seed_path 可覆盖"
-    )
-    bundled = Path(anima_world.__file__).parent / "world_seed.json"
-    return json.loads(bundled.read_text(encoding="utf-8"))
-
-
-def _write_deterministic_zip(output: Path, files: dict[str, Path | bytes]) -> None:
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for name in sorted(files):
-            value = files[name]
-            data = value.read_bytes() if isinstance(value, Path) else value
-            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.create_system = 3
-            info.external_attr = (stat.S_IFREG | 0o644) << 16
-            archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
-
-
-def export_world_package(
-    *,
-    redis: Any,
-    world_id: str,
-    seed_path: str | Path | None = None,
-    beats_path: str | Path | None = None,
-    output_path: str | Path,
-    package_world_id: str,
-    name: str,
-    summary: str = "",
-    genre: str = "",
-    setting: str = "",
-    theme: str = "default",
-    mysql: Any = None,
-    state: dict[str, Any] | None = None,
-) -> WorldPackageManifest:
-    """Export a world living on Redis (and optionally MySQL) as a v2 package.
-
-    `world_id` 是**源世界在 Redis 上的名字**(键前缀里那个);`package_world_id`
-    是**包的世系 id**(写进 manifest、跟着包走的那个)—— 两个身份故意分开:同一个
-    运行中的世界可以打成不同世系的包,反之亦然。
-
-    `state` 给了就直接用(活体导出在世界锁内先 `dump_world_state`,把锁的持有
-    时间压到 dump 那一瞬);没给就在这里 dump。
-    """
-    output_path = Path(output_path)
-    if output_path.exists():
-        raise FileExistsError(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not _WORLD_ID_RE.fullmatch(package_world_id):
-        raise PackageValidationError("package_world_id must be a safe lowercase identifier")
-
-    seed = _resolve_seed(redis, world_id, seed_path)
-    seed_error = _seed_schema_error(seed)
-    if seed_error is not None:
-        if seed_path is not None:
-            seed_error = seed_error.replace("world_seed.json", str(seed_path), 1)
-        raise PackageValidationError(seed_error)
-
-    if state is None:
-        state = dump_world_state(redis=redis, world_id=world_id, mysql=mysql)
-    _validate_world_state(state)
-
-    engine_version = _engine_version()
-    engine_major = _version_tuple(engine_version)[0]
-    files = {"seed": "world_seed.json", "state": "world_state.json"}
-    if beats_path is not None:
-        files["beats"] = "beats.json"
-    manifest = WorldPackageManifest(
-        package_format_version=PACKAGE_FORMAT_VERSION,
-        engine_min=_engine_min_for(engine_version),
-        engine_max_exclusive=f"{engine_major + 1}.0.0",
-        source_engine_version=engine_version,
-        world_id=package_world_id,
-        revision_id=str(uuid.uuid4()),
-        export_mode="snapshot",
-        name=name,
-        summary=summary,
-        genre=genre,
-        setting=setting,
-        theme=theme,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        files=files,
-    )
-    manifest.validate()
-
-    with tempfile.TemporaryDirectory(prefix="anima_world-export-", dir=output_path.parent) as temp_dir:
-        staging = Path(temp_dir)
-        members: dict[str, Path | bytes] = {
-            "manifest.json": _json_bytes(manifest.as_dict()),
-            "world_seed.json": _json_bytes(seed),
-            "world_state.json": _json_bytes(state),
-        }
-        if beats_path is not None:
-            try:
-                beats = json.loads(Path(beats_path).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise PackageValidationError("beats file is not valid JSON") from exc
-            members["beats.json"] = _json_bytes(beats)
-        checksum_entries: dict[str, dict[str, Any]] = {}
-        for member_name, value in members.items():
-            raw = value.read_bytes() if isinstance(value, Path) else value
-            checksum_entries[member_name] = {
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "size": len(raw),
-            }
-        members["checksums.json"] = _json_bytes(
-            {"algorithm": "sha256", "files": checksum_entries}
-        )
-        staged_archive = staging / "package.cyberworld"
-        _write_deterministic_zip(staged_archive, members)
-        inspect_world_package(staged_archive)
-        os.replace(staged_archive, output_path)
-    return manifest
-
-
-# ── 导入:restore ────────────────────────────────────────────────────────────
 
 
 def _is_growing_key(short: str) -> bool:
@@ -966,6 +444,21 @@ def _growth_rows_from_redis_section(
     return out
 
 
+def _restore_growth_into_mysql(
+    mysql: Any, world_id: str, section: dict[str, list[dict[str, Any]]]
+) -> None:
+    """无限增长的四样落进 MySQL。v2 的 import 与 v3 的装载共用这一条 ——
+    两处各写一遍的话,迟早有一条忘了 `_append_events` 那道 seq 连续性断言。"""
+    from anima_world.mysql_state import MySQLEventLog, as_connection, ensure_schema
+
+    conn = as_connection(mysql)
+    prefix = f"{world_id}_"
+    ensure_schema(conn, prefix)
+    _append_events(MySQLEventLog(conn, prefix), section.get("events") or [])
+    for table in ("memories", "conversations", "messages"):
+        _insert_rows(conn, f"{prefix}{table}", _MYSQL_COLUMNS[table], section.get(table) or [])
+
+
 def _restore_growth_into_redis(
     redis: Any, world_id: str, section: dict[str, list[dict[str, Any]]]
 ) -> None:
@@ -1002,64 +495,215 @@ def _restore_growth_into_redis(
             redis.rpush(f"{prefix}conv_msgs:{int(row['conversation_id'])}", int(row["id"]))
 
 
-def import_world_package(
-    package_path: str | Path,
-    *,
-    redis: Any,
-    world_id: str,
-    mysql: Any = None,
-    **validation_limits: int,
-) -> ImportedWorld:
-    """Validate a v2 package and install it into an EMPTY world on Redis.
+def dump_world_records(
+    *, redis: Any, world_id: str, mysql: Any = None
+) -> Iterator[dict[str, Any]]:
+    """把一个活世界流式 dump 成记录。**纯读。**
 
-    - 目标 `world_id` 在 Redis 上必须是空的(前缀下无键)—— 导入不许覆盖。
-    - 四样无限增长的数据按**目标**后端落位,而不是按包里的段落位:给了 `mysql=`
-      就进 MySQL(不管包里它们躺在哪个段),没给就全进 Redis。events 逐条 append
-      保 seq 连续,对不上当场抛 —— 见 `_append_events`。
+    带走什么、不带走什么,和 v2 逐条相同(那几条是安全纪律,不是格式细节):
+
+    - `lock` **不带走**:跨进程互斥的临时钥匙(带 TTL)。JSON 存不了 TTL,原样装回去
+      就是一把没有过期时间的死锁,新世界第一次 `act()` 就撞上它。
+    - `meta` 里的 `owner_pid` / `owner_host` **剥掉**:装进新世界等于让一个还没人跑过
+      的世界自称"有人在跑"。
+    - `config` 里 `is_secret` 的行 **剥掉**:包是**分发物**,带着作者的钥匙发出去
+      是不可挽回的。
     """
-    if not isinstance(world_id, str) or not world_id.strip():
-        raise PackageValidationError("world_id 不能为空")
-    manifest = inspect_world_package(package_path, **validation_limits)
-    try:
-        with zipfile.ZipFile(Path(package_path)) as archive:
-            state = _read_json_bytes(archive.read("world_state.json"), "world_state.json")
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise PackageValidationError(f"package is not a readable ZIP archive: {exc}") from exc
-    _validate_world_state(state)
+    prefix = _world_prefix(world_id)
+    growing: dict[str, dict[str, Any]] = {}
+    for key in sorted(_scan_world_keys(redis, world_id)):
+        short = key[len(prefix):]
+        if short == "lock":
+            continue
+        ktype = _text(redis.type(key))
+        value: Any
+        if ktype == "hash":
+            value = {_text(f): _text(v) for f, v in (redis.hgetall(key) or {}).items()}
+            if short == "config":
+                value = _strip_secret_config_rows(value)
+            elif short == "meta":
+                for transient in ("owner_pid", "owner_host"):
+                    value.pop(transient, None)
+        elif ktype == "list":
+            value = [_text(v) for v in (redis.lrange(key, 0, -1) or [])]
+        elif ktype == "string":
+            value = _text(redis.get(key))
+        elif ktype == "set":
+            value = sorted(_text(v) for v in (redis.smembers(key) or ()))
+        else:
+            raise PackageValidationError(
+                f"打不成包:键 {key} 的类型 {ktype!r} 不在世界文件格式里"
+                f"(hash/list/string/set)"
+            )
+        if _is_growing_key(short):
+            # **无限增长的那四样一律按语义记录导出,不看它们此刻住在哪个后端。**
+            # 两个理由,都是硬的:
+            #
+            # ① 一行一条 —— 事件塞进一个 `redis` list 记录里就是一整行几万字节的
+            #    转义 JSON,`grep '"type":"entity_spawn"'` 找不到(它在字符串里是
+            #    `\"type\"`),`diff` 也变成整块变。而"能 grep、能 diff、能流式"
+            #    正是换成文本格式的全部理由 —— 在最常见的那种世界(没接 MySQL)上
+            #    不成立的话,那三条就是空话。
+            # ② 同一个世界换个后端导出来必须长得一样。按后端分叉的话,一份包能不能
+            #    被 grep 取决于导出它的那台机器接没接 MySQL,而那和世界无关。
+            growing[short] = {"type": ktype, "value": value}
+            continue
+        yield {"kind": "redis", "key": short, "type": ktype, "value": value}
 
-    if _scan_world_keys(redis, world_id):
-        raise PackageValidationError(
-            f"世界 {world_id!r} 已存在(Redis 上有它的键),导入不许覆盖 —— 换一个 --world-id"
-        )
-
-    redis_section: dict[str, dict[str, Any]] = state["redis"]
-    mysql_section = state.get("mysql")
-    bounded = {k: v for k, v in redis_section.items() if not _is_growing_key(k)}
-    growing = {k: v for k, v in redis_section.items() if _is_growing_key(k)}
-
-    _restore_redis_entries(redis, world_id, bounded)
-
-    if mysql is not None:
-        from anima_world.mysql_state import MySQLEventLog, as_connection, ensure_schema
-
-        conn = as_connection(mysql)
-        prefix = f"{world_id}_"
-        ensure_schema(conn, prefix)
-        growth = (
-            mysql_section if mysql_section is not None
-            else _growth_rows_from_redis_section(growing)
-        )
-        _append_events(MySQLEventLog(conn, prefix), growth.get("events") or [])
+    if mysql is None:
+        section = _growth_rows_from_redis_section(growing) if growing else {}
+        for event in section.get("events") or []:
+            yield {"kind": "event", **event}
         for table in ("memories", "conversations", "messages"):
-            _insert_rows(conn, f"{prefix}{table}", _MYSQL_COLUMNS[table], growth.get(table) or [])
-    elif mysql_section is not None:
-        _restore_growth_into_redis(redis, world_id, mysql_section)
-    else:
+            for row in section.get(table) or []:
+                yield {"kind": "mysql", "table": table, "row": row}
+        return
+    from anima_world.mysql_state import MySQLEventLog, as_connection, ensure_schema
+
+    conn = as_connection(mysql)
+    mprefix = f"{world_id}_"
+    ensure_schema(conn, mprefix)     # 幂等;空世界(还没写过一行)也能导出
+    for event in MySQLEventLog(conn, mprefix).replay():
+        yield {
+            "kind": "event", "seq": int(event.seq), "ts": int(event.ts),
+            "type": event.type, "who": event.who, "loc": event.loc,
+            "payload": event.payload,
+        }
+    for table in ("memories", "conversations", "messages"):
+        for row in _select_all_rows(conn, f"{mprefix}{table}"):
+            yield {"kind": "mysql", "table": table, "row": row}
+
+
+def install_world_records(
+    records: Iterable[dict[str, Any]], *, redis: Any, world_id: str, mysql: Any = None
+) -> dict[str, Any]:
+    """把记录流装进一个世界。返回聚合好的**作者层** section 字典。
+
+    两层分开走,这是 v3 的全部结构:
+
+    - `redis` / `event` / `mysql` 记录 —— **直接落**,那是一个跑过的世界的状态;
+    - `author` 记录 —— 这里不编译,只聚合成 section 字典交回调用方,
+      由既有的那条编译管线去落(`duties` → 行为树、`money` → `payment` 事件……)。
+      **编译器还在**,只是它的输入现在和 dump 住在同一个文件里。
+
+    落键在编译之前:装完状态之后世界就不是空的了,于是"这是不是创世"这个判断
+    自己会给出正确答案 —— 一份只有状态的文件不会再被当成新世界播一遍种。
+    """
+    from anima_world.world_file import author_records_to_seed
+
+    entries: dict[str, dict[str, Any]] = {}
+    events: list[dict[str, Any]] = []
+    rows: dict[str, list[dict[str, Any]]] = {t: [] for t in ("memories", "conversations", "messages")}
+    authored: list[dict[str, Any]] = []
+
+    for record in records:
+        kind = record.get("kind")
+        if kind == "author":
+            authored.append(record)
+        elif kind == "redis":
+            short = str(record.get("key") or "")
+            expected = _STATE_REDIS_VALUE_TYPES.get(record.get("type"))
+            if not short or expected is None:
+                raise PackageValidationError(
+                    f"redis 记录坏了:key={short!r} type={record.get('type')!r} —— "
+                    f"只认 {sorted(_STATE_REDIS_VALUE_TYPES)}"
+                )
+            if not isinstance(record.get("value"), expected):
+                raise PackageValidationError(
+                    f"redis 记录 {short!r} 的值和它声明的类型对不上"
+                )
+            entries[short] = {"type": str(record["type"]), "value": record.get("value")}
+        elif kind == "event":
+            events.append({
+                "seq": record.get("seq"), "ts": record.get("ts"), "type": record.get("type"),
+                "who": record.get("who"), "loc": record.get("loc"),
+                "payload": record.get("payload") or {},
+            })
+        elif kind == "mysql":
+            table = str(record.get("table") or "")
+            if table not in rows:
+                raise PackageValidationError(
+                    f"mysql 记录指向不认识的表 {table!r} —— 只认 {sorted(rows)}"
+                )
+            rows[table].append(dict(record.get("row") or {}))
+
+    # 无限增长的那四样**按目标后端改道**,不按它们在文件里躺在哪儿(v2 的
+    # `import_world_package` 也是这条):一份没接 MySQL 的世界导出来,装进一个
+    # 接了 MySQL 的世界时照样该进 MySQL。文件说的是"有什么",不是"住哪儿"。
+    bounded = {k: v for k, v in entries.items() if not _is_growing_key(k)}
+    growing = {k: v for k, v in entries.items() if _is_growing_key(k)}
+    if bounded:
+        _restore_redis_entries(redis, world_id, bounded)
+
+    section = {"events": events, **rows}
+    if not any(section.values()) and growing:
+        section = _growth_rows_from_redis_section(growing)
+        growing = {}
+    if mysql is not None:
+        if any(section.values()):
+            _restore_growth_into_mysql(mysql, world_id, section)
+    elif any(section.values()):
+        _restore_growth_into_redis(redis, world_id, section)
+    elif growing:
         _restore_redis_entries(redis, world_id, growing)
 
-    return ImportedWorld(
-        world_id=world_id,
-        instance_id=world_id,
-        path=f"redis:{world_id}",
-        manifest=manifest,
-    )
+    return author_records_to_seed(authored)
+
+
+# ── 公开出口:装载与探查 ─────────────────────────────────────────────────────
+
+
+def import_world_file(
+    path: str | Path, *, redis: Any, world_id: str, mysql: Any = None,
+) -> Any:
+    """把一个世界文件装进一个**空的** `world_id`。返回它的 manifest。
+
+    **导入不许覆盖。** 目标前缀下有键就当场拒绝 —— 半个旧世界叠上半个新世界,
+    跑起来两边都对不上,而且没有任何地方会报错。
+
+    这和 `World.open(world_file=)` 是同一条装载路径,区别只在这里多一道
+    "目标必须空"的闸:`World.open` 允许往一个已有的世界补作者层(那是编辑),
+    而 `import` 说的是"把这个世界搬过来"。
+    """
+    from anima_world.world_file import read_world_file
+
+    prefix = _world_prefix(world_id)
+    existing = next(iter(redis.scan_iter(match=f"{_glob_escape(prefix)}*", count=1)), None)
+    if existing is not None:
+        raise PackageValidationError(
+            f"world_id {world_id!r} 下已经有键了 —— 导入只进空世界。"
+            f"换一个名字,或者先把那个世界清掉"
+        )
+    manifest, records = read_world_file(path)
+    install_world_records(records, redis=redis, world_id=world_id, mysql=mysql)
+    return manifest
+
+
+def inspect_world_file(path: str | Path) -> dict[str, Any]:
+    """不装载,只读封皮:这个世界要哪个引擎、叫什么、多大。
+
+    **答案,不是拒绝。** 管着多个引擎版本的启动器正是那个还跑不了它的调用方 ——
+    在这里因为"当前引擎跑不了"而抛错,就违背了这个格式存在的意义。
+    `runnable` 是一个字段,不是一个异常。
+
+    只读第一行,所以一个 5 GB 的世界也是一次 open + 一次 readline。
+    """
+    from anima_world.world_file import WORLD_FILE_VERSION, read_world_file
+
+    manifest, _ = read_world_file(path)
+    current = _engine_version()
+    engine_min = manifest.engine_min or "0.0.0"
+    runnable = _version_tuple(current) >= _version_tuple(engine_min)
+    return {
+        "world_id": manifest.world_id,
+        "name": manifest.name,
+        "summary": manifest.summary,
+        "format_version": manifest.version,
+        "engine_min": manifest.engine_min,
+        "source_engine_version": manifest.source_engine_version,
+        "created_at": manifest.created_at,
+        "current_engine_version": current,
+        "reader_format_version": WORLD_FILE_VERSION,
+        "runnable": runnable,
+        "size_bytes": Path(path).stat().st_size,
+    }

@@ -16,6 +16,8 @@ import sys
 
 import pytest
 
+from _worldfile import write_seed_file
+
 
 def _validate(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -25,6 +27,9 @@ def _validate(*args: str) -> subprocess.CompletedProcess:
 
 
 def _write(path, data) -> str:
+    """节拍脚本仍是 JSON;世界(`.cyberworld`)走世界文件格式。"""
+    if str(path).endswith(".cyberworld"):
+        return write_seed_file(path, data)
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return str(path)
 
@@ -36,7 +41,7 @@ _GOOD_SEED = {
 
 
 def test_a_good_seed_passes(tmp_path):
-    result = _validate("seed", _write(tmp_path / "s.json", _GOOD_SEED), "--json")
+    result = _validate("world", _write(tmp_path / "s.cyberworld", _GOOD_SEED), "--json")
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["valid"] is True
@@ -45,7 +50,7 @@ def test_a_good_seed_passes(tmp_path):
 
 def test_a_seed_missing_required_fields_is_refused(tmp_path):
     bad = {"agents": [{"id": "夏"}], "locations": []}
-    result = _validate("seed", _write(tmp_path / "s.json", bad), "--json")
+    result = _validate("world", _write(tmp_path / "s.cyberworld", bad), "--json")
     assert result.returncode == 2
     payload = json.loads(result.stdout)
     assert payload["valid"] is False and payload["errors"]
@@ -55,7 +60,7 @@ def test_an_agent_standing_somewhere_undefined_is_a_warning_not_an_error(tmp_pat
     """地点表只从种子的 locations 播种,不会因为被引用就自动补 —— 但这不该拦住开机。"""
     seed = json.loads(json.dumps(_GOOD_SEED))
     seed["agents"][0]["location"] = "打错的地名"
-    result = _validate("seed", _write(tmp_path / "s.json", seed), "--json")
+    result = _validate("world", _write(tmp_path / "s.cyberworld", seed), "--json")
 
     assert result.returncode == 0, "引用问题只提醒,不算失败"
     payload = json.loads(result.stdout)
@@ -66,7 +71,7 @@ def test_an_agent_standing_somewhere_undefined_is_a_warning_not_an_error(tmp_pat
 def test_a_duplicate_id_is_a_warning(tmp_path):
     seed = json.loads(json.dumps(_GOOD_SEED))
     seed["agents"].append(dict(seed["agents"][0], name="另一个人"))
-    result = _validate("seed", _write(tmp_path / "s.json", seed), "--json")
+    result = _validate("world", _write(tmp_path / "s.cyberworld", seed), "--json")
     payload = json.loads(result.stdout)
     assert any("不止一次" in w for w in payload["warnings"])
 
@@ -89,7 +94,7 @@ def test_a_beat_referencing_a_stranger_is_a_warning_when_a_seed_is_given(tmp_pat
     }]}
     result = _validate(
         "beats", _write(tmp_path / "b.json", script),
-        "--seed", _write(tmp_path / "s.json", _GOOD_SEED), "--json",
+        "--world-file", _write(tmp_path / "s.cyberworld", _GOOD_SEED), "--json",
     )
     assert result.returncode == 0, "提醒不算失败"
     payload = json.loads(result.stdout)
@@ -107,7 +112,7 @@ def test_an_agent_the_script_brings_in_itself_is_not_reported_as_missing(tmp_pat
     ]}
     result = _validate(
         "beats", _write(tmp_path / "b.json", script),
-        "--seed", _write(tmp_path / "s.json", _GOOD_SEED), "--json",
+        "--world-file", _write(tmp_path / "s.cyberworld", _GOOD_SEED), "--json",
     )
     payload = json.loads(result.stdout)
     assert not any("新人" in w for w in payload["warnings"]), payload["warnings"]
@@ -118,11 +123,11 @@ def test_validating_beats_without_a_seed_says_what_it_could_not_check(tmp_path):
                          "payload": [{"op": "memory", "agent_id": "谁", "summary": "…"}]}]}
     result = _validate("beats", _write(tmp_path / "b.json", script), "--json")
     payload = json.loads(result.stdout)
-    assert any("--seed" in w for w in payload["warnings"])
+    assert any("--world-file" in w for w in payload["warnings"])
 
 
 def test_a_missing_file_is_an_error_not_a_traceback(tmp_path):
-    result = _validate("seed", str(tmp_path / "nope.json"), "--json")
+    result = _validate("world", str(tmp_path / "nope.json"), "--json")
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
     assert json.loads(result.stdout)["errors"]

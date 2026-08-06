@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from _worldfile import open_world_at
+from _worldfile import bundled_seed, open_world_at
 
 import json
 
@@ -245,9 +245,7 @@ def test_what_she_perceives_reaches_her_autonomous_decision(tmp_path, bare_seed)
 def test_visibility_can_be_declared_in_the_seed(tmp_path, bare_seed):
     from importlib import resources
 
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     seed["stocks"] = [{"owner": "world", "values": {"season": 2}}]
     seed["stock_visibility"] = [
         {"kind": "world", "key": "season", "visible": "public"},
@@ -270,9 +268,7 @@ def test_a_bad_visibility_value_is_dropped_not_fatal(tmp_path, bare_seed):
     """写错一档的后果是"她本该知道却不知道",不该拦住启动。"""
     from importlib import resources
 
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     seed["stock_visibility"] = [
         {"kind": "world", "key": "season", "visible": "所有人都能看见"},
         {"kind": "world", "key": "粮价", "visible": "public"},

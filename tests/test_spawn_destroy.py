@@ -410,7 +410,7 @@ def test_生下来的东西进得了_cyberworld(tmp_path, open_world, fresh_redi
     `sapling:1` 那个号。id 会进事件、进提示词,复用一个死者的号等于让历史指向
     另一样东西。
     """
-    from anima_world.world_package import import_world_package
+    from anima_world.world_package import import_world_file
 
     world = _world(tmp_path, open_world, name="pack", world_id="pack")
     world.scheduler.perform_affordance("夏", "bench:a", "打椅子")
@@ -421,7 +421,7 @@ def test_生下来的东西进得了_cyberworld(tmp_path, open_world, fresh_redi
     world.close()
 
     target = type(fresh_redis)(decode_responses=True)
-    import_world_package(str(out), redis=target, world_id="landed")
+    import_world_file(str(out), redis=target, world_id="landed")
     landed = open_world("landed", redis=target)
     rows = landed.entities("chair")
     assert [r["id"] for r in rows] == [chair["id"]]

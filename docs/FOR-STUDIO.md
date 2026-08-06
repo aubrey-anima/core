@@ -4,9 +4,11 @@
 > CLI 的 `--db-path` 全线换成 `--redis URL` + `--world-id`(+可选 `--mysql DSN`);
 > `world export` 的世系参数改名 `--package-id`(`--world-id` 现在指源世界);
 > `world import` 改为导入进一个**空的** `--world-id`,不再解包成目录;
-> `.cyberworld` 包格式升 **v2**(`world.db` 成员 → `world_state.json`,template
-> 模式删除);`contract --json` 的 `db.*` 段换成 `storage.*`。创作台在拿到带这
-> 一版引擎的 venv 之前不受影响 —— 但对接前先按本条对齐子进程调用。
+> `contract --json` 的 `db.*` 段换成 `storage.*`。
+>
+> **而且 `.cyberworld` 一路升到了 v3:种子这个概念取消了,世界只有一种文件格式**
+> (gzip + JSONL,一个文件两层记录)。**这条直接改变你们的产物** —— 见 §3.9。
+> 创作台在拿到带这一版引擎的 venv 之前不受影响,但对接前先按本条对齐子进程调用。
 
 
 | | |
@@ -108,7 +110,7 @@ start  config  doctor  chat  prompt  map  ontology  run  simulate  events  repor
   "db": { "format_version": 1, "min_supported": 1, "schema_revision": 3 },
   "package": { "format_version": 1 },
   "report":  { "format_version": 2, "buckets": [...] },
-  "seed":    { "agent_keys": [...], "location_keys": [...] },
+  "seed":    { "agent_keys": [...], "location_keys": [...] },   // 字段名是历史包袱,内容是**作者层**的必填键
   "beats":   { "ops": [...], "op_required_fields": {...},
                "predicates": [...], "predicate_required_fields": {...} },
   "chat_tools": [ { "id": "walk_away", "kind": "walk_away",
@@ -499,6 +501,42 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
 `tend` 真的改到量、也真的花掉她的体力 → 累光了当场 `incapable` → 过一个世界日缓过来。
 `anima-world ontology --world-id w` 一眼看全。
 
+## 3.9 ⚠️ 2.0 破坏性:种子这个概念没有了,世界只有一种文件格式
+
+**这条直接改变你们的产物。** 详见引擎的 `CHANGELOG.md`,这里只说对你们的影响。
+
+以前你们输出 `world_seed.json`,引擎读它建世界,导出时再产出一个 zip 包。现在
+**只有一种文件**:`.cyberworld`(v3,gzip + JSONL),它同时是**手写格式**、
+**流转格式**和**归档格式**。
+
+```jsonc
+{"kind":"manifest","version":3,"world_id":"harbor","name":"海港"}     // 第一行
+{"kind":"author","type":"agent","body":{"id":"夏","location":"cafe",…}}
+{"kind":"author","type":"location","body":{"id":"cafe","name":"咖啡店",…}}
+{"kind":"author","type":"kind","body":{"id":"tree","affordances":{…}}}
+```
+
+你们要做的:
+
+1. **输出改成写 `author` 记录**,不再是一个 section 字典的 JSON。映射是一比一的:
+   `agents[]` → 一条条 `{"type":"agent"}`,`locations[]` → `{"type":"location"}`,
+   依此类推(`kind` / `entity` / `rule` / `item` / `stock` / `relation` / `memory` /
+   `visibility` / `place`);`config` / `world_setting` / `mock_narration` 三个是
+   **合并而不是追加**的对象型。
+2. **载荷必须收在 `body` 里,不要平铺。** 这条不是洁癖:`locations` 条目自己带 `kind`
+   (嵌套地图的几何类型),平铺进信封会把记录类型**静默覆盖**掉。
+3. **不必 gzip。** 压缩与否只看头两个字节,写一份裸 JSONL 引擎照样读 —— 手写、
+   调试、diff 都方便。引擎导出时才压。
+4. CLI:`--seed` 全线换成 `--world-file`;`validate seed` 换成 `validate world`
+   (`seed` 保留为别名);`validate beats --seed` 换成 `--world-file`。
+
+**顺带你们白得一个能力**:把一份只含 `author` 记录的文件装进一个**已有**的世界,
+就是一次编辑 —— 加一个地点、补三个实体、改一条规律,都是往里灌几行。
+这就是权限矩阵里"创作台增删改查创世态"那一行的实现,**不需要引擎再开一排写 API**。
+
+内置的 `demo.cyberworld` 是纯文本,`zcat`(或直接打开)就能看 —— 它同时是这个格式的
+说明书,照抄它比读这段文字快。
+
 ## 4. 旧特性速查(1.0 ~ 1.2,你们大概已经在用)
 
 | 层 | 一句话 | 开关 |
@@ -514,7 +552,7 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
 
 **内置种子是橱窗,不是毛坯**(1.3.0 改的):它替那个世界点亮了 needs / economy /
 social / stance / tools / intent / autonomy,并播了关系、创世记忆、钱、物品、货架、
-目标、量与规律。你们生成种子时可以照抄这个形状 —— `anima_world/world_seed.json`
+目标、量与规律。你们生成世界文件时可以照抄这个形状 —— `anima_world/demo.cyberworld`
 是它,随 wheel 分发,在 core 的 venv 里找得到。
 
 但**引擎默认值仍然全关**。分工是:引擎默认值 = 没人说话时的样子,种子 = 这个世界的

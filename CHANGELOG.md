@@ -174,6 +174,87 @@ Gibson 的 affordance 存在于**施动者与环境的配对**里:同一把斧�
 (`{"verb": "照料"}` 和 `{"verb": "tend"}` 是同一件事),反查按**这个东西的种类**做而
 不是全世界一张表 —— 两个种类各有一个"照料"时,全局表只留得下一个。
 
+### Changed —— 世界只有一种序列化形式了:`.cyberworld` v3(gzip JSONL),种子这个概念没有了
+
+**破坏性,主版本级。** v3 之前世界有**三种表示**:
+
+    world_seed.json   人写的世界描述(创世的输入)
+    Redis 键          活着的世界
+    world_state.json  导出时的 dump(藏在一个 zip 里)
+
+第一种和第三种是同一件东西的两种写法 —— 都在回答"这个世界是什么样",只是一个给人写、
+一个给机器读。留着两种,就要维护两套 schema、两套校验、**两个跨仓库镜像**,而且它们
+描述同一个世界时长得完全不一样(种子写 `duties`,dump 里是编译好的 `bt_nodes`)。
+
+v3 合成一个:**一个文件,两层记录。**
+
+```jsonc
+{"kind":"manifest","version":3,"world_id":…,"engine_min":…}       // 第一行,必须
+{"kind":"author","type":"agent","body":{…}}      // 作者层:装载时**编译**
+{"kind":"redis","key":"clock","type":"string","value":"8640"}      // 状态层:直接落键
+{"kind":"event","seq":1,"ts":0,"type":"payment","payload":{…}}     // 事件,一行一条
+{"kind":"mysql","table":"memories","row":{…}}
+{"kind":"checksum","sha256":…}                   // 最后一行,可选
+```
+
+于是**创世和还原是同一个动作** —— 往一个前缀里装一个世界文件。手写的世界只有 `author`
+记录,跑过的世界导出来只有状态记录;而把一份只含 `author` 的文件装进一个**已有**的世界,
+就是一次编辑 —— 创作台要的"增删改查创世态"由此免费得到,不必在 API 上再开一排写口。
+
+**去掉的**:`--seed` / `seed_path=`(换成 `--world-file` / `world_file=`)、
+`world_seed.json`(内置演示世界变成 `demo.cyberworld`,仍是唯一的 package data)、
+**出生证明**(`:meta.world_seed` —— 它是同一份内容的第二份拷贝)、zip 容器与它的成员
+白名单/压缩比检测/`assets` 白名单(从来没有代码产出或消费过)、`export_world_package` /
+`import_world_package` / `inspect_world_package` / `dump_world_state`(换成
+`import_world_file` / `inspect_world_file` / `dump_world_records` / `install_world_records`)。
+`world_package.py` 从 1200 行降到 700。
+
+**几条硬纪律,每条对着一种真的坏法:**
+
+- **载荷收在一个字段里**(`body` / `value` / `payload` / `row`),不平铺展开。这条是被
+  一次真碰撞逼出来的:`locations` 条目自己带 `kind`(嵌套地图的几何类型 `region`/`point`),
+  平铺进信封就把记录类型**静默覆盖**掉了 —— 文件写得出来,读的时候变成另一种记录。
+  收进 `body` 让它不可表达,比约定"别用这几个名字"可靠。
+- **不认识的记录类型、不认识的 section,都当场报错,不跳过。** 跳过等于安静地少装
+  一半世界,而文件看上去完全正常。这条也是被逼出来的:转换器最初漏了三个 section
+  (`stock_places` / `world_setting` / `mock_narration`),而丢掉的后果是世界照样建得起来、
+  只是少一整层(`mock_narration` 丢了 = 世界改说另一种语言),没有任何地方会说一句。
+- **压缩与否只看头两个字节,不看扩展名。** 写出去永远是 gzip(且 `mtime=0` —— 默认会
+  把当前时间写进头里,于是"这两个包一样吗"永远答不了,而可 diff 是换文本格式的卖点);
+  读进来允许裸 JSONL —— 手写一个世界不该被逼着先 gzip,而这正是这个格式能取代种子的
+  前提。内置的 `demo.cyberworld` 因此以**纯文本**进仓库:可 diff、可 review,
+  而且它同时是这个格式的说明书。
+- **导出与导入都是流式的。** v2 的 `_dump_mysql_section` 是全量 `replay()` 再 `SELECT *`,
+  **没有任何上限** —— 一个跑了两年的世界导一次包要把整段历史塞进内存。那是个只会在
+  生产上撞到才发现的洞(上一轮已经把它标记为已知缺口)。
+- **无限增长的那四样一律按语义记录导出,不看它们此刻住在哪个后端。** 这条是装上产物
+  演一遍用户故事时逮出来的,而且逮的是**这份 CHANGELOG 自己宣传的那句话**:按后端
+  分叉的话,没接 MySQL 的世界会把整段历史塞进**一个** `redis` list 记录 —— 一整行
+  几万字节的转义 JSON,于是 `grep '"type":"entity_spawn"'` 什么也找不到(它在字符串里
+  是 `\"type\"`),`diff` 也退化成整块变。**在最常见的那种世界上不成立的卖点,就是
+  空话。** 第二个理由同样硬:一份包能不能被 grep,不该取决于导出它的那台机器接没接
+  MySQL —— 那和世界无关,而两种形状意味着消费方要写两套读法。
+- **上限从"三个数乘起来"简化成"一条流三个数"**:解压 ≤512MB、≤500 万条记录、单行 ≤32MB。
+  zip 的成员白名单、压缩比、符号链接/路径穿越/加密成员那一整套整个不需要了。
+- **线格式与落库分家**:`world_file.py` 不认识 Redis,`world_package.py` 不认识 gzip ——
+  两边各自能被单独测,而"换一种容器"不必碰存储语义。
+
+**编译器还在。** `duties` → 行为树、`money` → `payment` 事件、被引用没定义的物品自动
+补一条 —— 这些是真实存在的一层,不会因为换了容器就消失。变的只是它不再叫"播种":
+`author` 记录聚合回 section 字典,原样喂给既有的那十八个编译步骤。**换掉容器,不动语义。**
+
+附带的好处不是修辞:
+
+```bash
+zcat world.cyberworld | grep '"type":"entity_spawn"'      # 这个世界里生出过什么
+diff <(zcat a.cyberworld) <(zcat b.cyberworld)            # 两次导出差在哪
+```
+
+⚠️ **跨仓库**:运维台的 `lib/worldSeed.js` 可删,`lib/worldPackage.js` 要整个重写 ——
+而且它**本来就欠 v2**(注释里还写着 `world.db?`,从没吸收上一轮),所以是从 v1 直接
+跳 v3。这也说明双向互验那几条没有真的在验格式(它们一直绿着,而镜像已落后一个大版本)。
+经过见 `platform/docs/引擎-2.0-同步.md`。
+
 ### Added —— 世界自己长得出新东西,也抹得掉(`spawn` / `destroys_target`)
 
 在这之前 `entities` 是**创世时钉死的闭集**:树不能被种下,杯子不能被打碎,而 `make`

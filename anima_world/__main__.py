@@ -146,7 +146,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "start", help="创建并启动一个世界(引导配置 LLM,前台运行)—— 从这里开始"
     )
     _add_world_args(start)
-    start.add_argument("--seed", default=None, help="世界种子 JSON(只对新建的世界生效)")
+    start.add_argument("--world-file", dest="world_file", default=None,
+                       help="世界文件 .cyberworld(只对新建的世界生效;默认内置演示世界)")
     start.add_argument("--beats", default=None, help="节拍脚本 JSON")
     start.add_argument("--no-input", action="store_true", help="不要交互提问(CI / 脚本)")
     start.add_argument(
@@ -247,7 +248,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
     )
     _add_world_args(run)
-    run.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
+    run.add_argument("--world-file", dest="world_file", default=None,
+                     help="世界文件 .cyberworld(默认内置的 demo.cyberworld)")
     run.add_argument(
         "--beats", default=None,
         help="Beat script JSON path (beat-director; invalid script fails startup)",
@@ -262,7 +264,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "simulate", help="Fast-forward a world headlessly (no sleep, no onboarding)"
     )
     _add_world_args(simulate)
-    simulate.add_argument("--seed", default=None, help="World seed JSON path (default: bundled world_seed.json)")
+    simulate.add_argument("--world-file", dest="world_file", default=None,
+                          help="世界文件 .cyberworld(默认内置的 demo.cyberworld)")
     simulate.add_argument(
         "--agents", type=int, default=None,
         help="Number of agents (default: full seed roster, or 3 without a seed)",
@@ -313,13 +316,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "validate", help="不建世界就检查一份种子或一份节拍脚本"
     )
     validate_commands = validate.add_subparsers(dest="validate_command", required=True)
-    validate_seed = validate_commands.add_parser("seed", help="检查 world_seed.json")
-    validate_seed.add_argument("path", help="种子文件")
+    validate_seed = validate_commands.add_parser(
+        "world", aliases=["seed"], help="检查一个世界文件(.cyberworld)"
+    )
+    validate_seed.add_argument("path", help="世界文件")
     validate_seed.add_argument("--json", action="store_true", help="机器可读输出")
     validate_beats = validate_commands.add_parser("beats", help="检查节拍脚本")
     validate_beats.add_argument("path", help="节拍脚本文件")
     validate_beats.add_argument(
-        "--seed", help="配套的种子 —— 有它才能查角色/地点的引用是否存在"
+        "--world-file", dest="seed",
+        help="配套的世界文件 —— 有它才能查角色/地点的引用是否存在"
     )
     validate_beats.add_argument("--json", action="store_true", help="机器可读输出")
 
@@ -330,7 +336,8 @@ def _build_parser() -> argparse.ArgumentParser:
     play.add_argument("--agent", help="先跟谁说话(缺省是名册里第一个)")
     play.add_argument("--name", help="你在这个世界里叫什么(缺省「访客」)")
     play.add_argument("--player-id", default="p1")
-    play.add_argument("--seed", help="Seed file for a brand-new world")
+    play.add_argument("--world-file", dest="world_file", default=None,
+                      help="世界文件 .cyberworld(只对新建的世界生效)")
     play.add_argument("--beats", help="Beat script")
     play.add_argument("--agents", type=int, help="Roster size for a brand-new world")
 
@@ -343,8 +350,6 @@ def _build_parser() -> argparse.ArgumentParser:
     world_commands = world.add_subparsers(dest="world_command", required=True)
     world_export = world_commands.add_parser("export", help="Export a .cyberworld package")
     _add_world_args(world_export)
-    world_export.add_argument("--seed", default=None,
-                              help="World seed JSON(缺省用世界自己的创世出生证明)")
     world_export.add_argument("--beats", default=None, help="Optional beats JSON path")
     world_export.add_argument("--output", required=True, help="Output .cyberworld path")
     world_export.add_argument("--package-id", required=True,
@@ -391,38 +396,54 @@ CHARACTER_ROSTER: list[dict[str, str]] = [
 ]
 
 
-WORLD_SEED_PATH = Path(__file__).parent / "world_seed.json"
+WORLD_FILE_PATH = Path(__file__).parent / "demo.cyberworld"
 
-def _load_world_seed(
-    path: Path | str = WORLD_SEED_PATH, *, authored: bool = False
-) -> dict[str, Any] | None:
-    """Load + validate a world seed file (D7).
 
-    The bundled seed degrades: on a missing/unreadable/invalid file it logs a
-    warning and returns None ("fall back to hardcoded defaults"), so a damaged
-    install can never stop a world from booting.
+def _load_world_file(
+    path: Path | str = WORLD_FILE_PATH,
+    *,
+    redis: Any,
+    world_id: str,
+    mysql: Any = None,
+    authored: bool = False,
+) -> dict[str, Any]:
+    """装一个世界文件:状态记录当场落键,作者记录聚合成编译管线吃的 section 字典。
 
-    An *authored* seed — one the caller named via `--seed` / `seed_path` —
-    raises `WorldSeedError` instead. Degrading there is unrecoverable rather
-    than merely lossy: a seed is only ever read into an EMPTY database, so a
-    single typo'd path silently produces the built-in demo world for good, and
-    re-running with the path fixed no longer helps. Same rule as beat scripts:
-    an authored file that cannot be honoured fails at load, loudly.
+    **创世和还原走这同一条。** 它们本来就是同一个动作 —— 往一个前缀里装一个世界
+    文件。区别只在文件里装的是哪一层记录:一份手写的世界只有 `author` 记录(于是
+    走编译),一份导出的世界只有 `redis`/`event`/`mysql` 记录(于是直接落键)。
+
+    **内置的那份会降级,作者指名的那份不会。** 内置文件坏了只 warning 然后回落
+    硬编码默认值 —— 一个装坏了的包也得能开机。而 `--world-file` 指名的文件坏了
+    当场抛:世界文件只会被读进空库一次,静默换成内置演示世界是**不可挽回**的,
+    路径打错重跑一次也救不回来。和节拍脚本、显式种子同一条规矩。
     """
+    from anima_world.world_file import WorldFileError, read_world_file
+    from anima_world.world_package import install_world_records
+
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        if authored:
-            raise WorldSeedError([f"cannot read seed file {path}: {exc}"]) from exc
-        logger.warning("world_seed.json unavailable or invalid (%s); falling back to hardcoded defaults", exc)
-        return None
-    errors = _world_seed_errors(data)
-    if errors:
-        if authored:
+        _, records = read_world_file(path)
+        authored = install_world_records(
+            records, redis=redis, world_id=world_id, mysql=mysql
+        )
+        # **作者层还是要过那道闸。** 换掉的是容器,不是校验:一份写错了 `agents`
+        # 的世界文件照旧不许开机。而**只有带作者层的文件才查** —— 一个跑过的世界
+        # 导出来只有状态记录,拿"agents 必须是个列表"去要求它是在问错问题。
+        errors = _world_seed_errors(authored) if authored else []
+        if errors:
             raise WorldSeedError([f"{path}: {e}" for e in errors])
-        logger.warning("world_seed.json failed schema validation; falling back to hardcoded defaults")
-        return None
-    return data
+        return authored
+    except Exception as exc:  # noqa: BLE001 — 坏文件的形状很多,分流只看是不是作者指名的
+        if authored:
+            if isinstance(exc, (WorldFileError, WorldSeedError)):
+                raise
+            raise WorldFileError([f"装不进这个世界文件 {path}:{exc}"]) from exc
+        logger.warning(
+            "内置世界文件读不了(%s);回落硬编码默认值 —— 一个装坏了的包也得能开机", exc
+        )
+        return {}
+
+
 _LOCATION_ENTRY_FIELDS = ("id", "name", "description", "kind", "parent", "x", "y", "w", "h")
 
 
@@ -794,7 +815,7 @@ def build_serve_scheduler(
     redis: Any,
     mysql: Any = None,
     n_agents: int | None = None,
-    seed_path: str | Path | None = None,
+    world_file: str | Path | None = None,
     force_mock_llm: bool = False,
     mock_narrative: bool = False,
     beats_path: str | Path | None = None,
@@ -808,8 +829,8 @@ def build_serve_scheduler(
     原点)。给了 `mysql=` 的世界,随时间无限增长的四样(events / memories /
     conversations / messages)归 MySQL,判据照旧是"她带不带得进上下文"。
 
-    seed_path: authored seed; loading is STRICT (WorldSeedError propagates
-    and fails startup). Only the BUNDLED seed degrades to hardcoded defaults.
+    world_file: 作者指名的世界文件;装载是**严格**的(坏了当场抛,启动失败)。
+    只有**内置**那份会降级成硬编码默认值 —— 装坏了的包也得能开机。
     beats_path: same rule (BeatScriptError). force_mock_llm / mock_narrative:
     unchanged from the world.db era — threaded through construction because a
     post-hoc swap is too late for the capability catalog.
@@ -828,13 +849,6 @@ def build_serve_scheduler(
 
     beat_script = BeatScript.load(beats_path) if beats_path is not None else None
     shared_lock = threading.RLock()
-    world_seed = (
-        _load_world_seed(seed_path, authored=True)
-        if seed_path is not None
-        else _load_world_seed()
-    )
-    if n_agents is None:
-        n_agents = len(world_seed["agents"]) if world_seed is not None else len(CHARACTER_ROSTER)
 
     warning = durability_warning(redis)
     if warning:
@@ -848,6 +862,19 @@ def build_serve_scheduler(
         mysql_conn = as_connection(mysql)
         mysql_prefix = f"{world_id}_"
         ensure_schema(mysql_conn, mysql_prefix)
+
+    # **一道门。** 创世和还原本来就是同一个动作:往一个前缀里装一个世界文件。
+    # 状态记录当场落键,作者记录聚合成 section 字典交给下面那条编译管线 ——
+    # 而落键在前是承重的:装完状态之后世界就不是空的了,于是"这是不是创世"
+    # 那个判断自己会给出正确答案,一份只有状态的文件不会再被当成新世界播一遍种。
+    # MySQL 连接必须先建好,不然增长的那四样没地方改道。
+    world_seed = _load_world_file(
+        world_file if world_file is not None else WORLD_FILE_PATH,
+        redis=redis, world_id=world_id, mysql=mysql_conn,
+        authored=world_file is not None,
+    )
+    if n_agents is None:
+        n_agents = len(world_seed["agents"]) if world_seed else len(CHARACTER_ROSTER)
 
     meta = meta_rows(redis, world_id)
     # 事件日志 —— 唯一真相。MySQL 接手时 Redis 里不留拷贝(两份真相里一份不更新,
@@ -1043,18 +1070,18 @@ def build_serve_scheduler(
     # reuse it here for persona resolution BEFORE constructing agents,
     # instead of folding the same event list into a second Projection.
     persisted: list[Event] = event_log.replay() if event_log is not None else []
-    if seed_path is not None and persisted:
+    if world_file is not None and persisted:
         # The seed file is first-boot-only (M6 D7). Editing one and pointing it
         # at a world that already exists looks like it should work and silently
         # does nothing — the event log and the definition tables are the running
         # world's only source of truth from genesis onward.
         logger.warning(
-            "--seed %s was NOT applied: world %r already holds %d event(s), and a seed "
-            "file is only ever read into an empty world. Its own roster and world state come "
-            "from its event log, so it does not need one. Point --world-id at a fresh name to "
-            "author against this seed, or edit the live world through World.config_set / "
-            "World.prompt_set and the locations / bt_nodes stores.",
-            seed_path, world_id, len(persisted),
+            "--world-file %s 里的**作者层**没有生效:世界 %r 已经有 %d 条事件了,而作者层"
+            "只会被读进一个空世界。它自己的名册与状态来自事件日志,不需要谁再播一遍。"
+            "要照着这份文件建世界就换一个空的 --world-id;要改一个活着的世界,"
+            "走 World.config_set / World.prompt_set 与各 store。"
+            "(文件里的**状态层**不受这条限制,它已经落进去了。)",
+            world_file, world_id, len(persisted),
         )
     boot_projection = scheduler._memory_projection
     scheduler.bt_store = bt_store
@@ -2022,7 +2049,7 @@ def run_run(args: argparse.Namespace) -> int:
     try:
         world = World.open(
             world_id, redis=redis, mysql=mysql,
-            seed_path=args.seed, beats_path=args.beats, agents=args.agents,
+            world_file=args.world_file, beats_path=args.beats, agents=args.agents,
         )
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[run] {exc}", file=sys.stderr)
@@ -2533,7 +2560,7 @@ def run_play(args: argparse.Namespace) -> int:
     try:
         world = World.open(
             world_id, redis=redis, mysql=mysql,
-            seed_path=args.seed, beats_path=args.beats, agents=args.agents,
+            world_file=args.world_file, beats_path=args.beats, agents=args.agents,
         )
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[play] {exc}", file=sys.stderr)
@@ -2757,7 +2784,7 @@ def run_start(args: argparse.Namespace) -> int:
 
     try:
         world = World.open(world_id, redis=redis, mysql=mysql,
-                           seed_path=args.seed, beats_path=args.beats)
+                           world_file=args.world_file, beats_path=args.beats)
     except (BeatScriptError, WorldSeedError) as exc:
         what = "节拍脚本" if isinstance(exc, BeatScriptError) else "世界种子"
         print(f"\n  {onboarding.red(onboarding.BAD)} {what}有问题:\n{exc}", file=sys.stderr)
@@ -3052,6 +3079,19 @@ def run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_authored_layer(path: str) -> tuple[dict[str, Any], str | None]:
+    """读一个世界文件的**作者层**,聚合成 section 字典。读不了就把话说清楚。"""
+    from anima_world.world_file import WorldFileError, author_records_to_seed, read_world_file
+
+    try:
+        _, records = read_world_file(path)
+        return author_records_to_seed(list(records)), None
+    except WorldFileError as exc:
+        return {}, str(exc)
+    except OSError as exc:
+        return {}, f"读不了 {path}:{exc}"
+
+
 def run_validate(args: argparse.Namespace) -> int:
     """不建世界就检查一份种子 / 一份节拍脚本。
 
@@ -3061,16 +3101,20 @@ def run_validate(args: argparse.Namespace) -> int:
     from anima_world.beats import beat_script_warnings
     from anima_world.world_seed import world_seed_errors, world_seed_warnings
 
+    if args.validate_command in ("world", "seed"):
+        # 世界文件:读出作者层再走既有的那套校验(**换了容器,没换闸**)。
+        authored, read_error = _load_authored_layer(args.path)
+        if read_error is not None:
+            return _report_validation("world", args.path, [read_error], [], args.json)
+        return _report_validation(
+            "world", args.path,
+            world_seed_errors(authored), world_seed_warnings(authored), args.json,
+        )
+
     data, read_error = _load_json_file(args.path)
     if read_error is not None:
         return _report_validation(
             args.validate_command, args.path, [read_error], [], args.json
-        )
-
-    if args.validate_command == "seed":
-        return _report_validation(
-            "seed", args.path,
-            world_seed_errors(data), world_seed_warnings(data), args.json,
         )
 
     # beats:硬错误走既有的严格校验器(与加载期逐字同一份),引用完整性只提醒。
@@ -3083,9 +3127,9 @@ def run_validate(args: argparse.Namespace) -> int:
     known_agents: list[str] = []
     known_locations: list[str] = []
     if args.seed:
-        seed_data, seed_error = _load_json_file(args.seed)
+        seed_data, seed_error = _load_authored_layer(args.seed)
         if seed_error is not None:
-            errors.append(f"--seed {seed_error}")
+            errors.append(f"--world-file {seed_error}")
         elif isinstance(seed_data, dict):
             known_agents = [
                 str(a.get("id")) for a in seed_data.get("agents") or []
@@ -3101,7 +3145,7 @@ def run_validate(args: argparse.Namespace) -> int:
     )
     if not args.seed:
         warnings.append(
-            "没给 --seed,所以没检查角色/地点是不是真的存在 —— 引用错一个 id,"
+            "没给 --world-file,所以没检查角色/地点是不是真的存在 —— 引用错一个 id,"
             "那个 beat 会静默作废并被永久标记已触发"
         )
     return _report_validation("beats", args.path, errors, warnings, args.json)
@@ -3334,7 +3378,7 @@ def run_simulate(args: argparse.Namespace) -> int:
             redis,
             mysql=mysql,
             n_agents=args.agents,
-            seed_path=args.seed,
+            world_file=args.world_file,
             force_mock_llm=(tier == "mock"),
             mock_narrative=(tier == "planner"),
             beats_path=args.beats,
@@ -3407,52 +3451,32 @@ def run_simulate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _inspect_payload(manifest: Any) -> dict[str, Any]:
-    """The documented `world inspect --json` field set (REFERENCE §8).
+def _pad(label: str, width: int = 12) -> str:
+    """中文标签按显示宽度对齐 —— 按字符个数补空格会把每一栏推歪。"""
+    from anima_world.mapview import display_width
 
-    Third-party launchers code against this, so it is a wire contract: the
-    whole manifest, flattened, plus what the running engine makes of it.
-    """
-    payload = dict(manifest.as_dict())
-    compat = payload.pop("engine_compat", {})
-    payload.update({
-        "operation": "inspect",
-        "engine_min": compat.get("minimum", manifest.engine_min),
-        "engine_max_exclusive": compat.get("maximum_exclusive", manifest.engine_max_exclusive),
-    })
-    payload.update(manifest.compatibility())
-    return payload
+    return label + " " * max(1, width - display_width(label))
 
 
-def _pad(label: str, width: int = 20) -> str:
-    """Pad to a terminal-cell width — a CJK label is 1 char but 2 cells wide."""
-    import unicodedata
-
-    cells = sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in label)
-    return label + " " * max(1, width - cells)
-
-
-def _print_inspect_human(manifest: Any, payload: dict[str, Any]) -> None:
+def _print_inspect_human(payload: dict[str, Any]) -> None:
     if payload["runnable"]:
         verdict = f"{payload['current_engine_version']} —— {onboarding.green('能跑')}"
     else:
-        verdict = onboarding.yellow(
-            f"{payload['current_engine_version']} —— 跑不了,装一个 "
-            f">= {payload['engine_min']} 且 < {payload['engine_max_exclusive']} 的引擎"
+        verdict = (
+            f"{payload['current_engine_version']} —— "
+            f"{onboarding.yellow('跑不了')}(要 >= {payload['engine_min']})"
         )
-    print(f"\n  {onboarding.bold(manifest.name)}  {onboarding.dim(manifest.world_id)}")
-    if manifest.summary:
-        print(f"  {onboarding.dim(manifest.summary)}")
+    print()
+    print(f"  {payload['name'] or payload['world_id']}")
     print()
     rows = [
-        ("模式", f"{manifest.export_mode}"
-                 f"{'(只有种子,没有存档)' if manifest.export_mode == 'template' else '(带 world.db 存档)'}"),
-        ("引擎区间", f"[{payload['engine_min']}, {payload['engine_max_exclusive']})"),
-        ("导出引擎", manifest.source_engine_version),
-        ("包格式", str(manifest.package_format_version)),
-        ("修订号", manifest.revision_id),
-        ("导出时间", manifest.created_at),
-        ("文件", ", ".join(f"{role}={path}" for role, path in sorted(manifest.files.items()))),
+        ("世界 id", payload["world_id"]),
+        ("一句话", payload["summary"] or "—"),
+        ("格式版本", f"v{payload['format_version']}(本引擎读到 v{payload['reader_format_version']})"),
+        ("要的引擎", f">= {payload['engine_min'] or '不限'}"),
+        ("导出自", payload["source_engine_version"] or "—"),
+        ("导出于", payload["created_at"] or "—"),
+        ("大小", f"{payload['size_bytes'] // 1024} KB"),
         ("当前引擎", verdict),
     ]
     for label, value in rows:
@@ -3461,67 +3485,58 @@ def _print_inspect_human(manifest: Any, payload: dict[str, Any]) -> None:
 
 
 def run_world_package(args: argparse.Namespace) -> int:
-    """Run the thin CLI around the portable package service."""
+    """`anima-world world export / import / inspect` —— `.cyberworld` v3。"""
+    from anima_world.api import World
+    from anima_world.world_file import WorldFileError
     from anima_world.world_package import (
         PackageValidationError,
-        export_world_package,
-        import_world_package,
-        read_package_manifest,
+        import_world_file,
+        inspect_world_file,
     )
 
     try:
         if args.world_command == "inspect":
-            # #3: reading the envelope must not require being able to run it —
-            # the caller who most needs this answer is the launcher that does
-            # not have the right engine yet. Exit 0 for an incompatible
-            # package: it answered, which is the entire point.
-            manifest = read_package_manifest(args.package)
-            payload = _inspect_payload(manifest)
+            # **答案,不是拒绝。** 最需要这个答案的调用方,正是那个还没有对的引擎
+            # 的启动器 —— 在这里因为"跑不了"而退非零,就违背了这个格式的意义。
+            payload = inspect_world_file(args.package)
             if args.as_json:
                 print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             else:
-                _print_inspect_human(manifest, payload)
+                _print_inspect_human(payload)
             return 0
         if args.world_command == "export":
             redis, world_id, mysql = _world_args(args)
             if not _require_existing_world(redis, world_id, "world export"):
                 return 2
-            manifest = export_world_package(
-                redis=redis,
-                world_id=world_id,
-                mysql=mysql,
-                seed_path=args.seed,
-                beats_path=args.beats,
-                output_path=args.output,
-                package_world_id=args.package_id,
-                name=args.name,
-                summary=args.summary,
-                genre=args.genre,
-                setting=args.setting,
-                theme=args.theme,
-            )
+            world = World.open(world_id, redis=redis, mysql=mysql, force_mock_llm=True)
+            try:
+                manifest = world.export_snapshot(
+                    args.output, world_id=args.package_id, name=args.name,
+                    beats_path=args.beats, summary=args.summary, genre=args.genre,
+                    setting=args.setting, theme=args.theme,
+                )
+            finally:
+                world.close()
             result = {
                 "operation": "export",
                 "world_id": manifest.world_id,
-                "revision_id": manifest.revision_id,
-                "mode": manifest.export_mode,
+                "output": str(args.output),
+                "engine_min": manifest.engine_min,
             }
         else:
             redis, world_id, mysql = _world_args(args)
-            imported = import_world_package(
+            manifest = import_world_file(
                 args.package, redis=redis, world_id=world_id, mysql=mysql,
             )
             result = {
                 "operation": "import",
-                "world_id": imported.world_id,
-                "instance_id": imported.instance_id,
-                "path": str(imported.path),
+                "world_id": world_id,
+                "from": manifest.world_id,
+                "engine_min": manifest.engine_min,
             }
-    except (OSError, PackageValidationError) as exc:
-        # #10: say WHICH of checksum / engine range / seed schema / zip guard
-        # tripped. The engine knew all along; the blanket "invalid or
-        # inaccessible package data" was the only thing an author or an
-        # operator relaying a 400 ever got to see, and it names no fix.
+    except (OSError, WorldFileError, PackageValidationError) as exc:
+        # 说清是**哪一道**闸拦下的(校验和 / 格式版本 / 目标非空 / 记录坏了)。
+        # 引擎一直知道,而"包无效或不可读"这种笼统话没有指出任何可做的事。
         print(f"[world {args.world_command}] {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

@@ -19,6 +19,8 @@ from importlib import resources
 
 import pytest
 
+from _worldfile import as_world_file, bundled_seed, write_seed_file
+
 # 橱窗独有的顶层字段 —— 剥掉它们就回到毛坯。
 # **橱窗每加一件展品,这里就要跟一行** —— 不跟的话,一堆"验引擎默认行为"的测试会
 # 因为世界变富了而莫名其妙地红(1.3.0 里已经发生过两次:先是 config/relations,
@@ -34,9 +36,7 @@ _SHOWCASE_LOCATION_FIELDS = ("stock",)
 
 
 def _bundled_seed() -> dict:
-    return json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    return bundled_seed()
 
 
 @pytest.fixture
@@ -56,9 +56,7 @@ def bare_seed(tmp_path) -> str:
         for field in _SHOWCASE_LOCATION_FIELDS:
             location.pop(field, None)
 
-    path = tmp_path / "bare_seed.json"
-    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
-    return str(path)
+    return write_seed_file(tmp_path / "bare.cyberworld", seed)
 
 @pytest.fixture(autouse=True)
 def _machine_config_stays_out_of_your_home(tmp_path_factory, monkeypatch):
@@ -92,7 +90,7 @@ def fresh_redis():
 
 @pytest.fixture
 def open_world(fresh_redis):
-    """开测试世界的门:`world = open_world()`,或 `open_world(seed_path=bare_seed)`。
+    """开测试世界的门:`world = open_world()`,或 `open_world(world_file=bare_seed)`。
 
     world_id 自动唯一(同一个 fakeredis 上开两个世界互不相扰),缺省 Mock LLM,
     teardown 统一 close —— 忘了关的世界会把线程池留到下一个测试里。
@@ -106,6 +104,12 @@ def open_world(fresh_redis):
 
     def _open(world_id: str | None = None, *, redis=None, **kwargs):
         kwargs.setdefault("force_mock_llm", True)
+        # v3 之前夹具传的是 `seed_path=<一个 JSON>`。世界文件把那两种表示合成了
+        # 一种,所以这里就地转一道 —— 走的是真的装载路径,只是入口换成同一份内容
+        # 的另一种写法。**新写的测试直接传 `world_file=`。**
+        legacy = kwargs.pop("seed_path", None)
+        if legacy is not None:
+            kwargs["world_file"] = as_world_file(legacy)
         world = World.open(
             world_id or f"t{next(counter)}", redis=redis or fresh_redis, **kwargs
         )

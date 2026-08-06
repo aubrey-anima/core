@@ -384,7 +384,7 @@ def test_the_notice_stays_quiet_when_autonomy_is_off(tmp_path, bare_seed):
     import sys
 
     done = run_cli("simulate",
-         "--world-id", "w", "--seed", bare_seed,
+         "--world-id", "w", "--world-file", bare_seed,
          "--ticks", "1", "--llm", "mock")
     assert done.returncode == 0, done.stderr
     assert "定时轮次" not in done.stdout

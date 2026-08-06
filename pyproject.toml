@@ -57,7 +57,7 @@ version = { attr = "anima_world.__version__" }
 include = ["anima_world*"]
 
 [tool.setuptools.package-data]
-anima_world = ["world_seed.json"]
+anima_world = ["demo.cyberworld"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

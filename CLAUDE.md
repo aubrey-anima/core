@@ -69,8 +69,9 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 
 | 权威模块 | 内容 | 谁镜像了它 |
 |---|---|---|
-| `anima_world/world_package.py` | `.cyberworld` 数据包格式 | 运维台 `lib/worldPackage.js` |
-| `anima_world/world_seed.py` | 种子 schema 校验 | 运维台 `lib/worldSeed.js` |
+| `anima_world/world_file.py` | `.cyberworld` **线格式**(v3,gzip JSONL) | 运维台 `lib/worldPackage.js` 要整个重写 |
+| `anima_world/world_package.py` | 落库那一层(dump / install / import / inspect) | 同上 |
+| `anima_world/world_seed.py` | **作者层**的 schema 校验(种子这个概念没了,闸还在) | 运维台 `lib/worldSeed.js` **可删** |
 | `anima_world/beats.py` | 节拍脚本严格校验 | (无镜像;创作台经 CLI 委托校验) |
 | `contract --json` 的 `storage` 段 | 存储契约:Redis 键前缀 / MySQL 表与表前缀(db.* 段随 world.db 退役) | 运维台镜像要改读 `storage.*` |
 
@@ -79,10 +80,14 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 `docs/引擎接口诉求-试炼与试聊.md` 提了两条,我早就交付了却没回执,他们的 P1
 白等了几天。**加了 CLI 出口就去那份文档里记一笔。**
 
-数据包与种子两项由运维台的 `test/contract.test.js` 与本包**双向互验**(引擎不可用时整体 skip)。
+⚠️ **v3 是一次跨仓库破坏,运维台欠两笔**:它的 `lib/worldPackage.js` 还停在 v1
+(注释里还写着 `world.db?`),从没吸收 v2;现在直接跳 v3。`lib/worldSeed.js` 整个可删 ——
+种子这个概念没有了。双向互验(`test/contract.test.js`)要照 v3 重写。经过写在
+`platform/docs/引擎-2.0-同步.md`。
+
 节拍脚本的严格校验有个硬要求:**坏脚本必须在加载时当场报错,不能流到世界启动**。
-**显式指定的种子同规矩**(`WorldSeedError`):种子只读进空库一次,静默降级成内置演示世界
-不可挽回;只有内置种子才降级(装坏了也得能开机)。
+**显式指定的世界文件同规矩**(`WorldFileError`):作者层只读进空库一次,静默降级成
+内置演示世界不可挽回;只有内置那份才降级(装坏了也得能开机)。
 
 Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)。它是宿主应用
 依赖的 API 面:**只加不改**,破坏性变更等于跨仓库破坏。
@@ -106,6 +111,7 @@ python -m twine upload dist/*         # 发布
 
 # 给人用的三个命令
 anima-world start                     # 引导配 LLM → 创世 → 前台运行;新世界用演示速度
+#   创世 = 装内置的 demo.cyberworld;换一个世界用 --world-file(--seed 已移除)
 anima-world doctor                    # 体检:Redis 持久化、密钥、真调一次 LLM、时钟翻译成人话
 anima-world config set llm.api_key sk-…   # 机器键自动进 ~/.anima-world,世界键进 :config
 
@@ -129,6 +135,9 @@ anima-world simulate --world-id w --ticks 288         # 无头快进;--ticks 0 =
 anima-world world export --world-id w --output my.cyberworld \
     --package-id my-world --name "我的世界"
 anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
+anima-world world inspect my.cyberworld               # 只读第一行:要哪个引擎、多大
+anima-world validate world my.cyberworld              # 不建世界就查作者层
+# `.cyberworld` 是 gzip JSONL:`zcat x.cyberworld | grep '"type":"entity_spawn"'` 真的能用。
 ```
 
 嵌入到应用里(主要用法):`from anima_world.api import World` →
@@ -209,6 +218,23 @@ anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
   issue #18/#16 的原文写的是"每轮发一个事件",那条被有意否决了(见 CHANGELOG 1.3.0
   末尾)。工具造成的**后果**(走开 / 广播 / 静音)照旧是世界事件:世界的历史只记世界里
   发生的事。
+- **世界只有一种序列化形式:`.cyberworld`(v3,gzip JSONL)。种子这个概念没有了。**
+  v3 之前世界有三种表示 —— 人写的种子 JSON、Redis 键、导出的 dump。第一种和第三种
+  是同一件东西的两种写法,留着两种就要维护两套 schema、两套校验、两个跨仓库镜像。
+  合成一个之后:**一个文件,两层记录**(`author` 装载时编译,`redis`/`event`/`mysql`
+  直接落键),于是**创世和还原是同一个动作** —— 往一个前缀里装一个世界文件
+  (`World.open(world_file=)` / `--world-file`;`seed_path` 与 `--seed` 已移除)。
+  手写的世界只有 `author` 记录;跑过的世界导出来只有状态记录;把只含 `author` 的文件
+  装进一个**已有**的世界 = 一次编辑(创作台要的"增删改查创世态"由此免费得到)。
+  随之去掉的还有**出生证明**(`:meta.world_seed`)—— 它是同一份内容的第二份拷贝。
+  几条硬纪律:**载荷收在一个字段里**(`body`/`value`/`payload`/`row`,不平铺 ——
+  `locations` 条目自己带 `kind`,平铺会**静默覆盖**记录类型);**不认识的记录类型与
+  不认识的 section 都当场报错,不跳过**(跳过等于安静地少装一半世界,而文件看上去
+  完全正常 —— 这条是被一次真的丢段逼出来的);**压缩与否只看头两个字节**(写出去
+  永远 gzip 且 `mtime=0` 保证可 diff,读进来允许裸 JSONL —— 手写世界不该被逼着先
+  gzip);导出与导入**都是流式的**(v2 的 dump 是全量 `replay()` 再 `SELECT *`,
+  没有任何上限)。线格式在 `world_file.py`,落库在 `world_package.py` ——
+  **格式模块不认识 Redis,落库模块不认识 gzip**,两边各自能被单独测。
 - 世界只收当轮有限历史(`World.chat` 传入、`record_chat_turn` 回传),完整转录留在
   宿主应用里,不落世界。
 - **chat-agent 的四个开关默认关**(`chat.stance/tools/intent/loop.enabled`),而且
@@ -226,8 +252,10 @@ anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
   `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取);
   `contract --json` 自报 `storage` 段与包格式版本(v2),镜像端照它对齐。
   改 Redis 键形状 / MySQL 表形状 = 改跨仓库契约,和改包格式同一级别。
-- `world_seed.json` 是本包**唯一的 package data**,随 wheel 分发
-  (`tests/test_packaging.py` 盯着,漏了会让宿主环境里少文件)。
+- `demo.cyberworld` 是本包**唯一的 package data**,随 wheel 分发
+  (`tests/test_packaging.py` 盯着,漏了会让宿主环境里少文件、世界开不起来)。
+  它以**纯文本**进仓库(可 diff、可 review)—— 一个 review 不了的二进制块不该是
+  新用户看到的第一眼,而它同时是世界文件格式的说明书。
 - **内置种子是橱窗,不是毛坯**(1.3.0):它用 `"config": {...}` 替这个世界点亮了
   needs/economy/social/stance/tools/intent/autonomy,并播了关系、创世记忆、钱、
   物品、货架、目标。理由是**做了却开箱看不见等于没做** —— 新用户装上包看到的第一屏

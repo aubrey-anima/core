@@ -9,7 +9,7 @@ README 展示的也正是那一幕。所以这不是降级路径上的边角料,
 """
 from __future__ import annotations
 
-from _worldfile import open_world_at, run_cli
+from _worldfile import bundled_seed, open_world_at, run_cli
 
 import json
 import subprocess
@@ -56,9 +56,7 @@ def test_templates_come_from_the_prompt_store_and_are_read_live(tmp_path):
 
 def test_a_seed_can_ship_narration_that_sounds_like_its_world(tmp_path):
     """种子决定世界说什么语言,所以模板也归种子 —— 顺带让 Mock 输出可被创作。"""
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     seed["mock_narration"] = {
         "sleep": "{agent} turned in for the night",
         "idle_wander": "{agent} drifted about",
@@ -88,9 +86,7 @@ def test_a_failing_llm_falls_back_to_the_worlds_own_templates(tmp_path):
     """真 LLM 挂掉时走的就是 Mock —— 那正是一个英文世界会突然改口说中文的地方。"""
     from anima_world.narrative import OpenAICompatibleNarrativeProvider
 
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     seed["mock_narration"] = {"sleep": "{agent} turned in for the night"}
     seed_path = tmp_path / "seed.json"
     seed_path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")

@@ -6,13 +6,13 @@ world.db 时代这里还有"交互即检查点"一组 —— 时钟检查点是 
 """
 from __future__ import annotations
 
+import gzip
 import json
 import time
-import zipfile
 
 from _worldfile import open_world_at
 
-from anima_world.world_package import import_world_package, inspect_world_package
+from anima_world.world_package import import_world_file, inspect_world_file
 
 
 def test_export_snapshot_while_running(tmp_path):
@@ -29,45 +29,55 @@ def test_export_snapshot_while_running(tmp_path):
         clock_at_export = w.scheduler.clock
 
         manifest = w.export_snapshot(out, world_id="live-test", name="活体导出")
-        assert manifest.export_mode == "snapshot"
+        assert manifest.world_id == "live-test"
         w.tick(1)  # 世界还活着,导出不毁世界
         assert w.scheduler.clock == clock_at_export + 1
 
-    inspect_world_package(out)  # 独立再验一遍包契约
+    assert inspect_world_file(out)["runnable"]      # 独立再验一遍封皮
+
     # 先查包本身(而不是 config_get —— 后者会读到这台机器的配置):零密文。
-    with zipfile.ZipFile(out) as archive:
-        state = json.loads(archive.read("world_state.json"))
-    config_entry = state["redis"].get("config") or {}
-    rows = config_entry.get("value") or {}
-    for raw in (rows.values() if isinstance(rows, dict) else []):
-        row = json.loads(raw) if isinstance(raw, str) else raw
-        assert not (row.get("is_secret") and row.get("value")), "分发包永远不含密文"
+    for line in gzip.open(out, "rt", encoding="utf-8"):
+        record = json.loads(line)
+        if record.get("kind") != "redis" or record.get("key") != "config":
+            continue
+        for raw in (record.get("value") or {}).values():
+            row = json.loads(raw) if isinstance(raw, str) else raw
+            assert not (row.get("is_secret") and row.get("value")), "分发包永远不含密文"
 
     target = fakeredis.FakeStrictRedis(decode_responses=True)
-    import_world_package(out, redis=target, world_id="restored")
+    import_world_file(out, redis=target, world_id="restored")
     with World.open("restored", redis=target, force_mock_llm=True) as w2:
         assert w2.scheduler.clock == clock_at_export, "安静尾巴不许在导出里缩水"
 
 
-def test_export_snapshot_uses_genesis_seed(tmp_path):
-    """活体导出默认带世界自己的出生种子,不是内置演示种子。"""
-    seed = {
+def test_导出的是这个世界后来的样子不是它出生时的样子(tmp_path):
+    """**v3 把"出生证明"整个去掉了。**
+
+    v2 的包里带着世界的创世种子,而那是同一份内容的第二种写法 —— 世界文件把
+    "人写的描述"和"机器的 dump"合成了一种格式之后,再单独存一份种子就是纯粹的
+    重复,而两份真相里有一份不更新是这个仓库最怕的坏法。
+
+    于是导出的语义变干净了:**一个跑过的世界导出来是它此刻的样子。** 它出生时
+    叫什么、从哪份文件建起来的,由建它的那个人留着那份文件去记 —— 那本来就是
+    那份文件的工作。
+    """
+    from _worldfile import write_seed_file
+
+    source = write_seed_file(tmp_path / "birth.cyberworld", {
         "agents": [{"id": "岚", "name": "岚", "location": "哨站", "personality": "寡言,靠得住"}],
         "locations": [{"id": "哨站", "name": "北哨站", "description": "山脊上的瞭望塔",
                        "kind": "point", "x": 0.5, "y": 0.5}],
-    }
-    seed_path = tmp_path / "seed.json"
-    seed_path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
-    out = tmp_path / "genesis.cyberworld"
+    })
+    out = tmp_path / "later.cyberworld"
 
-    with open_world_at(str(tmp_path / "w.db"), seed_path=str(seed_path), force_mock_llm=True) as w:
+    with open_world_at(str(tmp_path / "w.db"), seed_path=source, force_mock_llm=True) as w:
         assert "岚" in w.scheduler.agents
         w.tick(2)
-        w.export_snapshot(out, world_id="genesis-test", name="出生证明")
+        w.export_snapshot(out, world_id="genesis-test", name="后来的样子")
 
-    with zipfile.ZipFile(out) as archive:
-        packaged = json.loads(archive.read("world_seed.json").decode("utf-8"))
-    assert packaged == seed, "包里的种子必须是建库时真正用的那份"
+    kinds = {json.loads(line)["kind"] for line in gzip.open(out, "rt", encoding="utf-8")}
+    assert "author" not in kinds, "跑过的世界导出来不该再带作者层"
+    assert "redis" in kinds and "manifest" in kinds
 
 
 def test_orphan_conversation_closed_on_reopen(tmp_path):

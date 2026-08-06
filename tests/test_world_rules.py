@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from _worldfile import open_world_at
+from _worldfile import bundled_seed, open_world_at
 
 import json
 
@@ -26,9 +26,7 @@ from anima_world.rules import RuleError, parse_rules
 def _seed(tmp_path, *, stocks=None, rules=None, name="seed.json") -> str:
     from importlib import resources
 
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     if stocks is not None:
         seed["stocks"] = stocks
     if rules is not None:
@@ -431,7 +429,5 @@ def test_the_bundled_seed_survives_the_gate():
     import json
     from importlib import resources
 
-    seed = json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    seed = bundled_seed()
     assert parse_rules(seed.get("rules")), "内置种子的规律被自己的闸门拒了"

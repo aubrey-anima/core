@@ -34,11 +34,82 @@ def reset_current() -> None:
     _LAST[0] = None
 
 
+
+
+def bundled_seed() -> dict:
+    """内置演示世界的**作者层**,聚合回 section 字典的样子。
+
+    v3 之后 `world_seed.json` 没有了 —— 内置世界是 `demo.cyberworld`。
+    测试要问"橱窗里写了什么"就走这里,**只此一处知道它住在哪、是什么格式**。
+    """
+    from importlib import resources
+
+    from anima_world.world_file import author_records_to_seed, read_world_file
+
+    path = resources.files("anima_world") / "demo.cyberworld"
+    _, records = read_world_file(str(path))
+    return author_records_to_seed(list(records))
+
+
+def write_seed_file(path, seed: dict) -> str:
+    """把一个 section 字典写成世界文件。**测试夹具专用的最短路径。**
+
+    v3 把"人写的世界描述"和"导出的 dump"合成了一种文件格式,于是种子这个概念
+    没有了 —— 但 26 个测试文件是按 section 字典写夹具的,而 v3 换掉的是容器、
+    不是那些字段。所以这里转一道:走的是**真的**装载路径,只是入口换成同一份
+    内容的另一种写法,比逐个重写那 26 个文件诚实。
+
+    **新写的测试直接写 `author` 记录,别走这里。**
+    """
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    write_world_file(
+        path, WorldFileManifest(world_id="fixture"), seed_to_author_records(seed),
+        compress=False, checksum=False,
+    )
+    return str(path)
+
+
+def read_seed_file(path) -> dict:
+    """一个世界文件的**作者层**,聚合回 section 字典 —— `write_seed_file` 的反向。
+
+    夹具常常是"拿 bare_seed 改两条再存回去"。v3 之后那个路径上躺的是世界文件,
+    不是 JSON,所以读回来也得走这条。
+    """
+    from anima_world.world_file import author_records_to_seed, read_world_file
+
+    _, records = read_world_file(str(path))
+    return author_records_to_seed(list(records))
+
+
+def as_world_file(seed_path) -> str:
+    """`seed_path=<某个 JSON>` → 一个世界文件路径。已经是世界文件就原样返回。"""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    source = Path(seed_path)
+    if source.suffix != ".json" or not source.exists():
+        # 读不了的路径**原样透传** —— 有些测试就是要验"作者指名了一个坏文件,
+        # 引擎当场抛"。在缝里替它抛掉,验的就成了这条缝而不是引擎。
+        return str(source)
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return str(source)          # 同上:坏 JSON 交给引擎去拒
+    target = Path(tempfile.mkdtemp()) / "fixture.cyberworld"
+    return write_seed_file(target, data)
+
 def open_world_at(path, **kwargs):
     """`World.open(str(tmp_path / "w.db"), …)` 的一比一替身。"""
     from anima_world.api import World
 
     kwargs.pop("world_id", None)   # 旧 redis 测试的残参:世界名现在就是第一个参数
+    legacy = kwargs.pop("seed_path", None)
+    if legacy is not None:
+        kwargs["world_file"] = as_world_file(legacy)
     client = kwargs.pop("redis", None) or redis_for(path)
     return World.open("w", redis=client, **kwargs)
 

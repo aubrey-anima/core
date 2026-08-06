@@ -162,15 +162,19 @@ calling 支持参差。正文照样逐字流出,一个标记都不会漏给玩�
 说得清"一棵树"**是**什么,于是也说不清能对它**做**什么。声明一个**种类**,
 两件事一次说清,所有实例共享:
 
+世界写在一个 `.cyberworld` 文件里(gzip + JSONL,一行一条记录;不压缩也读得进来,
+所以手写完全可行)。声明种类就是往里加几条 `author` 记录 —— 下面为了好读换了行,
+真实文件里每条记录占一行:
+
 ```jsonc
-{
-  "kinds": [{
+{"kind":"author","type":"kind","body":{
     "id": "agent",
     "quantities": {
       "体力": {"default": 100, "visibility": "self", "unit": "点"},
       "手艺": {"default": 1.0, "visibility": "here"}
     }
-  }, {
+}}
+{"kind":"author","type":"kind","body":{
     "id": "tree",
     "gloss": "一棵树",
     "quantities": {
@@ -185,9 +189,9 @@ calling 支持参差。正文照样逐字流出,一个标记都不会漏给玩�
                "costs":    {"体力": "me_体力 - 15"}}
     },
     "prompt": {"budget": 3}
-  }],
-  "entities": [{"id": "tree:oak", "name": "门口那棵老橡树", "location": "yard"}]
-}
+}}
+{"kind":"author","type":"entity","body":{
+    "id": "tree:oak", "name": "门口那棵老橡树", "location": "yard"}}
 ```
 
 声明住在种类上,实例只带 id、名字、在哪。这一刀买到的是**有界性**:提示词里
@@ -289,8 +293,10 @@ memories / conversations / messages)搬去 MySQL。LLM 的钥匙住在这台机�
 
 ## 把世界发给别人
 
-世界打成单个 `.cyberworld` 文件 —— 一个活过的世界的快照(完整 Redis 状态,
-有 MySQL 就带上历史),连同它的创世种子作为出生证明。
+世界打成单个 `.cyberworld` 文件 —— **一个 gzip 的 JSONL,一行一条记录**:
+清单、每个 Redis 键、每条事件各一行。它同时是**手写格式**、**流转格式**和**归档格式** ——
+手写的世界只有 `author` 记录(装载时编译),跑过的世界导出来只有状态记录,
+两者同一道门,因为创世和还原本来就是同一个动作。
 
 ```bash
 anima-world world export --world-id world --output my.cyberworld \
@@ -306,6 +312,14 @@ anima-world world import my.cyberworld --world-id restored   # 目标必须是�
 anima-world world inspect my.cyberworld --json
 # {"world_id": "my-world", "engine_min": "2.0.0", …, "current_engine_version": "1.1.0",
 #  "runnable": false}          # 照样回答,退出码 0 —— 在这里拒绝就违背了这个格式的意义
+```
+
+因为它是文本,排障不需要任何工具:
+
+```bash
+zcat my.cyberworld | head -3                          # 它是什么
+zcat my.cyberworld | grep '"type":"entity_spawn"'      # 这个世界里生出过什么
+diff <(zcat a.cyberworld) <(zcat b.cyberworld)         # 两次导出差在哪
 ```
 
 ## 命令

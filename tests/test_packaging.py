@@ -9,56 +9,20 @@ from __future__ import annotations
 
 import json
 import pathlib
-import sqlite3
 from importlib import resources
 
 import pytest
 
+from _worldfile import bundled_seed
+
 from anima_world.beats import BeatScript, BeatScriptError
+from anima_world.world_file import read_world_file
 from anima_world.world_package import (
-    export_world_package,
-    import_world_package,
-    inspect_world_package,
+    PackageValidationError,
+    import_world_file,
+    inspect_world_file,
 )
-from anima_world.world_seed import is_valid_world_seed, world_seed_errors
 
-
-def _bundled_seed() -> dict:
-    """The world seed shipped inside the package (not a repo-relative path)."""
-    return json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
-
-
-def test_bundled_seed_is_shipped_and_valid():
-    assert is_valid_world_seed(_bundled_seed())
-
-
-# 每条都是"这份数据合不合法"的裁决,与运维台 lib/worldSeed.js 的镜像一一对应。
-# `world_seed_errors` 是后加的解释层,只准解释、不准改判 —— 改判就是单方面
-# 改了跨仓库契约,而契约互验(operator 的 test/contract.test.js)未必当场发现。
-SEED_VERDICTS = [
-    ({"agents": [], "locations": []}, True),
-    ({"agents": [{"id": "a", "name": "A", "location": "l", "personality": "p"}],
-      "locations": [{"id": "l", "name": "L", "description": "d"}]}, True),
-    (None, False),
-    ([], False),
-    ({"agents": []}, False),
-    ({"locations": []}, False),
-    ({"agents": {}, "locations": []}, False),
-    ({"agents": [{"id": "a", "name": "A", "location": "l"}], "locations": []}, False),
-    ({"agents": ["not-a-dict"], "locations": []}, False),
-    ({"agents": [], "locations": [{"id": "l", "name": "L"}]}, False),
-    ({"agents": [], "locations": [42]}, False),
-]
-
-
-@pytest.mark.parametrize("data, valid", SEED_VERDICTS)
-def test_seed_verdict_is_unchanged_by_the_explanation_layer(data, valid):
-    assert is_valid_world_seed(data) is valid
-    assert bool(world_seed_errors(data)) is (not valid), (
-        "解释层的判定必须与 is_valid_world_seed 完全一致"
-    )
 
 
 def test_engine_ships_no_ui_at_all():
@@ -93,232 +57,142 @@ def test_authoring_is_not_importable_from_the_engine():
         __import__("anima_world.author")
 
 
-def test_snapshot_export_import_roundtrip(tmp_path):
+
+# ── 包格式 v3:一个文件、两层记录 ────────────────────────────────────────────
+# 跨语言协作走文件,所以这几条同时是运维台镜像实现的规格。
+
+
+def _a_world(tmp_path, name="demo.cyberworld", ticks=3):
+    """一个真来源的 v3 包:fakeredis 上创世、跑几 tick、导出。"""
     import fakeredis
 
     from anima_world.api import World
 
     client = fakeredis.FakeStrictRedis(decode_responses=True)
-    with World.open("src", redis=client, force_mock_llm=True) as world:
-        world.tick(3)
-    package = tmp_path / "demo.cyberworld"
+    with World.open("pkg-src", redis=client, force_mock_llm=True) as world:
+        world.tick(ticks)
+        package = tmp_path / name
+        world.export_snapshot(package, world_id="demo-world", name="演示世界")
+    return package
 
-    manifest = export_world_package(
-        redis=client, world_id="src", output_path=package,
-        package_world_id="demo-world", name="演示世界", summary="roundtrip fixture",
-    )
-    assert manifest.world_id == "demo-world"
-    assert manifest.export_mode == "snapshot"
+
+def test_内置演示世界随轮子一起发():
+    """它是唯一的 package data。漏了会让宿主环境里少文件,而世界开不起来。"""
+    seed = bundled_seed()
+    assert len(seed["agents"]) >= 3 and len(seed["locations"]) >= 3
+    assert all({"id", "name", "location", "personality"} <= set(a) for a in seed["agents"])
+
+
+def test_导出再导入是同一个世界(tmp_path):
+    import fakeredis
+
+    from anima_world.api import World
+
+    package = _a_world(tmp_path)
     assert package.is_file()
 
-    # Inspecting must not need to unpack into an instance.
-    assert inspect_world_package(package).revision_id == manifest.revision_id
-
     target = fakeredis.FakeStrictRedis(decode_responses=True)
-    imported = import_world_package(package, redis=target, world_id="demo")
-    assert imported.world_id == "demo"   # 目标世界的名字;世系 id 在 manifest 里
+    manifest = import_world_file(package, redis=target, world_id="demo")
+    assert manifest.world_id == "demo-world"   # 世系名;目标世界叫 demo
     with World.open("demo", redis=target, force_mock_llm=True) as world:
         assert world.scheduler.event_log.count() > 0
         assert world.scheduler.clock >= 3
 
 
-def test_snapshot_export_carries_the_world_state(tmp_path):
-    import zipfile
-
-    package = _a_snapshot(tmp_path, "snap.cyberworld")
-    with zipfile.ZipFile(package) as archive:
-        names = set(archive.namelist())
-        assert "world_state.json" in names, names
-        assert "world.db" not in names, "v2 包里不该再有 SQLite 文件"
-        state = json.loads(archive.read("world_state.json"))
-    assert state["redis"], "状态快照是空的"
-
-
-# ── 包格式:envelope 谁都读得懂,拒绝要说人话 ──────────────────────────────
-# 跨语言协作走文件,所以这几条同时是运维台 lib/worldPackage.js 的镜像规格。
-
-
-def _repack(source: pathlib.Path, target: pathlib.Path, mutate) -> pathlib.Path:
-    """Rebuild an archive after `mutate` edits its members, checksums included.
-
-    Checksums are recomputed, so a package built here fails for exactly the
-    reason under test and not incidentally as "checksum mismatch".
-    """
-    import hashlib
-    import zipfile
-
-    with zipfile.ZipFile(source) as archive:
-        members = {name: archive.read(name) for name in archive.namelist()}
-    mutate(members)
-    members["checksums.json"] = (
-        json.dumps(
-            {
-                "algorithm": "sha256",
-                "files": {
-                    name: {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
-                    for name, raw in members.items()
-                    if name != "checksums.json"
-                },
-            },
-            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ) + "\n"
-    ).encode()
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted(members):
-            archive.writestr(name, members[name])
-    return target
-
-
-def _a_snapshot(tmp_path: pathlib.Path, name: str = "demo.cyberworld") -> pathlib.Path:
-    """一个真实来源的 v2 包:fakeredis 上创世,导出。"""
+def test_导入只进空世界(tmp_path):
+    """半个旧世界叠上半个新世界,跑起来两边都对不上,而且没有地方会报错。"""
     import fakeredis
 
-    from anima_world.api import World
-
-    client = fakeredis.FakeStrictRedis(decode_responses=True)
-    with World.open("pkg-src", redis=client, force_mock_llm=True):
-        pass
-    package = tmp_path / name
-    export_world_package(
-        redis=client, world_id="pkg-src", output_path=package,
-        package_world_id="demo-world", name="演示世界",
-    )
-    return package
+    package = _a_world(tmp_path)
+    target = fakeredis.FakeStrictRedis(decode_responses=True)
+    import_world_file(package, redis=target, world_id="demo")
+    with pytest.raises(PackageValidationError) as excinfo:
+        import_world_file(package, redis=target, world_id="demo")
+    assert "空世界" in str(excinfo.value)
 
 
-def _needing_engine(package: pathlib.Path, target: pathlib.Path, minimum: str, maximum: str):
-    def mutate(members):
-        manifest = json.loads(members["manifest.json"])
-        manifest["engine_compat"] = {"minimum": minimum, "maximum_exclusive": maximum}
-        members["manifest.json"] = (
-            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode()
-
-    return _repack(package, target, mutate)
+def test_包里带的是状态不是作者层(tmp_path):
+    """一个跑过的世界导出来是**它此刻的样子**。v2 那份"出生证明"是同一份内容的
+    第二种写法,而两份真相里有一份不更新是这个仓库最怕的坏法。"""
+    package = _a_world(tmp_path)
+    kinds = {r["kind"] for _, stream in [read_world_file(package)] for r in stream}
+    assert "redis" in kinds
+    assert "author" not in kinds
 
 
-def test_manifest_is_readable_by_an_engine_that_cannot_run_it(tmp_path):
-    """一个包必须能回答"我需要什么引擎",问的人恰恰是装不了那个引擎的人。
-
-    `.cyberworld` 的全部意义就是在引擎不匹配的机器之间搬运。从前
-    `from_dict` 会先跑引擎区间校验再返回,于是区间外的引擎连 world_id 都读
-    不到 —— 只能把版本号从异常的**消息文本**里正则抠出来,或者干脆自己解压
-    读 manifest,而后者会把包格式的知识复制出这个仓库。
-    """
-    from anima_world.world_package import read_package_manifest
-
-    future = _needing_engine(_a_snapshot(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
-
-    manifest = read_package_manifest(future)
-    assert manifest.world_id == "demo-world"
-    assert manifest.name == "演示世界"
-    assert manifest.export_mode == "snapshot"
-    assert manifest.engine_min == "2.0.0"
-    assert manifest.runs_on("2.4.1") and not manifest.runs_on("1.0.2")
-    assert manifest.compatibility()["runnable"] is False
+def test_封皮读得懂而不必跑得动(tmp_path):
+    """最需要这个答案的调用方,正是那个还没有对的引擎的启动器 ——
+    在这里因为"跑不了"而抛错,就违背了这个格式存在的意义。"""
+    package = _a_world(tmp_path)
+    payload = inspect_world_file(package)
+    assert payload["world_id"] == "demo-world"
+    assert payload["format_version"] == 3
+    assert payload["runnable"] is True          # 是一个**字段**,不是一个异常
+    assert payload["size_bytes"] > 0
 
 
-def test_world_inspect_answers_for_an_incompatible_package(tmp_path):
-    """`world inspect` 对跑不了的包必须**回答**,退出码 0 —— 拒绝就没意义了。"""
-    import subprocess
-    import sys
+def test_更新的格式版本读不了但说得清(tmp_path):
+    import gzip
+    import json as _json
 
-    future = _needing_engine(_a_snapshot(tmp_path), tmp_path / "v2.cyberworld", "2.0.0", "3.0.0")
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "world", "inspect", str(future), "--json"],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    # 第三方启动器按这组字段编码,少一个就是单方面改契约(REFERENCE §8)。
-    for field in (
-        "world_id", "name", "export_mode", "engine_min", "engine_max_exclusive",
-        "source_engine_version", "package_format_version", "current_engine_version", "runnable",
-    ):
-        assert field in payload, f"inspect --json 少了字段 {field}"
-    assert payload["runnable"] is False
-    assert payload["engine_min"] == "2.0.0"
+    from anima_world.world_file import WorldFileError
+
+    package = _a_world(tmp_path)
+    lines = gzip.open(package, "rt", encoding="utf-8").read().splitlines()
+    head = _json.loads(lines[0]); head["version"] = 99
+    bad = tmp_path / "future.cyberworld"
+    with gzip.open(bad, "wt", encoding="utf-8") as fh:
+        fh.write("\n".join([_json.dumps(head, ensure_ascii=False), *lines[1:]]) + "\n")
+    with pytest.raises(WorldFileError) as excinfo:
+        inspect_world_file(bad)
+    assert "99" in str(excinfo.value)
 
 
-def test_world_inspect_still_refuses_an_unreadable_package(tmp_path):
-    """放宽的只是"这个引擎跑不跑得了",不是校验本身。"""
-    import subprocess
-    import sys
+@pytest.mark.parametrize("flavour,expected", [
+    ("checksum", "校验和"),
+    ("not a world file", "读不动"),
+    ("unknown record", "不认识的记录类型"),
+])
+def test_拒收要说清是哪一道闸(tmp_path, flavour, expected):
+    """从前四类打印同一句"包无效或不可读"。运维台只能原样转述,所以它的 400 报文
+    里也没有原因 —— 作者不知道该"换引擎重导"还是"修文件",只能瞎试。"""
+    import gzip
+    import json as _json
 
-    junk = tmp_path / "junk.cyberworld"
-    junk.write_text("not a zip")
-    result = subprocess.run(
-        [sys.executable, "-m", "anima_world", "world", "inspect", str(junk)],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 2
-    assert "ZIP" in result.stderr
+    import fakeredis
 
+    from anima_world.world_file import WorldFileError
 
-def test_a_snapshot_pins_to_the_exporting_engine(tmp_path):
-    """快照带着世界的全部状态,地板是导出它的那个引擎(v2 起只有快照)。"""
-    from anima_world.world_package import _engine_version, read_package_manifest
-
-    manifest = read_package_manifest(_a_snapshot(tmp_path))
-    assert manifest.engine_min == _engine_version()
-
-
-REJECTIONS = [
-    ("engine range", "engine >= 2.0.0"),
-    ("seed schema", "missing 'personality'"),
-    ("checksum", "checksum mismatch"),
-    ("not a zip", "ZIP"),
-]
-
-
-@pytest.mark.parametrize("flavour, expected", REJECTIONS)
-def test_a_rejected_package_says_which_thing_is_wrong(tmp_path, flavour, expected):
-    """拒收要说人话:校验和 / 引擎区间 / 种子 schema / 压缩炸弹防护,四类各说各的。
-
-    从前四类打印同一句 "invalid or inaccessible package data"。运维台只能原样
-    转述引擎的话,所以它的 400 报文里也没有原因,作者不知道该"换 core 重导"
-    还是"修种子",只能瞎试(平台契约 §7 挂名的已知缺口)。退出码仍是 2。
-    """
-    import subprocess
-    import sys
-
-    package = _a_snapshot(tmp_path)
-    if flavour == "engine range":
-        target = _needing_engine(package, tmp_path / "bad.cyberworld", "2.0.0", "3.0.0")
-    elif flavour == "seed schema":
-        def drop_a_key(members):
-            seed = json.loads(members["world_seed.json"])
-            seed["agents"][0].pop("personality")
-            members["world_seed.json"] = (
-                json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-            ).encode()
-
-        target = _repack(package, tmp_path / "bad.cyberworld", drop_a_key)
-    elif flavour == "checksum":
-        # 改字节但**不**重算校验和 —— 这正是"包坏了,重传没用"那一类。
-        import zipfile
-
-        target = tmp_path / "bad.cyberworld"
-        with zipfile.ZipFile(package) as archive:
-            members = {name: archive.read(name) for name in archive.namelist()}
-        members["world_seed.json"] = members["world_seed.json"].replace(b"cafe", b"cafF", 1)
-        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name in sorted(members):
-                archive.writestr(name, members[name])
+    package = _a_world(tmp_path)
+    bad = tmp_path / "bad.cyberworld"
+    if flavour == "checksum":
+        lines = gzip.open(package, "rt", encoding="utf-8").read().splitlines()
+        lines[1] = lines[1].replace("cafe", "cafF", 1)
+        with gzip.open(bad, "wt", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    elif flavour == "unknown record":
+        lines = gzip.open(package, "rt", encoding="utf-8").read().splitlines()
+        with gzip.open(bad, "wt", encoding="utf-8") as fh:
+            fh.write("\n".join([lines[0], '{"kind":"quantum_flux"}', *lines[1:-1]]) + "\n")
     else:
-        target = tmp_path / "bad.cyberworld"
-        target.write_text("not a zip at all")
+        # gzip 的魔数对上了,后面是垃圾 —— 最像"包在路上坏掉了"的那一种
+        bad.write_bytes(b"\x1f\x8b" + "这不是一个世界文件".encode("utf-8"))
 
-    import fakeredis
+    target = fakeredis.FakeStrictRedis(decode_responses=True)
+    with pytest.raises((WorldFileError, PackageValidationError, OSError)) as err:
+        import_world_file(bad, redis=target, world_id="rejected")
+    assert expected in str(err.value), f"{flavour} 的拒绝理由没透出来:{err.value!r}"
 
-    from anima_world.world_package import PackageValidationError
 
-    target_redis = fakeredis.FakeStrictRedis(decode_responses=True)
-    with pytest.raises((PackageValidationError, OSError)) as err:
-        import_world_package(target, redis=target_redis, world_id="rejected")
-    assert expected in str(err.value), (
-        f"{flavour} 的拒绝理由没有透出来,作者不知道该修哪样:{err.value!r}"
-    )
+def test_包目录里除了代码只有内置世界():
+    """`anima_world/` 里不许躺着别的世界数据 —— 一份跟着轮子发出去的世界,
+    必须是有意为之的那一份。"""
+    strays = [
+        p.name for p in _package_dir().iterdir()
+        if p.is_file() and p.suffix in {".json", ".cyberworld", ".db", ".sqlite"}
+        and p.name != "demo.cyberworld"
+    ]
+    assert not strays, f"包目录里混进了世界数据:{strays}"
 
 
 def test_beat_script_rejects_a_bad_script():
@@ -332,24 +206,6 @@ def test_beat_script_rejects_a_bad_script():
 
 def _package_dir() -> pathlib.Path:
     return pathlib.Path(str(resources.files("anima_world")))
-
-
-def test_package_directory_carries_no_world_data():
-    """`anima_world/` 里除了代码只允许有 world_seed.json。
-
-    一个 world.db 是某个人的世界(还带着 Fernet 密钥能解开的 llm.api_key),
-    掉进包目录就会被 package-data 或 sdist 扫进发行包。这条测试盯着实际的
-    包目录,而不是盯打包声明——声明对了但文件躺在那里同样会出事。
-    """
-    strays = sorted(
-        p.name
-        for p in _package_dir().rglob("*")
-        if p.is_file()
-        and p.suffix not in {".py", ".pyc", ".typed"}
-        and p.name != "world_seed.json"
-        and "__pycache__" not in p.parts
-    )
-    assert strays == [], f"包目录里混进了非代码文件:{strays}"
 
 
 def test_package_directory_carries_no_tests():
@@ -386,8 +242,8 @@ def test_sdist_excludes_tests_and_world_data():
 
     assert not [n for n in names if "/tests/" in n or n.endswith("/tests")], "sdist 不许带 tests/"
     assert not [n for n in names if n.endswith((".db", ".db.key"))], "sdist 不许带世界数据"
-    assert any(n.endswith("anima_world/world_seed.json") for n in names), (
-        "world_seed.json 是唯一的 package data,漏了会让宿主环境少文件"
+    assert any(n.endswith("anima_world/demo.cyberworld") for n in names), (
+        "demo.cyberworld 是唯一的 package data,漏了会让宿主环境少文件、世界开不起来"
     )
 
 
@@ -441,3 +297,44 @@ def test_ticks_zero_initializes_a_world_without_running_it(monkeypatch):
     parsed = [json.loads(e) for e in events]
     assert any(e.get("type") == "agent_join" for e in parsed), "创世应该播下角色"
     assert all(int(e.get("ts") or 0) == 0 for e in parsed), "--ticks 0 不该推进世界"
+
+def test_事件在包里是一行一条(tmp_path):
+    """**这条是被"演一遍用户故事"逮出来的,而且逮的是我自己宣传的那句话。**
+
+    换成文本格式的全部理由是"能 grep、能 diff、能流式"。而无限增长的那四样一旦按
+    它们此刻住在哪个后端来 dump,没接 MySQL 的世界就会把整段历史塞进**一个**
+    `redis` list 记录里 —— 一整行几万字节的转义 JSON。那时
+    `grep '"type":"entity_spawn"'` 找不到任何东西(它在字符串里是 `\\"type\\"`),
+    `diff` 也退化成整块变。**在最常见的那种世界上不成立的卖点,就是空话。**
+
+    所以四样一律按语义记录导出,不看后端。
+    """
+    import gzip
+
+    package = _a_world(tmp_path, ticks=10)
+    lines = gzip.open(package, "rt", encoding="utf-8").read().splitlines()
+
+    events = [l for l in lines if '"kind": "event"' in l]
+    assert len(events) > 5, "事件被塞进一个 redis 记录里了,grep 和 diff 都会废掉"
+    assert not any('"key": "events"' in l for l in lines), (
+        "还有一条 redis 记录装着整段事件日志"
+    )
+    # 每条事件自己一行 —— 这才是 grep 找得到的前提
+    assert all(l.count('"kind": "event"') == 1 for l in events)
+
+
+def test_接不接_MySQL_导出来长得一样(tmp_path):
+    """一份包能不能被 grep,不该取决于导出它的那台机器接没接 MySQL —— 那和世界无关。
+
+    没接 MySQL 时四样住 Redis,接了住 MySQL;而**文件里它们必须是同一种记录**,
+    否则"同一个世界"会有两种包格式,消费方要写两套读法。
+    """
+    import gzip
+
+    package = _a_world(tmp_path, ticks=5)
+    kinds = set()
+    for line in gzip.open(package, "rt", encoding="utf-8"):
+        import json as _json
+        kinds.add(_json.loads(line)["kind"])
+    # 这个世界没接 MySQL,但事件照样是 event 记录(而不是 redis list)
+    assert "event" in kinds

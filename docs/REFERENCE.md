@@ -2,7 +2,7 @@
 
 > 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
-> 对应引擎版本:2.0(世界住 Redis,包格式 2)。首发已并入原 [ROADMAP](ROADMAP.md)
+> 对应引擎版本:2.0(世界住 Redis,世界文件格式 3)。首发已并入原 [ROADMAP](ROADMAP.md)
 > 2.0–5.0 的四大机制,详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
 > 想先理解"为什么是这样",读 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
@@ -1047,7 +1047,7 @@ secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的
 - `anima_world/__init__.py` 的 `__version__` 是**唯一版本源**(pyproject 动态读取)
 - **改 Redis 键形状 / MySQL 表形状 = 改跨仓库契约**,和改包格式同一级别
 - `anima-world contract --json` 自报 `storage` 段(后端、键前缀、MySQL 表名与表前缀)
-  与包格式版本(**2**),镜像端照它对齐
+  与世界文件格式版本(**3**),镜像端照它对齐
 - `anima_world.api` 的函数面**只加不改** —— 宿主应用的代码依赖它
 
 `tests/test_version_contract.py` 守这两条(版本单一来源、`contract --json` 报包格式)。
@@ -1069,7 +1069,7 @@ secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的
 
 | | 跨得过大版本吗 | 靠什么 |
 |---|---|---|
-| 作者写的种子(`world_seed.json`) | **能** | 它是版本中立的 JSON,schema 是跨仓库镜像契约 |
+| 作者写的世界文件(只含 `author` 记录) | **能** | 它是版本中立的 JSONL,记录形状是跨仓库镜像契约 |
 | `.cyberworld` 包 | **不能** | 里面是那一版键形状的类型化 dump |
 | 事件历史、积累的记忆、关系状态 | **不能** | 它们只活在那些键(或 MySQL 表)里 |
 
@@ -1096,9 +1096,9 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `World.open(world_id, *, redis, mysql=None, seed_path=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。空库首启从 seed 播种(缺省内置种子),并把这份种子存进 `:meta` 当出生证明;已有世界的 seed 被忽略并警告;**显式指定**的坏 seed / 坏 beats 当场抛 `WorldSeedError` / `BeatScriptError`。开机会收割上次崩溃遗留的 open 会话(补摘要、发事件) |
+| `World.open(world_id, *, redis, mysql=None, world_file=None, beats_path=None, agents=None, force_mock_llm=False)` | 打开(或创建)一个世界。**创世与还原是同一个动作**:往这个前缀装一个 `world_file`(缺省内置的 `demo.cyberworld`)—— 文件里的**状态层**直接落键,**作者层**走编译;已有世界的作者层被忽略并警告(状态层不受此限)。**显式指定**的坏文件 / 坏 beats 当场抛 `WorldFileError` / `BeatScriptError`。开机会收割上次崩溃遗留的 open 会话(补摘要、发事件) |
 | `world.close(wait=True)` | 停时钟、排干 LLM 线程池。幂等;`with World.open(...) as world:` 自动调用。事件每 tick 已落盘,退出时不额外写 |
-| `world.export_snapshot(output_path, *, world_id, name, seed_path=None, beats_path=None, …)` | **活体导出**:世界不停,当场打出完整 snapshot 包。先刷检查点,持世界锁 `dump_world_state` 拷一份一致快照(锁只挡这一瞬),打包在锁外;secret 行当场剥除。种子按 显式参数 → `:meta` 出生种子 → 内置种子(记警告) 解析。返回 `WorldPackageManifest` |
+| `world.export_snapshot(output_path, *, world_id, name, beats_path=None, …)` | **活体导出**:世界不停,当场打出一个 `.cyberworld`(v3)。先刷检查点,持世界锁**流式 dump**(锁只挡 dump 那一段,压缩落盘在锁外);secret 行当场剥除,不带 `lock` 与占用标记。导出的是**状态层** —— 一个跑过的世界是它此刻的样子,不带"出生证明"。返回 `WorldFileManifest` |
 
 交互即检查点:`record_chat_turn` / `player_action` / `player_buy` / `close_conversation`
 结束时会顺手把 needs / 反思水位 / 时钟检查点刷进存储 —— 玩家碰过世界的那一刻,存储
@@ -1513,33 +1513,28 @@ anima-world world inspect my.cyberworld [--json]          # 它需要什么引�
 
 #### `inspect` 跑不了的包也要回答
 
-**读封皮不需要先能跑它**。`inspect` 只做与版本无关的校验(归档安全、`checksums.json`
-与归档一一对应、`manifest.json` 的摘要对得上、manifest 结构合法),然后把兼容性作为
-**数据**给出:`runnable: false` + 退出码 **0**。
+**读封皮不需要先能跑它**。`inspect` 只读**第一行**(manifest),然后把兼容性作为
+**数据**给出:`runnable: false` + 退出码 **0**。一个 5 GB 的世界也是一次 open 加一次
+readline。
 
 这条是格式存在的意义:`.cyberworld` 就是用来在引擎不匹配的机器之间搬运的,拒绝回答
-"你需要什么"给最需要问的那个调用方,方向是反的。只有 `package_format_version` 允许
-硬拒解析 —— 那是封皮自己的版本。归档读不了(不是 ZIP、校验和不符)照旧退出码 2。
+"你需要什么"给最需要问的那个调用方,方向是反的。只有**格式版本比这个引擎认得的更新**
+才允许硬拒 —— 旧引擎猜新格式,猜成什么样都不算数。文件读不动(不是世界文件、校验和
+不符)照旧退出码 2。
 
-拒收时 stderr 按类别给一句人话,四类各说各的:校验和不符(包坏了,重传没用,重新
-导出)/ 引擎区间不匹配(换匹配的 core 重导)/ 种子不合 schema(逐条点名哪个 agent
-缺哪个键)/ 归档防护触发。
+拒收时 stderr 按类别给一句人话,各说各的:校验和不符(文件在路上被改过或截断,重传
+没用)/ 格式版本太新(装个新些的引擎)/ 目标世界非空(导入只进空世界)/ 记录坏了
+(点名第几行、哪条记录)。
 
-#### 引擎兼容区间怎么算
+#### 引擎兼容怎么算
 
-导出时盖章,`[engine_min, engine_max_exclusive)`。v2 只有 snapshot 一种模式:
+导出时把**导出它的引擎版本**盖进 manifest 的 `engine_min`。`inspect` 拿它和当前引擎
+比一下,给出 `runnable`。
 
-| `engine_min` | `engine_max_exclusive` |
-|---|---|
-| **导出它的引擎截到次版本**(`{major}.{minor}.0`) | 下一个大版本 |
-
-下限取次版本而不是补丁版本,因为 `world_state.json` 里是引擎写进 Redis 的那些键,
-**它的形状随次版本演进**,而补丁版本按定义不改形状 —— 拿 2.0.3 导出的包在 2.0.0 上
-是能开的,拿 2.1 导出的包不该在 2.0 上开。
-
-1.x 曾有一种只装 `world_seed.json` 的 `template` 模式,它盖的是当前大版本的地板。
-2.0 删掉了:种子本来就该直接分发(它是版本中立的 JSON,schema 是跨仓库镜像契约),
-把它塞进一个带引擎区间的容器里只是给一份不需要引擎的数据凭空加了一道版本闸。
+按硬钉版纪律,**世界钉死在生成它的引擎版本上,不做跨版本迁移** —— 所以这里不需要
+一个上界区间:能不能挂由装载时的格式版本闸兜底,而"该用哪个引擎"由 `engine_min`
+直说。v1/v2 那套 `[engine_min, engine_max_exclusive)` 双端区间连同 `template` 模式
+一起退役了。
 
 ---
 
@@ -1657,7 +1652,7 @@ anima-world world inspect my.cyberworld [--json]          # 它需要什么引�
 
 | 文件 | 说明 |
 |---|---|
-| `world_seed.json` | 种子,字段见下表。**内置**种子畸形时降级到硬编码默认(不阻断启动);经 `--seed`/`seed_path` 显式指定的种子畸形则当场报错 —— 种子只读进空世界一次,静默降级不可挽回 |
+| `demo.cyberworld` | **内置演示世界**(v3 世界文件,纯文本 JSONL,可 diff)。它是本包**唯一的 package data**。畸形时降级到硬编码默认(装坏了的包也得能开机);经 `--world-file`/`world_file=` 显式指定的文件畸形则当场报错 —— 作者层只读进空世界一次,静默降级不可挽回 |
 | `beats.json` | 可选节拍脚本(见 §9) |
 
 密钥也不在世界里:见 §2.11(机器配置,`~/.anima-world/config.json`)。
@@ -1765,24 +1760,52 @@ stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身
 - **种子一碰物质层,内置演示物品就整体让位**(空表才种的规矩)。一个自带怀表和过冬煤
   的世界不该再被塞进三份演示咖啡 —— 半真半假的货架比空货架更难查。
 
-**`.cyberworld` 包** = 受严格约束的 ZIP:
+**`.cyberworld` 世界文件**(v3)= **一个 gzip 的 JSONL**,一行一条记录:
 
+```jsonc
+{"kind":"manifest","version":3,"world_id":…,"name":…,"engine_min":…}   // 第一行,必须
+{"kind":"author","type":"agent","body":{…}}      // 作者层:装载时**编译**
+{"kind":"redis","key":"clock","type":"string","value":"8640"}          // 状态层:直接落键
+{"kind":"event","seq":1,"ts":0,"type":"payment","payload":{…}}         // 事件,一行一条
+{"kind":"mysql","table":"memories","row":{…}}    // 无限增长的另外三张表
+{"kind":"checksum","sha256":…}                   // 最后一行,可选
 ```
-manifest.json      # 格式版本(**2**)、world_id、revision_id、mode、引擎兼容区间、名称/简介/题材、文件清单
-checksums.json     # sha256 逐文件校验(algorithm 必须 sha256,清单必须与归档一致)
-world_seed.json    # 必有
-world_state.json   # Redis 键的**类型化 dump**(+ 可选的 MySQL 段);secret 行在 dump 时剥除
-beats.json         # 可选
-assets/…           # 可选,扩展名白名单
-```
 
-v1 的 `world.db` 成员在 v2 换成了 `world_state.json` —— 它按键记类型(string / hash /
-list / zset),因为一份不带类型的 dump 还原不回 Redis,而**还原错了不会报错**。
-`lock` 键与占用标记(`owner_pid` / `owner_host`)不进包:它们是那台机器上的运行时状态。
+**一个文件,两层记录 —— 于是创世和还原是同一个动作。** v2 之前"人写的世界描述"
+(`world_seed.json`)和"导出的 dump"(`world_state.json`)是两种格式,描述同一个世界时
+长得完全不一样(种子写 `duties`,dump 里是编译好的 `bt_nodes`)。合成一个之后:
 
-安全约束:压缩后 ≤256MB、解压 ≤512MB、≤128 个文件、拒绝 zip 炸弹/符号链接/路径穿越/
-加密成员/重复名。导出是**确定性 ZIP**(固定时间戳/权限/排序,同输入同字节),先自检再
-原子落地;导入先校验、再往一个**空的** world_id 上写那些键。
+- **手写的世界** = 只有 `author` 记录;**跑过的世界导出来** = 只有 `redis`/`event`/`mysql` 记录
+- 把一份只含 `author` 记录的文件装进一个**已有**的世界 = **一次编辑**
+- 「种子」这个概念、以及随世界携带的「出生证明」(`:meta.world_seed`)一起没有了 ——
+  它们是同一份内容的第二种写法,而两份真相里有一份不更新是这个仓库最怕的坏法
+
+**每种记录的载荷都收在一个字段里**(`body` / `value` / `payload` / `row`),不平铺展开。
+这条是被一次真碰撞逼出来的:`locations` 条目自己带 `kind`(嵌套地图的几何类型),
+平铺进信封会把记录类型**静默覆盖**掉。收进 `body` 让它不可表达。
+
+`author` 记录的 `type` 与 section 一一对应:`agent` / `location` / `kind` / `entity` /
+`rule` / `item` / `stock` / `relation` / `memory` / `visibility` / `place`,外加三个
+**合并而不是追加**的对象型:`config` / `world_setting` / `mock_narration`。
+**不认识的 type 与不认识的记录类型都当场报错,不跳过** —— 跳过等于安静地少装一半世界。
+
+`lock` 键与占用标记(`owner_pid` / `owner_host`)不进包,`is_secret` 的配置行在 dump 时
+剥除:包是**分发物**。
+
+**无限增长的那四样一律按语义记录导出**(`event` / `mysql`),不看它们此刻住在 Redis 还是
+MySQL。两个理由都是硬的:① 一行一条 —— 塞进一个 `redis` list 记录就是一整行几万字节的
+转义 JSON,`grep` 找不到、`diff` 退化成整块变,而那三条正是换文本格式的全部理由;
+② 同一个世界换个后端导出来必须长得一样,否则消费方要写两套读法。
+
+**压缩与否只看头两个字节,不看扩展名。** 写出去永远是 gzip(且 `mtime=0`,同样的世界
+写两次得到同样的字节),读进来允许裸 JSONL —— 手写一个世界不该被逼着先 gzip,
+而内置的 `demo.cyberworld` 因此以**纯文本**进仓库,可 diff、可 review,它同时是这个
+格式的说明书。
+
+安全约束**从三个乘起来的上限简化成一条流三个数**:解压后 ≤512MB、≤500 万条记录、
+单行 ≤32MB。zip 的成员白名单、压缩比检测、符号链接/路径穿越/加密成员那一整套不再需要 ——
+一个 JSONL 里没有成员这种东西。导出**流式**(一个跑了两年的世界不必整份进内存),
+导入先验再往一个**空的** world_id 上写。
 
 ## 9. 节拍脚本格式
 
@@ -1849,8 +1872,8 @@ tick 还会再试。`co_located` 用的是活黑板而**不是**投影 —— �
 **不建世界就检查**:
 
 ```bash
-anima-world validate seed  world_seed.json  [--json]
-anima-world validate beats beats.json --seed world_seed.json  [--json]
+anima-world validate world demo.cyberworld  [--json]
+anima-world validate beats beats.json --world-file demo.cyberworld  [--json]
 ```
 
 **错误退出码 2,提醒退出码 0** —— 这个区分是有意的。引用完整性(角色/地点存不存在)

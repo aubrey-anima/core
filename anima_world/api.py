@@ -55,7 +55,6 @@ from anima_world.locations import DEFAULT_POINTS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
 from anima_world.types import AgentState, Projection
-from anima_world.world_package import WorldPackageManifest, export_world_package
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
 
 logger = logging.getLogger(__name__)
@@ -773,18 +772,20 @@ class World:
         *,
         redis: Any,
         mysql: Any = None,
-        seed_path: str | None = None,
+        world_file: str | None = None,
         beats_path: str | None = None,
         agents: int | None = None,
         force_mock_llm: bool = False,
     ) -> "World":
         """打开(或创建)一个世界。**世界住在 Redis 里,`world_id` 是它的名字。**
 
-        空世界首启时从 seed 播种(缺省用内置种子);已有世界的 seed 会被忽略并
-        警告。坏 beats 脚本在这里当场抛 BeatScriptError,不流到运行期。
+**创世与还原是同一个动作**:往这个前缀里装一个 `world_file`(缺省是内置的
+        演示世界)。文件里的**状态层**直接落键,**作者层**走编译(`duties` → 行为树、
+        `money` → `payment` 事件);已有世界的作者层会被忽略并警告 —— 它只会被读进
+        一个空世界。坏 beats 脚本在这里当场抛 BeatScriptError,不流到运行期。
 
         创世与重连共用一条纪律:**只填缺,不覆盖**(黑板 seed_missing、时钟
-        setnx、每个 seed 函数空 store 才播)—— 接一个已经在跑的世界不许把她
+        setnx、每个播种函数空 store 才播)—— 接一个已经在跑的世界不许把她
         按回原点。`world_id` 进 Redis 键名:一个 Redis 实例上跑十个世界是常态,
         键撞车的后果是两个世界的角色共用一个脑子。
 
@@ -800,7 +801,7 @@ class World:
             redis,
             mysql=mysql,
             n_agents=agents,
-            seed_path=seed_path,
+            world_file=world_file,
             beats_path=beats_path,
             force_mock_llm=force_mock_llm,
         )
@@ -840,53 +841,53 @@ class World:
         *,
         world_id: str,
         name: str,
-        seed_path: str | Path | None = None,
         beats_path: str | Path | None = None,
         summary: str = "",
         genre: str = "",
         setting: str = "",
         theme: str = "default",
-    ) -> WorldPackageManifest:
-        """活体导出:世界不停,当场打出一个完整的 snapshot 包。
+    ) -> Any:
+        """活体导出:世界不停,当场打出一个 `.cyberworld`(v3,gzip JSONL)。
 
-        先刷检查点(needs/反思水位),再持世界锁 dump 一份一致的状态快照 ——
-        锁只挡 dump 那一瞬,打包在锁外进行。种子按显式 seed_path →
-        `:meta` 里的创世出生证明 → 内置种子(记警告)解析(world_package 内部)。
-        分发纪律不变:包里零 secret(config 行里 is_secret 的字段在 dump 时剥除)。
+        先刷检查点(needs / 反思水位),再**持世界锁流式 dump** —— 锁只挡 dump
+        那一段,压缩与落盘在锁外。导出的是**状态层**:一个跑过的世界没有作者层,
+        它的"本来是什么样"已经被它后来的样子取代了。
+
+        分发纪律不变,而且它们是安全条款不是格式细节:包里**零 secret**
+        (`is_secret` 的配置行在 dump 时剥除)、不带 `lock`(JSON 存不了 TTL,
+        装回去就是一把死锁)、不带 `owner_pid`/`owner_host`(装进新世界等于让一个
+        还没人跑过的世界自称"有人在跑")。
         """
-        from anima_world.world_package import dump_world_state
+        from datetime import datetime, timezone
+
+        import anima_world
+        from anima_world.world_file import WorldFileManifest, write_world_file
+        from anima_world.world_package import dump_world_records
 
         if self._closed:
-            raise RuntimeError("world is closed; use export_world_package offline instead")
+            raise RuntimeError("world is closed")
         scheduler = self.scheduler
         scheduler.checkpoint()
         world_lock = getattr(self, "_world_lock", None)
         mysql_conn = getattr(scheduler, "mysql_conn", None)
+        manifest = WorldFileManifest(
+            world_id=world_id, name=name, summary=summary, genre=genre,
+            setting=setting, theme=theme,
+            engine_min=anima_world.__version__,
+            source_engine_version=anima_world.__version__,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
         if world_lock is not None:
             world_lock.acquire()
         try:
             with scheduler._lock:
-                state = dump_world_state(
+                write_world_file(output_path, manifest, dump_world_records(
                     redis=scheduler.redis, world_id=scheduler.world_id, mysql=mysql_conn,
-                )
+                ))
         finally:
             if world_lock is not None:
                 world_lock.release()
-        return export_world_package(
-            redis=scheduler.redis,
-            world_id=scheduler.world_id,
-            seed_path=seed_path,
-            beats_path=beats_path,
-            output_path=output_path,
-            package_world_id=world_id,
-            name=name,
-            summary=summary,
-            genre=genre,
-            setting=setting,
-            theme=theme,
-            mysql=mysql_conn,
-            state=state,
-        )
+        return manifest
 
     # ── 时钟 ────────────────────────────────────────────────────────────────
 

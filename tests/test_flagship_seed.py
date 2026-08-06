@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from _worldfile import open_world_at
+from _worldfile import bundled_seed, open_world_at
 
 import json
 from importlib import resources
@@ -22,9 +22,7 @@ from anima_world.world_seed import is_valid_world_seed
 
 
 def _bundled_seed() -> dict:
-    return json.loads(
-        (resources.files("anima_world") / "world_seed.json").read_text(encoding="utf-8")
-    )
+    return bundled_seed()
 
 
 @pytest.fixture
