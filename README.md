@@ -261,10 +261,83 @@ break of character as blurting out a mine's reserves, except it leaves no trace 
 prompt at all. So that branch is warned about once at startup and reads `None` forever
 after, rather than silently using whatever she saw last time she walked past.
 
-Ask the CLI what a world actually declares:
+**Tools, materials, and time are costs too.** Gibson's own example is an *axe* — something
+she carries — and that could not appear in a declaration at all when `requires` could only
+read quantities. `have_<item>` reads how many of a thing she is carrying (from the ledger
+projection; nothing carried reads as **0**, not as an error — someone who never owned
+shears and someone who just put them down are in the same position). `consumes` spends
+materials and brings its own *you must have these* gate, so you never write the `requires`
+line twice; writing it twice is what lets you write it once, and a world that only wrote
+`consumes` would let her finish the job with a bag of fertiliser that does not exist —
+stock does not go negative, so the books would look fine.
+
+`duration` is the one cost that cannot be slept off. Quantities come back, materials can be
+bought, but a stretch of time simply has to pass — which is why growing a new thing has to
+hang off it. Ten months of pregnancy is not a gate because it is expensive; it is a gate
+because it is long.
+
+```jsonc
+"make": {"duration": 8640,      // ticks; 0 (the default) means instantaneous
+         "occupies": false,     // whether she's tied up meanwhile; default true
+         "consumes": {"timber": 3}, "costs": {"stamina": "me_stamina - 40"},
+         "set": {"quality": "quality + 1"}}
+```
+
+The cost is paid **up front** and the effect lands **when the time is up** — paying at the
+end would make starting-and-abandoning free, and a promise you can walk away from without
+a trace is not a promise. The gates are checked **only at the start**: being refused after
+ten months, with the price already paid, is a failure she had no way to prevent, and a
+failure you cannot prevent teaches nothing. `occupies` is a property of the *task*, not a
+state of hers — building a chair ties her up, carrying a child does not, and both take ten
+months. While she is tied up, any affordance call is refused with `reason == "busy"`: a
+fourth class, because she should wait for what she is holding rather than try another tree
+or go rest. Ask `world.engagements()` what anyone is in the middle of.
+
+**Verbs belong to the author.** They used to be a closed set of ten, justified by "the
+engine has to implement the effect" — which stopped being true once `set`/`costs`/`consumes`
+made effects data. Declare `酿` or `brew` and it exists; misspell it elsewhere and the world
+still refuses to start. An ASCII verb must carry a `label`, because what she reads in her
+prompt is those characters and "you may: look at it, brew" is noise she then has to act on.
+
+**The world can grow new things, and lose them.** Until 2.0 `entities` was a closed set
+fixed at genesis: a tree could not be planted, a cup could not be broken. A world that
+cannot grow anything new is a diorama — and *laying out entities by rule* is what
+generating a world actually is.
+
+```jsonc
+"raise_seedling": {"duration": 24, "when": ["height >= 3"],
+                   "requires": ["me_stamina >= 20"], "consumes": {"fertiliser": 1},
+                   "costs": {"stamina": "me_stamina - 20"},
+                   "spawn": {"kind": "sapling", "name": "a new seedling"}},
+"pull_up": {"costs": {"stamina": "me_stamina - 5"}, "destroys_target": true}
+```
+
+**Spawning must cost something, and the author decides what.** Declaring `spawn` or
+`destroys_target` without any of `costs` / `consumes` / `duration` refuses to start the
+world. The engine does not hand out quotas instead: a quota is the *engine's* ceiling, and
+when she hits it the refusal means nothing inside the world — "this world allows at most a
+hundred trees" is not something she can understand or act on, and she will never learn it.
+A cost is the *world's* reason: she knows why she can't, and what she'd have to replenish
+first. But a cost only bounds the *rate*, never the *stock* — stamina refills nightly, so a
+hundred days is a hundred children. Real worlds bound themselves by birth and death
+together, which is why `destroys_target` shipped in the same round.
+
+**Every birth is checked, and a failed check is not born.** A thing created at runtime does
+not go through genesis, so none of the genesis gates apply to it. Without the check a
+newborn can look perfectly fine in `entities` while not one of its quantities landed — its
+conditions then evaluate against zero, its rules compute nothing, and both simply fail to
+happen, quietly, until someone notices months later that the tree never grew. So the engine
+dry-runs it: are the quantities there, does every affordance produce a *nameable* outcome,
+is it actually present where its visibility claims. Nameable, not successful — "not ripe
+yet" and "she can't" are the world talking normally. Anything that fails is rolled back
+whole and reported as `entity_stillborn`, and the cost is *not* refunded: she really did
+pay, and refunding would erase the author's bug from the books too.
+
+Ask the CLI what a world actually declares, or whether what's in it is alive:
 
 ```bash
 anima-world ontology --world-id world --json    # kinds, quantities, verbs, live values
+anima-world ontology --world-id world --check   # run the birth check over every entity
 ```
 
 The verb table is only obtainable here. `stocks` gives you numbers, and a number does not

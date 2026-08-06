@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from anima_world.ontology import AFFORDANCE_VERBS
 from anima_world.tools.base import BODY, ToolCallError, ToolContext, ToolResult, tool
 
 logger = logging.getLogger(__name__)
@@ -149,9 +148,8 @@ def seek_company(ctx: ToolContext, params: dict) -> ToolResult:
     return _do(ctx, "idle_social", {})
 
 
-# 她提示词里读到的是"照料",不是 `tend` —— 中文提示词里的英文动词是噪音。所以
-# 反过来这张表也要在,不然她照着提示词说"照料",引擎回一句"不认识这个动词"。
-_VERB_ALIASES = {label: verb for verb, label in AFFORDANCE_VERBS.items()}
+# 她照着提示词说"照料"而不是 `tend`,而人话反查现在归 `Ontology.affordance_of`:
+# 动词放开之后,自造动词的人话住在**声明**里,引擎手上没有那张表可查。
 
 
 @tool(
@@ -175,7 +173,6 @@ def interact(ctx: ToolContext, params: dict) -> ToolResult:
         raise ToolCallError("没说对什么东西")
     if not verb:
         raise ToolCallError("没说做什么")
-    verb = _VERB_ALIASES.get(verb, verb)
     outcome = ctx.runtime.interact_with(ctx.agent_id, target, verb)
     if not outcome.get("ok"):
         # 世界说"这会儿不行"(果子还没熟)。不是失败,是没成 —— 照实报。

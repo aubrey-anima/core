@@ -237,6 +237,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ontology_cmd.add_argument("--kind", default=None, help="只看这一类(如 tree)")
     ontology_cmd.add_argument("--builtin", action="store_true",
                               help="连内置种类一起列(agent / location / world / player)")
+    ontology_cmd.add_argument(
+        "--check", action="store_true",
+        help="逐个跑一遍出生自检:量落地了吗、能力算得出结论吗、在场吗(有问题时退出码 1)",
+    )
     ontology_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
     run = sub.add_parser(
@@ -818,7 +822,8 @@ def build_serve_scheduler(
         RedisOntologyStore, RedisReflectionStore, RedisRulesStore, RedisStockStore,
         RedisVisibilityStore,
         clock_key, current_action_key, decode_action, encode_action, events_key,
-        drop_stale_copies_for_mysql, durability_warning, meta_rows, plans_key, transit_key,
+        drop_stale_copies_for_mysql, durability_warning, engagements_key, meta_rows,
+        plans_key, transit_key,
     )
 
     beat_script = BeatScript.load(beats_path) if beats_path is not None else None
@@ -991,6 +996,9 @@ def build_serve_scheduler(
         redis, current_action_key(world_id), encode=encode_action, decode=decode_action,
     )
     scheduler._plans = RedisDict(redis, plans_key(world_id))
+    # 在做的长过程:椅子做到一半、孩子怀了六个月。**真状态,不是缓存** ——
+    # 内存态等于每次重启都流产一次。
+    scheduler._engaged = RedisDict(redis, engagements_key(world_id))
     # 需求 / 小团体 / 反思水位 / 经济。
     scheduler.needs_store = RedisNeedsStore(redis, world_id)
     scheduler.clique_store = RedisCliqueStore(redis, world_id)
@@ -1000,9 +1008,20 @@ def build_serve_scheduler(
     scheduler.stock_store = stock_store
     scheduler.visibility_store = visibility_store
     with shared_lock:
-        _seed_world_rules(rules_store, world_seed)
-        _seed_stock_visibility(world_seed, visibility_store)
-        _seed_stock_places(world_seed, visibility_store)
+        # **播种是创世那一刻的事,不是"这张表恰好还空着"的事。**
+        #
+        # 按空表判断,只在第一次开机时和创世重合。之后每一次开机,手里这份种子
+        # (缺省是包自带的橱窗)都会去填当初作者**有意留空**的那几张表 —— 而规律
+        # 是这个世界的物理法则:一个作者写了 `kinds` 却没写 `rules` 的世界,重开一次
+        # 就会被塞进橱窗那条"树会长高"的规律,而它引用的 `tree` 这个种类在这个世界
+        # 里根本不存在。下场不是算错,是**这个世界从此打不开**(`resolve` 当场拒绝)。
+        # 创作台的整套流程都是自定义种子,所以这条一撞一个准。
+        #
+        # `_seed_ontology` 早就是这么判的(`fresh_world=`),这里只是把同一条补齐。
+        if fresh_world:
+            _seed_world_rules(rules_store, world_seed)
+            _seed_stock_visibility(world_seed, visibility_store)
+            _seed_stock_places(world_seed, visibility_store)
         _seed_ontology(ontology_store, world_seed, fresh_world=fresh_world)
         scheduler.world_rules = _load_world_rules(rules_store)
         # 本体的解析在规律之后:它要拿规律去查引用。声明过种类的世界从此走闸,
@@ -1123,7 +1142,9 @@ def build_serve_scheduler(
             # Only re-fold here: genesis events were just appended above,
             # so the projection Scheduler.__init__ built (from the
             # then-empty log) is now stale and must be recomputed once.
-            scheduler._memory_projection = project_events(persisted)
+            # **走 reset_projection,别直接赋值**:水位要跟着一起挪,不然下一次
+            # `catch_up_projection` 会把创世事件再折一遍(钱和随身物品当场翻倍)。
+            scheduler.reset_projection(persisted)
         scheduler.load_persisted_events(persisted)
         if memory_store is not None and trigger_engine is not None:
             _rebuild_memories(memory_store, trigger_engine, persisted)
@@ -2173,8 +2194,24 @@ def run_ontology(args: argparse.Namespace) -> int:
     try:
         kinds = world.kinds()
         entities = world.entities(args.kind)
+        checked = world.check_entity() if getattr(args, "check", False) else None
     finally:
         world.close()
+
+    if checked is not None:
+        bad = [row for row in checked if not row["ok"]]
+        if args.as_json:
+            print(json.dumps({"checked": checked}, ensure_ascii=False, indent=2))
+        else:
+            for row in bad:
+                for problem in row["problems"]:
+                    print(f"✗ {problem}")
+            print(f"{world_id}:查了 {len(checked)} 个,{len(bad)} 个有问题")
+            if not bad:
+                # 查过了要说出来。什么也不打印和"没查"长得一模一样。
+                print("(量都落地了、能力都算得出结论、该在场的都在场)")
+        # 有问题时退出码 1 —— 这条命令于是能进 CI,和 `--ticks 0` 当校验器同一个用法。
+        return 1 if bad else 0
 
     if args.kind is not None:
         kinds = [k for k in kinds if k["id"] == args.kind]
@@ -2219,7 +2256,16 @@ def run_ontology(args: argparse.Namespace) -> int:
         for a in kind["affordances"]:
             gate = ("  仅当 " + " 且 ".join(a["conditions"])) if a["conditions"] else ""
             deed = "改变世界" if a["changes_world"] else "只是看看"
-            print(f"    能力 {pad(a['verb'], 14)}{deed}{gate}")
+            # 动词放开之后 id 和人话可以不一样。两个都印:作者调的是 id,
+            # 她读到的是人话,而排错时要对得上的正是这两者。
+            word = a["verb"] if a.get("label", a["verb"]) == a["verb"] else \
+                f"{a['verb']}({a['label']})"
+            print(f"    能力 {pad(word, 14)}{deed}{gate}")
+            if a.get("duration"):
+                # 时长要印出来,而且要连着说占不占用她 —— 一个 8640 tick 的能力
+                # 占不占用,决定的是这个世界在这段时间里还有没有她。
+                busy = "这期间她腾不出手" if a.get("occupies") else "这期间她照常过日子"
+                print(f"         要花 {a['duration']} 个 tick,{busy}")
             for setter in a["sets"]:
                 print(f"         → {setter}")
             # 关于她的那一半单独一行,不和上面的效果混在一起 —— 混了的话读的人
@@ -2232,6 +2278,14 @@ def run_ontology(args: argparse.Namespace) -> int:
                 # 花掉的东西自带一道"你得有" —— 这里连着说出来,不然读的人会以为
                 # 少写了一条 requires,然后照着补一遍。
                 print(f"         她花掉 {item_id} × {count}(得先有这么多)")
+            # 生与灭要印出来,而且要显眼:一条能力会不会**让世界多一样东西**,是
+            # 读一份声明时最该先知道的事,比它把哪个量加了 0.05 要紧得多。
+            spawn = a.get("spawn")
+            if spawn:
+                where = spawn.get("location") or "这件事发生的地方"
+                print(f"         ✦ 生出一个 {spawn['kind']} @{where}")
+            if a.get("destroys_target"):
+                print("         ✦ 做完之后这个东西就没了")
         if not kind["builtin"]:
             # 内置种类没有实例住在本体里(角色在投影里),那条上限对它没有意义。
             print(f"    同一个地方最多带 {kind['budget']} 个进提示词")

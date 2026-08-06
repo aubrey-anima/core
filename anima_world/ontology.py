@@ -114,11 +114,17 @@ ME_PREFIX = "me_"
 # 库存仍然只有事件日志一个来源。
 HAVE_PREFIX = "have_"
 
-# 她能对一个东西做什么。**闭集**,和 `edges` 的谓词闭集同一条纪律:
-# 放开就要重算上界。Dwarf Fortress 的 raws 是反例边界 —— 能给生物加
-# `[CARNIVOROUS]`,却造不出自定义食性,因为效果终归由引擎实现。
-# 与其假装开放,不如把边界写在这里。
-AFFORDANCES = (
+# 她能对一个东西做什么。**这是默认词表,不是闭集** —— 作者可以自己声明动词。
+#
+# 它一度是闭集,理由写着"效果终归由引擎实现"(Dwarf Fortress 的 raws 是那个反例:
+# 能给生物加 `[CARNIVOROUS]`,却造不出自定义食性)。那条理由在 `set`/`costs`/
+# `consumes` 落地之后就**不成立了**:`apply_affordance` 从头到尾没有一处按动词分支,
+# 效果整个是作者的数据。于是闭集买到的只剩两样 —— 拼错当场报错,和一张中文词表。
+# 而这两样都不需要枚举:**声明过**就够了(和 `kinds` / perception 逐字同构)。
+#
+# 放开的是词,不是纪律:自造的动词照样要在 `kinds` 里声明一次,别处写错一个字
+# 照样开不了机;英文动词照样必须给 `label`,因为她提示词里读到的是那几个字。
+BUILTIN_AFFORDANCES = (
     "look",      # 看一眼(所有实体隐含都有)
     "use",       # 用它
     "take",      # 拿走
@@ -137,9 +143,10 @@ AFFORDANCES = (
 _ENTITY_ID_RE = re.compile(r"^[^\s:]+:[^\s:]+$")
 _KIND_ID_RE = re.compile(r"^[^\s:]+$")
 
-# 能力的人话。她提示词里读到的是这些词,不是 `harvest` —— 英文动词在中文提示词里
-# 是**噪音**,而她要照着它行动。
-AFFORDANCE_VERBS = {
+# 内置能力的人话。她提示词里读到的是这些词,不是 `harvest` —— 英文动词在中文提示词里
+# 是**噪音**,而她要照着它行动。自造的动词从 `label` 拿这一行;`label` 没写而动词
+# 又是纯 ASCII 的,当场报错(见 `_affordance_label`)—— 那正是这张表要挡的东西。
+BUILTIN_AFFORDANCE_LABELS = {
     "look": "端详",
     "use": "使用",
     "take": "拿走",
@@ -151,6 +158,11 @@ AFFORDANCE_VERBS = {
     "read": "读",
     "enter": "进去",
 }
+
+# 自造动词只能长成这样:不含空白、不含冒号(冒号是实例 id 的分隔符)。
+_VERB_RE = re.compile(r"^[^\s:]+$")
+# 纯 ASCII 的动词进不了中文提示词 —— 见 `BUILTIN_AFFORDANCE_LABELS`。
+_ASCII_RE = re.compile(r"^[\x00-\x7f]+$")
 
 # 同一个地方东西太多时,最多带几个进提示词。作者没在种类上声明就用它 ——
 # 有上限本身不是可选的(那是这一层的判据),可选的只是**几个**。
@@ -200,6 +212,34 @@ class PromptSpec:
 
 
 @dataclass(frozen=True)
+class SpawnSpec:
+    """做完这件事,世界里多出一个新东西。
+
+    **它必须要代价。** 这是这一格唯一的硬约束(`_parse_affordance` 里那道闸):一个
+    不要代价的生成,作者写下去的第二天世界里就有一百万棵树 —— 而挡住它的正确办法
+    不是引擎给个配额。配额是**引擎的天花板**:撞上去时她收到的拒绝在世界里没有意义,
+    "这个世界最多一百棵树"不是她能理解、能应对的东西,她也永远学不会。代价是**世界
+    的理由**:她知道自己为什么做不到,也知道要做到得先补什么(`incapable`)。
+
+    三种代价都算数(`costs` / `consumes` / `duration`),但**只有时间那种封得住** ——
+    量能睡回来、材料能买回来,而一段时间过不去就是过不去。十月怀胎拦得住不是因为它贵。
+
+    ⚠️ 而**代价只封得住速率,封不住存量**:体力天天回满的世界里,一百天就是一百个
+    孩子。真实世界靠的是生灭成对,所以 `destroys_target` 和这一格是同一轮加的 ——
+    只有生的引擎会让每个世界最后都挤爆,而且漏得很慢、很安静。
+    """
+
+    kind: str
+    name: str = ""
+    gloss: str = ""
+    # 生在哪儿。空 = **这件事发生的那个地方**(她和那个东西所在处),
+    # 否则是一个地点 id。给个默认而不是必填,是因为绝大多数出生就在当场。
+    location: str = ""
+    # 覆盖种类默认值的那几个量;没写的照种类声明落地。
+    quantities: Mapping[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Affordance:
     """她能对这个东西做的一件事,以及**做完之后世界怎么变**。
 
@@ -215,6 +255,8 @@ class Affordance:
     """
 
     verb: str
+    # 她提示词里读到的那几个字。内置动词有默认,自造的要作者给。
+    label: str = ""
     conditions: tuple[Expression, ...] = ()
     outputs: Mapping[str, Expression] = field(default_factory=dict)
     # 关于**她**的那一半。`requires` 只读得到 `me_*` 与 `have_*`,这是有意的硬约束:
@@ -227,10 +269,40 @@ class Affordance:
     # 做不了。写两遍则给了只写一遍的机会,而只写 `consumes` 的那个世界里,她会用
     # 一包不存在的肥料把活干完 —— 库存扣不到负数,于是连账上都看不出来。
     consumes: Mapping[str, int] = field(default_factory=dict)
+    # 做这件事要多少个 tick。**0 = 一下子的事**(默认,老样子)。
+    #
+    # 时间是这个引擎此前完全说不出的那种代价。`costs` 扣的是量、`consumes` 扣的是
+    # 东西,两样都能靠"过一天就回来"绕开;而**一段时间过不去就是过不去**。十月怀胎
+    # 之所以拦得住,不是因为它贵,是因为它长。所以生成新实体必须挂在这上面,
+    # 挂在 `costs` 上的话,体力回满的那天她就能再生一个。
+    duration: int = 0
+    # 这段时间占不占用她。**做椅子占用,怀胎不占用** —— 两者都是长过程,而
+    # "这期间她还能不能干别的"才是代价的真实形状。占用的那种一次只能有一件。
+    occupies: bool = True
+    # 做完之后世界里多出一个东西 / 少掉这个东西。
+    #
+    # 生和灭是**同一轮**加的,不是两件事:代价只封得住"多久生一个",封不住"世界里
+    # 一共有多少个"。体力天天回满的世界里,一百天就是一百个孩子 —— 速率有界、存量
+    # 无界。真实世界不是靠出生的代价封的,是靠会生的东西都会死。
+    spawn: SpawnSpec | None = None
+    destroys_target: bool = False
+
+    @property
+    def is_process(self) -> bool:
+        """要花时间的事。为真时 `apply_affordance` 的结果**不当场落库**。"""
+        return self.duration > 0
+
+    @property
+    def has_price(self) -> bool:
+        """这件事要不要她付出点什么。生灭那一格的闸问的就是这一句。"""
+        return bool(self.costs) or bool(self.consumes) or self.duration > 0
 
     @property
     def changes_world(self) -> bool:
-        return bool(self.outputs) or bool(self.costs) or bool(self.consumes)
+        return (
+            bool(self.outputs) or bool(self.costs) or bool(self.consumes)
+            or self.spawn is not None or self.destroys_target
+        )
 
     @property
     def needs_actor(self) -> bool:
@@ -290,6 +362,18 @@ class Ontology:
     kinds: Mapping[str, Kind] = field(default_factory=dict)
     entities: Mapping[str, Entity] = field(default_factory=dict)
 
+    def add_entity(self, entity: Entity) -> None:
+        """运行期多出一个东西。**只有实例这一半能动,种类那一半仍然是冻的。**
+
+        这条不对称不是省事:规律是按种类校验的(`resolve`),运行期新增一个种类
+        等于让"这条规律合不合法"随时间变化,重放就不再确定。而种一棵树只是多一个
+        owner —— 规律早就写好了,量的默认值也早就声明过。
+        """
+        self.entities[entity.id] = entity          # type: ignore[index]
+
+    def drop_entity(self, entity_id: str) -> None:
+        self.entities.pop(entity_id, None)         # type: ignore[union-attr]
+
     def kind_of(self, entity_id: str) -> Kind | None:
         entity = self.entities.get(entity_id)
         return self.kinds.get(entity.kind) if entity else None
@@ -315,10 +399,25 @@ class Ontology:
         return kind.prompt.budget if kind and kind.prompt else DEFAULT_HERE_BUDGET
 
     def affordance_of(self, owner: str, verb: str) -> Affordance | None:
-        """这个东西认不认这个动词。认不得返回 `None` —— 由调用方报成拒绝。"""
+        """这个东西认不认这个动词。认不得返回 `None` —— 由调用方报成拒绝。
+
+        **人话也认。** 她提示词里读到的是"照料"而不是 `tend`,于是她照着说出来的
+        也是"照料" —— 只认 id 的话,引擎会回她一句"不认识这个动词",而那几个字
+        正是引擎自己写给她的。从前这靠 `tools/body.py` 里一张全局的反查表,动词
+        放开之后那张表就不够了(自造动词的人话住在声明里,不住在引擎里),而且
+        它按世界范围反查:两个种类各有一个"照料"时,反查表只留得下一个。
+        """
         entity = self.entities.get(owner)
         kind = self.kinds.get(entity.kind if entity else owner_kind(owner))
-        return kind.affordances.get(verb) if kind else None
+        if kind is None:
+            return None
+        found = kind.affordances.get(verb)
+        if found is not None:
+            return found
+        for affordance in kind.affordances.values():
+            if affordance.label == verb:
+                return affordance
+        return None
 
     def units_of(self, owner: str) -> dict[str, str]:
         """`{"树高": "米"}`。没有单位的量不出现。
@@ -343,7 +442,9 @@ class Ontology:
         if kind is None:
             return ("", [])
         gloss = (entity.gloss if entity and entity.gloss else kind.gloss) or ""
-        verbs = [AFFORDANCE_VERBS[a] for a in kind.affordances if a in AFFORDANCE_VERBS]
+        # 人话取自能力自己的 `label`(内置有默认,自造的由作者给)——
+        # 从前这里查一张引擎的表,于是作者造得出的动词这里一个字也读不到。
+        verbs = [a.label or a.verb for a in kind.affordances.values()]
         return (gloss, verbs)
 
     def is_declared_owner(self, owner: str) -> bool:
@@ -532,11 +633,10 @@ def _parse_one_kind(
         else:
             for value, spec in raw_affordances.items():
                 name = str(value).strip()
-                if name not in AFFORDANCES:
+                if not _VERB_RE.match(name):
                     errors.append(
-                        f"{label}:不认识的 affordance {name!r} —— 只认 {list(AFFORDANCES)}。"
-                        f"这是个闭集:引擎认得的动词才有实现,放开它只会得到一个"
-                        f"她说得出、做不到的能力"
+                        f"{label}:动词 {name!r} 的形状不对 —— 不能是空的、不能带空白、"
+                        f"不能带冒号(冒号是实例 id 的分隔符)"
                     )
                     continue
                 affordance, affordance_errors = _parse_affordance(
@@ -593,13 +693,61 @@ def _parse_affordance(
         spec = {}
     if not isinstance(spec, dict):
         return (None, [f"{label}.affordances.{verb}:效果必须是对象,收到 {type(spec).__name__}"])
-    unknown = set(spec) - {"when", "set", "requires", "costs", "consumes"}
+    unknown = set(spec) - {
+        "when", "set", "requires", "costs", "consumes", "label", "duration", "occupies",
+        "spawn", "destroys_target",
+    }
     if unknown:
         errors.append(
             f"{label}.affordances.{verb}:不认识的字段 {sorted(unknown)} —— "
-            f"只认 when / set(关于它)与 requires / costs / consumes(关于她)。"
+            f"只认 when / set(关于它)、requires / costs / consumes(关于她)、"
+            f"duration / occupies(关于时间)、spawn / destroys_target(关于生灭)"
+            f"与 label(关于她怎么读它)。"
             f"门槛事件归规律那一层(能力只管这一下改了什么)"
         )
+
+    verb_label, label_errors = _affordance_label(label, verb, spec.get("label"))
+    errors.extend(label_errors)
+
+    # ── 时间 ──────────────────────────────────────────────────────────────
+    duration = 0
+    duration_ok = True
+    raw_duration = spec.get("duration", 0)
+    # 和 `consumes` 同一条:**只收整数**。tick 是可数的,而"做 2.5 个 tick"要么
+    # 悄悄取整、要么引出一套半 tick 的语义,两条路都比不许坏。
+    if isinstance(raw_duration, bool) or not isinstance(raw_duration, int):
+        errors.append(
+            f"{label}.affordances.{verb}.duration:必须是非负整数(单位 tick),"
+            f"收到 {raw_duration!r}"
+        )
+        duration_ok = False
+    elif raw_duration < 0:
+        errors.append(
+            f"{label}.affordances.{verb}.duration:必须是非负整数,收到 {raw_duration} —— "
+            f"0 是「一下子的事」,没有比它更快的"
+        )
+        duration_ok = False
+    else:
+        duration = int(raw_duration)
+
+    occupies = True
+    raw_occupies = spec.get("occupies")
+    if raw_occupies is not None:
+        if not isinstance(raw_occupies, bool):
+            errors.append(
+                f"{label}.affordances.{verb}.occupies:必须是 true / false,"
+                f"收到 {raw_occupies!r}"
+            )
+        elif duration_ok and duration <= 0:
+            # 声明了却什么也不改 = 一句谎。作者写下 `occupies` 时想的是"这段时间
+            # 她在忙",而没有 duration 就没有那段时间 —— 让它静默无效的话,他会
+            # 以为自己已经表达过了。
+            errors.append(
+                f"{label}.affordances.{verb}.occupies:只在 duration > 0 时有意义 —— "
+                f"一下子的事没有「这期间」可占用"
+            )
+        else:
+            occupies = bool(raw_occupies)
 
     conditions: list[Expression] = []
     raw_when = spec.get("when") or []
@@ -699,6 +847,43 @@ def _parse_affordance(
             continue
         spending[item_id] = int(source)
 
+    # ── 生与灭 ────────────────────────────────────────────────────────────
+    spawn, spawn_errors = _parse_spawn(label, verb, spec.get("spawn"))
+    errors.extend(spawn_errors)
+
+    destroys = False
+    raw_destroys = spec.get("destroys_target")
+    if raw_destroys is not None:
+        if not isinstance(raw_destroys, bool):
+            errors.append(
+                f"{label}.affordances.{verb}.destroys_target:必须是 true / false,"
+                f"收到 {raw_destroys!r}"
+            )
+        else:
+            destroys = raw_destroys
+    if destroys and raw_set:
+        # 写到一个正要被抹掉的东西身上。两条里必有一条是作者没想清楚的,而引擎
+        # 挑哪条都是猜 —— 落库再删,那几个值一秒都没人读到;删了再落库,写到一个
+        # 不存在的 owner 上(量的外键那道闸正是为这个存在的)。
+        errors.append(
+            f"{label}.affordances.{verb}:`destroys_target` 和 `set` 不能一起写 —— "
+            f"这个东西做完就没了,写在它身上的量没有任何人读得到。"
+            f"要留下点什么就用 `spawn` 生一个新的"
+        )
+
+    has_price = bool(charges) or bool(spending) or duration > 0
+    if (spawn is not None or destroys) and not has_price:
+        # **生成必须要代价** —— 而挡住无限生成的正确办法不是配额。配额是引擎的
+        # 天花板:撞上去时她收到的拒绝在世界里没有意义,她也永远学不会。代价是
+        # 世界的理由:她知道自己为什么做不到、要做到得先补什么。
+        # 灭同理:一个不要代价的"抹掉",一 tick 就能把世界清空。
+        errors.append(
+            f"{label}.affordances.{verb}:声明了 "
+            f"{'spawn' if spawn is not None else 'destroys_target'} 就必须要代价 —— "
+            f"写 costs(扣她的量)/ consumes(花掉材料)/ duration(要花的时间)"
+            f"里的至少一样。不要代价的生灭,作者写下去的第二天世界里就是一百万个"
+        )
+
     if errors:
         return (None, errors)
 
@@ -760,14 +945,108 @@ def _parse_affordance(
     return (
         Affordance(
             verb=verb,
+            label=verb_label,
             conditions=tuple(conditions),
             outputs=outputs,
             requires=tuple(requires),
             costs=charges,
             consumes=spending,
+            duration=duration,
+            occupies=occupies,
+            spawn=spawn,
+            destroys_target=destroys,
         ),
         [],
     )
+
+
+def _parse_spawn(label: str, verb: str, raw: Any) -> tuple[SpawnSpec | None, list[str]]:
+    """`spawn` 那一格。种类引用与地点引用留给 `resolve` —— 这里还看不见它们。
+
+    量的键这里也不查,同理:要查得知道那个**新种类**声明过什么,而种类表是
+    `parse_kinds` 的产物,这个函数正跑在它中间。两阶段加载的分工就是这样。
+    """
+    if raw is None:
+        return (None, [])
+    where = f"{label}.affordances.{verb}.spawn"
+    if not isinstance(raw, dict):
+        return (None, [f"{where}:必须是对象,收到 {type(raw).__name__}"])
+
+    errors: list[str] = []
+    unknown = set(raw) - {"kind", "name", "gloss", "location", "quantities"}
+    if unknown:
+        errors.append(f"{where}:不认识的字段 {sorted(unknown)}")
+
+    kind_id = str(raw.get("kind") or "").strip()
+    if not kind_id:
+        errors.append(f"{where}:少了 kind —— 生出来的是**哪一种**东西")
+    elif not _KIND_ID_RE.match(kind_id):
+        errors.append(
+            f"{where}.kind:种类 id 不能带空白或冒号(冒号是实例 id 的分隔符),"
+            f"收到 {kind_id!r}"
+        )
+
+    location = raw.get("location")
+    if location is not None and not str(location).strip():
+        # 写了个空串和不写不是一回事:不写是"生在当场",而空串是作者以为自己
+        # 指定了地方。静默当成当场的话,他会以为那句话生效了。
+        errors.append(f"{where}.location:不能是空的 —— 不写就是「生在这件事发生的地方」")
+
+    values: dict[str, float] = {}
+    raw_values = raw.get("quantities") or {}
+    if not isinstance(raw_values, dict):
+        errors.append(f"{where}.quantities:必须是「量名 → 数」的对象")
+        raw_values = {}
+    for key, source in raw_values.items():
+        name = str(key).strip()
+        if isinstance(source, bool) or not isinstance(source, (int, float)):
+            # **只收常数,不收表达式。** 一个新生的东西身上还没有任何值可读,
+            # 而读施动者或母体的量是另一件事(那要先回答"读的是起头那一刻还是
+            # 收尾那一刻"),没想清楚之前不开这个口。
+            errors.append(
+                f"{where}.quantities.{name}:必须是一个数,收到 {source!r} —— "
+                f"新生的东西身上还没有值可读,所以这里不收表达式"
+            )
+            continue
+        values[name] = float(source)
+
+    if errors:
+        return (None, errors)
+    return (
+        SpawnSpec(
+            kind=kind_id,
+            name=str(raw.get("name") or "").strip(),
+            gloss=str(raw.get("gloss") or "").strip(),
+            location=str(location).strip() if location else "",
+            quantities=values,
+        ),
+        [],
+    )
+
+
+def _affordance_label(label: str, verb: str, raw: Any) -> tuple[str, list[str]]:
+    """这个动词她读到的是哪几个字。
+
+    动词放开之后这一步才有必要:内置的十个词引擎自带中文,自造的引擎不知道怎么念。
+    判据是**纯 ASCII 的动词必须给 `label`** —— 不是为了严格,是因为 `describe()`
+    的产物直接进她的提示词,而"你可以对它:端详、brew"里那个 brew 是噪音,她还得
+    照着它行动。中文/日文之类的动词 id 本身就是人话,不必再写一遍。
+    """
+    if raw is not None:
+        text = str(raw).strip()
+        if not text:
+            return ("", [f"{label}.affordances.{verb}.label:不能是空的"])
+        return (text, [])
+    builtin = BUILTIN_AFFORDANCE_LABELS.get(verb)
+    if builtin:
+        return (builtin, [])
+    if _ASCII_RE.match(verb):
+        return ("", [
+            f"{label}.affordances.{verb}:自造的动词要给一行 `label` —— "
+            f"她提示词里读到的是那几个字,而 {verb!r} 在中文提示词里是噪音。"
+            f"内置自带中文的是 {list(BUILTIN_AFFORDANCE_LABELS)}",
+        ])
+    return (verb, [])
 
 
 def _parse_quantity(label: str, name: str, spec: Any) -> tuple[Quantity | None, list[str]]:
@@ -1017,6 +1296,37 @@ def resolve(
                     )
                 )
 
+    # `spawn` 的三样引用都在这一阶段查:生出来的是哪个种类、身上那几个量它声明过
+    # 没有、指定的地方存不存在。**都放到运行期查是不行的** —— 一条生不出东西的
+    # 能力不会让世界崩,只会让她每次都白付一次代价,而世界照跑、日志干净。
+    for kind in kinds.values():
+        for affordance in kind.affordances.values():
+            spawn = affordance.spawn
+            if spawn is None:
+                continue
+            where = f"kinds ({kind.id}).affordances.{affordance.verb}.spawn"
+            born = kinds.get(spawn.kind)
+            if born is None:
+                errors.append(_unresolved(f"{where}.kind", "kind", spawn.kind, kinds))
+            elif born.builtin:
+                errors.append(
+                    f"{where}.kind:{spawn.kind!r} 是内置种类,生不出来 —— "
+                    f"角色走 agents / 地点走 locations,它们各有各的生命周期"
+                )
+            else:
+                for name in sorted(spawn.quantities):
+                    if name not in born.quantities:
+                        errors.append(
+                            f"{where}.quantities.{name}:{spawn.kind!r} 没声明过这个量 —— "
+                            f"写下去会在新生的东西身上凭空造出一个没人知道、也没有"
+                            f"可见性的量。声明过的是 {sorted(born.quantities)}"
+                        )
+            if spawn.location and known_locations and spawn.location not in known_locations:
+                errors.append(
+                    _unresolved(f"{where}.location", "location",
+                                spawn.location, known_locations)
+                )
+
     if errors:
         raise OntologyError(errors)
     return Ontology(kinds=dict(kinds), entities=dict(entities))
@@ -1228,3 +1538,111 @@ def apply_affordance(
         me_updates=me_updates,
         consumed=dict(affordance.consumes),
     )
+
+
+def finish_affordance(
+    affordance: Affordance,
+    *,
+    values: Mapping[str, float],
+    world_values: Mapping[str, float] | None = None,
+    me_values: Mapping[str, float] | None = None,
+    now: int = 0,
+) -> AffordanceOutcome:
+    """一个长过程走完了 —— 只算它对**那个东西**的效果。
+
+    和 `apply_affordance` 的分工是**时间上的**,不是功能上的:
+
+        起头   apply_affordance  → 查关口、扣她的量、花掉材料
+        走完   finish_affordance → 算这个东西变成什么样
+
+    **关口不再查。** 这是有意的:付了代价、占了她十个月,到头来被一句"这会儿不行"
+    拒掉的话,她没有任何办法预防那次失败 —— 而一个预防不了的失败教不会她任何东西,
+    只会让长过程变成赌博。想让长过程可能落空的世界,让它落空在**起头**。
+
+    但**效果读的是此刻的值,不是起头那一刻的**:一棵树在这十个月里自己长了,
+    走完时该在它现在的高度上加。拿起头的快照算等于把这十个月的世界抹掉。
+    """
+    namespace: dict[str, Any] = {
+        **{f"{WORLD_PREFIX}{k}": v for k, v in (world_values or {}).items()},
+        **{f"{ME_PREFIX}{k}": v for k, v in (me_values or {}).items()},
+        **dict(values),
+        "now": now,
+        "dt": 0,
+    }
+    try:
+        updates = {
+            key: float(expression.evaluate(namespace))
+            for key, expression in affordance.outputs.items()
+        }
+    except ExpressionError as exc:
+        logger.warning("能力 %s 收尾时算不出来:%s", affordance.verb, exc)
+        return AffordanceOutcome(
+            verb=affordance.verb, refusal=f"收尾时算不出来({exc})", reason="error"
+        )
+    return AffordanceOutcome(verb=affordance.verb, updates=updates)
+
+
+def check_entity(
+    ontology: Ontology,
+    entity_id: str,
+    *,
+    values: Mapping[str, float],
+    world_values: Mapping[str, float] | None = None,
+    place: str | None = None,
+) -> list[str]:
+    """**这个东西活得了吗** —— 逐条列出它身上讲不通的地方,没问题就是空列表。
+
+    出生自检。运行期生出来的东西走的不是创世那条路,而创世那条路上的闸(一次列全、
+    当场开不了机)在这里一条都不在。少了这一步,一个新生的东西可以是这样:
+    `entities` 里看着好好的,量却一个都没落地 —— 于是它的能力条件对着 0 求值,
+    `tend` 安静地永远不生效,规律照跑、日志干净,作者要到三个月后发现那棵树没长
+    才知道。**这正是这个仓库最怕的那一类,只是换到了运行期。**
+
+    查四样,按"错了之后有多难发现"排:
+
+    1. **种类还认得它。** 认不得的话下面三样都问不出口。
+    2. **声明过的量一个不缺。** 逐个量查,不是查"有没有量" —— 后者放得过"给了一个
+       `树高` 就算数",而那正是创世那边踩过的坑(其余量不落地,规律算不动)。
+    3. **每条能力都给得出一个叫得出名字的结论。** 空跑一遍(`apply_affordance`
+       本来就**只算不写**,所以这一步几乎免费)。判据不是"能成功" —— `conditions`
+       (果子还没熟)和 `incapable`(她做不了)都算过关,那是世界在正常说话。
+       只有 `error`(表达式算不出来)不算:那是作者的声明本身坏了。
+    4. **它按声明的可见性真的在场。** 声明成 `here` 却不在任何地方,等于谁也看不见 ——
+       这个东西在世界里存在,而没有任何人能碰到它,是一种比不存在更糟的存在。
+
+    `place` 传 `None` 表示调用方不查在场那一条(比如还没接可见性表的场合)。
+    """
+    entity = ontology.entities.get(entity_id)
+    if entity is None:
+        return [f"{entity_id}:本体里没有这个东西"]
+    kind = ontology.kinds.get(entity.kind)
+    if kind is None:
+        return [f"{entity_id}:它的种类 {entity.kind!r} 不在本体里 —— 这东西没有出身"]
+
+    problems: list[str] = []
+    for name in sorted(kind.quantities):
+        if name not in values:
+            problems.append(
+                f"{entity_id}:量 {name!r} 没落地 —— 读到的会是 0,"
+                f"于是用到它的条件与规律都安静地不生效"
+            )
+
+    for verb, affordance in sorted(kind.affordances.items()):
+        outcome = apply_affordance(
+            affordance,
+            values=values,
+            world_values=world_values,
+            me_values={k: 0.0 for k in actor_quantities(ontology)},
+            held={},
+        )
+        if outcome.reason == "error":
+            problems.append(f"{entity_id}:能力 {verb!r} 算不出来 —— {outcome.refusal}")
+
+    if place is not None and not place:
+        visible = [q.key for q in kind.quantities.values() if q.visibility != HIDDEN]
+        if visible:
+            problems.append(
+                f"{entity_id}:不在任何地方,而它有人看得见的量 {sorted(visible)} —— "
+                f"没有位置的东西永远不在场,于是「在场可见」等于「永远看不见」"
+            )
+    return problems

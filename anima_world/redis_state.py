@@ -386,6 +386,12 @@ def decode_action(raw: Any) -> Any:
     return ActionDescriptor(str(raw.get("kind")), dict(raw.get("params") or {}))
 
 
+def engagements_key(world_id: str) -> str:
+    """在做的长过程。**真状态,必须住 Redis** —— 内存态的话每次重启都流产一次,
+    而一件事要花多久由作者决定,重启多少次由运维决定,两件事不该有关系。"""
+    return f"{KEY_PREFIX}:{world_id}:engaged"
+
+
 def plans_key(world_id: str) -> str:
     return f"{KEY_PREFIX}:{world_id}:plans"
 
@@ -732,6 +738,12 @@ class RedisVisibilityStore:
             if row is not None:
                 label = row.get("label")
         self._places.put(owner, {"owner": owner, "location": location, "label": label})
+
+    def unplace(self, owner: str) -> None:
+        """这个东西不在任何地方了(被抹掉时)。**留着行比删掉坏** —— 一个已经
+        不存在的东西还挂在某个地点上,`at()` 会一直把它报进那儿的在场名单,
+        于是她的提示词里有一样她走过去也摸不到的东西。"""
+        self._places.drop(owner)
 
     def at(self, location: str) -> dict[str, str | None]:
         return {
@@ -1595,11 +1607,31 @@ class RedisOntologyStore:
     **读的时候**当场报错,不流到运行期。
     """
 
-    __slots__ = ("_kinds", "_entities")
+    __slots__ = ("_kinds", "_entities", "_redis", "_rev_key", "_seq_key")
 
     def __init__(self, redis: Any, world_id: str) -> None:
         self._kinds = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:kinds")
         self._entities = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:entities")
+        self._redis = redis
+        # 实例表改过几次。**别用行数当版本** —— 一生一灭净变化是 0,而那正是
+        # 世界跑起来之后最常见的一对。别的进程于是永远看不到这次更替。
+        self._rev_key = f"{KEY_PREFIX}:{world_id}:entities_rev"
+        self._seq_key = f"{KEY_PREFIX}:{world_id}:entities_seq"
+
+    def revision(self) -> int:
+        """实例表的版本号。别的进程拿它判断"我手里这份还新不新"。"""
+        raw = self._redis.get(self._rev_key)
+        return int(raw) if raw else 0
+
+    def mint_id(self, kind: str) -> str:
+        """给一个新生的东西起个 id:`kind:序号`。
+
+        **计数器住 Redis,不住进程**:两个进程各数各的,迟早撞出同一个 id,而撞上的
+        后果是后来的那个**覆盖**前一个 —— 世界里少一样东西,没有任何地方报错。
+        序号只增不减(抹掉一个不会把号让出来),因为 id 会进事件、进提示词、进
+        `.cyberworld`,复用一个死者的号等于让历史指向另一样东西。
+        """
+        return f"{kind}:{int(self._redis.incr(self._seq_key))}"
 
     def __len__(self) -> int:
         return len(self._kinds)
@@ -1637,10 +1669,21 @@ class RedisOntologyStore:
         kinds = parse_kinds(self.kind_definitions())
         entity = parse_entities([entry], kinds)[str(entry.get("id")).strip()]
         self._entities.put(entity.id, {"definition": entry, "updated_at": stamp})
+        self._redis.incr(self._rev_key)
         return entity
 
     def drop_entity(self, entity_id: str) -> int:
-        return self._entities.drop(entity_id)
+        dropped = self._entities.drop(entity_id)
+        if dropped:
+            self._redis.incr(self._rev_key)
+        return dropped
+
+    def parse_entities_now(self, kinds: Any) -> dict:
+        """重读实例表并编译。**只重读实例,不重读种类** —— 种类是冻的,重跑一遍
+        `parse_kinds` 只是把同一份声明再编译一次,而世界每生一样东西就付一次。"""
+        from anima_world.ontology import parse_entities
+
+        return parse_entities(self.entity_definitions(), kinds)
 
 
 class RedisConfigBackend:

@@ -137,3 +137,76 @@ def test_a_no_key_world_still_boots_clean(flagship):
     # 定时轮次问过了、也没做什么(Mock 给不出能力标记),而且没有崩
     stats = flagship.autonomy_stats()
     assert stats["failed"] == 0 or stats["acted"] == 0
+
+
+def test_一件要花一小时的事橱窗里演得出来(flagship):
+    """**做了却开箱看不见,等于没做。**
+
+    时间是这个引擎里唯一封得住"她一天能干多少事"的代价 —— 量能睡回来、材料能买
+    回来,而一段时间过不去就是过不去。橱窗里那棵老橡树因此有一件要花一小时的事:
+    嫁接(自造的动词,12 tick = 一小时),做完把这棵树的上限抬高两米。
+
+    这条演的是整条链:起头 → 代价当场付而树一点没变 → 这期间她腾不出手 →
+    到点了效果才落。断在任何一环,`duration` 这一层在橱窗里就等于不存在。
+    """
+    agent_id = "夏"                      # 剪子在她手上(遥 没有,那是 §2.9.6.1 的演出)
+    tree = "tree:harbor_oak"
+    flagship.tick(24)                    # 让树先长过 `when: 树高 >= 2` 那道门
+    ceiling = flagship.stocks(tree)["最大树高"]
+    stamina = flagship.stocks(f"agent:{agent_id}")["体力"]
+
+    started = flagship.scheduler.perform_affordance(agent_id, tree, "嫁接")
+    assert started["ok"] and started["started"] is True, started
+    assert started["duration"] == 12
+    assert flagship.stocks(f"agent:{agent_id}")["体力"] == stamina - 25, "代价该当场付"
+    assert flagship.stocks(tree)["最大树高"] == ceiling, "一小时还没过,树不该已经变了"
+
+    # 这期间她腾不出手 —— 而且理由自成一类(不是"这会儿不行",也不是"她做不了")。
+    busy = flagship.scheduler.perform_affordance(agent_id, tree, "tend")
+    assert not busy["ok"] and busy["reason"] == "busy", busy
+
+    engaged = flagship.engagements(agent_id)
+    assert engaged and engaged[0]["verb"] == "嫁接" and engaged[0]["occupies"]
+
+    flagship.tick(12)
+    assert flagship.stocks(tree)["最大树高"] == ceiling + 2, "到点了效果该落"
+    assert not flagship.engagements(agent_id)
+    assert flagship.scheduler.perform_affordance(agent_id, tree, "tend")["ok"], "手腾出来了"
+
+
+def test_橱窗里的世界自己长得出新东西也抹得掉(flagship):
+    """**一个不能长出新东西的世界是个西洋镜,不是世界。**
+
+    橱窗里那棵老橡树因此能育苗:花两小时(24 tick)、一包肥、二十点体力,长出一株
+    树苗——一个创世时**不存在**的实体。而树苗能被拔掉,因为代价只封得住"多久生
+    一个",封不住"世界里一共有多少个":会生的东西都得会死,否则每个世界最后都挤爆,
+    而且漏得很慢、很安静。
+
+    这条演的是整条链:够不够格 → 代价当场付 → 到点了才生下来 → 生下来的东西真的
+    在世界里(有量、在场、能被交互、经得起自检)→ 也真的抹得掉。
+    """
+    agent_id = "夏"                     # 剪子和肥都在她手上
+    tree = "tree:harbor_oak"
+    assert flagship.entities("sapling") == [], "创世时世界里还没有树苗"
+
+    started = flagship.scheduler.perform_affordance(agent_id, tree, "育苗")
+    assert started["ok"] and started["started"] is True, started
+    assert started["consumed"] == {"fertilizer": 1}
+    assert flagship.entities("sapling") == [], "两小时还没过,苗不该已经在那儿"
+
+    flagship.tick(24)
+    saplings = flagship.entities("sapling")
+    assert len(saplings) == 1, "到点了苗该长出来"
+    sapling = saplings[0]
+    assert sapling["name"] == "新育的树苗"
+    assert sapling["location"] == flagship.entities("tree")[0]["location"], \
+        "没写 location 就生在这件事发生的地方"
+    assert sapling["values"] == {"苗高": 0.2}, "声明过的量要逐个落地"
+    assert flagship.check_entity(sapling["id"])[0]["ok"], "生下来就得活得了"
+
+    # 它是世界里一个真的东西:她碰得到,而且能被抹掉。
+    assert flagship.scheduler.perform_affordance(agent_id, sapling["id"], "look")["ok"]
+    pulled = flagship.scheduler.perform_affordance(agent_id, sapling["id"], "拔掉")
+    assert pulled["ok"] and pulled["destroyed"] == sapling["id"]
+    assert flagship.entities("sapling") == []
+    assert flagship.stocks(sapling["id"]) == {}, "抹掉了量还留着 = 一个不存在的东西还有高度"

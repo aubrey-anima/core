@@ -91,7 +91,7 @@ start  config  doctor  chat  prompt  map  ontology  run  simulate  events  repor
 | `chat --agent X` | 本地试聊(免 claim) | B3 性格试镜 |
 | `prompt --agent X` | **看她收到的提示词,逐块带来源** | 1.3.0 新增,见 §3 |
 | `map [--json]` | **地图 + 谁在哪 + 谁去了哪儿** | 1.4.0 新增,见 §3.6 —— `--json` 出数据,你们自己渲染 |
-| `ontology [--json]` | **有哪些种类的东西、身上有哪些量、能对它们做什么**,以及**一件事要她付出什么**(`requires` / `costs`) | 2.0 新增,见 §3.7 —— 能力表**只有这里问得到**,猜不出来 |
+| `ontology [--json] [--check]` | **有哪些种类的东西、身上有哪些量、能对它们做什么**,以及**一件事要她付出什么**(`requires` / `costs` / `consumes` / `duration`)。`--check` 跑出生自检 | 2.0 新增,见 §3.7 —— 能力表**只有这里问得到**,猜不出来;动词现在是**你们声明的**,不是引擎的十个;世界能自己长出新东西(`spawn`) |
 | `world export/import` | `.cyberworld` 打包 | 出厂 |
 | `events export` | 事件流 JSONL | 连续性通路(只导出,不重放) |
 | `doctor` | 体检 | 装完 core 自检 |
@@ -391,7 +391,9 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
 
 `entities[]` 每行带 `values`(此刻的量),`kinds[]` 每行带 `quantities` 与
 `affordances`(含 `conditions` / `sets` / `requires` / `costs` 的**源表达式字符串**,
-照作者写的样子,外加一个 `needs_actor` 布尔告诉你这条能力看不看施动者)。
+照作者写的样子,外加 `consumes`(花掉什么)、`label`(她读到的那几个字)、
+`duration` / `occupies`(要花多久、这期间占不占用她),以及一个 `needs_actor` 布尔
+告诉你这条能力看不看施动者)。
 声明过量的 `agent` 一直在 `kinds[]` 里(不必加 `--builtin`)—— `me_体力` 的出处在那儿。
 
 **四件对你们要紧的事:**
@@ -415,6 +417,70 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
    量就和 `when` 分不开了,而分得开正是它存在的全部理由),**`me_X` 和 `costs` 的键
    都必须在 `agent` 的 `quantities` 里声明过**(否则读到的恒为 0,那道门要么永远开着
    要么永远关着)。两条都是**开不了机**级别的错,一次报全。
+5. **工具、材料、时间也能当代价**,写法都在同一个能力里(这三样是"她为什么不能
+   一天做一百件事"的全部答案):
+
+   ```jsonc
+   "harvest": {
+     "requires": ["have_garden_shears >= 1"],   // 她随身带着几个某样东西(库存投影)
+     "consumes": {"fertilizer": 1},             // 做完花掉;**自带一道"你得有"的门**
+     "duration": 6,                             // 要花几个 tick;0(默认)= 一下子的事
+     "occupies": true,                          // 这期间她腾不出手;默认 true
+     "set": {"果子": "果子 - 1"}
+   }
+   ```
+
+   - `have_X` 里的 X 是**东西的 id**,拼错**开不了机**(物品是闭集)。没带的读作 **0**,
+     不是报错 —— 一个从没拿过剪子的人和一个刚放下剪子的人,在"她现在能不能修枝"上
+     没有区别。
+   - `consumes` **只收正整数**,而且不必再写一遍 `requires: ["have_x >= 1"]`。
+   - **`duration > 0` 的调用只是起个头**:返回里有 `started: true` / `ends_tick`,
+     `changed` 是空的 —— 代价当场付,效果要到点才落(`entity_engage` → 到点的
+     `entity_interaction`)。做界面时这两条要分得开,不然一个做到一半的世界看起来
+     和做完了一模一样。查进度用 `world.engagements()`,或 `state()` 里那个人的
+     `activity.engaged`。
+   - `occupies` 期间任何能力调用都拒绝,`reason == "busy"` —— **第四类**,别并进
+     `conditions`:她该等自己手上这件做完,既不是换一棵,也不是去补足。
+6. **世界能自己长出新东西,也能抹掉东西**(`spawn` / `destroys_target`)。这条对你们
+   最直接:`entities` 不再是创世时钉死的一张表,所以"按规则铺开一个世界"这件事有了
+   落点。
+
+   ```jsonc
+   "育苗": {"duration": 24, "when": ["树高 >= 3"],
+           "requires": ["me_体力 >= 20", "have_garden_shears >= 1"],
+           "consumes": {"fertilizer": 1}, "costs": {"体力": "me_体力 - 20"},
+           "spawn": {"kind": "sapling", "name": "新育的树苗"}},
+   "拔掉": {"costs": {"体力": "me_体力 - 5"}, "destroys_target": true}
+   ```
+
+   - **生成必须要代价** —— 声明了 `spawn` / `destroys_target` 却没写 `costs` /
+     `consumes` / `duration` 里任何一样,**开不了机**。引擎不发配额:配额撞上去时
+     她收到的拒绝在世界里没有意义,而代价她学得会。
+   - **想封住存量就得配一条能抹掉它的能力**:代价只封"多久生一个"。
+   - `spawn.location` 不写 = 生在这件事发生的地方;`quantities` 只收常数;
+     id 由引擎发(`kind:序号`),你们不用也不能自己起。
+   - 生在**收尾那一刻**(有 `duration` 时),所以界面上"起了个头"和"生下来了"是
+     两件事:`entity_engage` → `entity_spawn`。
+   - 抹掉时实例 / 量 / 位置 / 挂在它身上的长过程**四样一起走**。
+7. **出生自检,以及你们可以直接调的那个检查**(`anima-world ontology --check`)。
+   运行期生出来的东西走的不是创世那条路,而创世那条路上的闸(一次列全、当场开不了机)
+   在这里一条都不在。引擎每次出生自己跑一遍:量都落地了吗、每条能力都算得出一个叫得出
+   名字的结论吗、声明成看得见的东西真的在场吗。没过就整个撤回并发 `entity_stillborn`。
+
+   ```bash
+   anima-world ontology --world-id w --check          # 有问题时退出码 1 —— 能进 CI
+   anima-world ontology --world-id w --check --json   # {"checked": [{"entity","kind","ok","problems"}]}
+   ```
+
+   **写声明的时候就能用**:不必先让世界真的生一个出来看看。它查的正是那类不报错的病 ——
+   量没落地(读到 0,条件和规律都安静地不生效)、能力的表达式算不出来、声明成看得见
+   却不在任何地方(存在,而没有任何人碰得到)。注意判据是"算得出结论"而不是"能成功":
+   `conditions` / `incapable` 都算过关,那是世界在正常说话。
+8. **动词是你们的,不是引擎的。** 原来是十个词的闭集,现在 `kinds` 里声明什么就有
+   什么。两条规矩:自造动词照样"别处写错一个字就开不了机";**纯 ASCII 的动词必须
+   给一行 `label`**(她提示词里读到的就是那几个字,"端详、brew"里的 brew 是噪音)。
+   中文动词自己就是人话,不必写 `label`。`--json` 里每条能力都带 `label` / `duration`
+   / `occupies` —— **界面上该印 `label`,不是 `verb`**。调用时两个都认。
 **排班也能按量分支了**(`when_stock`)—— 钟点排班("八点到六点半照看店里")是这个
 引擎在这之前能表达的全部,而人不是那样活的:
 

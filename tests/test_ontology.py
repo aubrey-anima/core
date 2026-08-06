@@ -491,3 +491,37 @@ def test_内置种类身上的量不走闸(tmp_path, open_world):
     world = open_world(seed_path=str(path))
     assert world.stocks("world") == {"季节": 2.0}
     assert world.stocks("agent:甲") == {"功力": 1.0}
+
+
+def test_重开一个世界不会被塞进别人的物理法则(tmp_path, open_world, fresh_redis):
+    """**播种是创世那一刻的事,不是"这张表恰好还空着"的事。**
+
+    按空表判断,只在第一次开机时和创世重合。之后每一次开机,手里这份种子(缺省是
+    包自带的橱窗)都会去填当初作者**有意留空**的那几张表 —— 而规律是这个世界的
+    物理法则:一个作者写了 `kinds` 却没写 `rules` 的世界,重开一次就会被塞进橱窗
+    那条"树会长高"的规律,而它引用的 `tree` 这个种类在这个世界里根本不存在。
+
+    下场不是算错,是**这个世界从此打不开**(`resolve` 当场拒绝整个本体)。
+    创作台的整套流程都是自定义种子,所以这条一撞一个准。
+    """
+    import json
+
+    seed = {
+        "locations": [{"id": "cafe", "name": "咖啡店", "description": "拐角那家"}],
+        "agents": [{"id": "甲", "name": "甲", "location": "cafe", "personality": "安静"}],
+        # 声明了种类,**没写 rules** —— 这个世界的作者不要任何物理法则。
+        "kinds": [{"id": "bench", "gloss": "长凳",
+                   "quantities": {"完好": {"default": 1.0, "visibility": "here"}},
+                   "affordances": {"look": {}}}],
+        "entities": [{"id": "bench:a", "name": "那条", "location": "cafe"}],
+    }
+    path = tmp_path / "no_rules.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+    world = open_world("norules", seed_path=str(path))
+    assert world.scheduler.world_rules == [], "作者没写规律,世界就不该有规律"
+    world.close()
+
+    # 重开 —— 这次手里是包自带的橱窗种子,它的规律引用 `tree`,而这里没有 tree。
+    reopened = open_world("norules", redis=fresh_redis)
+    assert reopened.scheduler.world_rules == [], "别人的物理法则被塞了进来"
+    assert [e["id"] for e in reopened.entities()] == ["bench:a"]

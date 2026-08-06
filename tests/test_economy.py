@@ -237,3 +237,36 @@ def test_一样什么也补不回来的东西不是饭(tmp_path, bare_seed):
                        force_mock_llm=True) as world:
         meal = world.scheduler.economy_store.cheapest_meal(where)
         assert meal and meal["item_id"] == "coffee", "肥料被当成了饭"
+
+
+def test_新世界折一次就够了不许折两遍(tmp_path, open_world, bare_seed):
+    """**创世那条路把投影重折了一遍,却没挪水位。**
+
+    `Scheduler.__init__` 建投影时日志还空着,水位于是停在 0;创世事件写完之后
+    `__main__` 重折一次投影 —— 投影里有了那 20 多条,水位还是 0。于是下一次
+    `catch_up_projection()`(`World.act()` 每次都调)把创世事件**再折一遍**:
+    每个人的钱和随身物品当场翻倍。
+
+    坏得最难查的是它的形状:只翻一次(第二次 catch_up 就正常了)、只在**创建
+    这个世界的那个进程**里(重开一次读到的是对的)、日志本身一条不错。所以
+    账面上永远看不出来 —— 事件重放出来的数和内存里的数不一样,而没人会去比。
+    """
+    seed = json.loads(pathlib.Path(bare_seed).read_text(encoding="utf-8"))
+    seed["agents"][0]["money"] = 100
+    seed["agents"][0]["inventory"] = [{"item": "怀表", "qty": 2}]
+    who = seed["agents"][0]["id"]
+    path = tmp_path / "genesis_fold.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+
+    world = open_world(seed_path=str(path))
+    inventories = world.scheduler._memory_projection.inventories
+    assert world.balance(who) == 100.0, "创世本身就没播对"
+    assert dict(inventories.get(who, {})) == {"怀表": 2}, "创世本身就没播对"
+
+    # 水位必须已经在日志末尾。它是**因**,上面两条是果 —— 只断言果的话,
+    # 换一种重折方式(比如把创世事件挪进 __init__)会让这条测试假绿。
+    assert world.scheduler._projection_seq == max(e["seq"] for e in world.events())
+
+    world.scheduler.catch_up_projection()
+    assert world.balance(who) == 100.0, "创世的钱被折了两遍"
+    assert dict(inventories.get(who, {})) == {"怀表": 2}, "创世的随身物品被折了两遍"

@@ -12,6 +12,8 @@ import time
 import zlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Iterable, Protocol
 
 from anima_world.actions import ActionDescriptor, to_event
@@ -231,6 +233,13 @@ class Scheduler:
         # (声明本身就是开关,和认知层同构)。
         self.ontology: Any | None = None
         self.ontology_store: Any | None = None
+        # 她正在做的**长过程**:field = `agent|target|verb`,值是一条记录
+        # (`_engagement_key` / `_engage`)。真状态,所以在 `__main__` 里换成 RedisDict ——
+        # 十月怀胎横跨的重启次数不由引擎决定,内存态等于每次重启都流产一次。
+        self._engaged: Any = {}
+        # 手里这份实例表是哪个版本的(见 `_sync_entities`)。别的进程种下的树,
+        # 这个进程也得看得见 —— 实例可以运行期长出来,而种类是冻的。
+        self._entities_rev: int = 0
         # 规律上次算是什么时候 —— 只决定"要不要现在算",不影响结果(结果由 dt 定),
         # 所以是内存态:重启清空最多多算一次,值不会错。
         self._rule_last_run: dict[str, int] = {}
@@ -542,6 +551,21 @@ class Scheduler:
         self._reflection_dirty.discard(agent_id)
         self.reflection_store.reset(agent_id, self.clock)
         self._submit_reflection(agent_id)
+
+    def reset_projection(self, events: list[Any]) -> None:
+        """从头重折一遍投影,**并且把水位一起挪到位**。
+
+        水位(`_projection_seq`)是"我已经折到第几条了"。重折而不挪水位,投影里
+        已经有了那些事件、水位却还停在 0 —— 于是下一次 `catch_up_projection` 会把
+        它们**再折一遍**。这不是理论上的:创世那条路正是这么走的(建 Scheduler 时
+        日志还空着 → 写创世事件 → 重折),于是一个刚建好的世界在第一次
+        `World.act()` 时,每个人的钱和随身物品**当场翻倍**,一次,而且只在创建它的
+        那个进程里。日志没错、重开一次就正常,所以从账面上永远看不出来。
+
+        两个字段各写各的是那个洞本身,所以这里把它们焊死在一个方法里。
+        """
+        self._memory_projection = project_events(events)
+        self._projection_seq = max((int(e.seq or 0) for e in events), default=0)
 
     def catch_up_projection(self) -> int:
         """把别的进程写进日志、而这个进程还没折进来的事件补上。
@@ -925,6 +949,11 @@ class Scheduler:
             #     (autonomy 正相反:那条要打网络,必须丢到别的线程去。)
             self._evaluate_world_rules()
 
+            # 3.65 到点的长过程:椅子做好了、孩子生下来了。**必须早于行为树** ——
+            #      占用她的那件事在这里解除,不然她这一 tick 还被当成在忙,
+            #      于是每个长过程都白白多占一 tick(而且没人看得出来)。
+            self._settle_engagements()
+
             # 3.7 定时轮次:问问她此刻要不要自己做点什么(autonomy)。
             self._maybe_run_autonomy(now)
 
@@ -1306,6 +1335,9 @@ class Scheduler:
                     "reason": reason, "refusal": refusal}
 
         with self._lock:
+            # 别的进程刚种下的东西,这个进程也得看得见 —— 否则她面前那样东西
+            # 会被回一句"这儿没有它"。
+            self._sync_entities()
             ontology = self.ontology
             store = self.stock_store
             if ontology is None or store is None:
@@ -1318,17 +1350,22 @@ class Scheduler:
                 )
             affordance = ontology.affordance_of(target, verb)
             if affordance is None:
-                known = sorted(ontology.kinds[entity.kind].affordances)
-                return no("unknown_verb", f"{target} 不能被 {verb};它能被 {known}")
+                # 人话也报出来:她读到的是"照料",报一句"它能被 ['tend']" 等于让她
+                # 再猜一次,而那几个字本来就是引擎写给她的。
+                known = [
+                    f"{a.label}({a.verb})" if a.label != a.verb else a.verb
+                    for a in ontology.kinds[entity.kind].affordances.values()
+                ]
+                return no("unknown_verb", f"{target} 不能被 {verb};它能被 {sorted(known)}")
+            # 人话进来时把它归一成动词 id —— 事件与在做的事的键都用 id,
+            # 不然同一件事按她那一轮说的是"照料"还是 tend 记成两条。
+            verb = affordance.verb
 
-            brain = self.agents.get(agent_id)
-            here = ""
-            if brain is not None and agent_id not in self._transit:
-                here = brain.agent.blackboard.read("loc") or brain.agent.location or ""
-            where = (
-                self.visibility_store.place_of(target)
-                if self.visibility_store is not None else entity.location
-            )
+            # 起头的在场检查和长过程收尾的那一次**共用这两句** —— 各写一遍的话,
+            # 迟早一处认为"在路上还算在原地",于是同一个人在同一时刻,一条路上
+            # "在",另一条路上"不在"。
+            here = self._where_is(agent_id)
+            where = self._place_of(target)
             if not here or where != here:
                 # 两头都说出来。只说"它在 cafe"会读成一句谎:她也可能就在 cafe,
                 # 而真正的原因是引擎不知道**她**在哪(在路上就是这样)。
@@ -1337,6 +1374,19 @@ class Scheduler:
                     f"{entity.name or target} 不在你这儿 —— "
                     f"它在 {where or '别处'},你在 {here or '别处'}",
                 )
+
+            if (affordance.spawn is not None or affordance.destroys_target) \
+                    and self.ontology_store is None:
+                # 引擎这一头没接上,不是世界的错。**拦在收费之前** —— 收了钱再
+                # 发现生不出来,她付的那一次在世界里什么也没换到。
+                return no(
+                    "no_ontology",
+                    "这个引擎没接本体存储,生不出新东西、也抹不掉旧的",
+                )
+
+            busy = self._busy_refusal(agent_id, target, verb, affordance)
+            if busy is not None:
+                return no("busy", busy)
 
             me = f"agent:{agent_id}"
             outcome = apply_affordance(
@@ -1350,18 +1400,24 @@ class Scheduler:
                 # `incapable`(她做不了)和 `conditions`(这会儿不行)必须分开传上去 ——
                 # 合成一个,一个累坏了的人会挨棵树轮着试,每棵都回她"再等等"。
                 return no(outcome.reason or "conditions", outcome.refusal)
+
+            if affordance.is_process:
+                # 长过程:**代价当场付,效果到点才落**。
+                #
+                # 代价付在起头是有意的:付在收尾的话,起个头再放弃就是免费的,而
+                # 一个可以随时反悔且不留痕的承诺不是承诺。她真的少了一把力气、
+                # 真的烧掉了两壶油,然后这段时间才开始走。
+                #
+                # `outcome.updates` 这里**扔掉** —— 它是拿起头那一刻的值算的。
+                # 但让它算一遍不是白算:`set` 里的表达式坏掉会在这里就报成拒绝,
+                # 而不是等十个月之后收尾时才发现。
+                return self._engage(
+                    agent_id, target, verb, affordance, outcome, here=here, me=me
+                )
+
             if outcome.updates:
                 store.set_many(target, outcome.updates, tick=int(self.clock))
-            if outcome.me_updates:
-                store.set_many(me, outcome.me_updates, tick=int(self.clock))
-            for item_id, quantity in sorted(outcome.consumed.items()):
-                # 库存只有事件日志一个来源 —— 这里发事件,投影自己去减。直接改投影
-                # 会让"重启一次她的肥料就回来了"成为可能,而账上什么也看不出来。
-                self._record_event({
-                    "type": "item_consume", "who": agent_id, "loc": here,
-                    "payload": {"who": agent_id, "item_id": item_id, "qty": quantity,
-                                "source": f"{verb}:{target}"},
-                })
+            self._charge(agent_id, me, target, verb, outcome, here)
             self._record_event({
                 "type": "entity_interaction",
                 "who": agent_id,
@@ -1374,11 +1430,403 @@ class Scheduler:
                     "consumed": dict(outcome.consumed),
                 },
             })
+            # 生与灭排在交互事件之后:那条事件记的是"她做了这件事",而生灭是它的
+            # 后果 —— 历史里先有因再有果,重放的人才读得出是哪一下造出了那样东西。
+            born = self._settle_birth_and_death(agent_id, target, verb, affordance, here)
             return {
                 "ok": True, "target": target, "verb": verb,
                 "changed": dict(outcome.updates), "cost": dict(outcome.me_updates),
                 "consumed": dict(outcome.consumed),
+                **({"spawned": born} if born else {}),
+                **({"destroyed": target} if affordance.destroys_target else {}),
             }
+
+    # ── 长过程:做一件事要花的那段时间 ──────────────────────────────────────
+    #
+    # 时间是这个引擎此前完全说不出的那种代价。`costs` 扣的是量、`consumes` 扣的是
+    # 东西,两样都能靠"睡一觉就回来"绕开;而一段时间过不去就是过不去。所以它是
+    # 唯一挡得住"生成新东西"的那道闸 —— 十月怀胎拦得住,不是因为贵,是因为长。
+    #
+    # 三条:
+    # - **代价当场付,效果到点落。** 付在收尾的话起个头再放弃就是免费的。
+    # - **关口只在起头查。** 见 `ontology.finish_affordance` 的长注释。
+    # - **占用是一件事的属性,不是她的状态。** 做椅子占用她,怀胎不占用 ——
+    #   两者都要花十个月,而"这期间她还能不能干别的"才是代价的真实形状。
+
+    @staticmethod
+    def _engagement_key(agent_id: str, target: str, verb: str) -> str:
+        return f"{agent_id}|{target}|{verb}"
+
+    def _where_is(self, agent_id: str) -> str:
+        """她此刻在哪。**在路上就是"不知道"**(空串)—— 而不是"还在出发地"。
+
+        `perform_affordance` 的 `absent` 与长过程的在场检查共用这一句:两处各写一遍
+        的话,迟早一处认为在路上还算在原地,于是同一个人在同一时刻,一条路上"在",
+        另一条路上"不在"。
+        """
+        brain = self.agents.get(agent_id)
+        if brain is None or agent_id in self._transit:
+            return ""
+        return brain.agent.blackboard.read("loc") or brain.agent.location or ""
+
+    def _place_of(self, target: str) -> str:
+        if self.visibility_store is not None:
+            return self.visibility_store.place_of(target) or ""
+        entity = self.ontology.entities.get(target) if self.ontology is not None else None
+        return (entity.location if entity else "") or ""
+
+    def _engagements_of(self, agent_id: str) -> list[tuple[str, dict[str, Any]]]:
+        prefix = f"{agent_id}|"
+        return [(k, v) for k, v in self._engaged.items() if k.startswith(prefix)]
+
+    def _occupying(self, agent_id: str) -> dict[str, Any] | None:
+        """她此刻被哪件长过程占着 —— 没有就是 `None`。占用的一次只能有一件。"""
+        for _, record in self._engagements_of(agent_id):
+            if record.get("occupies"):
+                return record
+        return None
+
+    def _busy_refusal(
+        self, agent_id: str, target: str, verb: str, affordance: Any
+    ) -> str | None:
+        """她这会儿腾不出手 —— 返回那句话,腾得出就是 `None`。
+
+        这是**第四类**拒绝,不是硬塞进前三类里的一种。判据一直是"她接下来该干什么"
+        不一样:`conditions` 该换一棵树,`incapable` 该去补足,而 `busy` 两样都不该 ——
+        她该等自己手上这件做完。塞进 `conditions` 的话,一个正在做椅子的人会挨棵树
+        问过去,每棵都回她"这会儿不行",而真正的原因跟树一点关系没有。
+        """
+        key = self._engagement_key(agent_id, target, verb)
+        mine = self._engaged.get(key)
+        if mine is not None:
+            left = max(0, int(mine.get("ends", 0)) - int(self.clock))
+            return f"你已经在做这件事了 —— 还要 {left} 个 tick"
+        held = self._occupying(agent_id)
+        if held is not None:
+            left = max(0, int(held.get("ends", 0)) - int(self.clock))
+            what = held.get("label") or held.get("verb")
+            return (
+                f"你手上还有一件事没做完:{what} {held.get('target')} —— "
+                f"还要 {left} 个 tick"
+            )
+        return None
+
+    def _charge(
+        self, agent_id: str, me: str, target: str, verb: str, outcome: Any, here: str
+    ) -> None:
+        """把一次调用的代价落进世界:她身上的量 + 花掉的东西。
+
+        瞬间的事和长过程共用这一段 —— 两条路各写一遍的话,迟早有一条忘了发
+        `item_consume`,而那一条上的材料会**凭空回来**,账上还看不出来。
+        """
+        if outcome.me_updates and self.stock_store is not None:
+            self.stock_store.set_many(me, outcome.me_updates, tick=int(self.clock))
+        for item_id, quantity in sorted(outcome.consumed.items()):
+            # 库存只有事件日志一个来源 —— 这里发事件,投影自己去减。直接改投影
+            # 会让"重启一次她的肥料就回来了"成为可能,而账上什么也看不出来。
+            self._record_event({
+                "type": "item_consume", "who": agent_id, "loc": here,
+                "payload": {"who": agent_id, "item_id": item_id, "qty": quantity,
+                            "source": f"{verb}:{target}"},
+            })
+
+    def _engage(
+        self, agent_id: str, target: str, verb: str, affordance: Any, outcome: Any,
+        *, here: str, me: str,
+    ) -> dict[str, Any]:
+        """起头一件要花时间的事:代价当场付,记一条在做的事,到点由 tick 收尾。"""
+        self._charge(agent_id, me, target, verb, outcome, here)
+        started = int(self.clock)
+        ends = started + int(affordance.duration)
+        record = {
+            "agent": agent_id, "target": target, "verb": verb,
+            "label": affordance.label or verb,
+            "started": started, "ends": ends,
+            "occupies": bool(affordance.occupies),
+            "loc": here,
+        }
+        self._engaged[self._engagement_key(agent_id, target, verb)] = record
+        self._record_event({
+            "type": "entity_engage", "who": agent_id, "loc": here,
+            "payload": {
+                "target": target, "verb": verb, "duration": int(affordance.duration),
+                "ends_tick": ends, "occupies": bool(affordance.occupies),
+                # 起头就把代价记进历史。到点才记的话,一件做了十个月的事在账上
+                # 前十个月完全不存在 —— 而她那十个月的力气确实是这时候没的。
+                "cost": dict(outcome.me_updates), "consumed": dict(outcome.consumed),
+            },
+        })
+        return {
+            "ok": True, "target": target, "verb": verb, "started": True,
+            "duration": int(affordance.duration), "ends_tick": ends,
+            "occupies": bool(affordance.occupies),
+            "changed": {}, "cost": dict(outcome.me_updates),
+            "consumed": dict(outcome.consumed),
+        }
+
+    def _settle_engagements(self) -> None:
+        """到点的长过程结算掉。**跑在 tick 线程上** —— 纯算术,和规律同一类。"""
+        if not self._engaged:
+            return
+        from anima_world.ontology import finish_affordance
+
+        now_tick = int(self.clock)
+        for key, record in list(self._engaged.items()):
+            if int(record.get("ends", 0)) > now_tick:
+                continue
+            agent_id = str(record.get("agent") or "")
+            target = str(record.get("target") or "")
+            verb = str(record.get("verb") or "")
+            self._engaged.pop(key, None)
+            # 占着她的那件事解除了 —— 当前动作跟着清掉,不然行为树下一 tick
+            # 挑到同一个动作会被"和当前相同"挡住,她就再也不动了。
+            if record.get("occupies"):
+                self._current_action.pop(agent_id, None)
+            # 实例查一次,能力再查一次。**只查能力不够** —— `affordance_of` 查不到
+            # 实例时会回落到种类,于是一棵被砍掉的树照样"能被照料",这件事会安静地
+            # 收尾在一个不存在的东西上,量还真的写回去了。
+            ontology = self.ontology
+            affordance = (
+                ontology.affordance_of(target, verb)
+                if ontology is not None and target in ontology.entities else None
+            )
+            store = self.stock_store
+            if affordance is None or store is None:
+                # 东西没了(或者本体整个换了)。**代价不退** —— 她那十个月确实
+                # 花掉了,退回去等于让"世界变了"成为一次免费的重来。
+                self._record_event({
+                    "type": "entity_disengage", "who": agent_id,
+                    "loc": str(record.get("loc") or ""),
+                    "payload": {"target": target, "verb": verb, "reason": "gone"},
+                })
+                logger.info("%s 的 %s %s 收不了尾:那个东西不在了", agent_id, verb, target)
+                continue
+            # **占用她的那种要求她一直在场。** 起头时查过一次同处一地
+            # (`perform_affordance` 的 `absent`),而一件占着她身体的事,她走开
+            # 之后当然就不在做了 —— 不查的话,她可以起个头就动身去别的镇子,
+            # 那棵树照样在十二个 tick 之后被嫁接完,世界一声不吭。
+            # 不占用的那种正相反(怀胎不该要求她守在原地),所以只查这一半。
+            if record.get("occupies"):
+                here = self._where_is(agent_id)
+                if not here or here != self._place_of(target):
+                    self._record_event({
+                        "type": "entity_disengage", "who": agent_id,
+                        "loc": here or str(record.get("loc") or ""),
+                        "payload": {"target": target, "verb": verb, "reason": "left",
+                                    "started_at": str(record.get("loc") or "")},
+                    })
+                    logger.info("%s 中途走开了,%s %s 没做完", agent_id, verb, target)
+                    continue
+            outcome = finish_affordance(
+                affordance, values=store.of(target),
+                world_values=store.of("world"),
+                me_values=store.of(f"agent:{agent_id}") if affordance.needs_actor else None,
+                now=now_tick,
+            )
+            if not outcome.ok:
+                self._record_event({
+                    "type": "entity_disengage", "who": agent_id,
+                    "loc": str(record.get("loc") or ""),
+                    "payload": {"target": target, "verb": verb, "reason": outcome.reason,
+                                "refusal": outcome.refusal},
+                })
+                continue
+            if outcome.updates:
+                store.set_many(target, outcome.updates, tick=now_tick)
+            here = str(record.get("loc") or "")
+            self._record_event({
+                "type": "entity_interaction", "who": agent_id,
+                "loc": here,
+                "payload": {
+                    "target": target, "verb": verb, "changed": dict(outcome.updates),
+                    # 代价在起头那条 `entity_engage` 上,这里不重复记 —— 记两遍的话
+                    # 按事件重算"她今天花了多少力气"会得到两倍。
+                    "cost": {}, "consumed": {},
+                    "duration": now_tick - int(record.get("started", now_tick)),
+                },
+            })
+            # 十月怀胎落在这一行:孩子生在**收尾那一刻**,不是起头那一刻。
+            self._settle_birth_and_death(agent_id, target, verb, affordance, here)
+
+    # ── 生与灭 ──────────────────────────────────────────────────────────────
+    #
+    # 生成必须要代价,而代价由**作者**写(`costs` / `consumes` / `duration`),不由
+    # 引擎发配额。配额是引擎的天花板:撞上去时她收到的拒绝在世界里没有意义,
+    # "这个世界最多一百棵树"不是她能理解、能应对的东西。代价是世界的理由。
+    #
+    # 生和灭同一轮加,因为代价只封得住**速率**,封不住**存量**:体力天天回满的
+    # 世界里,一百天就是一百个孩子。真实世界靠的是会生的东西都会死。
+
+    def _sync_entities(self) -> None:
+        """别的进程种下的树,这个进程也得看得见。
+
+        实例表住 Redis(数据是共享的),而每个进程手里的 `Ontology` 是一份缓存 ——
+        不同步的话,A 进程生下来的东西在 B 进程眼里根本不存在:B 的 `interact` 回
+        一句"这儿没有这个东西",而那东西就在她面前。**两份真相里有一份不更新**,
+        正是这个仓库最怕的坏法。
+
+        用版本号而不是行数:一生一灭净变化是 0,而那正是最常见的一对。
+        重编译只重编译实例(种类是冻的),所以这一步是一次 GET 加一次小解析。
+        """
+        store = self.ontology_store
+        if store is None or self.ontology is None or not hasattr(store, "revision"):
+            return
+        try:
+            remote = int(store.revision())
+        except Exception:  # noqa: BLE001 - 同步失败不该掀翻这次调用
+            logger.warning("实例表版本读不到", exc_info=True)
+            return
+        if remote == self._entities_rev:
+            return
+        try:
+            entities = store.parse_entities_now(self.ontology.kinds)
+        except Exception:  # noqa: BLE001 - 别的进程写坏了,不该让这个进程崩
+            logger.warning("实例表重读失败,继续用手里这份", exc_info=True)
+            return
+        self.ontology = replace(self.ontology, entities=entities)
+        self._entities_rev = remote
+
+    def _settle_birth_and_death(
+        self, agent_id: str, target: str, verb: str, affordance: Any, here: str,
+    ) -> dict[str, Any]:
+        """一次调用真的做成之后的生与灭。瞬间的事和长过程共用这一段。
+
+        顺序是**先生后灭**:反过来的话,一条"砍倒这棵树,得到几根木料"里,新木料的
+        默认位置(这件事发生的地方)要从一个已经被抹掉的东西身上问出来。
+        """
+        born: dict[str, Any] = {}
+        if affordance.spawn is not None:
+            born = self._spawn_entity(agent_id, target, verb, affordance.spawn, here)
+        if affordance.destroys_target:
+            self._destroy_entity(agent_id, target, verb, here)
+        return born
+
+    def _spawn_entity(
+        self, agent_id: str, target: str, verb: str, spawn: Any, here: str,
+    ) -> dict[str, Any]:
+        """世界里多出一个东西 —— **而且当场验它活不活得了**。
+
+        出生自检不是事后的工具,是出生的一部分。运行期生出来的东西走的不是创世
+        那条路,而创世那条路上的闸(一次列全、当场开不了机)在这里一条都不在。
+        不验的话,一个新生的东西可以是:`entities` 里看着好好的,量却一个都没落地,
+        于是它的能力条件对着 0 求值、规律算不动,而两件事都只是安静地不发生。
+
+        没通过就**整个撤回**(实例、量、位置三样一起),并且吭声 —— 留一个半死不活
+        的东西在世界里,比根本没生出来更难查。**代价不退**:她确实付过了,而这一次
+        失败是作者的声明坏了,退给她只会让那个 bug 从账面上也消失。
+        """
+        from anima_world.ontology import check_entity, seed_quantities
+
+        store = self.ontology_store
+        stocks = self.stock_store
+        if store is None or stocks is None or self.ontology is None:
+            return {}
+
+        where = spawn.location or (
+            self._place_of(target) or here
+        )
+        # **不写 `kind`**:实例的种类是 id 的前缀,不是一个字段(`tree:oak` 里那个
+        # `tree` 就是它)。两处各存一份的话,迟早有一份说的是另一件事。
+        entity_id = store.mint_id(spawn.kind)
+        entry: dict[str, Any] = {"id": entity_id}
+        if spawn.name:
+            entry["name"] = spawn.name
+        if spawn.gloss:
+            entry["gloss"] = spawn.gloss
+        if where:
+            entry["location"] = where
+
+        stamp = datetime.now(timezone.utc).isoformat()
+        try:
+            entity = store.add_entity(entry, stamp)
+        except Exception as exc:  # noqa: BLE001 - 坏声明不该掀翻这一 tick
+            logger.error("%s 生不出 %s:%s", agent_id, spawn.kind, exc)
+            self._record_event({
+                "type": "entity_stillborn", "who": agent_id, "loc": here,
+                "payload": {"kind": spawn.kind, "verb": verb, "problems": [str(exc)]},
+            })
+            return {}
+        self.ontology.add_entity(entity)
+        self._entities_rev = store.revision()
+
+        # **逐个量填,不是逐个实体填**(创世那边踩过):作者在 spawn 里写了一个量,
+        # 不该让这个种类声明过的其余量一个都不落地。
+        values = {**seed_quantities(self.ontology, entity), **dict(spawn.quantities)}
+        if values:
+            stocks.set_many(entity_id, values, tick=int(self.clock))
+        if where and self.visibility_store is not None:
+            self.visibility_store.place(entity_id, where, entity.name)
+
+        problems = check_entity(
+            self.ontology, entity_id,
+            values=stocks.of(entity_id),
+            world_values=stocks.of("world"),
+            place=where,
+        )
+        if problems:
+            self._unmake(entity_id)
+            logger.error("%s 生下来的 %s 活不了:%s", agent_id, entity_id, "; ".join(problems))
+            self._record_event({
+                "type": "entity_stillborn", "who": agent_id, "loc": here,
+                "payload": {"entity": entity_id, "kind": spawn.kind, "verb": verb,
+                            "problems": problems},
+            })
+            return {}
+
+        self._record_event({
+            "type": "entity_spawn", "who": agent_id, "loc": here,
+            "payload": {"entity": entity_id, "kind": spawn.kind, "name": entity.name,
+                        "location": where, "from": target, "verb": verb,
+                        "values": dict(stocks.of(entity_id))},
+        })
+        return {"entity": entity_id, "kind": spawn.kind, "name": entity.name,
+                "location": where}
+
+    def _destroy_entity(self, agent_id: str, target: str, verb: str, here: str) -> None:
+        """这个东西没了。**四样一起走**:实例、量、位置、还在它身上的长过程。
+
+        少收一样的下场各不相同,但都安静:量留着 → 一个不存在的东西还有高度,
+        而下一个同名的实例会捡到它(id 不复用正是为了这个,但量的 owner 不会自己
+        清);位置留着 → `at()` 一直把它报进那儿的在场名单,她的提示词里有一样
+        走过去也摸不到的东西;长过程留着 → 她被一件永远收不了尾的事占着,直到
+        原定的结束 tick 才解脱,而这中间她什么也做不了、也说不出为什么。
+        """
+        store = self.ontology_store
+        if store is None or self.ontology is None:
+            return
+        name = ""
+        entity = self.ontology.entities.get(target)
+        if entity is not None:
+            name = entity.name
+        self._unmake(target)
+        for key, record in list(self._engaged.items()):
+            if record.get("target") != target:
+                continue
+            self._engaged.pop(key, None)
+            if record.get("occupies"):
+                self._current_action.pop(str(record.get("agent") or ""), None)
+            self._record_event({
+                "type": "entity_disengage", "who": str(record.get("agent") or ""),
+                "loc": str(record.get("loc") or ""),
+                "payload": {"target": target, "verb": str(record.get("verb") or ""),
+                            "reason": "gone"},
+            })
+        self._record_event({
+            "type": "entity_destroy", "who": agent_id, "loc": here,
+            "payload": {"entity": target, "name": name, "verb": verb},
+        })
+
+    def _unmake(self, entity_id: str) -> None:
+        """把一个实体从三张表上一起抹掉。撤回一次失败的出生走的也是这一条。"""
+        if self.ontology_store is not None:
+            self.ontology_store.drop_entity(entity_id)
+            self._entities_rev = self.ontology_store.revision()
+        if self.ontology is not None:
+            self.ontology.drop_entity(entity_id)
+        if self.stock_store is not None:
+            self.stock_store.delete(entity_id)
+        if self.visibility_store is not None and hasattr(self.visibility_store, "unplace"):
+            self.visibility_store.unplace(entity_id)
 
     def _persist_all_needs(self) -> None:
         if not self._needs_enabled() or self.event_log is None:
@@ -1898,11 +2346,16 @@ class Scheduler:
         # constraint into a wait, and a wait into an encounter.
         if self.emit_action(agent, action):
             self._advance_intent(agent)
-            if action.kind == "interact":
+            if action.kind == "interact" and self._occupying(agent.id) is None:
                 # **一次交互是一下子的事,不是一个状态。** 记成"当前动作"的话,
                 # 树下一 tick 重挑同一个动作 → 与当前相同 → 不再发生;于是
                 # "树矮就浇水"这条排班一辈子只浇一次,而闸门还开着、日志还干净。
                 # `walk`/`work`/`sleep` 正相反,它们本来就是持续的状态。
+                #
+                # **除非它起了一件占着她的长过程** —— 那时它就**是**一个状态,而且
+                # 正是这条让"30 分钟的排班窗口把同一件事干 6 遍"停下来:给它一个
+                # 覆盖那段窗口的 duration,她就只做一遍,做满整段时间。声明时长的
+                # 世界才变,不声明的逐位如旧。
                 self._current_action.pop(agent.id, None)
                 return
             self._current_action[agent.id] = action

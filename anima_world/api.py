@@ -225,6 +225,23 @@ class _WorldView:
                 "eta_minutes": remaining * int(mpt),
             }
 
+        # 她手上要花时间的事。**和 `transit` 并列不是巧合** —— 两者是同一种东西:
+        # 一段她已经起了头、还没走完的时间。少了这一格,一个埋头做了十个月椅子的人
+        # 在 `state()` 里看上去和闲着一模一样,而宿主的界面只认这里。
+        engaged = [
+            {
+                "target": str(r.get("target") or ""),
+                "verb": str(r.get("verb") or ""),
+                "label": str(r.get("label") or r.get("verb") or ""),
+                "remaining": max(0, int(r.get("ends", 0)) - int(self.scheduler.clock)),
+                "occupies": bool(r.get("occupies")),
+            }
+            for _, r in self.scheduler._engaged.items()
+            if r.get("agent") == agent_id
+        ]
+        if engaged:
+            activity["engaged"] = sorted(engaged, key=lambda r: (r["remaining"], r["verb"]))
+
         plan = self.scheduler._plans.get(agent_id)
         if plan is not None:
             now = self.scheduler.world_time()
@@ -1619,9 +1636,14 @@ class World:
         才发现世界不认。
 
         每行 `{"id","gloss","builtin","budget","quantities":[{"key","default",
-        "visibility","label","unit"}],"affordances":[{"verb","changes_world",
-        "needs_actor","conditions":[…],"sets":[…],"requires":[…],"costs":[…],
-        "consumes":{item_id: 几个}}]}`。
+        "visibility","label","unit"}],"affordances":[{"verb","label","duration",
+        "occupies","changes_world","needs_actor","conditions":[…],"sets":[…],
+        "requires":[…],"costs":[…],"consumes":{item_id: 几个}}]}`。
+
+        `duration > 0` 的能力是**长过程**:调用它只是起个头(代价当场付),效果
+        要到 `duration` 个 tick 之后才落。`occupies` 说这段时间占不占用她 ——
+        占用的那种一次只能有一件,期间别的能力一律拒绝(`reason == "busy"`)。
+        `label` 是她提示词里读到的那几个字,也是宿主界面上该印的那几个字。
         条件与效果给的是**源表达式的字符串**,照着作者写的样子 —— 宿主要显示
         "照料:树高 < 最大树高 时可用"。
 
@@ -1651,6 +1673,11 @@ class World:
                 "affordances": [
                     {
                         "verb": a.verb,
+                        # 她读到的那几个字。宿主的按钮上该印这个,不是 `harvest` ——
+                        # 动词放开之后引擎手上也没有别的地方查得到它。
+                        "label": a.label or a.verb,
+                        "duration": a.duration,
+                        "occupies": a.occupies if a.duration > 0 else False,
                         "changes_world": a.changes_world,
                         "needs_actor": a.needs_actor,
                         "conditions": [str(c) for c in a.conditions],
@@ -1658,6 +1685,17 @@ class World:
                         "requires": [str(r) for r in a.requires],
                         "costs": [f"{k} = {v}" for k, v in a.costs.items()],
                         "consumes": dict(a.consumes),
+                        # 生与灭。`spawn` 是 `{"kind","name","gloss","location",
+                        # "quantities"}`(`location` 空 = 生在这件事发生的地方)。
+                        "spawn": (
+                            {
+                                "kind": a.spawn.kind, "name": a.spawn.name,
+                                "gloss": a.spawn.gloss, "location": a.spawn.location,
+                                "quantities": dict(a.spawn.quantities),
+                            }
+                            if a.spawn is not None else None
+                        ),
+                        "destroys_target": a.destroys_target,
                     }
                     for a in kind.affordances.values()
                 ],
@@ -1694,6 +1732,86 @@ class World:
             }
             for e in rows
         ]
+
+    def check_entity(self, entity_id: str | None = None) -> list[dict[str, Any]]:
+        """**这些东西活得了吗** —— 逐个跑一遍出生自检,报每个身上讲不通的地方。
+
+        不给 `entity_id` 就查全部。每行 `{"entity","kind","ok","problems":[…]}`,
+        `ok` 为真时 `problems` 是空的。
+
+        引擎在**每一次出生时自己跑这一套**(不通过就整个撤回并发 `entity_stillborn`),
+        这个方法是同一套检查的手动入口。两个用处:
+
+        - **写声明的时候**问一句"我这么写,生出来的东西活得了吗" —— 不必先让世界
+          真的生一个出来看看;
+        - **查一个已经在世界里的东西**为什么不动弹。它查的正是那类不报错的病:
+          量没落地(读到 0,于是条件和规律都安静地不生效)、能力的表达式算不出来、
+          声明成看得见却不在任何地方(存在,而没有任何人碰得到)。
+
+        查的是**能不能算出一个叫得出名字的结论**,不是"能不能成功":`conditions`
+        (果子还没熟)和 `incapable`(她做不了)都算过关 —— 那是世界在正常说话。
+        """
+        from anima_world.ontology import check_entity as _check
+
+        ontology = self.scheduler.ontology
+        if ontology is None:
+            return []
+        store = self.scheduler.stock_store
+        visibility = self.scheduler.visibility_store
+        ids = [entity_id] if entity_id is not None else sorted(ontology.entities)
+        out: list[dict[str, Any]] = []
+        for eid in ids:
+            entity = ontology.entities.get(eid)
+            problems = _check(
+                ontology, eid,
+                values={} if store is None else store.of(eid),
+                world_values=None if store is None else store.of("world"),
+                place=(
+                    None if visibility is None
+                    else (visibility.place_of(eid) or "")
+                ),
+            )
+            out.append({
+                "entity": eid,
+                "kind": entity.kind if entity is not None else "",
+                "ok": not problems,
+                "problems": problems,
+            })
+        return out
+
+    def engagements(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """**谁正在做一件要花时间的事**;给了 `agent_id` 就只看她。
+
+        为什么这个必须有出口:一个长过程在别处一点痕迹都没有 —— `state()` 里她
+        看上去闲着,`stocks()` 上那个东西一动不动,而她其实已经埋头干了十个月。
+        少了这一个方法,"她在忙"和"她没事干"在宿主眼里长得一模一样,而这一层
+        存在的全部意义就是让这两者不一样。
+
+        每行 `{"agent","target","verb","label","started_tick","ends_tick",
+        "remaining","occupies"}`。`remaining` 是**此刻**还剩几个 tick,拿它显示
+        进度条;`occupies` 为真表示这期间她腾不出手,别的能力一律 `busy`。
+        """
+        now = int(self.scheduler.clock)
+        rows = [
+            dict(record) for _, record in self.scheduler._engaged.items()
+            if agent_id is None or record.get("agent") == agent_id
+        ]
+        return sorted(
+            (
+                {
+                    "agent": str(r.get("agent") or ""),
+                    "target": str(r.get("target") or ""),
+                    "verb": str(r.get("verb") or ""),
+                    "label": str(r.get("label") or r.get("verb") or ""),
+                    "started_tick": int(r.get("started", 0)),
+                    "ends_tick": int(r.get("ends", 0)),
+                    "remaining": max(0, int(r.get("ends", 0)) - now),
+                    "occupies": bool(r.get("occupies")),
+                }
+                for r in rows
+            ),
+            key=lambda r: (r["ends_tick"], r["agent"], r["target"], r["verb"]),
+        )
 
     # ---- 看一眼她收到了什么 ----------------------------------------------
 

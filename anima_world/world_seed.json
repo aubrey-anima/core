@@ -510,6 +510,54 @@
           "costs": {
             "体力": "me_体力 - 10"
           }
+        },
+        "嫁接": {
+          "duration": 12,
+          "when": ["树高 >= 2"],
+          "requires": ["me_体力 >= 25", "have_garden_shears >= 1"],
+          "set": {
+            "最大树高": "最大树高 + 2"
+          },
+          "costs": {
+            "体力": "me_体力 - 25"
+          }
+        },
+        "育苗": {
+          "duration": 24,
+          "when": ["树高 >= 3"],
+          "requires": ["me_体力 >= 20", "have_garden_shears >= 1"],
+          "consumes": {"fertilizer": 1},
+          "costs": {
+            "体力": "me_体力 - 20"
+          },
+          "spawn": {
+            "kind": "sapling",
+            "name": "新育的树苗"
+          }
+        }
+      },
+      "prompt": {
+        "budget": 3
+      }
+    },
+    {
+      "id": "sapling",
+      "gloss": "一株齐膝高的树苗,叶子还嫩",
+      "quantities": {
+        "苗高": {
+          "default": 0.2,
+          "visibility": "here",
+          "unit": "米"
+        }
+      },
+      "affordances": {
+        "look": {},
+        "拔掉": {
+          "requires": ["me_体力 >= 5"],
+          "costs": {
+            "体力": "me_体力 - 5"
+          },
+          "destroys_target": true
         }
       },
       "prompt": {
