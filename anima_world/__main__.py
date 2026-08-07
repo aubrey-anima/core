@@ -306,14 +306,14 @@ def _build_parser() -> argparse.ArgumentParser:
     events_export.add_argument("--output", required=True, help="写到文件;`-` = stdout")
 
     report_cmd = sub.add_parser(
-        "report", help="对着一个 world.db 出运行摘要 —— 只读,不跑世界"
+        "report", help="对着一个世界出运行摘要 —— 只读,不跑世界"
     )
     _add_world_args(report_cmd)
     report_cmd.add_argument("--json", action="store_true", help="机器可读输出")
     report_cmd.add_argument("--output", help="写到文件(缺省打到 stdout)")
 
     validate = sub.add_parser(
-        "validate", help="不建世界就检查一份种子或一份节拍脚本"
+        "validate", help="不建世界就检查一份世界文件或一份节拍脚本"
     )
     validate_commands = validate.add_subparsers(dest="validate_command", required=True)
     validate_seed = validate_commands.add_parser(
@@ -1198,25 +1198,36 @@ def build_serve_scheduler(
 
 
 def _seed_world_setting(prompt_store: Any | None, world_seed: dict[str, Any] | None) -> None:
-    """prompt-grounding: a seed file's `world_setting` replaces the bundled
-    default worldview at FIRST BOOT only (caller guards with `not persisted`).
+    """世界文件的 `world_setting`(一条 `author` 记录,body 就是那段话)在**首启**
+    时替换掉内置的默认世界观(调用方用 `not persisted` 把着门)。
 
-    The DB row is the runtime authority thereafter (M5 rule, same as llm.*):
-    UI hot-edits stick, restarts never re-apply the seed. Without this
-    channel every custom world ran under the hardcoded 旧港区 worldview —
-    Window-1's narrative "hallucinations" were the LLM obeying it.
+    之后 `:prompts` 里那一行是运行期权威(和 llm.* 同一条 M5 规矩):`prompt_set`
+    的热改留得住,重启不会拿文件回头盖掉它。没有这条通道,每个自定义世界都跑在
+    写死的旧港区世界观下 —— Window-1 那些"叙事幻觉"是 LLM 在照它办事。
+
+    ⚠️ 形状归 `world_file.AUTHOR_SCALAR_TYPES` 定,**一段非空文本**。这里曾经和
+    线格式对不上(那边归进"对象型"、要求 body 是 dict,这里只认 str),于是任何
+    `.cyberworld` 的世界观都进不来,而且一声不吭 —— 所以下面那个 `warning`
+    不是装饰:形状不对时必须有人说一句。
     """
     if prompt_store is None or world_seed is None:
         return
     setting = world_seed.get("world_setting")
-    if isinstance(setting, str) and setting.strip():
-        try:
-            prompt_store.set("world.setting", setting.strip())
-        except Exception:  # noqa: BLE001 - a bad seed field must not abort a
-            # first boot whose genesis events are already committed (the
-            # crash would silently lock the world onto the bundled default
-            # worldview forever — code review Round 1 #1)
-            logger.warning("world_setting from seed could not be stored; keeping default", exc_info=True)
+    if setting is None:
+        return
+    if not isinstance(setting, str) or not setting.strip():
+        logger.warning(
+            "world_setting 必须是一段非空文本,收到 %s;这个世界仍用内置世界观",
+            type(setting).__name__,
+        )
+        return
+    try:
+        prompt_store.set("world.setting", setting.strip())
+    except Exception:  # noqa: BLE001 - a bad seed field must not abort a
+        # first boot whose genesis events are already committed (the
+        # crash would silently lock the world onto the bundled default
+        # worldview forever — code review Round 1 #1)
+        logger.warning("world_setting from seed could not be stored; keeping default", exc_info=True)
 
 
 def _seed_mock_narration(prompt_store: Any | None, world_seed: dict[str, Any] | None) -> None:

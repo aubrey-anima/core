@@ -320,6 +320,55 @@ def test_config_是合并不是追加():
     assert seed["config"] == {"a": 1, "b": 2}
 
 
+def test_世界观是一段文本不是一张表():
+    """**这个洞的形状定义在这里。** 引擎自己的两半曾经对不上:线格式把
+    `world_setting` 归进"对象型"(body 必须是 dict),而播种函数只认字符串 ——
+    于是任何 `.cyberworld` 的世界观都送不进世界,**而且一声不吭**。
+
+    形状是:`body` 就是那段话本身。段的值 = body,不多包一层。
+    """
+    seed = author_records_to_seed([
+        {"kind": "author", "type": "world_setting", "body": "旧港区,常年下雨。"},
+    ])
+    assert seed == {"world_setting": "旧港区,常年下雨。"}
+
+
+def test_世界观写成对象是当场报错不是静默忽略():
+    """两边对不上时必须有人说一句 —— 上一版的答案是没有人说话。"""
+    with pytest.raises(WorldFileError) as excinfo:
+        author_records_to_seed([
+            {"kind": "author", "type": "world_setting", "body": {"text": "旧港区"}},
+        ])
+    assert "world_setting" in str(excinfo.value)
+
+    with pytest.raises(WorldFileError):
+        author_records_to_seed([
+            {"kind": "author", "type": "world_setting", "body": "   "},
+        ])
+
+
+def test_世界观后一条盖前一条():
+    """它是一段而不是一列 —— 记录按文件顺序应用,所以"导出一份、手改一行、
+    装回去"照旧成立。"""
+    seed = author_records_to_seed([
+        {"kind": "author", "type": "world_setting", "body": "第一版"},
+        {"kind": "author", "type": "world_setting", "body": "第二版"},
+    ])
+    assert seed["world_setting"] == "第二版"
+
+
+def test_段的值类型不对是报错不是静默丢掉():
+    """反方向同一条。这个方向更难发现:文件写得出来、装得进去,只是少了一整段
+    (`world_setting` 写成字符串时,这里曾经一言不发地把整个世界观扔掉)。"""
+    with pytest.raises(WorldFileError) as excinfo:
+        seed_to_author_records({"world_setting": {"text": "旧港区"}})
+    assert "world_setting" in str(excinfo.value)
+
+    with pytest.raises(WorldFileError) as excinfo:
+        seed_to_author_records({"config": "needs.enabled=true"})
+    assert "config" in str(excinfo.value)
+
+
 def test_转换器往返不丢东西():
     """"换容器不动语义"要真成立:section 字典 → author 记录 → section 字典,
     逐段相等。这条守着的是那 26 个按 section 字典写夹具的测试文件 ——
@@ -339,5 +388,9 @@ def test_转换器往返不丢东西():
         "stocks": [{"owner": "world", "values": {"季节": 2.0}}],
         "stock_visibility": [{"kind": "tree", "key": "树高", "visible": "here"}],
         "config": {"needs.enabled": True},
+        # 三个非列表段全在这里。少一个,那一段就可以在转换器里悄悄丢掉而这条依旧绿
+        # —— `world_setting` 缺席了整整一个大版本,正是这么缺的。
+        "world_setting": "旧港区,常年下雨,港务局说了算。",
+        "mock_narration": {"sleep": "{agent} turned in for the night"},
     }
     assert author_records_to_seed(seed_to_author_records(seed)) == seed

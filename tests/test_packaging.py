@@ -49,12 +49,19 @@ def test_the_chat_tools_subpackage_ships_and_registers_itself():
     assert tools.get("mute").params_schema["minutes"]["required"] is True
 
 
-def test_authoring_is_not_importable_from_the_engine():
-    """`anima_world.author` moved out. Leaving a shim would let the studio
-    import the engine again, which is exactly what makes version switching a
-    lie — the studio drives engines as subprocesses, never as imports."""
+@pytest.mark.parametrize("gone", ["anima_world.author", "anima_world.world"])
+def test_the_removed_layers_are_not_importable_from_the_engine(gone):
+    """`anima_world.author`(创作)和 `anima_world.world`(HTTP)都搬走了。
+
+    留个 shim 就等于给工具开后门:创作台靠子进程驱动多个引擎版本,它一旦
+    import 得到引擎,版本切换就是一句谎话。
+
+    ⚠️ `world` 这条是补的,而漏掉它的方式很安静:源码删干净了,**目录还在**
+    (只剩 `__pycache__` 和一个空 `static/`),于是 Python 把它当**命名空间包** ——
+    `import anima_world.world` 照样成功,返回一个空模块。删源码不等于删模块。
+    """
     with pytest.raises(ModuleNotFoundError):
-        __import__("anima_world.author")
+        __import__(gone)
 
 
 

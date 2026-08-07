@@ -87,10 +87,25 @@ AUTHOR_SECTIONS: dict[str, str] = {
 # 那两个**不是一列条目而是一个对象**的段,和 `config` 同类:一份而不是一条。
 AUTHOR_OBJECT_TYPES: dict[str, str] = {
     "config": "config",
-    "world_setting": "world_setting",
     "mock_narration": "mock_narration",
 }
 AUTHOR_CONFIG_TYPE = "config"    # 兼容旧名字;它现在只是 AUTHOR_OBJECT_TYPES 之一
+
+# 载荷本身就是**一个标量**的段。目前只有一个:世界观是作者写的一段话,
+# 不是一张表 —— 它从这里到 `:prompts` 的 `world.setting`、再到她收到的提示词块,
+# 全程是同一个字符串(`prompt_store._RAW_TEMPLATES` 里它原样贴)。给它包一层
+# `{"text": …}` 等于给一个只有一层的东西造一层不存在的结构,而每一层都是一处
+# 两边可以对不上的地方 —— 这个洞正是那么来的:
+# **v3 把 `world_setting` 编进了"对象型"(body 必须是 dict),而播种函数
+# `__main__._seed_world_setting` 只认字符串,于是任何 `.cyberworld` 的世界观
+# 都送不进世界,并且一声不吭。** 形状定在这里,两头照它对齐。
+#
+# ⚠️ 跨仓库:`body` 的类型随 `type` 走,所以镜像端(运维台 `lib/worldPackage.js`)
+# 要读的是这三张表,而不是"body 永远是个对象"这条猜测。类型不符**当场报错**,
+# 读和写两个方向都是 —— 静默跳过就是这个洞的第二种写法。
+AUTHOR_SCALAR_TYPES: dict[str, str] = {
+    "world_setting": "world_setting",
+}
 
 # Redis 值的类型闭集(和 `type` 命令的回答一致)。
 REDIS_TYPES = frozenset({"hash", "list", "string", "set"})
@@ -343,6 +358,10 @@ def author_records_to_seed(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     `{"agents": [...]}`,于是既有的那十八个编译步骤一行都不用改。
 
     非 `author` 的记录**直接忽略** —— 调用方拿同一个流分别喂给这里和落键那一路。
+
+    **`body` 的形状由 `type` 决定**,三张表各一种:一列条目(`AUTHOR_SECTIONS`)、
+    一份对象(`AUTHOR_OBJECT_TYPES`)、一段文本(`AUTHOR_SCALAR_TYPES`)。
+    对不上**当场报错**:世界观曾经因为这条不成立而整段消失,静默。
     """
     seed: dict[str, Any] = {}
     errors: list[str] = []
@@ -351,6 +370,18 @@ def author_records_to_seed(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             continue
         kind = str(record.get("type") or "").strip()
         body = record.get("body")
+        scalar = AUTHOR_SCALAR_TYPES.get(kind)
+        if scalar is not None:
+            if not isinstance(body, str) or not body.strip():
+                errors.append(
+                    f"author[{index}] {kind}:body 必须是一段非空文本(收到 "
+                    f"{type(body).__name__})—— 这个段的载荷就是那段话本身,不包对象"
+                )
+                continue
+            # 一段而不是一条:后一条**覆盖**前一条(记录按文件顺序应用,
+            # 所以"导出一份、手改一行、装回去"照旧成立)。
+            seed[scalar] = body
+            continue
         if not isinstance(body, dict):
             errors.append(
                 f"author[{index}] {kind or '?'}:少了 body,或者它不是一个对象"
@@ -366,7 +397,7 @@ def author_records_to_seed(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         if section is None:
             errors.append(
                 f"author[{index}]:不认识的 type {kind!r} —— 只认 "
-                f"{sorted([*AUTHOR_SECTIONS, *AUTHOR_OBJECT_TYPES])}"
+                f"{sorted([*AUTHOR_SECTIONS, *AUTHOR_OBJECT_TYPES, *AUTHOR_SCALAR_TYPES])}"
             )
             continue
         seed.setdefault(section, []).append(body)
@@ -380,16 +411,36 @@ def seed_to_author_records(seed: dict[str, Any]) -> list[dict[str, Any]]:
 
     留着它有两个正当用处,都不是"兼容旧格式":把内置演示世界一次性转成新格式,
     以及让测试用最短的写法造夹具。**产品代码里没有第二条读 section 字典的路。**
+
+    和 `author_records_to_seed` 一样按三张表分流,而且**类型不符是报错,不是跳过** ——
+    这个方向上的静默丢弃更难发现:文件写得出来、装得进去,只是少了一段
+    (`world_setting` 是字符串时,这里曾经一言不发地把整个世界观扔掉)。
     """
     out: list[dict[str, Any]] = []
     reverse = {section: kind for kind, section in AUTHOR_SECTIONS.items()}
     reverse_object = {section: kind for kind, section in AUTHOR_OBJECT_TYPES.items()}
+    reverse_scalar = {section: kind for kind, section in AUTHOR_SCALAR_TYPES.items()}
     unknown: list[str] = []
+    mistyped: list[str] = []
     for section, value in seed.items():
+        kind = reverse_scalar.get(section)
+        if kind is not None:
+            if isinstance(value, str) and value.strip():
+                out.append({"kind": "author", "type": kind, "body": value})
+            elif value:
+                mistyped.append(
+                    f"段 {section!r} 必须是一段非空文本,收到 {type(value).__name__}"
+                )
+            continue
         kind = reverse_object.get(section)
         if kind is not None:
-            if isinstance(value, dict) and value:
-                out.append({"kind": "author", "type": kind, "body": dict(value)})
+            if isinstance(value, dict):
+                if value:
+                    out.append({"kind": "author", "type": kind, "body": dict(value)})
+            elif value:
+                mistyped.append(
+                    f"段 {section!r} 必须是一个对象,收到 {type(value).__name__}"
+                )
             continue
         kind = reverse.get(section)
         if kind is None:
@@ -402,13 +453,16 @@ def seed_to_author_records(seed: dict[str, Any]) -> list[dict[str, Any]]:
             for entry in value:
                 if isinstance(entry, dict):
                     out.append({"kind": "author", "type": kind, "body": entry})
+    errors: list[str] = list(mistyped)
     if unknown:
-        raise WorldFileError([
+        errors.append(
             f"不认识的段 {sorted(unknown)} —— 认得的是 "
-            f"{sorted([*AUTHOR_SECTIONS.values(), *AUTHOR_OBJECT_TYPES.values()])}。"
-            f"加一个新段要同时在 AUTHOR_SECTIONS / AUTHOR_OBJECT_TYPES 里登记,"
-            f"不然它会安静地从世界里消失"
-        ])
+            f"{sorted([*AUTHOR_SECTIONS.values(), *AUTHOR_OBJECT_TYPES.values(), *AUTHOR_SCALAR_TYPES.values()])}。"
+            f"加一个新段要同时在 AUTHOR_SECTIONS / AUTHOR_OBJECT_TYPES / "
+            f"AUTHOR_SCALAR_TYPES 里登记,不然它会安静地从世界里消失"
+        )
+    if errors:
+        raise WorldFileError(errors)
     return out
 
 

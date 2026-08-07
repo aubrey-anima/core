@@ -265,6 +265,16 @@ v3 合成一个:**一个文件,两层记录。**
   一半世界,而文件看上去完全正常。这条也是被逼出来的:转换器最初漏了三个 section
   (`stock_places` / `world_setting` / `mock_narration`),而丢掉的后果是世界照样建得起来、
   只是少一整层(`mock_narration` 丢了 = 世界改说另一种语言),没有任何地方会说一句。
+- **`body` 的类型也归 `type` 管,对不上当场报错。** 同一条纪律欠了最后一段:
+  `world_setting` 被编进"一份对象"(`body` 要是 dict),而播种它的
+  `__main__._seed_world_setting` 只认字符串 —— 于是**任何 `.cyberworld` 的世界观都送不进
+  世界,而且一声不吭**,每个自定义世界都跑在引擎写死的那份默认世界观下。定案是
+  **一段文本**(`body` 就是那段话,不包 `{"text": …}`):它到 `:prompts` 的
+  `world.setting`、再到她收到的提示词块,全程是同一个字符串。落点是
+  `world_file.AUTHOR_SCALAR_TYPES`(第三张表,读写两个方向都验),`seed_to_author_records`
+  那一头也从"静默跳过类型不符的段"改成报错。这个洞能存在一整版,是因为
+  `demo.cyberworld` 里没有这条记录、也没有一条测试碰过它 ——
+  `tests/test_world_setting.py` 现在守着整条通道(文件 → `:prompts` → 提示词块)。
 - **压缩与否只看头两个字节,不看扩展名。** 写出去永远是 gzip(且 `mtime=0` —— 默认会
   把当前时间写进头里,于是"这两个包一样吗"永远答不了,而可 diff 是换文本格式的卖点);
   读进来允许裸 JSONL —— 手写一个世界不该被逼着先 gzip,而这正是这个格式能取代种子的

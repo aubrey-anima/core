@@ -522,8 +522,8 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
 1. **输出改成写 `author` 记录**,不再是一个 section 字典的 JSON。映射是一比一的:
    `agents[]` → 一条条 `{"type":"agent"}`,`locations[]` → `{"type":"location"}`,
    依此类推(`kind` / `entity` / `rule` / `item` / `stock` / `relation` / `memory` /
-   `visibility` / `place`);`config` / `world_setting` / `mock_narration` 三个是
-   **合并而不是追加**的对象型。
+   `visibility` / `place`);`config` / `mock_narration` 是**合并而不是追加**的
+   对象型;`world_setting` 是**一段文本**(见下面 3.10)。
 2. **载荷必须收在 `body` 里,不要平铺。** 这条不是洁癖:`locations` 条目自己带 `kind`
    (嵌套地图的几何类型),平铺进信封会把记录类型**静默覆盖**掉。
 3. **不必 gzip。** 压缩与否只看头两个字节,写一份裸 JSONL 引擎照样读 —— 手写、
@@ -545,6 +545,42 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
 
 内置的 `demo.cyberworld` 是纯文本,`zcat`(或直接打开)就能看 —— 它同时是这个格式的
 说明书,照抄它比读这段文字快。
+
+## 3.10 修好了:世界观(`world_setting`)进得了世界了
+
+**你们诊断得对,而且洞在引擎这边。** 2.0 开发期引擎自己的两半对不上:线格式
+(`world_file.py`)把 `world_setting` 编进了"一份对象"(要求 `body` 是 dict),而播种
+它的那一头(`__main__._seed_world_setting`)只认字符串 —— 于是**任何 `.cyberworld` 写下
+的世界观都送不进世界,并且一声不吭**:世界建得起来、角色照样说话,只是每个自定义世界
+都跑在引擎写死的那份默认世界观下。`demo.cyberworld` 里没有这条记录、也没有任何测试
+碰过它,所以它一直没暴露。
+
+**形状定了:一段文本,`body` 就是那段话本身**(不包 `{"text": …}`)。理由是它从这里
+到 `:prompts` 的 `world.setting`、再到她收到的提示词块,全程是同一个字符串;包一层
+等于给一个只有一层的东西造一层不存在的结构,而每多一层就多一处两边能对不上的地方。
+
+```jsonc
+{"kind":"author","type":"world_setting","body":"旧港区,常年下雨。港务局说了算。"}
+```
+
+你们要跟的三条:
+
+1. **写成一段字符串。** 写成 `{"text": …}` 或空串现在是**当场报错**(`validate world`
+   退出码 2 并点名 `world_setting`),不再是静默忽略 —— 两边对不上时必须有人说一句。
+2. **只在首启说话。** 和 `config` 同一条规矩:它替**新世界**定世界观;世界建成之后
+   `:prompts` 里那一行是运行期权威,`prompt_set` 的热改留得住,重启不会拿文件盖回去。
+   ⚠️ 也就是说,把一份带 `world_setting` 的文件装进一个**已有**的世界,这一段**不生效**
+   (对象型的 `config` / `mock_narration` 同样如此)——"装进已有世界 = 一次编辑"目前
+   只对列表型的段成立。而 `world.setting` 的写口只有 Python 的
+   `World.prompt_set("world.setting", …)`,**CLI 上没有**(`anima-world prompt` 是只读的),
+   所以你们现在改不了一个**活着的**世界的世界观 —— 新建的世界没问题。
+   要这条路就开一条诉求(`anima-world prompt --set` 之类的写口归引擎开),
+   别在你们那侧绕过去。
+3. **验一遍不需要 Redis**:`anima-world validate world x.cyberworld` 就能查出形状错。
+
+守着它的是 `tests/test_world_setting.py`(文件 → `:prompts` → 她真收到的提示词块,
+整条通道),外加 `tests/test_world_file.py` 里那条往返测试 —— 三个非列表段现在都在
+里面,少一个,那一段就能在转换器里悄悄丢掉而测试依旧绿。
 
 ## 4. 旧特性速查(1.0 ~ 1.2,你们大概已经在用)
 

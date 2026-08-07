@@ -1718,7 +1718,7 @@ stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身
 | `locations[]` | **必填** `id` / `name` / `description`;可选 `kind` / `parent` / `x` / `y` / `w` / `h`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、`stock` |
 | `relations[]` | `a` / `b` / `sentiment` / `r_type` / `r_type_back`,双向播种 |
 | `memories[]` | 创世记忆 |
-| `world_setting` | 世界观,首启写进 `world.setting` 提示词 |
+| `world_setting` | 世界观,**一段文本**(一条 `author` 记录,`body` 就是那段话),首启写进 `world.setting` 提示词;之后 `prompt_set` 的热改是权威,重启不覆盖 |
 | `items[]` | 物品定义:`id` / `name` / `kind`(`consumable`/`durable`/`artwork`)/ `base_price` / `restores` |
 | `mock_narration` | Mock 叙事模板,键是动作种类(外加 `memory_suffix`),见 §7 |
 | `config` | **这个世界开箱点亮哪些开关**(1.3.0),见下 |
@@ -1802,10 +1802,22 @@ stance / tools / intent / autonomy,并播了关系、创世记忆、钱、随身
 这条是被一次真碰撞逼出来的:`locations` 条目自己带 `kind`(嵌套地图的几何类型),
 平铺进信封会把记录类型**静默覆盖**掉。收进 `body` 让它不可表达。
 
-`author` 记录的 `type` 与 section 一一对应:`agent` / `location` / `kind` / `entity` /
-`rule` / `item` / `stock` / `relation` / `memory` / `visibility` / `place`,外加三个
-**合并而不是追加**的对象型:`config` / `world_setting` / `mock_narration`。
-**不认识的 type 与不认识的记录类型都当场报错,不跳过** —— 跳过等于安静地少装一半世界。
+`author` 记录的 `type` 与 section 一一对应,**`body` 的形状随 `type` 走,三类**:
+
+| 类 | `type` | `body` | 两条同类记录 |
+|---|---|---|---|
+| 一列条目 | `agent` / `location` / `kind` / `entity` / `rule` / `item` / `stock` / `relation` / `memory` / `visibility` / `place` | 一个对象 | **追加** |
+| 一份对象 | `config` / `mock_narration` | 一个对象 | **按键合并** |
+| 一段文本 | `world_setting` | **一个字符串**,就是那段话本身 | **后一条覆盖前一条** |
+
+```jsonc
+{"kind":"author","type":"world_setting","body":"旧港区,常年下雨。港务局说了算。"}
+```
+
+**不认识的 type、不认识的记录类型、`body` 的类型和 `type` 对不上,都当场报错,不跳过** ——
+跳过等于安静地少装一半世界。⚠️ 最后那一条是补上的:2.0 开发期 `world_setting` 被编进
+"一份对象",而播种它的那一头只认字符串,于是**任何 `.cyberworld` 的世界观都送不进世界,
+而且一声不吭**(`tests/test_world_setting.py` 现在守着整条通道)。
 
 `lock` 键与占用标记(`owner_pid` / `owner_host`)不进包,`is_secret` 的配置行在 dump 时
 剥除:包是**分发物**。
