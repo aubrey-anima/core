@@ -993,6 +993,21 @@ def build_serve_scheduler(
     # 编辑加得进新东西,但不会把这个世界跑出来的现在倒带回创世那一刻。
     authored_file = world_file is not None
     seed_author_layer = fresh_world or authored_file
+
+    # ⚠️ **先验,再写 —— 因为这些表不是一起写的。**
+    #
+    # 从前的顺序是"播地图 → 播规律 → 播可见性 → 编译本体",而**会失败的是最后那一步**。
+    # 于是一份写错了 `kinds` 的文件会留下一个装了一半的世界:地图和规律都进去了,
+    # `kinds` 是空的,而开机是失败的 —— 作者改好文件再来一次,那条半截的规律还在
+    # 那儿,来路不明。更坏的是那个失败让这个前缀**不再是空的**,于是重试走的已经
+    # 不是创世那条路了。
+    #
+    # 修法不是包一层事务(这些表在 Redis 上没有共同的事务),是**把判断提前到第一次
+    # 写之前**:本体声明本来就验得动,它依赖的规律/地点/物品三样,库里那份读得到、
+    # 文件里那份就在手上。验不过就一个字都不写 —— 和能力调用被拒时"一个字都不写"
+    # 是同一条。
+    if seed_author_layer and world_seed and world_seed.get("kinds"):
+        _precheck_ontology(world_seed, rules_store, location_store, economy_store)
     if fresh_world:
         _store_genesis_seed(meta, world_seed)  # 出生证明随世界走
         # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
@@ -1132,6 +1147,7 @@ def build_serve_scheduler(
         # 创作台的整套流程都是自定义种子,所以这条一撞一个准。
         #
         # `_seed_ontology` 早就是这么判的(`fresh_world=`),这里只是把同一条补齐。
+        #
         if seed_author_layer:
             _seed_world_rules(rules_store, world_seed)
             _seed_stock_visibility(world_seed, visibility_store)
@@ -1550,6 +1566,63 @@ def _seed_ontology(
         return
     parse_entities(entities, parse_kinds(kinds))   # 校验在这里,坏了当场抛
     ontology_store.seed(kinds, entities, datetime.now(timezone.utc).isoformat())
+
+
+def _precheck_ontology(
+    world_seed: dict[str, Any], rules_store: Any, location_store: Any, economy_store: Any
+) -> None:
+    """在动任何一张表之前,先把作者写的 `kinds` / `entities` 验一遍。
+
+    坏声明**整体拒绝世界**是对的(一次列全,所以 `--ticks 0` 能当校验器用)。
+    但那次拒绝原先发生在**写完几张表之后** —— 于是失败留下一个装了一半的世界。
+    这个函数把同一份判断搬到写之前,验的是同一套规则(它和 `_load_ontology` 走
+    `Ontology.parse` 同一条路),所以两边不可能给出不同的答案。
+
+    引用要查的三样此刻都在:规律读得到、地点读得到、物品读得到。种子里带的规律
+    还没落库,所以这里把**文件里那一份**和**库里那一份**并起来查 —— 不然一条只在
+    文件里的规律会被判成"引用了不存在的规律"。
+    """
+    # **走的是 `RedisOntologyStore.load` 同一条路**(parse_kinds → parse_entities →
+    # resolve),只是喂给它文件里的声明而不是库里的。另写一份判断的话,两边迟早
+    # 给出不同的答案 —— 而那种不一致会表现成"预检说没问题,开机还是失败"。
+    from anima_world.ontology import parse_entities, parse_kinds, resolve
+
+    seeded_rules = [dict(r) for r in (world_seed.get("rules") or []) if isinstance(r, dict)]
+    # 地点同理:此刻库里那份可能还没播,所以把文件里的并进来 —— 不然一个只写在
+    # 文件里的地点会被判成"实体挂在一个不存在的地方"。
+    locations = [str(row.get("id")) for row in (location_store.all() or ())]
+    locations += [str(l.get("id")) for l in (world_seed.get("locations") or []) if isinstance(l, dict)]
+    # 物品同理,而且**来源不止 `items` 那一段**:`_seed_material_layer` 走的是
+    # "引用即存在" —— 角色的 `inventory` 和地点的 `stock` 里提到的 id 也会被自动
+    # 补一条定义。预检只看 `items` 的话,一个只写在随身物品里的 `garden_shears`
+    # 会被判成"引用不到",而真实创世里它明明会存在。
+    #
+    # 这一处是被 `test_broken_material_entries_are_dropped_one_by_one_not_fatally`
+    # 逮住的:那条测试把种子的 `items` 整个换掉,而橱窗的能力靠随身物品里的
+    # `garden_shears` 才立得住 —— **预检和播种必须看同一批来源**,不然预检会拒掉
+    # 一个真实开机完全正常的世界。
+    items = [str(row.get("id")) for row in (economy_store.items() if economy_store else ())]
+    seed_items = [str(i.get("id")) for i in (world_seed.get("items") or []) if isinstance(i, dict)]
+    for section, field in (("agents", "inventory"), ("locations", "stock")):
+        for entry in (world_seed.get(section) or []):
+            if not isinstance(entry, dict):
+                continue
+            for row in (entry.get(field) or []):
+                if isinstance(row, dict) and row.get("item"):
+                    seed_items.append(str(row["item"]))
+
+    # 种子里的规律还没落库,所以把**文件里那份**和**库里那份**并起来查 ——
+    # 不然一条只在文件里的规律会被判成"引用了不存在的规律"。
+    rules = list(_load_world_rules(rules_store))
+    if seeded_rules:
+        from anima_world.rules import parse_rules
+
+        rules = rules + list(parse_rules(seeded_rules))
+
+    kinds = parse_kinds(world_seed.get("kinds") or [])
+    entities = parse_entities(world_seed.get("entities") or [], kinds)
+    resolve(kinds, entities, rules=rules, locations=sorted(set(locations)),
+            items=sorted({*items, *seed_items}))
 
 
 def _load_ontology(

@@ -431,3 +431,112 @@ def test_the_bundled_seed_survives_the_gate():
 
     seed = bundled_seed()
     assert parse_rules(seed.get("rules")), "内置种子的规律被自己的闸门拒了"
+
+
+def test_坏本体不留下半截的世界(tmp_path):
+    """**先验,再写 —— 因为这些表不是一起写的。**
+
+    从前的顺序是"播地图 → 播规律 → 播可见性 → 编译本体",而会失败的是最后那一步。
+    于是一份写错了 `kinds` 的文件会留下一个装了一半的世界:地图和规律都进去了、
+    `kinds` 是空的,而开机是失败的 —— 作者改好文件再来一次,那条半截的规律还在
+    那儿,来路不明。更坏的是那次失败让这个前缀**不再是空的**,重试走的已经不是
+    创世那条路了。
+    """
+    import fakeredis
+
+    from anima_world.__main__ import build_serve_scheduler
+    from anima_world.ontology import OntologyError
+
+    bad = tmp_path / "bad.cyberworld"
+    bad.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "atom"}\n'
+        '{"kind": "author", "type": "agent", "body": {"id": "a", "name": "阿岚",'
+        ' "location": "cafe", "personality": "安静"}}\n'
+        '{"kind": "author", "type": "location", "body": {"id": "cafe", "name": "咖啡馆",'
+        ' "description": "临海"}}\n'
+        '{"kind": "author", "type": "rule", "body": {"id": "r1", "every": {"days": 1},'
+        ' "for_each": {"owner": "world"}, "set": {"季节": "季节"}}}\n'
+        # costs 的键必须是裸量名,`me_体力` 是读法不是键 —— 这份文件过不了本体校验
+        '{"kind": "author", "type": "kind", "body": {"id": "tree",'
+        ' "quantities": {"树高": {"default": 1.0}},'
+        ' "affordances": {"tend": {"costs": {"me_体力": 10}}}}}\n',
+        encoding="utf-8",
+    )
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with pytest.raises(OntologyError):
+        build_serve_scheduler("atom", client, world_file=bad, force_mock_llm=True)
+
+    left = list(client.keys("anima:atom:*"))
+    assert left == [], f"坏本体留下了 {left} —— 一份验不过的世界文件该一个字都不写"
+
+
+def test_导入一个混装两层的文件要说作者层没编译(tmp_path, caplog):
+    """状态记录一落键,这个前缀就不空了,于是首启不给 `--world-file` 时作者层
+    再也编译不了 —— 而这中间此前**没有任何一处会说一句**。
+
+    少装一半世界而文件看上去完全正常,正是这个格式最怕的那种坏法。
+    """
+    import logging
+
+    import fakeredis
+
+    from anima_world.world_package import import_world_file
+
+    mixed = tmp_path / "mixed.cyberworld"
+    mixed.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "m"}\n'
+        '{"kind": "author", "type": "kind", "body": {"id": "tree",'
+        ' "quantities": {"树高": {"default": 1.0}}}}\n'
+        '{"kind": "redis", "key": "clock", "type": "string", "value": "42"}\n',
+        encoding="utf-8",
+    )
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with caplog.at_level(logging.WARNING, logger="anima_world.world_package"):
+        import_world_file(mixed, redis=client, world_id="m")
+
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "作者层" in said and "kinds" in said, f"导入没说作者层没编译:{said!r}"
+
+
+def test_预检和播种必须看同一批物品来源(tmp_path):
+    """**预检拒掉一个真实开机完全正常的世界,比它要防的那个 bug 更坏。**
+
+    物品的来源不止 `items` 那一段:`_seed_material_layer` 走的是"引用即存在" ——
+    角色的 `inventory` 和地点的 `stock` 里提到的 id 也会被自动补一条定义。
+    预检只看 `items` 的话,一个只写在随身物品里的 `garden_shears` 会被判成
+    "引用不到",而真实创世里它明明会存在。
+
+    我写预检时正是这么错的:校验那一半复用了引擎同一条路
+    (`parse_kinds → parse_entities → resolve`),而**输入这一侧还是自己拼的**,
+    于是从输入那儿分了岔。抓到它的是一条为完全不同目的写的测试
+    (`test_broken_material_entries_are_dropped_one_by_one_not_fatally`)。
+    """
+    import fakeredis
+
+    from anima_world.__main__ import build_serve_scheduler
+
+    world = tmp_path / "w.cyberworld"
+    world.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "srcs"}\n'
+        # 剪子**只出现在随身物品里**,`items` 段一个字都没提它
+        '{"kind": "author", "type": "agent", "body": {"id": "a", "name": "阿岚",'
+        ' "location": "cafe", "personality": "安静",'
+        ' "inventory": [{"item": "garden_shears", "qty": 1}]}}\n'
+        '{"kind": "author", "type": "location", "body": {"id": "cafe", "name": "咖啡馆",'
+        ' "description": "临海"}}\n'
+        '{"kind": "author", "type": "kind", "body": {"id": "agent",'
+        ' "quantities": {"体力": {"default": 100.0}}}}\n'
+        '{"kind": "author", "type": "kind", "body": {"id": "tree",'
+        ' "quantities": {"树高": {"default": 1.0}},'
+        ' "affordances": {"照料": {"requires": ["have_garden_shears >= 1"],'
+        ' "costs": {"体力": "me_体力 - 1"}}}}}\n',
+        encoding="utf-8",
+    )
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    scheduler = build_serve_scheduler("srcs", client, world_file=world, force_mock_llm=True)
+    try:
+        assert client.hexists("anima:srcs:kinds", "tree"), (
+            "预检拒掉了一个真实开机正常的世界 —— 它看的物品来源比播种少"
+        )
+    finally:
+        scheduler.stop()

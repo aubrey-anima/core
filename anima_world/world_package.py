@@ -666,7 +666,27 @@ def import_world_file(
             f"换一个名字,或者先把那个世界清掉"
         )
     manifest, records = read_world_file(path)
-    install_world_records(records, redis=redis, world_id=world_id, mysql=mysql)
+    authored = install_world_records(records, redis=redis, world_id=world_id, mysql=mysql)
+    # ⚠️ **作者层不在这里编译,而它的返回值此前是被直接丢掉的。**
+    #
+    # 导入只做"落键":把记录写进这个前缀。而作者层要**编译**(种类要解析、规律要
+    # 校验、实体的量要落地),那要一整套 store 和一次开机 —— 只有 `World.open`
+    # 那条路走得了。
+    #
+    # 一个只有作者层的文件走这条路,状态层是空的,所以世界仍然是"空"的,首启时
+    # 照常编译 —— 那是常态,没问题。**出问题的是混装两层的文件**:状态记录一落键,
+    # 这个前缀就不空了,于是首启不给 `--world-file` 时作者层再也编译不了 ——
+    # 而这中间**没有任何一处会说一句**。
+    #
+    # 这里不替它编译(那要把半个 `build_serve_scheduler` 搬过来),但**必须说**:
+    # 少装一半世界而文件看上去完全正常,正是这个格式最怕的那种坏法。
+    if authored:
+        logger.warning(
+            "%s 里有作者层(%s),而**导入不编译它** —— 状态记录已经落键,这个世界从此"
+            "不是空的了。要让作者层生效,首启时把同一份文件指回来:"
+            "`--world-file %s`(那是一次编辑,只填缺不覆盖)。",
+            path, "、".join(sorted(authored)), path,
+        )
     return manifest
 
 
