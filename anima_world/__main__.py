@@ -419,6 +419,31 @@ CHARACTER_ROSTER: list[dict[str, str]] = [
 WORLD_FILE_PATH = Path(__file__).parent / "demo.cyberworld"
 
 
+def _authored_only(records, path):
+    """滤掉状态记录,只放作者记录过去;跳过了多少条要说出来。
+
+    **报数而不是只报"跳过了"**:一份 12000 条事件的文件被静默跳过,和一份空文件
+    在日志里长得一模一样。
+    """
+    skipped = 0
+
+    def gen():
+        nonlocal skipped
+        for record in records:
+            if record.get("kind") == "author":
+                yield record
+            else:
+                skipped += 1
+        if skipped:
+            logger.info(
+                "%s 里有 %d 条状态记录没有装:这个世界已经存在了,状态层只在创世那一次装。"
+                "要还原一个世界用 `anima-world world import`(它要求目标是空的)",
+                path, skipped,
+            )
+
+    return gen()
+
+
 def _load_world_file(
     path: Path | str = WORLD_FILE_PATH,
     *,
@@ -443,6 +468,18 @@ def _load_world_file(
 
     try:
         _, records = read_world_file(path)
+        # ⚠️ **状态记录只装一次,而"开机"会发生很多次。**
+        #
+        # 一份带状态层的世界文件(跑过的世界导出来的、或者从 1.x 迁过来的)装进一个
+        # **已经不空**的世界,没有一种正确答案:合并会重号,覆盖会抹掉这期间发生的
+        # 一切。此前是当场抛错 —— 而托管环境里 entrypoint 每次启动都指着同一份文件,
+        # 于是**第一次开得起来、第二次再也起不来**,而错误信息说的是"seq 对不上",
+        # 没人会想到它在讲"这个世界已经装过了"。
+        #
+        # 作者层不同:它本来就是"只填缺,不覆盖",装进已有世界 = 一次编辑。
+        # 所以这里只滤掉状态记录,并且**说一句**——安静地跳过和安静地装错一样坏。
+        if _world_exists(redis, world_id):
+            records = _authored_only(records, path)
         authored = install_world_records(
             records, redis=redis, world_id=world_id, mysql=mysql
         )
@@ -452,7 +489,12 @@ def _load_world_file(
         errors = _world_seed_errors(authored) if authored else []
         if errors:
             raise WorldSeedError([f"{path}: {e}" for e in errors])
-        return authored
+        # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
+        # 跑过的世界导出来、或者从 1.x 迁过来的,里面一条 author 记录都没有 ——
+        # 交一个 `{}` 下去的话,下游会拿它当"作者写了一个没有地点的世界"去索引
+        # `world_seed["locations"]` 然后 KeyError。而 `None` 是它一直认得的
+        # "这次开机没有种子"。
+        return authored or None
     except Exception as exc:  # noqa: BLE001 — 坏文件的形状很多,分流只看是不是作者指名的
         if authored:
             if isinstance(exc, (WorldFileError, WorldSeedError)):
