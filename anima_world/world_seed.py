@@ -35,11 +35,22 @@ class WorldSeedError(ValueError):
         super().__init__("invalid world seed:\n" + "\n".join(f"- {e}" for e in errors))
 
 
-def world_seed_errors(data: Any) -> list[str]:
+def world_seed_errors(data: Any, *, complete: bool = True) -> list[str]:
     """Say what is wrong with *data*, one line per problem (empty = valid).
 
     The mirrored contract is `is_valid_world_seed`'s verdict, which is derived
     from this list so the two can never drift. This function only explains it.
+
+    **`complete=False` 是"这是一次编辑,不是一个世界"。**
+
+    v3 起,把一份只含 `author` 记录的文件装进一个**已有**的世界就是一次编辑
+    (创作台要的"增删改查创世态"由此免费得到)。而这道闸原先不管目标世界空不空,
+    一律要求 `agents` 和 `locations` —— 于是那条能力**在文档里写着,实际用不了**:
+    想给一个跑着的世界补一层 `kinds`,会被"'agents' must be a list (missing)" 挡回来,
+    而那个世界的名册明明就在它自己的库里。
+
+    写了的段照旧逐条查(写错的 `agents` 仍然不许进);**只是不再要求你把没打算改的
+    那些段也抄一遍** —— 抄一遍才是真正危险的事:那份抄件迟早和世界里的不一致。
     """
     if not isinstance(data, dict):
         return [f"seed must be a JSON object, got {type(data).__name__}"]
@@ -47,6 +58,8 @@ def world_seed_errors(data: Any) -> list[str]:
     errors: list[str] = []
     for field, keys in (("agents", WORLD_SEED_AGENT_KEYS), ("locations", WORLD_SEED_LOCATION_KEYS)):
         entries = data.get(field)
+        if entries is None and not complete:
+            continue      # 这一段这次不改
         if not isinstance(entries, list):
             found = "missing" if field not in data else type(entries).__name__
             errors.append(f"'{field}' must be a list ({found})")

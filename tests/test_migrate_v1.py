@@ -317,3 +317,33 @@ def test_加密的配置行不迁进世界(tmp_path):
     assert "needs.enabled" in config["value"], "普通配置要迁过去"
     assert "llm.api_key" not in config["value"], "密文进了世界文件 —— 那是分发物"
     assert dropped.get("config.secret") == 1, "丢掉了要报数,不能静默"
+
+
+def test_名字像密钥的也不迁_哪怕_is_secret_是_0(tmp_path):
+    """**不能只信 `is_secret` 这一栏,因为 1.x 自己把它标错过。**
+
+    `llm.background.api_key` 在 1.x 里是 `is_secret=0` 的**明文行** —— 于是
+    "剥 is_secret"那道闸对它完全无效,一把明文 API key 直接进了分发物。
+    实测三个线上世界的 `.cyberworld` 里都有。
+
+    宁可多剥一个 `*_key` 配置项(作者重新填一次),也不能漏一把真钥匙 ——
+    发出去就收不回来。
+    """
+    db = _legacy_db(tmp_path / "w.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL,"
+        " value_type TEXT NOT NULL, category TEXT NOT NULL, is_secret INTEGER NOT NULL DEFAULT 0,"
+        " description TEXT, updated_at TEXT NOT NULL);"
+    )
+    # is_secret=0,但它是一把真钥匙 —— 1.x 的原样
+    conn.execute("INSERT INTO config VALUES ('llm.background.api_key','sk-真钥匙','str','llm',0,'','x')")
+    conn.execute("INSERT INTO config VALUES ('llm.background.model','gpt-4','str','llm',0,'','x')")
+    conn.execute("INSERT INTO config VALUES ('needs.enabled','1','bool','needs',0,'','x')")
+    conn.commit()
+    conn.close()
+
+    config = _one(list(migrate_world_db(db, world_id="w")), "redis", "config")
+    assert "llm.background.api_key" not in config["value"], "明文钥匙进了分发物"
+    assert "llm.background.model" in config["value"], "模型名不是密钥,该迁"
+    assert "needs.enabled" in config["value"]

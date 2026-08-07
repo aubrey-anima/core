@@ -486,7 +486,12 @@ def _load_world_file(
         # **作者层还是要过那道闸。** 换掉的是容器,不是校验:一份写错了 `agents`
         # 的世界文件照旧不许开机。而**只有带作者层的文件才查** —— 一个跑过的世界
         # 导出来只有状态记录,拿"agents 必须是个列表"去要求它是在问错问题。
-        errors = _world_seed_errors(authored) if authored else []
+        # **世界已经有了的话,这份文件是一次编辑,不是一个完整世界。**
+        # 要求它把名册和地图再抄一遍,等于逼作者维护一份迟早会不一致的抄件。
+        errors = (
+            _world_seed_errors(authored, complete=not _world_exists(redis, world_id))
+            if authored else []
+        )
         if errors:
             raise WorldSeedError([f"{path}: {e}" for e in errors])
         # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
@@ -937,7 +942,8 @@ def build_serve_scheduler(
         authored=world_file is not None,
     )
     if n_agents is None:
-        n_agents = len(world_seed["agents"]) if world_seed else len(CHARACTER_ROSTER)
+        # 一次编辑可以只带 kinds、不带名册 —— 那时人数以世界自己的为准。
+        n_agents = len(world_seed.get("agents") or CHARACTER_ROSTER) if world_seed else len(CHARACTER_ROSTER)
 
     meta = meta_rows(redis, world_id)
     # 事件日志 —— 唯一真相。MySQL 接手时 Redis 里不留拷贝(两份真相里一份不更新,
@@ -971,6 +977,22 @@ def build_serve_scheduler(
     # 创世判定:这个 world_id 下还什么都没有。判据和 world.db 时代逐字同构
     # (没有事件、没有地图 = 空世界),只是问的是 store 而不是表。
     fresh_world = event_log.count() == 0 and not location_store.all()
+    # **作者层什么时候生效:空世界,或者作者指名了一份文件。**
+    #
+    # 这两件事此前合成了一个判断("世界空不空"),而它们性质完全不同:
+    #
+    #   内置的兜底那份(没给 `--world-file`)—— **只准进空世界**。它每次开机都在手上,
+    #     拿它去填一个已有世界的空表,就是把橱窗的橡树塞进别人的世界:世界照跑、
+    #     日志干净,只是它凭空多了一棵别人的树。这个 bug 今天刚修过。
+    #   作者指名的那份 —— 是一次**明示的编辑**。作者层本来就是给作者调试用的,
+    #     "改不了一个活着的世界"说不通:他想给世界补一层 `kinds`、改一条规律,
+    #     就该改得动。
+    #
+    # 引擎里本来就有这个区分(`_load_world_file` 的 `authored=`),只是没用在播种上。
+    # 语义仍然是**只填缺,不覆盖**(每个 seed 函数自己守着空表那条)——
+    # 编辑加得进新东西,但不会把这个世界跑出来的现在倒带回创世那一刻。
+    authored_file = world_file is not None
+    seed_author_layer = fresh_world or authored_file
     if fresh_world:
         _store_genesis_seed(meta, world_seed)  # 出生证明随世界走
         # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
@@ -1110,11 +1132,11 @@ def build_serve_scheduler(
         # 创作台的整套流程都是自定义种子,所以这条一撞一个准。
         #
         # `_seed_ontology` 早就是这么判的(`fresh_world=`),这里只是把同一条补齐。
-        if fresh_world:
+        if seed_author_layer:
             _seed_world_rules(rules_store, world_seed)
             _seed_stock_visibility(world_seed, visibility_store)
             _seed_stock_places(world_seed, visibility_store)
-        _seed_ontology(ontology_store, world_seed, fresh_world=fresh_world)
+        _seed_ontology(ontology_store, world_seed, fresh_world=seed_author_layer)
         scheduler.world_rules = _load_world_rules(rules_store)
         # 本体的解析在规律之后:它要拿规律去查引用。声明过种类的世界从此走闸,
         # 没声明的照旧走警告 —— 那条警告只对后者还有意义。
@@ -1130,7 +1152,7 @@ def build_serve_scheduler(
         # 迁移时撞出来的:一个 1.x 迁过来的世界(`stocks` 表本来就是空的)开机一次,
         # 就被塞进橱窗那棵 `tree:harbor_oak` 和两个世界量。世界照跑、日志干净,
         # 只是它凭空多了一棵别人世界里的橡树。
-        if fresh_world:
+        if seed_author_layer:
             _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology)
         if scheduler.ontology is None:
             _warn_unresolved_rule_names(stock_store, scheduler.world_rules)
@@ -1142,16 +1164,19 @@ def build_serve_scheduler(
     # instead of folding the same event list into a second Projection.
     persisted: list[Event] = event_log.replay() if event_log is not None else []
     if world_file is not None and persisted:
-        # The seed file is first-boot-only (M6 D7). Editing one and pointing it
-        # at a world that already exists looks like it should work and silently
-        # does nothing — the event log and the definition tables are the running
-        # world's only source of truth from genesis onward.
-        logger.warning(
-            "--world-file %s 里的**作者层**没有生效:世界 %r 已经有 %d 条事件了,而作者层"
-            "只会被读进一个空世界。它自己的名册与状态来自事件日志,不需要谁再播一遍。"
-            "要照着这份文件建世界就换一个空的 --world-id;要改一个活着的世界,"
-            "走 World.config_set / World.prompt_set 与各 store。"
-            "(文件里的**状态层**不受这条限制,它已经落进去了。)",
+        # **这是一次编辑,不是一次创世** —— 说清楚它能做什么、做不了什么。
+        #
+        # 从前这里是一句"你的编辑没有生效"的警告,因为作者层只进空世界。现在它进得去了
+        # (作者层本来就是给作者调试用的),但语义是**只填缺,不覆盖**:加得进新东西,
+        # 不会把这个世界跑出来的现在倒带回创世那一刻。
+        #
+        # 这两句话必须一起说。只说"生效了",作者会以为改一条已有的 `kinds` 也能生效;
+        # 只说"不覆盖",他又会以为整份文件都白写了。
+        logger.info(
+            "--world-file %s 装进了一个**已有**的世界 %r(%d 条事件)—— 这是一次编辑:"
+            "空着的那些段会被填上(比如给一个还没有本体层的世界补 kinds/rules),"
+            "而**已经有内容的段不会被覆盖** —— 名册与状态来自事件日志,"
+            "改一条已有的声明要走对应的 store。",
             world_file, world_id, len(persisted),
         )
     boot_projection = scheduler._memory_projection
@@ -1635,9 +1660,17 @@ def _seed_world_defs(
     ghost references the way the old hardcoded `ActionTable.default()` did.
     """
     if world_seed is not None:
-        loc_entries = [_normalize_location_entry(loc, i, len(world_seed["locations"]))
-                       for i, loc in enumerate(world_seed["locations"])]
-        agent_ids = [a["id"] for a in world_seed["agents"]]
+        # **只改了一部分的文件不该被当成"作者删掉了其余段"。**
+        # 没写 `locations` = 这次不动地图,不是"这个世界没有地点"。
+        seed_locs = world_seed.get("locations")
+        seed_agents = world_seed.get("agents")
+        loc_entries = (
+            [_normalize_location_entry(loc, i, len(seed_locs)) for i, loc in enumerate(seed_locs)]
+            if seed_locs is not None else [dict(p) for p in DEFAULT_POINTS]
+        )
+        agent_ids = [a["id"] for a in seed_agents] if seed_agents is not None else [
+            a["id"] for a in CHARACTER_ROSTER
+        ]
     else:
         loc_entries = [dict(p) for p in DEFAULT_POINTS]
         agent_ids = [e["id"] for e in CHARACTER_ROSTER]
@@ -1660,8 +1693,11 @@ def _seed_initial_world(
     if location_store is not None:
         entries = location_store.all()
     elif world_seed is not None:
-        entries = [_normalize_location_entry(loc, i, len(world_seed["locations"]))
-                   for i, loc in enumerate(world_seed["locations"])]
+        seed_locs = world_seed.get("locations")
+        if seed_locs is None:
+            return
+        entries = [_normalize_location_entry(loc, i, len(seed_locs))
+                   for i, loc in enumerate(seed_locs)]
     else:
         entries = [dict(p) for p in DEFAULT_POINTS]
     # Genesis registers the existence of the places an agent can stand in;

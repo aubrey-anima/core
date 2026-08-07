@@ -41,19 +41,60 @@ def test_seed_is_applied_to_a_fresh_db_without_warning(tmp_path, minimal_seed, c
         scheduler.stop()
 
 
-def test_seed_against_a_populated_db_is_ignored_and_says_so(tmp_path, minimal_seed, caplog):
+def test_一份指名的世界文件能改一个已有的世界(tmp_path, minimal_seed, caplog):
+    """**作者层本来就是给作者调试用的,所以它得改得动一个活着的世界。**
+
+    这条此前守的是反过来的行为("作者层只进空世界,并且警告你它没生效")。
+    那个行为的理由其实是另一件事:**内置的兜底文件**每次开机都在手上,拿它去填
+    一个已有世界的空表,就会把橱窗的橡树塞进别人的世界(世界照跑、日志干净,
+    只是它凭空多了一棵别人的树)。
+
+    区分不在"世界空不空",在**这份文件是谁给的**:
+      · 没给 `--world-file` → 用内置那份 → 只准进空世界
+      · 给了 `--world-file`  → 一次**明示的编辑** → 生效
+
+    语义仍然是**只填缺,不覆盖** —— 加得进新东西,不会把这个世界跑出来的现在
+    倒带回创世那一刻。下面那条测试钉的就是这后半句。
+    """
     import fakeredis
 
     client = fakeredis.FakeStrictRedis(decode_responses=True)
     build_serve_scheduler("w", client, world_file=minimal_seed, force_mock_llm=True).stop()
 
-    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
-        scheduler = build_serve_scheduler(
-            "w", client, world_file=minimal_seed, force_mock_llm=True
-        )
+    patch = tmp_path / "patch.cyberworld"
+    patch.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "w"}\n'
+        '{"kind": "author", "type": "rule", "body": {"id": "r1", "every": {"days": 1},'
+        ' "for_each": {"owner": "world"}, "set": {"季节": "季节"}}}\n',
+        encoding="utf-8",
+    )
+    scheduler = build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True)
     try:
-        assert any("--world-file" in r.getMessage() for r in caplog.records), (
-            "a seed file silently ignored on an existing world is the trap this warns about"
+        assert client.hexists("anima:w:world_rules", "r1"), (
+            "指名的世界文件没能给一个已有的世界补上一条规律 —— 作者层就调不了试"
+        )
+    finally:
+        scheduler.stop()
+
+
+def test_内置那份兜底文件不许去填一个已有的世界(tmp_path, minimal_seed):
+    """这是上面那条的另一半,而它守的是一个真出过的 bug。
+
+    内置文件每次开机都在手上。按"这张表恰好还空着"判的话,一个从 1.x 迁过来、
+    `stocks` 本来就空的世界,开机一次就多出橱窗那棵 `tree:harbor_oak` ——
+    **世界照跑、日志干净**,只是它凭空多了一棵别人世界里的树。
+    """
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w2", client, world_file=minimal_seed, force_mock_llm=True).stop()
+
+    # 第二次开机**不给** --world-file:走内置兜底那条路
+    scheduler = build_serve_scheduler("w2", client, force_mock_llm=True)
+    try:
+        owners = {k.split(":", 2)[-1] for k in client.keys("anima:w2:stock:*")}
+        assert not any("harbor_oak" in o for o in owners), (
+            f"橱窗的东西漏进了这个世界:{owners}"
         )
     finally:
         scheduler.stop()

@@ -71,8 +71,27 @@ def _json(value: Any, default: Any = None) -> Any:
 # 每一项:1.x 表名 → (2.0 的键, 怎么把一行变成 hash 的 field/value)。
 # **这是一个闭集**,见文件头。
 
+# 1.x 把 `is_secret` 这一栏标错过,所以**不能只信那一栏**。
+#
+# ⚠️ `llm.background.api_key` 在 1.x 里是 **`is_secret=0` 的明文行** —— 这是那一代
+# 自己的 bug(core CLAUDE.md 点过名:"以 is_secret=0 的明文行落在 world.db,
+# 而快照导出只剥 is_secret=1")。于是"剥 is_secret"这道闸对它完全无效,
+# 一把**明文** API key 就这样进了分发物。实测三个线上世界的 `.cyberworld` 里都有。
+#
+# 所以判据是两条**并集**:标了 is_secret 的,以及**名字长得像密钥的**。
+# 名字这条看起来粗糙,但它挡的正是"上游把标记写错了"这一类 —— 而那一类恰恰是
+# 靠标记永远挡不住的。宁可多剥一个 `*_key` 配置项(作者重新填一次),
+# 也不能漏一把真钥匙(发出去就收不回来)。
+_SECRET_NAME_HINTS = ("api_key", "apikey", "secret", "token", "password", "passwd")
+
+
+def _looks_like_a_secret(key: str) -> bool:
+    lowered = str(key).lower()
+    return any(hint in lowered for hint in _SECRET_NAME_HINTS)
+
+
 def _config_row(row: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    """配置行 —— **`is_secret` 的一律不迁**,返回 None 表示丢掉这一行。
+    """配置行 —— **像密钥的一律不迁**,返回 None 表示丢掉这一行。
 
     ⚠️ 这道闸我先漏了,而漏的方式很典型:引擎自己的导出路径有
     `world_package._strip_secrets`,而迁移**直读 SQLite,绕过了它**。于是 1.x 那行
@@ -87,9 +106,10 @@ def _config_row(row: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     钥匙的去处是**机器配置**(`~/.anima-world/config.json`,0600),迁移的调用方
     自己搬 —— 那一步要解密,而解密要 keyfile,那是一次**人在场**的操作。
     """
-    if row.get("is_secret"):
+    key = str(row["key"])
+    if row.get("is_secret") or _looks_like_a_secret(key):
         return None
-    return (str(row["key"]), row)
+    return (key, row)
 
 
 def _hash_by(field: str):
