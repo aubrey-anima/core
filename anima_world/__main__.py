@@ -371,6 +371,17 @@ def _build_parser() -> argparse.ArgumentParser:
     world_import.add_argument("package", help="Package archive path")
     _add_world_args(world_import)
 
+    world_migrate = world_commands.add_parser(
+        "migrate",
+        help="把一个 1.x 的 world.db 迁成 2.0 的世界文件 —— 一次性的桥",
+    )
+    world_migrate.add_argument("db", help="1.x 的 world.db 路径")
+    world_migrate.add_argument("--output", required=True, help="写出的 .cyberworld")
+    world_migrate.add_argument("--package-id", required=True, help="迁过去之后世界叫什么")
+    world_migrate.add_argument("--name", default="", help="展示名")
+    world_migrate.add_argument("--summary", default="")
+    world_migrate.add_argument("--json", action="store_true", help="机器可读输出")
+
     world_drop = world_commands.add_parser(
         "drop", help="把一个世界从 Redis 上整个抹掉(键前缀下的一切)"
     )
@@ -3544,6 +3555,43 @@ def run_world_package(args: argparse.Namespace) -> int:
                 "output": str(args.output),
                 "engine_min": manifest.engine_min,
             }
+        elif args.world_command == "migrate":
+            # **一次性的桥**:1.x 的世界在 2.0 面前本来没有任何入口
+            # (SQLite 退役了,而 v1 的包是 ZIP、v3 的读者只认 gzip JSONL)。
+            from anima_world.migrate_v1 import MigrationError, write_migrated_world
+
+            try:
+                counts = write_migrated_world(
+                    args.db, args.output,
+                    world_id=args.package_id, name=args.name, summary=args.summary,
+                )
+            except MigrationError as exc:
+                print(f"迁不了:{exc}", file=sys.stderr)
+                return 2
+            payload = {
+                "operation": "world migrate",
+                "source": str(args.db),
+                "output": str(args.output),
+                "world_id": args.package_id,
+                **counts,
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False))
+            else:
+                print(f"  迁好了 → {args.output}")
+                print(f"    状态记录  {counts.get('redis', 0)}")
+                print(f"    事件      {counts.get('event', 0)}")
+                print(f"    增长的三样 {counts.get('mysql', 0)}")
+                gaps = counts.get("seq_gaps_filled", 0)
+                if gaps:
+                    # 补了必须说 —— 不说的话"这个世界的历史完整吗"没人问得到。
+                    print(
+                        f"    ⚠ 补了 {gaps} 个空号:1.x 的 AUTOINCREMENT 在事务回滚时"
+                        f"消耗掉的号,那些位置从来没有过事件。"
+                    )
+                print(f"\n  装进一个空世界:anima-world world import {args.output} --world-id …")
+            return 0
+
         elif args.world_command == "drop":
             redis, world_id, mysql = _world_args(args)
             if not _require_existing_world(redis, world_id, "world drop"):

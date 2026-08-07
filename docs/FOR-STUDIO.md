@@ -635,3 +635,33 @@ social / stance / tools / intent / autonomy,并播了关系、创世记忆、钱
 唯一的建议:**加一句"这个功能在工作台哪一步被卡住"**。这次 `report` / `chat` 交付了
 却没人告诉你们,你们的 P1 白等了几天 —— 如果诉求里写着"C3 卡在这条上",我在
 CHANGELOG 里就会记得回一句。
+
+## 3.11 新增:`world migrate` —— 1.x 的世界迁到 2.0
+
+**这条出口是给运维台的,创作台大概率用不上**,但记在这里因为它回答了一个你们
+早晚会问的问题:「我手里那些 1.x 的世界怎么办」。
+
+2.0 把 SQLite 整个退役了,而 1.x 的导出包是 ZIP、2.0 的读者只认 gzip JSONL ——
+拿一个 v1 包喂它,第一行就不是合法 JSON。**所以一个跑过的 1.x 世界在 2.0 面前
+本来没有任何入口。**
+
+```bash
+anima-world world migrate <world.db> --output x.cyberworld --package-id 世界名 --name 展示名
+anima-world world import x.cyberworld --world-id w2      # 目标必须是空世界
+```
+
+它**只是一道桥**:用裸 `sqlite3` 读那 26 张表(不 import 引擎的存储层 —— 留个
+SQLite 依赖的话"引擎不碰 SQLite 了"就是假话),产出一份普通的 `.cyberworld`,
+之后走的是和别的世界文件同一条装载路径。
+
+三件要知道的:
+
+1. **迁之前把那个世界停掉。** SQLite 的 WAL 没 checkpoint 的话,热拷出来的库会少
+   最近的写(实测差了 72 条事件)。
+2. **它会补 seq 空号,并且当场报出补了几个。** 1.x 的 `events.seq` 是
+   AUTOINCREMENT,事务回滚会消耗号;而 2.0 的 seq 是连续整数(Redis 列表下标就是
+   它)。重新编号会静默改掉 `memories.event_seq` 的指向 —— 一个真世界里有 356 条
+   记忆引用它 —— 所以选的是保住原编号、把空号填成一条惰性的占位事件。
+3. **1.x 世界里的明文密钥进不来。** 装载时引擎会点名跳过 `is_secret` 的配置行:
+   钥匙归机器配置,世界里一个 secret 都没有。迁完记得重新配 `llm.api_key`。
+

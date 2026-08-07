@@ -1,0 +1,528 @@
+<title>ANIMA 数据落点 · world.db 退役版</title>
+<style>
+  :root {
+    --bg: #f7f5f1;
+    --surface: #fffdf9;
+    --surface2: #f0ede7;
+    --ink: #26221b;
+    --ink-soft: #5d574c;
+    --line: #d9d4ca;
+    --line-soft: #e7e3da;
+
+    --redis: #bf4a3f;
+    --redis-bg: #f8e3df;
+    --mysql: #33679f;
+    --mysql-bg: #dfe9f5;
+    --machine: #2e7d63;
+    --machine-bg: #ddefe7;
+    --proc: #6d5a9e;
+    --proc-bg: #e9e3f4;
+    --host: #6b6459;
+    --host-bg: #eae7e0;
+
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+    --sans: -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1915; --surface: #23201b; --surface2: #2b2822;
+      --ink: #e9e4da; --ink-soft: #a89f90; --line: #454036; --line-soft: #35312a;
+      --redis: #e07a6c; --redis-bg: #3e2521;
+      --mysql: #79aade; --mysql-bg: #1f2e42;
+      --machine: #5cc39e; --machine-bg: #1c332a;
+      --proc: #ab95dd; --proc-bg: #2e2740;
+      --host: #a39a8b; --host-bg: #302d27;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1b1915; --surface: #23201b; --surface2: #2b2822;
+    --ink: #e9e4da; --ink-soft: #a89f90; --line: #454036; --line-soft: #35312a;
+    --redis: #e07a6c; --redis-bg: #3e2521; --mysql: #79aade; --mysql-bg: #1f2e42;
+    --machine: #5cc39e; --machine-bg: #1c332a; --proc: #ab95dd; --proc-bg: #2e2740;
+    --host: #a39a8b; --host-bg: #302d27;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f5f1; --surface: #fffdf9; --surface2: #f0ede7;
+    --ink: #26221b; --ink-soft: #5d574c; --line: #d9d4ca; --line-soft: #e7e3da;
+    --redis: #bf4a3f; --redis-bg: #f8e3df; --mysql: #33679f; --mysql-bg: #dfe9f5;
+    --machine: #2e7d63; --machine-bg: #ddefe7; --proc: #6d5a9e; --proc-bg: #e9e3f4;
+    --host: #6b6459; --host-bg: #eae7e0;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 15px; line-height: 1.65;
+    margin: 0; padding: 0 20px 80px;
+  }
+  main { max-width: 1040px; margin: 0 auto; }
+
+  header { padding: 44px 0 24px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+    color: var(--ink-soft); text-transform: uppercase; margin: 0 0 10px;
+  }
+  h1 { font-size: 30px; line-height: 1.25; margin: 0 0 8px; letter-spacing: .01em; text-wrap: balance; }
+  .subtitle { color: var(--ink-soft); margin: 0; max-width: 46em; }
+  .subtitle code, .lede code, p code { font-family: var(--mono); font-size: .92em; }
+
+  /* 四落点总览条 */
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 26px 0 0; }
+  .tile {
+    border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+    padding: 14px 16px 12px; border-top: 3px solid var(--line);
+  }
+  .tile.t-redis { border-top-color: var(--redis); }
+  .tile.t-mysql { border-top-color: var(--mysql); }
+  .tile.t-machine { border-top-color: var(--machine); }
+  .tile.t-proc { border-top-color: var(--proc); }
+  .tile .t-name { font-weight: 700; font-size: 15px; margin: 0; }
+  .tile.t-redis .t-name { color: var(--redis); }
+  .tile.t-mysql .t-name { color: var(--mysql); }
+  .tile.t-machine .t-name { color: var(--machine); }
+  .tile.t-proc .t-name { color: var(--proc); }
+  .tile .t-count { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); margin: 2px 0 6px; }
+  .tile .t-what { font-size: 12.5px; color: var(--ink-soft); margin: 0; line-height: 1.5; }
+
+  h2 { font-size: 20px; margin: 48px 0 6px; letter-spacing: .01em; }
+  h2 .no { font-family: var(--mono); font-size: 13px; color: var(--ink-soft); margin-right: 10px; }
+  .lede { color: var(--ink-soft); margin: 0 0 18px; max-width: 52em; }
+
+  figure { margin: 0; }
+  .figure-frame {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 18px 14px 10px; overflow-x: auto;
+  }
+  .figure-frame svg { display: block; min-width: 820px; max-width: 100%; height: auto; margin: 0 auto; }
+  figcaption { font-size: 13px; color: var(--ink-soft); padding: 10px 4px 0; max-width: 60em; }
+
+  /* 判据 callout */
+  .criterion {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+    background: var(--line); border: 1px solid var(--line); border-radius: 6px;
+    overflow: hidden; margin: 18px 0 6px;
+  }
+  .criterion > div { background: var(--surface); padding: 16px 20px; }
+  .criterion .rule { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+  .criterion .rule .arrow { color: var(--ink-soft); font-weight: 400; padding: 0 6px; }
+  .criterion p { margin: 4px 0 0; font-size: 13px; color: var(--ink-soft); }
+  .criterion .to-redis .dest { color: var(--redis); }
+  .criterion .to-mysql .dest { color: var(--mysql); }
+  .criterion-proof { font-size: 13px; color: var(--ink-soft); margin: 10px 2px 0; }
+  .criterion-proof code { font-family: var(--mono); font-size: 12px; background: var(--surface2); padding: 1px 5px; border-radius: 3px; }
+
+  /* 落点清单 */
+  .matrix-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  table.matrix { border-collapse: collapse; width: 100%; min-width: 780px; font-size: 13.5px; }
+  .matrix th, .matrix td { padding: 9px 14px; text-align: left; vertical-align: top; border-top: 1px solid var(--line-soft); }
+  .matrix thead th {
+    border-top: none; border-bottom: 2px solid var(--ink);
+    font-size: 12.5px; letter-spacing: .05em; padding-top: 14px; padding-bottom: 8px;
+  }
+  .matrix .group td {
+    background: var(--surface2); font-weight: 600; font-size: 12.5px; letter-spacing: .06em;
+    padding: 7px 14px; color: var(--ink-soft);
+  }
+  .matrix .group td em { font-style: normal; font-weight: 400; margin-left: 10px; letter-spacing: 0; }
+  .matrix td.what { min-width: 200px; }
+  .matrix td.what .name { font-weight: 600; }
+  .matrix td.what .hint { display: block; font-size: 12px; color: var(--ink-soft); margin-top: 1px; }
+  .matrix code, .keylist code { font-family: var(--mono); font-size: 12px; }
+  .matrix td .k { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); display: block; margin-top: 1px; }
+  .matrix td.note-cell { font-size: 12.5px; color: var(--ink-soft); min-width: 200px; }
+
+  .chip {
+    display: inline-block; font-size: 11.5px; font-weight: 600; letter-spacing: .04em;
+    padding: 1px 8px 2px; border-radius: 3px; white-space: nowrap;
+    font-family: var(--mono);
+  }
+  .chip.redis { color: var(--redis); background: var(--redis-bg); }
+  .chip.mysql { color: var(--mysql); background: var(--mysql-bg); }
+  .chip.machine { color: var(--machine); background: var(--machine-bg); }
+  .chip.proc { color: var(--proc); background: var(--proc-bg); }
+  .chip.host { color: var(--host); background: var(--host-bg); }
+
+  .warn-row td.what .name::after { content: " ⚠"; color: var(--redis); font-size: 12px; }
+
+  /* 后端明细卡 */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 18px 20px; border-top: 3px solid var(--line);
+  }
+  .card.c-redis { border-top-color: var(--redis); }
+  .card.c-mysql { border-top-color: var(--mysql); }
+  .card.c-machine { border-top-color: var(--machine); }
+  .card.c-proc { border-top-color: var(--proc); }
+  .card h3 { margin: 0 0 2px; font-size: 16px; }
+  .card .where { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); margin: 0 0 12px; }
+  .card p { font-size: 13px; color: var(--ink-soft); margin: 8px 0; }
+  .keylist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
+  .keylist li { padding: 4px 0; border-top: 1px solid var(--line-soft); display: flex; gap: 10px; justify-content: space-between; align-items: baseline; }
+  .keylist li:first-child { border-top: none; }
+  .keylist .desc { color: var(--ink-soft); font-size: 12px; text-align: right; flex-shrink: 0; }
+  .keylist .sect { border-top: 1px solid var(--line); font-size: 11px; letter-spacing: .08em; color: var(--ink-soft); font-weight: 600; padding-top: 8px; }
+  .keylist .sect:first-child { border-top: none; padding-top: 0; }
+
+  .resolve { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-family: var(--mono); font-size: 12px; margin: 10px 0; }
+  .resolve .step { border: 1px solid var(--line); background: var(--surface2); border-radius: 3px; padding: 2px 8px; }
+  .resolve .arr { color: var(--ink-soft); }
+
+  .footnotes { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 14px; font-size: 13px; color: var(--ink-soft); }
+  .footnotes p { margin: 6px 0; max-width: 60em; }
+  .footnotes .fn { font-family: var(--mono); font-size: 11px; color: var(--ink); }
+
+  @media (max-width: 900px) { .tiles { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 760px) { .criterion { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main>
+<header>
+  <p class="eyebrow">anima-world · runtime storage</p>
+  <h1>运行时数据落点：一个在跑的世界写在哪里</h1>
+  <p class="subtitle">world.db/SQLite 已整体退役：世界只住 Redis（键前缀 <code>anima:{world_id}:</code>），给了 <code>mysql=</code> 时无限增长的四样归 MySQL，LLM 钥匙在机器配置，派生层留在进程里。依据删除后的代码逐处核对（redis_state.py / mysql_state.py / machine_config.py / __main__.py 创世路径）。</p>
+
+  <div class="tiles">
+    <div class="tile t-redis">
+      <p class="t-name">Redis</p>
+      <p class="t-count">anima:{world_id}:* · 30+ 键</p>
+      <p class="t-what">她此刻带进提示词的一切：黑板、时钟、在途、动作、规划、关系、姿态、量……全部有界</p>
+    </div>
+    <div class="tile t-mysql">
+      <p class="t-name">MySQL</p>
+      <p class="t-count">{prefix}× 4 表</p>
+      <p class="t-what">随时间无限增长的历史：事件、记忆、转录——要用时按 k 取回</p>
+    </div>
+    <div class="tile t-machine">
+      <p class="t-name">机器配置</p>
+      <p class="t-count">~/.anima-world/config.json</p>
+      <p class="t-what">LLM 钥匙与端点。属于这台机器，不属于任何世界</p>
+    </div>
+    <div class="tile t-proc">
+      <p class="t-name">进程内</p>
+      <p class="t-count">派生层 · 有意不落库</p>
+      <p class="t-what">记忆投影、锁与线程池、已加载的世界规律、LLM 客户端</p>
+    </div>
+  </div>
+</header>
+
+<h2><span class="no">01</span>总拓扑：谁读写谁</h2>
+<p class="lede">世界不再是一个文件——很多进程通过同一个 Redis 连上同一个活着的世界，<code>act()</code> / <code>intend()</code> 在一把跨进程的世界锁下执行；历史落在 MySQL，任何一侧都不持有另一侧的拷贝。</p>
+
+<figure>
+<div class="figure-frame">
+<svg viewBox="0 0 940 470" role="img" aria-label="拓扑图：引擎进程与外部进程都连接 Redis；引擎进程写 MySQL；机器配置只供引擎进程读取">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <!-- 宿主应用 -->
+  <rect x="60" y="16" width="300" height="46" rx="4" fill="var(--host-bg)" stroke="var(--host)"/>
+  <text x="210" y="36" text-anchor="middle" font-size="13" font-weight="600" fill="var(--ink)">宿主应用（网站后端等）</text>
+  <text x="210" y="52" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--ink-soft)">import anima_world.api · 完整转录留在宿主</text>
+  <line x1="210" y1="62" x2="210" y2="110" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+  <text x="220" y="92" font-size="11" fill="var(--ink-soft)">World.open(…, redis=…, mysql=…)</text>
+
+  <!-- 引擎进程 -->
+  <rect x="60" y="114" width="300" height="222" rx="6" fill="var(--surface2)" stroke="var(--proc)" stroke-width="1.5"/>
+  <text x="210" y="138" text-anchor="middle" font-size="14" font-weight="700" fill="var(--ink)">引擎进程 · World / Scheduler</text>
+  <text x="210" y="155" text-anchor="middle" font-size="11" fill="var(--ink-soft)">世界自己的循环：tick · 行为树 · 规律求值</text>
+  <g font-size="11.5" fill="var(--ink)">
+    <rect x="76" y="168" width="268" height="24" rx="3" fill="var(--proc-bg)"/>
+    <text x="86" y="184">记忆投影（事件重折，有意不落库）</text>
+    <rect x="76" y="196" width="268" height="24" rx="3" fill="var(--proc-bg)"/>
+    <text x="86" y="212">RLock + Condition（进程内唯一的锁）</text>
+    <rect x="76" y="224" width="268" height="24" rx="3" fill="var(--proc-bg)"/>
+    <text x="86" y="240">线程池：叙事 / 规划 / 关系判定</text>
+    <rect x="76" y="252" width="268" height="24" rx="3" fill="var(--proc-bg)"/>
+    <text x="86" y="268">world_rules 解释器（AST 白名单，绝不 eval）</text>
+    <rect x="76" y="280" width="268" height="24" rx="3" fill="var(--proc-bg)"/>
+    <text x="86" y="296">LLM 客户端（注入；永不进 tick 线程）</text>
+  </g>
+
+  <!-- 别的进程 -->
+  <rect x="60" y="380" width="300" height="52" rx="4" fill="var(--surface)" stroke="var(--line)"/>
+  <text x="210" y="400" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--ink)">别的进程（很多个，各持一个 World）</text>
+  <text x="210" y="418" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--ink-soft)">World.act() / World.intend() / body 面的动词</text>
+
+  <!-- Redis -->
+  <rect x="600" y="60" width="290" height="180" rx="6" fill="var(--redis-bg)" stroke="var(--redis)" stroke-width="1.5"/>
+  <text x="745" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="var(--redis)">Redis · 运行时状态</text>
+  <text x="745" y="105" text-anchor="middle" font-size="11" fill="var(--ink-soft)">进得了提示词的一切 → 必须有界</text>
+  <text x="745" y="126" text-anchor="middle" font-size="11" fill="var(--ink)">黑板 · 时钟 · 在途 · 当前动作 · 规划</text>
+  <text x="745" y="143" text-anchor="middle" font-size="11" fill="var(--ink)">关系图 · 需求 · 姿态 · 量 · 认知声明</text>
+  <text x="745" y="160" text-anchor="middle" font-size="11" fill="var(--ink)">地图 · 行为树 · 经济目录 · 提示词模板</text>
+  <text x="745" y="184" text-anchor="middle" font-size="11" fill="var(--ink)">写入只填缺（HSETNX / setnx）：</text>
+  <text x="745" y="200" text-anchor="middle" font-size="11" fill="var(--ink)">接一个在跑的世界不许把她按回原点</text>
+  <text x="745" y="222" text-anchor="middle" font-size="11" font-family="var(--mono)" fill="var(--ink-soft)">anima:{world_id}:*</text>
+
+  <line x1="360" y1="180" x2="600" y2="150" stroke="var(--redis)" stroke-width="1.4" marker-end="url(#arr)" color="var(--redis)"/>
+  <text x="478" y="152" text-anchor="middle" font-size="10.5" fill="var(--redis)">每 tick 读写</text>
+  <line x1="360" y1="400" x2="600" y2="210" stroke="var(--redis)" stroke-width="1.4" marker-end="url(#arr)" color="var(--redis)" stroke-dasharray="5 3"/>
+  <text x="500" y="330" text-anchor="middle" font-size="10.5" fill="var(--redis)">RedisLock（:lock）下执行</text>
+
+  <!-- MySQL -->
+  <rect x="600" y="290" width="290" height="142" rx="6" fill="var(--mysql-bg)" stroke="var(--mysql)" stroke-width="1.5"/>
+  <text x="745" y="316" text-anchor="middle" font-size="14" font-weight="700" fill="var(--mysql)">MySQL · 无限增长的历史</text>
+  <text x="745" y="335" text-anchor="middle" font-size="11" fill="var(--ink-soft)">进不了提示词的 → 可以无限，按 k 取回</text>
+  <text x="745" y="357" text-anchor="middle" font-size="11.5" font-family="var(--mono)" fill="var(--ink)">events · memories</text>
+  <text x="745" y="374" text-anchor="middle" font-size="11.5" font-family="var(--mono)" fill="var(--ink)">conversations · messages</text>
+  <text x="745" y="398" text-anchor="middle" font-size="11" fill="var(--ink)">mysql= 传工厂，不传裸连接</text>
+  <text x="745" y="414" text-anchor="middle" font-size="10.5" fill="var(--ink-soft)">（每线程一条；裸连接开机当场点名）</text>
+
+  <line x1="360" y1="300" x2="600" y2="340" stroke="var(--mysql)" stroke-width="1.4" marker-end="url(#arr)" color="var(--mysql)"/>
+  <text x="478" y="308" text-anchor="middle" font-size="10.5" fill="var(--mysql)">追加事件 / 记忆 / 转录</text>
+  <line x1="600" y1="370" x2="420" y2="370" stroke="var(--mysql)" stroke-width="1.2" marker-end="url(#arr)" color="var(--mysql)" stroke-dasharray="5 3"/>
+  <text x="510" y="362" text-anchor="middle" font-size="10.5" fill="var(--mysql)">按 k 取回（检索 / 分页）</text>
+
+  <!-- Redis→MySQL 纪律 -->
+  <line x1="745" y1="240" x2="745" y2="290" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)" stroke-dasharray="4 3"/>
+  <text x="755" y="268" font-size="10.5" fill="var(--ink-soft)">events/memories 归 MySQL 后，删 Redis 冻拷贝</text>
+
+  <!-- 机器配置 -->
+  <rect x="420" y="380" width="150" height="0" fill="none"/>
+  <rect x="600" y="16" width="290" height="0" fill="none"/>
+  <rect x="392" y="16" width="180" height="46" rx="4" fill="var(--machine-bg)" stroke="var(--machine)" stroke-width="1.5"/>
+  <text x="482" y="36" text-anchor="middle" font-size="12" font-weight="700" fill="var(--machine)">机器配置（0600）</text>
+  <text x="482" y="52" text-anchor="middle" font-size="10.5" font-family="var(--mono)" fill="var(--ink-soft)">~/.anima-world/config.json</text>
+  <line x1="440" y1="62" x2="330" y2="114" stroke="var(--machine)" stroke-width="1.4" marker-end="url(#arr)" color="var(--machine)"/>
+  <text x="418" y="96" text-anchor="middle" font-size="10.5" fill="var(--machine)">LLM 钥匙 · 端点</text>
+</svg>
+</div>
+<figcaption>一个活着的世界与它的三个外部落点。实线是常规读写；虚线是纪律性的动作。多进程的正确性由两条纪律扛着：写入只填缺（不许倒带一个在跑的世界），以及历史只有一份（归 MySQL 后 Redis 里的冻拷贝必须删掉）。</figcaption>
+</figure>
+
+<h2><span class="no">02</span>分家判据：带不带得进上下文</h2>
+<p class="lede">Redis / MySQL 的分界不是"冷热"也不是模糊的"增长性直觉"，而是一条可验证的规则——</p>
+<div class="criterion">
+  <div class="to-redis">
+    <p class="rule">进得了提示词<span class="arrow">→</span>必须有界<span class="arrow">→</span><span class="dest">Redis</span></p>
+    <p>LLM 上下文有上限，所以她此刻带在身上的东西按世界规模封顶：黑板每人约 20 键、edges ≤ 2×N²（谓词闭集，承重）。</p>
+  </div>
+  <div class="to-mysql">
+    <p class="rule">进不了提示词<span class="arrow">→</span>可以无限<span class="arrow">→</span><span class="dest">MySQL</span></p>
+    <p>要用时按 k 取回（三因子检索、分页）。四样：events、memories、conversations、messages。</p>
+  </div>
+</div>
+<p class="criterion-proof">可验性：分对了的话提示词不随世界变老而涨。实测 60 世界日，事件 50 → 3264（×65），提示词 2251 → 2272 字。<code>tests/test_bounded.py</code> 是这道闸。</p>
+
+<h2><span class="no">03</span>落点清单：每样数据写在哪里</h2>
+<p class="lede">全部运行时数据的归属。键名省略前缀 <code>anima:{world_id}</code>；MySQL 表名的 <code>{prefix}</code> 让一个库跑多个世界。</p>
+<div class="matrix-wrap">
+<table class="matrix">
+  <thead>
+    <tr>
+      <th>数据</th>
+      <th>落点</th>
+      <th>要点</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr class="group"><td colspan="3">随时间无限增长<em>GROWS_FOREVER · 给了 mysql= 归 MySQL；没给就住 Redis，接受随时间涨的账</em></td></tr>
+    <tr>
+      <td class="what"><span class="name">事件日志</span><span class="hint">唯一真相；seq 是 1 起连续整数</span></td>
+      <td><span class="chip mysql">MySQL</span><span class="k">{prefix}events</span></td>
+      <td class="note-cell">世界的历史只记世界里发生的事；整场会话只在关闭时发一个事件</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">记忆</span><span class="hint">反思、遗忘曲线的对象</span></td>
+      <td><span class="chip mysql">MySQL</span><span class="k">{prefix}memories</span></td>
+      <td class="note-cell">三因子检索按 k 取回，进提示词的永远是有界的一小片</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">聊天转录</span><span class="hint">逐轮 stance / intent / tool_call 落在 messages 行上</span></td>
+      <td><span class="chip mysql">MySQL</span><span class="k">{prefix}conversations · {prefix}messages</span><span class="chip redis">Redis</span><span class="k">:conversations(:id) · :messages(:id) · :conv_msgs:{id}</span></td>
+      <td class="note-cell">写它的入口在表的主人那儿（MySQLChatStore / RedisChatStore）；ChatStateStore 只转发</td>
+    </tr>
+
+    <tr class="group"><td colspan="3">纯运行时<em>此刻的世界，逐 tick 读写</em></td></tr>
+    <tr>
+      <td class="what"><span class="name">黑板（每角色）</span><span class="hint">性格、目标、位置，约 20 键</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:agent:{id}（hash）</span></td>
+      <td class="note-cell">接入时 seed_missing 只填缺——整份写回等于拿创世快照倒带她</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">世界时钟</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:clock</span></td>
+      <td class="note-cell">setnx 只填缺，同一条纪律；时钟永不等网络</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">世界锁</span><span class="hint">act() / intend() 在它下面执行</span></td>
+      <td><span class="chip redis">RedisLock</span><span class="k">:lock</span></td>
+      <td class="note-cell">进程内 RLock 不消失——Condition 要一把真线程锁，两把不互替</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">在途 · 当前动作 · 规划</span><span class="hint">"她正在赶路"必须全进程可见</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:transit · :doing · :plans</span></td>
+      <td class="note-cell">看不见在途，别的进程会让她跟一个还没走到的人搭话</td>
+    </tr>
+
+    <tr class="group"><td colspan="3">有界的世界状态<em>随世界规模封顶</em></td></tr>
+    <tr class="warn-row">
+      <td class="what"><span class="name">关系图 edges</span><span class="hint">曾被分错去 MySQL</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:edges · :edges:id</span></td>
+      <td class="note-cell">UNIQUE 三元组 + 闭集谓词 → ≤2×N²。放开谓词就要重算这笔账</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">需求</span><span class="hint">energy / hunger / social</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:needs</span></td>
+      <td class="note-cell">驱动行为树紧急带</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">chat-agent 五样</span><span class="hint">姿态 · 静音 · 拒谈 · 回头找你 · 玩家教的规则</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:stance · :mutes · :refused_topics · :followups(:id) · :overrides</span></td>
+      <td class="note-cell">真世界状态：她真的在不理你、真的会到点回来敲门</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">量（stocks）</span><span class="hint">树高、季节、钱</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:stock:{owner} · :stock_owners</span></td>
+      <td class="note-cell">world-rules 双缓冲读写的对象；连续变化不发事件</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">认知层声明</span><span class="hint">self / here / public / hidden</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:visibility · :stock_places</span></td>
+      <td class="note-cell">没声明 = 感知不到；反方向的错不可挽回</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">小团体 · 反思水位</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:cliques · :reflection</span></td>
+      <td class="note-cell"></td>
+    </tr>
+
+    <tr class="group"><td colspan="3">创世后基本不动<em>冷，但完整性比冷热重要——世界不该缺一角</em></td></tr>
+    <tr>
+      <td class="what"><span class="name">地图</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:locations</span></td>
+      <td class="note-cell">几何相对父级；map 的数据出口是契约，渲染是赠品</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">行为树</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:bt_actions · :bt_nodes</span></td>
+      <td class="note-cell"></td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">经济目录</span><span class="hint">物品定义与货架</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:item_defs · :shop_stock</span></td>
+      <td class="note-cell">账本不单独存——它是事件投影</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">提示词模板</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:prompts</span></td>
+      <td class="note-cell">只存作者动过的——搬合并视图等于重建刚拆掉的默认值快照</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">世界规律 world_rules</span><span class="hint">{every, for_each, when, set, emit}</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:world_rules（定义原文）</span></td>
+      <td class="note-cell">开机读入并编译进 scheduler.world_rules；坏定义在读的时候当场报错，不流到运行期</td>
+    </tr>
+
+    <tr>
+      <td class="what"><span class="name">配置（作者的意见）</span><span class="hint">只存作者动过的；读时合并 env → 机器 → 世界 → _DEFAULTS</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:config（hash，内置种子世界 = 8 行，毛坯 = 0 行）</span></td>
+      <td class="note-cell">非空 secret 当场拒收——世界是分发物，引擎已没有加密钥匙</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">世界元数据</span><span class="hint">创世出生证明 · 占用标记</span></td>
+      <td><span class="chip redis">Redis</span><span class="k">:meta（world_seed · owner_pid/host）</span></td>
+      <td class="note-cell">出生证明随世界走，导出时优先于内置种子</td>
+    </tr>
+    <tr class="group"><td colspan="3">不属于任何世界<em>位置恒定</em></td></tr>
+    <tr>
+      <td class="what"><span class="name">LLM 钥匙与端点</span><span class="hint">api_key · base_url · model · background.model · timeout · max_retries</span></td>
+      <td><span class="chip machine">机器</span><span class="k">~/.anima-world/config.json（0600）</span></td>
+      <td class="note-cell">分发出去的世界零 secret；容器/CI 用环境变量兜前</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">记忆投影</span></td>
+      <td><span class="chip proc">进程内</span><span class="k">catch_up_projection</span></td>
+      <td class="note-cell">派生数据存两份只多一种不一致的坏法；重折廉价且必然正确</td>
+    </tr>
+    <tr>
+      <td class="what"><span class="name">完整聊天转录（应用侧）</span></td>
+      <td><span class="chip host">宿主应用</span><span class="k">World.chat 传入 / record_chat_turn 回传</span></td>
+      <td class="note-cell">世界只收当轮有限历史</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2><span class="no">04</span>各落点明细</h2>
+<div class="cards">
+
+<div class="card c-redis">
+  <h3>Redis · 运行时状态</h3>
+  <p class="where">前缀 anima:{world_id}: · 多进程共享 · 一把 RedisLock</p>
+  <ul class="keylist">
+    <li class="sect">纯运行时</li>
+    <li><code>:agent:{id}</code><span class="desc">黑板 hash</span></li>
+    <li><code>:clock · :lock</code><span class="desc">时钟 · 跨进程锁</span></li>
+    <li><code>:transit · :doing · :plans</code><span class="desc">在途 · 动作 · 规划</span></li>
+    <li class="sect">世界状态</li>
+    <li><code>:edges(:id) · :needs · :cliques · :reflection</code></li>
+    <li><code>:stance · :mutes · :refused_topics · :followups(:id) · :overrides</code></li>
+    <li><code>:stock:{owner} · :stock_owners</code><span class="desc">量</span></li>
+    <li><code>:visibility · :stock_places</code><span class="desc">认知层</span></li>
+    <li class="sect">创世配置与作者意见</li>
+    <li><code>:locations · :bt_actions · :bt_nodes</code></li>
+    <li><code>:item_defs · :shop_stock · :prompts</code></li>
+    <li><code>:config · :world_rules · :meta</code><span class="desc">配置 · 规律 · 出生证明/占用标记</span></li>
+    <li class="sect">转录（无 mysql= 时）</li>
+    <li><code>:conversations(:id) · :messages(:id) · :conv_msgs:{id}</code></li>
+  </ul>
+  <p>纪律：<strong>只填缺，不覆盖</strong>（黑板 seed_missing、时钟 setnx）。黑板曾漏过这条——第二个 World.open 会悄悄把她挪回 cafe，两边都不报错。</p>
+</div>
+
+<div class="card c-mysql">
+  <h3>MySQL · 无限增长的历史</h3>
+  <p class="where">{prefix} 让一个库跑多个世界（撞表 = 两个世界共用历史）</p>
+  <ul class="keylist">
+    <li><code>{prefix}events</code><span class="desc">MySQLEventLog</span></li>
+    <li><code>{prefix}memories</code><span class="desc">MySQLMemoryStore</span></li>
+    <li><code>{prefix}conversations · {prefix}messages</code><span class="desc">MySQLChatStore</span></li>
+  </ul>
+  <p>实测依据：三人世界 20 天，Redis 内存增量的九成是 events + memories；一千个世界一年 4.6 GB 常驻且不回落。</p>
+  <p>⚠ 传工厂：<code style="font-family:var(--mono)">mysql=lambda: pymysql.connect(…)</code>。pymysql threadsafety=1 而引擎有线程池；裸连接不必现地坏，所以开机当场点名。</p>
+  <p>⚠ 历史只有一份：events/memories 归 MySQL 后，Redis 里冻在旧时刻的拷贝会被删掉——两份真相里一份不更新是最怕的坏法。</p>
+</div>
+
+<div class="card c-machine">
+  <h3>机器配置 · 不随世界走</h3>
+  <p class="where">~/.anima-world/config.json · 0600 · 明文（0600 即边界）</p>
+  <ul class="keylist">
+    <li><code>llm.api_key</code><span class="desc">唯一的 secret，绝不进世界</span></li>
+    <li><code>llm.base_url · llm.model · llm.background.model</code></li>
+    <li><code>llm.timeout · llm.max_retries</code></li>
+  </ul>
+  <p>判据：换一个世界这个值要不要跟着变？不要 → 它是机器的。</p>
+  <div class="resolve">
+    <span class="step">环境变量</span><span class="arr">→</span>
+    <span class="step">机器配置</span><span class="arr">→</span>
+    <span class="step">世界配置（旧世界兼容）</span><span class="arr">→</span>
+    <span class="step">默认值</span>
+  </div>
+  <p>人不手写环境变量：<code style="font-family:var(--mono)">config set</code> 与 start 的引导直接写这个文件。降级永远可见（runtime.llm.degraded_reason）。</p>
+</div>
+
+<div class="card c-proc">
+  <h3>进程内 · 有意不落库</h3>
+  <p class="where">派生层与执行机构——可以随进程消失，重建必然正确</p>
+  <ul class="keylist">
+    <li><code>记忆投影</code><span class="desc">从事件日志重折</span></li>
+    <li><code>RLock + Condition</code><span class="desc">进程内唯一的锁</span></li>
+    <li><code>线程池</code><span class="desc">叙事/规划/关系判定，LLM 永不进 tick 线程</span></li>
+    <li><code>scheduler.world_rules</code><span class="desc">开机读入的规律列表</span></li>
+    <li><code>LLM 客户端</code><span class="desc">注入；钥匙来自机器配置</span></li>
+  </ul>
+  <p>判据：能从别处重建的不落库——存两份只多一种不一致的坏法。</p>
+</div>
+
+</div>
+
+<div class="footnotes">
+  <p><span class="fn">核对来源</span>　Redis 键：redis_state.py 全部 KEY_PREFIX 构造点；MySQL：mysql_state.py 的 GROWS_FOREVER 与 SCHEMA；接入纪律：api.py World.open 的 seed_missing / setnx 与 _drop_stale_redis_copies；机器配置：machine_config.py 的 MACHINE_KEYS 与解析顺序。</p>
+  <p><span class="fn">阅读方式</span>　拿一样数据先问"她带不带得进上下文"：进得了 → 有界 → Redis；进不了 → 无限 → MySQL。加新的量再多问一句：她该不该知道它（认知层）？她会把它带进提示词吗（tests/test_bounded.py）？</p>
+</div>
+</main>

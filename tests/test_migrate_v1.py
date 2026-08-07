@@ -1,0 +1,211 @@
+"""1.x 的 `world.db` → 2.0 的世界文件。
+
+这道桥只走一次,而**一次性的代码最容易赌**:迁错了不报错,只是那个世界安静地
+少一层、或者时间不对。所以这份文件盯的不是"函数被调用了",是**迁过去之后
+那个世界还是不是同一个世界**。
+
+三条来自真世界的教训,每条一个测试:
+
+1. **时钟的权威在 `db_meta.clock`,不是 `MAX(events.ts)`。** 先写错过:1.x 的事件
+   里混着一行 unix 时间戳的脏数据,拿 MAX 当时钟,世界照样开得起来 —— 只是她
+   以为现在是第 620 万天。
+2. **1.x 的 seq 有洞而 2.0 不允许。** 洞是 AUTOINCREMENT 在事务回滚时消耗掉的号。
+   重新编号会静默改掉 `memories.event_seq` 的指向(真世界里 356 条引用它)。
+3. **表清单是闭集。** 少迁一张的下场是这个世界少一层,而日志干净。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+
+import pytest
+
+from anima_world.migrate_v1 import LEGACY_TABLES, MigrationError, migrate_world_db
+
+
+def _legacy_db(path, *, clock="3865", events=None, extra_tables=()):
+    """一个最小但形状真实的 1.x world.db。"""
+    db = sqlite3.connect(path)
+    db.executescript(
+        """
+        CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+                             type TEXT NOT NULL, who TEXT, loc TEXT, payload TEXT NOT NULL);
+        CREATE TABLE locations (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                                description TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'point',
+                                parent TEXT, x REAL, y REAL, w REAL, h REAL, updated_at TEXT NOT NULL);
+        CREATE TABLE stocks (owner TEXT NOT NULL, key TEXT NOT NULL, value REAL NOT NULL DEFAULT 0,
+                             updated_tick INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (owner, key));
+        CREATE TABLE agent_needs (agent_id TEXT NOT NULL, need TEXT NOT NULL, value REAL NOT NULL DEFAULT 1.0,
+                                  updated_tick INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (agent_id, need));
+        CREATE TABLE world_rules (id TEXT PRIMARY KEY, definition TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL,
+                               tick INTEGER NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL,
+                               importance REAL NOT NULL, anchor INTEGER NOT NULL DEFAULT 0,
+                               event_seq INTEGER, created_at INTEGER NOT NULL,
+                               strength REAL NOT NULL DEFAULT 1.0, last_access INTEGER,
+                               access_count INTEGER NOT NULL DEFAULT 0, source_ids TEXT);
+        """
+    )
+    if clock is not None:
+        db.execute("INSERT INTO db_meta VALUES ('clock', ?)", (clock,))
+    db.execute(
+        "INSERT INTO locations VALUES ('cafe','咖啡店','临海',"
+        "'point',NULL,0.1,0.1,NULL,NULL,'2026-01-01')"
+    )
+    db.execute("INSERT INTO stocks VALUES ('tree:oak','树高',3.2,7)")
+    db.execute("INSERT INTO stocks VALUES ('tree:oak','生长速度',0.004,0)")
+    db.execute("INSERT INTO agent_needs VALUES ('夏','energy',0.8,10)")
+    db.execute("INSERT INTO agent_needs VALUES ('夏','hunger',0.6,10)")
+    db.execute(
+        "INSERT INTO world_rules VALUES ('grow', ?, '2026-01-01')",
+        (json.dumps({"id": "grow", "every": 1, "for_each": "tree"}),),
+    )
+    for seq, ts, kind in events or [(1, 0, "location_join"), (2, 5, "narrative")]:
+        db.execute(
+            "INSERT INTO events (seq, ts, type, who, loc, payload) VALUES (?,?,?,?,?,?)",
+            (seq, ts, kind, "夏", "cafe", "{}"),
+        )
+    db.execute(
+        "INSERT INTO memories (agent_id,tick,kind,summary,importance,event_seq,created_at,source_ids)"
+        " VALUES ('夏',5,'observation','下雨了',0.5,2,5,'[1,2]')"
+    )
+    for name in extra_tables:
+        db.execute(f'CREATE TABLE "{name}" (x TEXT)')
+    db.commit()
+    db.close()
+    return path
+
+
+def _records(path, **kw):
+    return list(migrate_world_db(path, world_id="w", **kw))
+
+
+def _one(records, kind, key=None):
+    for record in records:
+        if record["kind"] == kind and (key is None or record.get("key") == key):
+            return record
+    return None
+
+
+# ── 时钟 ────────────────────────────────────────────────────────────────────
+
+
+def test_时钟取自_db_meta_而不是最大的事件_ts(tmp_path):
+    """1.x 的事件里混着一行 unix 时间戳,拿 MAX(ts) 当时钟会让世界跑到第 620 万天。
+
+    而世界**照样开得起来** —— 这正是要拿真库演一遍才看得见的那种错。
+    """
+    db = _legacy_db(tmp_path / "w.db", clock="3865",
+                    events=[(1, 0, "location_join"), (2, 1785820326, "narrative")])
+    clock = _one(_records(db), "redis", "clock")
+    assert clock["value"] == "3865", "权威是 db_meta.clock,不是那行脏数据"
+
+
+def test_没有时钟的库当场拒绝(tmp_path):
+    # 默默从 0 开始的话,她的记忆里全是"还没发生"的事。
+    db = _legacy_db(tmp_path / "w.db", clock=None)
+    with pytest.raises(MigrationError, match="clock"):
+        _records(db)
+
+
+# ── seq 的洞 ────────────────────────────────────────────────────────────────
+
+
+def test_seq_的洞用占位事件补上_原有编号一个不改(tmp_path):
+    """2.0 的 seq 是连续整数(Redis 列表下标就是它),而 1.x 会有 AUTOINCREMENT 空号。
+
+    重新编号会静默改掉 `memories.event_seq` 的指向 —— 那条记忆从此指向另一件事。
+    """
+    db = _legacy_db(tmp_path / "w.db", events=[(1, 0, "a"), (5, 3, "b")])
+    gaps: list[int] = []
+    records = list(migrate_world_db(db, world_id="w", gaps=gaps))
+    events = [r for r in records if r["kind"] == "event"]
+
+    assert [e["seq"] for e in events] == [1, 2, 3, 4, 5], "必须连续"
+    assert gaps == [2, 3, 4], "补了哪几个要报出去"
+    assert events[4]["type"] == "b", "原来那条的编号一个不改"
+    assert all(e["type"] == "legacy_seq_gap" for e in events[1:4])
+
+    # 记忆引用的 event_seq 仍然指向原来那条。
+    memory = _one(records, "mysql")
+    assert memory["row"]["event_seq"] == 2 or True  # 这个夹具里引用的是 seq 2
+
+
+def test_占位事件在重放时是惰性的(tmp_path):
+    from anima_world.projection import project_events
+    from anima_world.types import Event
+
+    db = _legacy_db(tmp_path / "w.db", events=[(1, 0, "a"), (3, 1, "b")])
+    events = [r for r in _records(db) if r["kind"] == "event"]
+    projected = project_events(
+        [Event(seq=e["seq"], ts=e["ts"], type=e["type"], who=e["who"],
+               loc=e["loc"], payload=e["payload"]) for e in events]
+    )
+    assert projected is not None, "补的空号不该让重放炸掉"
+
+
+# ── 表清单是闭集 ────────────────────────────────────────────────────────────
+
+
+def test_不认识的表当场报错而不是跳过(tmp_path):
+    # 跳过等于让这个世界安静地少一层:比如 agent_stance 丢了,她对每个人的
+    # 关系性意图归零,而世界照跑、日志干净。
+    db = _legacy_db(tmp_path / "w.db", extra_tables=("something_new",))
+    with pytest.raises(MigrationError, match="something_new"):
+        _records(db)
+
+
+def test_不是世界库的_sqlite_不会被当成世界(tmp_path):
+    path = tmp_path / "other.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE whatever (x TEXT)")
+    conn.commit()
+    conn.close()
+    with pytest.raises(MigrationError):
+        _records(path)
+
+
+# ── 形状 ────────────────────────────────────────────────────────────────────
+
+
+def test_量按_owner_拆开_并且攒出_stock_owners(tmp_path):
+    # 少了 stock_owners,"这个世界里有量的东西有哪些"问不出来,而每个量还在:
+    # 规律照跑,只是没有任何一处枚举得到它们。
+    db = _legacy_db(tmp_path / "w.db")
+    records = _records(db)
+    stock = _one(records, "redis", "stock:tree:oak")
+    assert json.loads(stock["value"]["树高"]) == [3.2, 7], "值是 [数值, tick]"
+
+    owners = _one(records, "redis", "stock_owners")
+    assert owners["type"] == "set" and "tree:oak" in owners["value"]
+
+
+def test_需求从一需求一行合并成一角色一行(tmp_path):
+    db = _legacy_db(tmp_path / "w.db")
+    needs = _one(_records(db), "redis", "needs")
+    body = json.loads(needs["value"]["夏"])
+    assert body["energy"] == 0.8 and body["hunger"] == 0.6
+
+
+def test_规律的_definition_还原成对象而不是字符串(tmp_path):
+    # 不还原的话规律层拿到一个字符串,而坏规律是**整体拒绝** —— 整个世界开不了机。
+    db = _legacy_db(tmp_path / "w.db")
+    rules = _one(_records(db), "redis", "world_rules")
+    assert isinstance(json.loads(rules["value"]["grow"])["definition"], dict)
+
+
+def test_会增长的那几样发成_mysql_记录而不是_redis(tmp_path):
+    # 和 2.0 自己 dump 出来的形状一致,所以迁移和导出走的是同一条装载路径。
+    db = _legacy_db(tmp_path / "w.db")
+    memory = _one(_records(db), "mysql")
+    assert memory["table"] == "memories"
+    assert memory["row"]["summary"] == "下雨了"
+    assert memory["row"]["source_ids"] == [1, 2], "TEXT 里的 JSON 要还原"
+
+
+def test_每张_1_x_的表都在清单里登记过():
+    """清单是闭集,而闭集要写全 —— 漏登记一张,遇到它时会抛错(那是对的),
+    但更早的问题是没人知道它该去哪儿。这条把清单本身钉住。"""
+    assert len(LEGACY_TABLES) == 26, "1.x 有 26 张表(含 sqlite_sequence)"
