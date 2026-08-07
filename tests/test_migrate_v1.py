@@ -290,3 +290,30 @@ def test_读不懂的旧规划当作没有_而不是让整个世界塌掉():
     redis.hset("t2:plans", "夏", "Plan(agent_id='夏', day=14, steps=())")
     plans = RedisDict(redis, "t2:plans", encode=encode_plan, decode=decode_plan)
     assert plans.get("夏") is None
+
+
+def test_加密的配置行不迁进世界(tmp_path):
+    """引擎自己的导出路径有 `_strip_secrets`,而迁移**直读 SQLite、绕过了它**。
+
+    于是 1.x 那行 Fernet 密文 `llm.api_key` 原样进了 `.cyberworld` —— 而那是
+    **分发物**。功能上看不出来(2.0 手里没有 Fernet 钥匙,读的时候会点名跳过),
+    所以它能一直躺着。线上迁完之后是在 Redis 里翻到的。
+    """
+    db = _legacy_db(tmp_path / "w.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL,"
+        " value_type TEXT NOT NULL, category TEXT NOT NULL, is_secret INTEGER NOT NULL DEFAULT 0,"
+        " description TEXT, updated_at TEXT NOT NULL);"
+    )
+    conn.execute("INSERT INTO config VALUES ('llm.api_key','gAAAAABq密文','str','llm',1,'','x')")
+    conn.execute("INSERT INTO config VALUES ('needs.enabled','1','bool','needs',0,'','x')")
+    conn.commit()
+    conn.close()
+
+    dropped: dict[str, int] = {}
+    records = list(migrate_world_db(db, world_id="w", dropped=dropped))
+    config = _one(records, "redis", "config")
+    assert "needs.enabled" in config["value"], "普通配置要迁过去"
+    assert "llm.api_key" not in config["value"], "密文进了世界文件 —— 那是分发物"
+    assert dropped.get("config.secret") == 1, "丢掉了要报数,不能静默"

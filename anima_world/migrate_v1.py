@@ -71,6 +71,27 @@ def _json(value: Any, default: Any = None) -> Any:
 # 每一项:1.x 表名 → (2.0 的键, 怎么把一行变成 hash 的 field/value)。
 # **这是一个闭集**,见文件头。
 
+def _config_row(row: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """配置行 —— **`is_secret` 的一律不迁**,返回 None 表示丢掉这一行。
+
+    ⚠️ 这道闸我先漏了,而漏的方式很典型:引擎自己的导出路径有
+    `world_package._strip_secrets`,而迁移**直读 SQLite,绕过了它**。于是 1.x 那行
+    Fernet 密文 `llm.api_key` 原样进了 `.cyberworld` —— 而那个文件是**分发物**。
+    功能上看不出来(2.0 手里没有 Fernet 钥匙,读的时候会点名跳过),所以它能一直躺着。
+
+    两条理由,任何一条都够:
+      - 包是分发物,带着作者的钥匙发出去**不可挽回**;
+      - 那段密文对 2.0 毫无用处 —— Fernet 随 SQLite 一起退役了,钥匙在
+        `world.db.key` 里,而世界文件里不该有钥匙这种东西。
+
+    钥匙的去处是**机器配置**(`~/.anima-world/config.json`,0600),迁移的调用方
+    自己搬 —— 那一步要解密,而解密要 keyfile,那是一次**人在场**的操作。
+    """
+    if row.get("is_secret"):
+        return None
+    return (str(row["key"]), row)
+
+
 def _hash_by(field: str):
     """field 取一列,value 是整行。绝大多数表是这个形状。"""
     def build(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -143,7 +164,7 @@ LEGACY_TABLES: dict[str, Any] = {
     "item_defs": ("item_defs", _hash_by("id")),
     "stock_places": ("stock_places", _hash_by("owner")),
     "prompt_templates": ("prompts", _hash_by("name")),
-    "config": ("config", _hash_by("key")),
+    "config": ("config", _config_row),
     "world_rules": ("world_rules", _world_rules),
     "bt_nodes": ("bt_nodes", _bt_node),
     "bt_actions": ("bt_actions", _bt_action),
@@ -185,6 +206,10 @@ DROPPED_TABLES: dict[str, str] = {
         "世界的历史只记世界里发生的事;新版的壳写自己的 internal-receipts.db",
     "world_chat_evolution_receipts":
         "同上:聊天演化的投递回执,归平台",
+    "config.secret":
+        "1.x 的加密配置行(Fernet 密文)。包是**分发物**,带着作者的钥匙发出去不可挽回;"
+        "而那段密文对 2.0 也毫无用处 —— Fernet 随 SQLite 一起退役了。"
+        "钥匙的去处是机器配置(~/.anima-world/config.json),那一步要 keyfile,人得在场",
 }
 
 
@@ -244,7 +269,11 @@ def migrate_world_db(
                 continue
             value: dict[str, str] = {}
             for row in rows:
-                field, body = build(row)
+                built = build(row)
+                if built is None:      # 有意丢掉这一行(目前只有 is_secret)
+                    self_dropped[f"{table}.secret"] = self_dropped.get(f"{table}.secret", 0) + 1
+                    continue
+                field, body = built
                 value[field] = json.dumps(body, ensure_ascii=False)
             yield {"kind": "redis", "key": key, "type": "hash", "value": value}
 
