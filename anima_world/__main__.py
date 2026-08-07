@@ -904,7 +904,8 @@ def build_serve_scheduler(
         RedisMemoryStore, RedisNeedsStore, RedisCliqueStore, RedisPromptStore,
         RedisOntologyStore, RedisReflectionStore, RedisRulesStore, RedisStockStore,
         RedisVisibilityStore,
-        clock_key, current_action_key, decode_action, encode_action, events_key,
+        clock_key, current_action_key, decode_action, decode_plan, encode_action,
+        encode_plan, events_key,
         drop_stale_copies_for_mysql, durability_warning, engagements_key, meta_rows,
         plans_key, transit_key,
     )
@@ -1084,7 +1085,9 @@ def build_serve_scheduler(
     scheduler._current_action = RedisDict(
         redis, current_action_key(world_id), encode=encode_action, decode=decode_action,
     )
-    scheduler._plans = RedisDict(redis, plans_key(world_id))
+    scheduler._plans = RedisDict(
+        redis, plans_key(world_id), encode=encode_plan, decode=decode_plan,
+    )
     # 在做的长过程:椅子做到一半、孩子怀了六个月。**真状态,不是缓存** ——
     # 内存态等于每次重启都流产一次。
     scheduler._engaged = RedisDict(redis, engagements_key(world_id))

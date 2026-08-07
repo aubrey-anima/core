@@ -299,12 +299,27 @@ def test_the_redis_dict_only_pretends_to_be_a_dict_where_it_really_is(redis):
 
 
 def test_plans_move_too(world, redis):
-    from anima_world.redis_state import RedisDict, plans_key
+    """规划也住 Redis,而且**存的是 JSON,不是 `repr(Plan(...))`**。
+
+    这条此前塞的是一个 list of dict —— 一个生产里从来不出现的形状,它只是恰好
+    能活过恒等编解码。于是"`_plans` 少了 encode/decode"这个洞在这里完全看不见:
+    真的写一个 `Plan` 进去,redis-py 会把它 `str()` 成 repr,读回来是字符串,
+    而 `state()` 会在 `plan.steps` 上 AttributeError —— **只在她真的有计划的那一刻**。
+    """
+    from anima_world.planner import Plan, PlanStep
+    from anima_world.redis_state import RedisDict, decode_plan, encode_plan, plans_key
 
     assert isinstance(world.scheduler._plans, RedisDict)
-    world.scheduler._plans["夏"] = [{"kind": "walk", "params": {"location": "cafe"}}]
-    outsider = RedisDict(redis, plans_key("t"))
-    assert outsider.get("夏")[0]["kind"] == "walk"
+    world.scheduler._plans["夏"] = Plan(
+        agent_id="夏", day=1,
+        steps=(PlanStep(420, "walk", {"location": "cafe"}, "去店里"),),
+    )
+    # 另一个"进程"看到的必须是同一个 Plan,不是一段 repr。
+    outsider = RedisDict(redis, plans_key("t"), encode=encode_plan, decode=decode_plan)
+    got = outsider.get("夏")
+    assert not isinstance(got, str), "存成 repr 了"
+    assert got.steps[0].kind == "walk"
+    assert got.steps[0].params["location"] == "cafe"
 
 
 def test_the_projection_is_not_moved_but_caught_up(tmp_path, redis):

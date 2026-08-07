@@ -250,3 +250,43 @@ def test_迁过来的世界开机时不会被橱窗塞进一棵别人的树(tmp_
         assert not any("harbor_oak" in o for o in owners), f"多了别人的东西:{owners}"
     finally:
         world.close(wait=False)
+
+
+def test_一天的规划存的是_JSON_不是_repr(tmp_path):
+    """`RedisDict` 不给 `encode` 就是原样交给 redis-py,而它对一个不认得的对象
+    只会 `str()` —— 于是 `plans` 里存的是 `repr(Plan(...))`,读回来是字符串。
+
+    下场是 `state()` 在 `plan.steps` 上 AttributeError,**而且只在她真的有计划的
+    那一刻才炸**:一个刚创世的世界永远碰不到,一个跑了两周的世界一开机就 500。
+    上线时正是这样:两个世界好好的,第三个(唯一装着规划器的那个)整个读不了。
+    """
+    import fakeredis
+
+    from anima_world.planner import Plan, PlanStep
+    from anima_world.redis_state import RedisDict, decode_plan, encode_plan
+
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    plans = RedisDict(redis, "t:plans", encode=encode_plan, decode=decode_plan)
+    plans["夏"] = Plan(agent_id="夏", day=3, steps=(PlanStep(420, "walk", {"location": "cafe"}, "散步"),))
+
+    got = plans.get("夏")
+    assert got is not None and not isinstance(got, str), "读回来必须是 Plan,不是 repr 字符串"
+    assert got.steps[0].start_min == 420
+    assert got.steps[0].params["location"] == "cafe"
+    assert got.steps[0].note == "散步"
+
+
+def test_读不懂的旧规划当作没有_而不是让整个世界塌掉():
+    """这个 bug 存在期间写下的 repr 字符串还躺在老世界里。
+
+    读不懂就当没有 —— 她下一轮会重新规划;而让 `state()` 塌掉的话,
+    整个世界对外就是一个 500。
+    """
+    import fakeredis
+
+    from anima_world.redis_state import RedisDict, decode_plan, encode_plan
+
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    redis.hset("t2:plans", "夏", "Plan(agent_id='夏', day=14, steps=())")
+    plans = RedisDict(redis, "t2:plans", encode=encode_plan, decode=decode_plan)
+    assert plans.get("夏") is None

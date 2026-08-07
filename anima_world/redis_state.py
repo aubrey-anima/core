@@ -396,6 +396,44 @@ def plans_key(world_id: str) -> str:
     return f"{KEY_PREFIX}:{world_id}:plans"
 
 
+def encode_plan(plan: Any) -> dict[str, Any]:
+    """一天的自由时间规划 → JSON。
+
+    ⚠️ **`RedisDict` 不给 `encode` 就是原样交给 redis-py**,而 redis-py 对一个
+    它不认得的对象只会 `str()` —— 于是 `plans` 里存的是 `repr(Plan(...))`,
+    读回来是一个字符串。下场是 `state()` 在 `plan.steps` 上
+    `AttributeError: 'str' object has no attribute 'steps'`,**而且只在她真的
+    有计划的那一刻才炸**:一个刚创世的世界永远碰不到,一个跑了两周的世界一开机
+    就 500。`_current_action` 早就有这一对,`_plans` 漏了。
+    """
+    return {
+        "agent_id": plan.agent_id,
+        "day": int(plan.day),
+        "steps": [step.to_dict() for step in plan.steps],
+    }
+
+
+def decode_plan(raw: Any) -> Any:
+    from anima_world.planner import Plan, PlanStep
+
+    if raw is None:
+        return None
+    # 老世界里可能躺着 repr 字符串(这个 bug 存在期间写下的)。解不出来就当没有 ——
+    # 一个读不懂的计划不该让整个 `state()` 塌掉,而她下一轮会重新规划。
+    if not isinstance(raw, dict):
+        return None
+    steps = tuple(
+        PlanStep(
+            start_min=int(s.get("start_min") or 0),
+            kind=str(s.get("kind") or ""),
+            params=dict(s.get("params") or {}),
+            note=str(s.get("note") or ""),
+        )
+        for s in (raw.get("steps") or [])
+    )
+    return Plan(agent_id=str(raw.get("agent_id") or ""), day=int(raw.get("day") or 0), steps=steps)
+
+
 def events_key(world_id: str) -> str:
     return f"{KEY_PREFIX}:{world_id}:events"
 
