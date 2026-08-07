@@ -1080,7 +1080,13 @@ def build_serve_scheduler(
         # 种子的显式值先落(它此刻仍是空库,"空库一次"那条守得住),声明的默认值
         # 后面**只填缺** —— 反过来的话作者写的 3.2 会被声明的 1.0 盖掉。
         # 而它现在拿得到本体了,于是"写了一个没声明过的量"这件事走得了闸。
-        _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology)
+        #
+        # ⚠️ **同样要 `fresh_world`,这是上面那三个的第四个** —— 漏了它的下场是
+        # 迁移时撞出来的:一个 1.x 迁过来的世界(`stocks` 表本来就是空的)开机一次,
+        # 就被塞进橱窗那棵 `tree:harbor_oak` 和两个世界量。世界照跑、日志干净,
+        # 只是它凭空多了一棵别人世界里的橡树。
+        if fresh_world:
+            _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology)
         if scheduler.ontology is None:
             _warn_unresolved_rule_names(stock_store, scheduler.world_rules)
         else:
@@ -3573,7 +3579,8 @@ def run_world_package(args: argparse.Namespace) -> int:
                 "source": str(args.db),
                 "output": str(args.output),
                 "world_id": args.package_id,
-                **counts,
+                **{k: v for k, v in counts.items() if k != "dropped"},
+                "dropped": counts.get("dropped") or {},
             }
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False))
@@ -3583,6 +3590,11 @@ def run_world_package(args: argparse.Namespace) -> int:
                 print(f"    事件      {counts.get('event', 0)}")
                 print(f"    增长的三样 {counts.get('mysql', 0)}")
                 gaps = counts.get("seq_gaps_filled", 0)
+                for table, rows in (counts.get("dropped") or {}).items():
+                    from anima_world.migrate_v1 import DROPPED_TABLES
+
+                    # 有意丢弃也要报 —— 这是使用者唯一有机会说"等等那个我要"的时刻。
+                    print(f"    · 丢掉 {table}({rows} 行):{DROPPED_TABLES[table]}")
                 if gaps:
                     # 补了必须说 —— 不说的话"这个世界的历史完整吗"没人问得到。
                     print(

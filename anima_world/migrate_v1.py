@@ -37,7 +37,7 @@ from typing import Any, Iterator
 
 from anima_world.world_file import WorldFileManifest, write_world_file
 
-__all__ = ["migrate_world_db", "MigrationError", "LEGACY_TABLES"]
+__all__ = ["migrate_world_db", "MigrationError", "LEGACY_TABLES", "DROPPED_TABLES"]
 
 NUL = "\x00"
 
@@ -173,6 +173,20 @@ LEGACY_TABLES: dict[str, Any] = {
     "sqlite_sequence": (None, None),
 }
 
+# **有意丢弃的表,以及为什么。**
+#
+# 和"没登记"分开放,因为那是两件事:没登记要**报错**(可能是漏了一层世界),
+# 登记了不要要**报出来给人看一眼**(可能那正是他要的东西)。一次迁移里
+# "补了什么"和"扔了什么"是使用者唯一有机会说"等等那个我要"的时刻 ——
+# 过了这一刻,就再也没人会去问了。
+DROPPED_TABLES: dict[str, str] = {
+    "world_command_receipts":
+        "运维台旧版服务壳的投递回执 —— 平台的账,不是世界的内容。"
+        "世界的历史只记世界里发生的事;新版的壳写自己的 internal-receipts.db",
+    "world_chat_evolution_receipts":
+        "同上:聊天演化的投递回执,归平台",
+}
+
 
 def migrate_world_db(
     db_path: str | Path,
@@ -182,12 +196,16 @@ def migrate_world_db(
     summary: str = "",
     engine_min: str = "",
     gaps: list[int] | None = None,
+    dropped: dict[str, int] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """读一个 1.x 的 `world.db`,产出 v3 记录流。**纯读,不碰引擎的存储层。**
 
-    `gaps` 给一个列表进来的话,补掉的空号会写进去 —— 调用方要报给人看。
+    `gaps` / `dropped` 给容器进来的话,补掉的空号与有意丢掉的表会写进去 ——
+    两样都要报给人看:一次迁移里"补了什么"和"扔了什么"是使用者唯一有机会
+    质疑的地方,而过了这一刻就再也没人会去问了。
     """
     self_gaps = gaps if gaps is not None else []
+    self_dropped = dropped if dropped is not None else {}
     path = Path(db_path)
     if not path.exists():
         raise MigrationError(f"没有这个文件:{path}")
@@ -204,13 +222,18 @@ def migrate_world_db(
             raise MigrationError(
                 f"{path} 看上去不是一个 1.x 的世界库(没有 events / locations 表)"
             )
-        unknown = present - set(LEGACY_TABLES)
+        unknown = present - set(LEGACY_TABLES) - set(DROPPED_TABLES)
         if unknown:
             # 跳过等于让这个世界安静地少一层。
             raise MigrationError(
                 f"不认识的表 {sorted(unknown)} —— 迁移的表清单是闭集,"
                 f"加一张新表要同时在 LEGACY_TABLES 里登记,不然它会静默消失"
             )
+
+        for table in sorted(present & set(DROPPED_TABLES)):
+            count = db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            if count:
+                self_dropped[table] = int(count)
 
         # ── 状态层:一个个 hash ────────────────────────────────────────────
         for table, (key, build) in LEGACY_TABLES.items():
@@ -342,10 +365,12 @@ def write_migrated_world(
 
     counts: dict[str, int] = {}
     gaps: list[int] = []
+    dropped: dict[str, int] = {}
 
     def counted() -> Iterator[dict[str, Any]]:
         for record in migrate_world_db(
-            db_path, world_id=world_id, name=name, summary=summary, gaps=gaps
+            db_path, world_id=world_id, name=name, summary=summary,
+            gaps=gaps, dropped=dropped,
         ):
             counts[record["kind"]] = counts.get(record["kind"], 0) + 1
             yield record
@@ -360,4 +385,5 @@ def write_migrated_world(
     write_world_file(output, manifest, counted())
     # 补了几个空号要报出去 —— 补完不吭声的话,"这个世界的历史完整吗"就没人问得到了。
     counts["seq_gaps_filled"] = len(gaps)
+    counts["dropped"] = dropped
     return counts

@@ -24,7 +24,7 @@ import pytest
 from anima_world.migrate_v1 import LEGACY_TABLES, MigrationError, migrate_world_db
 
 
-def _legacy_db(path, *, clock="3865", events=None, extra_tables=()):
+def _legacy_db(path, *, clock="3865", events=None, extra_tables=(), stocks=True):
     """一个最小但形状真实的 1.x world.db。"""
     db = sqlite3.connect(path)
     db.executescript(
@@ -54,13 +54,21 @@ def _legacy_db(path, *, clock="3865", events=None, extra_tables=()):
         "INSERT INTO locations VALUES ('cafe','咖啡店','临海',"
         "'point',NULL,0.1,0.1,NULL,NULL,'2026-01-01')"
     )
-    db.execute("INSERT INTO stocks VALUES ('tree:oak','树高',3.2,7)")
-    db.execute("INSERT INTO stocks VALUES ('tree:oak','生长速度',0.004,0)")
+    if stocks:
+        db.execute("INSERT INTO stocks VALUES ('tree:oak','树高',3.2,7)")
+        db.execute("INSERT INTO stocks VALUES ('tree:oak','生长速度',0.004,0)")
     db.execute("INSERT INTO agent_needs VALUES ('夏','energy',0.8,10)")
     db.execute("INSERT INTO agent_needs VALUES ('夏','hunger',0.6,10)")
     db.execute(
         "INSERT INTO world_rules VALUES ('grow', ?, '2026-01-01')",
-        (json.dumps({"id": "grow", "every": 1, "for_each": "tree"}),),
+        # **要写一条真规律** —— 坏规律引擎是整体拒绝的,拿一条假的当夹具会让
+        # "迁过来的世界开得了机"这类测试红在一个和迁移无关的地方。
+        (json.dumps({
+            "id": "grow",
+            "every": {"days": 1},
+            "for_each": {"kind": "tree"},
+            "set": {"树高": "树高 + 生长速度 * dt"},
+        }),),
     )
     for seq, ts, kind in events or [(1, 0, "location_join"), (2, 5, "narrative")]:
         db.execute(
@@ -209,3 +217,36 @@ def test_每张_1_x_的表都在清单里登记过():
     """清单是闭集,而闭集要写全 —— 漏登记一张,遇到它时会抛错(那是对的),
     但更早的问题是没人知道它该去哪儿。这条把清单本身钉住。"""
     assert len(LEGACY_TABLES) == 26, "1.x 有 26 张表(含 sqlite_sequence)"
+
+
+def test_迁过来的世界开机时不会被橱窗塞进一棵别人的树(tmp_path):
+    """播种按"这张表恰好还空着"判,只在第一次开机时和创世重合。
+
+    一个 1.x 迁过来的世界 `stocks` 表本来就是空的 —— 开机一次就被内置演示世界
+    塞进 `tree:harbor_oak` 和两个世界量。**世界照跑、日志干净**,只是它凭空多了
+    一棵别人世界里的橡树。这是 rules / stock_visibility / stock_places 那三个
+    已经补过的闸漏掉的第四个。
+    """
+    import fakeredis
+
+    from anima_world.api import World
+    from anima_world.migrate_v1 import write_migrated_world
+    from anima_world.world_package import import_world_file
+
+    # **量必须一个都没有** —— 触发条件是"这张表恰好空着"。夹具里留着两行的话,
+    # "空表才播"那条自己就挡住了,于是这条测试会在闸撤掉之后照样绿(我先这么写过,
+    # 而一条不会红的回归测试比没有更坏:它让人以为这个洞被守着)。
+    # 线上那个 qingshi 正是一个量都没有的世界。
+    db = _legacy_db(tmp_path / "w.db", stocks=False)
+    package = tmp_path / "w.cyberworld"
+    write_migrated_world(db, package, world_id="q", name="q")
+
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    import_world_file(package, redis=redis, world_id="q")
+    world = World.open("q", redis=redis)
+    try:
+        owners = {k.split(":", 2)[-1] for k in redis.keys("anima:q:stock:*")}
+        assert "stock:tree:harbor_oak" not in owners, "橱窗的橡树跑进来了"
+        assert not any("harbor_oak" in o for o in owners), f"多了别人的东西:{owners}"
+    finally:
+        world.close(wait=False)
