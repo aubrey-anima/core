@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -497,14 +498,65 @@ def _eval_predicate(
 # ── payload expansion (pure ops only) ────────────────────────────────────────
 
 
+# 目标之间的分隔符。作者(和替作者写目标的那个模型)拿它们串一行,
+# 而 `{goals}` 是逐条渲染的 —— 不拆开的话,一整行会变成"一个目标"。
+_GOAL_SPLIT = re.compile(r"[；;、\n]+")
+
+
+def _split_goal_text(text: str) -> list[str]:
+    return [part.strip() for part in _GOAL_SPLIT.split(text) if part.strip()]
+
+
+def _looks_char_split(items: list[str]) -> bool:
+    """这份 goals 是不是一整句话被按**字**拆开的结果。
+
+    判据要窄:元素多(≥4)、而且**每一个都只有一个字**。真目标没有一个字的
+    ("学会放手"最短也四个字),更不会一连四个都是。窄到这个程度之后,误判需要
+    一个作者真的写下 `["静", "默", "等", "待"]` —— 那本来也是一份坏数据。
+    """
+    return len(items) >= 4 and all(len(item.strip()) == 1 for item in items)
+
+
 def coerce_goals(value: Any) -> list[Any]:
-    """A hand-authored goals field may be a bare string; `list(str)` would
-    split it into one goal per character (same trap __main__._coerce_goals
-    closes for the seed file)."""
+    """把作者写的 goals 收成一列**人读得出**的目标。
+
+    两种坏形状,同一个下场:`{goals}` 直接进 planner 的提示词,而它是逐条渲染的。
+
+    1. 一整个字符串(`"摆脱母亲的控制；重新定义自己的人生"`)。对它做 `list(...)`
+       会按字符拆开;此前这里只挡住了这一步,把整行当成**一个**目标 —— 不炸,
+       但那一条里塞着两个目标,分隔符原样进提示词。现在按分隔符拆开。
+    2. **已经被按字拆开的一列**(`["摆","脱","母","亲",…]`)。这一形状是
+       `list[str]`,合法得挑不出毛病,于是它一路畅通无阻地进了世界:线上那个
+       897e282865f5 九个角色全中,每人背着十几二十个单字目标,而 planner 每天
+       照着它排一天的日子。上游(创作台 `concept.py` 的 `_short_lines`)已经
+       堵住了产出侧,但**引擎这一头当时一声不吭地收下了** —— 这正是这个仓库
+       最怕的那类:照跑、日志干净、作者三个月后才发现。
+
+    修法是把字拼回去再按分隔符拆:`["摆","脱",…,"；","重",…]` → 拼 →
+    `"摆脱母亲的控制；重新定义自己的人生"` → 拆 → 两条。拼接是**无损**的,
+    所以这不是猜一个答案出来,是把丢掉的那一步倒回去。
+    """
     if isinstance(value, str):
-        return [value] if value.strip() else []
+        return _split_goal_text(value)
     if isinstance(value, (list, tuple)):
-        return list(value)
+        items = [item for item in value]
+        texts = [str(item) for item in items]
+        if _looks_char_split(texts):
+            repaired = _split_goal_text("".join(texts))
+            logger.warning(
+                "goals 是一列单字(%d 条)—— 按字拆开的痕迹,已拼回并重新拆成 %d 条:%s",
+                len(texts), len(repaired), repaired,
+            )
+            return repaired
+        # 一条里塞着分隔符的照样拆开(模型常把两个目标写进同一个数组元素),
+        # 非字符串的元素原样留着 —— 拆它没有意义,而丢它是另一种静默的少装。
+        out: list[Any] = []
+        for item in items:
+            if isinstance(item, str):
+                out.extend(_split_goal_text(item))
+            else:
+                out.append(item)
+        return out
     return []
 
 

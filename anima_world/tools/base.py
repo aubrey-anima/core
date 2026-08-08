@@ -86,31 +86,71 @@ class ToolRuntime(Protocol):
 
     def agent_location(self, agent_id: str) -> str: ...
 
+    def player_location(self, player_id: str) -> str: ...
+
     def face_to_face(self, agent_id: str, player_id: str) -> bool: ...
 
     def point_ids(self) -> list[str]: ...
+
+    def point_names(self) -> dict[str, str]: ...
 
     def move_agent(self, agent_id: str, location: str) -> dict[str, Any]: ...
 
     def do_action(self, agent_id: str, kind: str, params: dict[str, Any]) -> bool: ...
 
-    def interact_with(self, agent_id: str, target: str, verb: str) -> dict[str, Any]: ...
+    def player_do_action(
+        self, player_id: str, kind: str, params: dict[str, Any]
+    ) -> bool: ...
+    """玩家版的 `do_action`。返回 `False` 同样是"世界这会儿不接",不是异常。
+
+    分开一条而不是给 `do_action` 加个开关:玩家没有行为树、没有黑板、没有需求带,
+    `emit_action` 那条路上的每一步都假设施动者是一个 `Agent`。共用的是**动词和
+    它的后果**,不是执行器。"""
+
+    def give_item(self, player_id: str, agent_id: str, wanted: str) -> dict[str, Any]: ...
+
+    def entity_names(self) -> dict[str, str]: ...
+
+    def interact_with(
+        self, agent_id: str, target: str, verb: str,
+        participants: list[str] | None = None, player_id: str = "",
+    ) -> dict[str, Any]: ...
 
     def close_conversation(self, agent_id: str, player_id: str) -> bool: ...
 
 
+AGENT_ACTOR = "agent"
+PLAYER_ACTOR = "player"
+
+
 @dataclass
 class ToolContext:
-    """一次调用的现场:谁在调、对谁调、以及那个世界。"""
+    """一次调用的现场:谁在调、对谁调、以及那个世界。
+
+    `actor` 是**这一下是谁做的**,而不是这一下发生在谁身上。两个 id 字段都还在
+    (一次玩家调用照样要知道对面那个角色是谁,`talk_to` 的 target 就是他),变的
+    只是施动者。默认 `agent` —— 在这个字段出现之前的每一次调用都是她做的,
+    默认值让那些调用点一行都不用改。
+    """
 
     agent_id: str
     player_id: str
     runtime: ToolRuntime
     agent_name: str = ""
+    actor: str = AGENT_ACTOR
 
     @property
     def state(self) -> Any:
         return self.runtime.state
+
+    @property
+    def is_player(self) -> bool:
+        return self.actor == PLAYER_ACTOR
+
+    @property
+    def actor_id(self) -> str:
+        """施动者的 id。事件的 `who` 用它 —— 玩家的动作不该记在角色名下。"""
+        return self.player_id if self.is_player else self.agent_id
 
 
 ToolHandler = Callable[[ToolContext, dict[str, Any]], ToolResult]
@@ -122,7 +162,35 @@ ToolHandler = Callable[[ToolContext, dict[str, Any]], ToolResult]
 CHAT = "chat"            # 玩家跟她说话的那一轮
 AUTONOMY = "autonomy"    # 定时轮次:没人跟她说话,她自己决定要不要做点什么
 BODY = "body"            # 过日子的动作:走、吃、干活、睡 —— 谁都能做,不挑场合
-SURFACES = (CHAT, AUTONOMY, BODY)
+PLAYER = "player"        # 玩家在网页上点得动的那些 —— 见下
+SURFACES = (CHAT, AUTONOMY, BODY, PLAYER)
+"""`PLAYER` 是"人和 NPC 共用一套行动"的那一半。
+
+在这之前玩家只有两个入口:`player_move`(真改位置)和 `player_action` ——
+而后者是个**空壳**,签名是一个自由字符串,进去只落一条日志事件,不校验、不产生
+任何后果。于是同一个世界里有两套行为学:她走路要花时间、吃饭要付钱、
+一起做事要在同一个地方;而人点一下"走到哈尔滨",世界里只多一行字。
+
+这个面把玩家接到**同一份 `ToolSpec`** 上:同一套参数校验、同一条执行路径、
+同一批副作用。区别只剩调用者是谁 —— LLM 挑,还是人在网页上点。
+
+⚠️ **进这个面的门槛是"在世界里真发生了什么",不是"这个动作听起来人也能做"。**
+第一批只有两个:
+
+- `walk` —— 真在途、发 `travel`、到点补 `location_join`
+- `broadcast` —— 在场的角色真的留下 `memory_seed`
+
+`work` / `eat` / `sleep` / `wander` / `seek_company` / `talk_to` **暂不进**:
+玩家侧它们最终落到 `World.player_action`,而那条只写一行事件日志、**不投递给
+任何角色的感知**,更没有需求带和账本可扣。开了它们等于把上面那句"同一批副作用"
+变成一句假话 —— 而菜单上的说明还是照角色写的(`eat` 那条写着"付钱是副作用"),
+宿主照着画出来的按钮点下去世界里什么也没发生、**还不报错**。那正是本文件开头
+骂 `player_action` 的形状,不该在同一次改动里又犯一遍。
+
+要开它们,先补玩家侧的那份账(需求带 / 钱包 / 物品消耗),和 `interact` 门口
+挂的是同一条理由。
+
+`wait_for_user`(对人没有意义)、`reach_out`(人本来就是主动方)则永远不进。"""
 
 
 @dataclass(frozen=True)
@@ -135,6 +203,27 @@ class ToolSpec:
     params_schema: dict[str, Any]
     handler: ToolHandler
     surfaces: tuple[str, ...] = (CHAT,)
+    requires_colocation: bool = False
+    """**这个能力要玩家真的在她跟前。**
+
+    在这之前玩家是个幽灵:不管角色在哈尔滨还是三亚,他都能面对面说话、给东西、
+    一起做事 —— **位置这个维度等于白设计了**。而引擎里位置是真的(她走路要花
+    时间、同地才看得见对方身上的量、`reach_out` 老早就拒绝不在场的人),
+    只有玩家这一侧一直没人管。
+
+    判据是**施动者是谁**,不是"这件事重不重要":
+
+    - 玩家**亲手**做的(把围巾递过去、跟她一起坐下来)—— 要当面。隔着三亚递不了
+      一条围巾,这一条不需要论证。
+    - 玩家**开口**让她做的(「你去睡觉」「你去雕那座冰雕」)—— 不要当面。
+      那是一句话,而一句话打电话也说得出来。把它一起挡掉,等于宣称"异地就不能
+      跟她说话",而那正是这一层想保住的那一半。
+
+    ⚠️ **默认不生效。** 引擎侧收紧会当场打断线上世界(`player_move` 是宿主可选
+    调用,今天线上根本没人调,于是"异地"是默认值),所以这道闸挂在
+    `presence.enforce_colocation` 上、默认关,关着时行为与今天**逐位相同**。
+    迁移说明在 REFERENCE §2.9.7。
+    """
     writes: tuple[str, ...] = ()
     """**它把世界改在哪儿。** 每一项是一张表名,或 `events:<类型>`。
 
@@ -168,6 +257,7 @@ def tool(
     params: dict[str, Any] | None = None,
     surfaces: tuple[str, ...] = (CHAT,),
     writes: tuple[str, ...] = (),
+    requires_colocation: bool = False,
 ) -> Callable[[ToolHandler], ToolHandler]:
     """把一个函数登记成能力。重复登记同一个 id 是错,不是覆盖。"""
 
@@ -180,7 +270,7 @@ def tool(
         _REGISTRY[id] = ToolSpec(
             id=id, kind=kind, description=description, writes=tuple(writes),
             params_schema=dict(params or {}), handler=handler,
-            surfaces=tuple(surfaces),
+            surfaces=tuple(surfaces), requires_colocation=bool(requires_colocation),
         )
         return handler
 
@@ -215,6 +305,10 @@ def capability_payloads() -> list[dict[str, Any]]:
             "description": spec.description,
             "params_schema": spec.params_schema,
             "surface": ",".join(spec.surfaces),
+            # 目录里也要有它:宿主(和运维台的镜像)照这份画界面,而"这个按钮
+            # 要玩家走到她跟前才点得动"是界面上必须先知道的事 —— 点下去才发现
+            # 的话,那是一次没有任何人预告过的失败。
+            "requires_colocation": spec.requires_colocation,
         }
         for spec in tools_for("*")
     ]

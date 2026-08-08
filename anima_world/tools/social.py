@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from anima_world.tools.base import AUTONOMY, CHAT, ToolCallError, ToolContext, ToolResult, tool
+from anima_world.tools.base import AUTONOMY, CHAT, PLAYER, ToolCallError, ToolContext, ToolResult, tool
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ def refuse_topic(ctx: ToolContext, params: dict) -> ToolResult:
     kind="broadcast",
     description="当众说一句话,这会儿在你身边的人都听得见,而且会记住",
     params={"text": {"type": "string", "description": "说什么", "required": True}},
-    surfaces=(CHAT, AUTONOMY),
+    surfaces=(CHAT, AUTONOMY, PLAYER),
 )
 def broadcast(ctx: ToolContext, params: dict) -> ToolResult:
     """当众说一句 —— **在场的人真的会记住它**。
@@ -199,18 +199,26 @@ def broadcast(ctx: ToolContext, params: dict) -> ToolResult:
     text = str(params.get("text") or "").strip()
     if not text:
         raise ToolCallError("广播内容是空的")
-    here = ctx.runtime.agent_location(ctx.agent_id) or None
-    speaker = ctx.runtime.agent_names().get(ctx.agent_id) or ctx.agent_id
+    # 施动者可以是人:他当众说的一句,同样该进在场角色的记忆。**没有"自己"要排除**
+    # —— 玩家不在 `agent_ids()` 里,而她广播时要跳过她自己。
+    if ctx.is_player:
+        here = ctx.runtime.player_location(ctx.player_id) or None
+        speaker = ctx.runtime.player_name(ctx.player_id)
+        who, exclude = f"player:{ctx.player_id}", None
+    else:
+        here = ctx.runtime.agent_location(ctx.agent_id) or None
+        speaker = ctx.runtime.agent_names().get(ctx.agent_id) or ctx.agent_id
+        who, exclude = ctx.agent_id, ctx.agent_id
     heard_by = [
         agent_id for agent_id in ctx.runtime.agent_ids()
-        if agent_id != ctx.agent_id and here and ctx.runtime.agent_location(agent_id) == here
+        if agent_id != exclude and here and ctx.runtime.agent_location(agent_id) == here
     ]
     ctx.runtime.emit({
         "type": "agent_broadcast",
-        "who": ctx.agent_id,
+        "who": who,
         "loc": here,
         "payload": {
-            "agent_id": ctx.agent_id, "text": text,
+            "agent_id": who, "text": text,
             "audience": "here", "heard_by": heard_by,
         },
     })
@@ -251,6 +259,10 @@ def wait_for_user(ctx: ToolContext, params: dict) -> ToolResult:
         "text": {"type": "string", "description": "开口第一句说什么"},
     },
     surfaces=(AUTONOMY,),
+    # 这条一直在**手写**同一件事(下面 `present_player_ids(ctx.agent_id)` 那两句)。
+    # 声明出来不改变它的行为(默认关的那道闸之外,处理器里那两句照旧兜底),
+    # 改变的是**别人问得到**:目录里有了这一格,宿主界面才知道这个按钮要人走过去。
+    requires_colocation=True,
 )
 def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
     """她自己决定来找你(定时轮次的主力能力)。

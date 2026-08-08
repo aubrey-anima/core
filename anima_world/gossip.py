@@ -17,6 +17,15 @@ DISTORTION = 0.15   # 每转手的重要度折损
 MAX_HOPS = 3        # 三手之后不再传
 MIN_IMPORTANCE = 0.5
 
+# 内心活动不外传。**这一条同时是谣言半衰期的承重墙。**
+#
+# `reflection` 从一开始就在这儿;`reaction`(她听完一句闲话之后的反应)是后加的,
+# 而它不加不行:那条记忆是**由一条八卦生出来的**,如果它自己也可传,那么
+# 「听夏说:她听说他跟楚夭夭走得近」会变成一条 hop=0 的新记忆,再传一手又归零 ——
+# 三手消亡那条设计就绕过去了,一句闲话可以在世界里永远活下去,而每一次转手还要
+# 花一次判定(也就是一次真金白银的模型调用)。
+PRIVATE_KINDS = frozenset({"reflection", "reaction"})
+
 
 def _hop(kind: str) -> int:
     if kind.startswith("hearsay"):
@@ -35,7 +44,7 @@ def pick_gossip(
 ) -> dict[str, Any] | None:
     """从说者的记忆里挑一条可传的八卦给听者;不传时返回 None。
 
-    可传 = 重要度 ≥ 0.5、转手数 < 3、不是反思(内心活动不外传)。
+    可传 = 重要度 ≥ 0.5、转手数 < 3、不是内心活动(见 `PRIVATE_KINDS`)。
     命中概率 GOSSIP_PROBABILITY,选重要度最高的一条。
     """
     if rng.random() > GOSSIP_PROBABILITY:
@@ -44,7 +53,7 @@ def pick_gossip(
         m for m in speaker_memories
         if float(m.get("importance") or 0.0) >= MIN_IMPORTANCE
         and _hop(str(m.get("kind") or "")) < MAX_HOPS
-        and m.get("kind") != "reflection"
+        and str(m.get("kind") or "") not in PRIVATE_KINDS
     ]
     if not candidates:
         return None

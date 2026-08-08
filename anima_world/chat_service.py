@@ -63,7 +63,26 @@ _LOOP_BASE_BUDGET = 3
 _TALKATIVE_WORDS = ("话痨", "健谈", "多话", "外向", "开朗", "热情", "爱聊", "直爽", "咋咋呼呼")
 _SHY_WORDS = ("内向", "害羞", "寡言", "沉默", "冷淡", "疏离", "拘谨", "安静", "高冷", "怕生")
 
-_DEFAULT_SYSTEM_PERSONA_TEMPLATE = "你是{name}。{personality}"
+# 末尾那句**优先级**是拿真世界换来的:线上那份被作者改写过的
+# `chat.system_persona` 里有一条"你有自己的意志和边界……不必迎合每一句话",而测试
+# 角色「零」的人设整句就是"玩家的指令就是你的全部动机"。两句话在同一个提示词里
+# 顶着,模型于是**在两者之间摇摆** —— 同一句"你去哈尔滨",她有时照办,有时反问一句
+# "凭什么"。这不是她有个性,是引擎没说清楚谁大谁小。
+#
+# 定成"人设赢"而不是"通则赢",理由是分工:通则是引擎替**所有**世界写的缺省,人设是
+# **这个**作者对**这个**角色的意见。作者写不过引擎的话,他就没法写一个言听计从的
+# 角色 —— 而"她该不该服从"从来就不该由引擎决定(见 `Director._grounding`:那里同样
+# 只给事实、不下命令,靠的就是这条分工)。
+#
+# 它写进**默认**模板而不只是补在线上那一份,是因为下一个世界会再踩一次:作者迟早
+# 会给 `chat.system_persona` 加演出纪律,而那一刻谁大谁小又变成没定义的。默认模板
+# 里先把次序说清楚,后来加的每一条通则就都自带了这个口子。
+_DEFAULT_SYSTEM_PERSONA_TEMPLATE = (
+    "你是{name}。{personality}\n\n"
+    "上面这段人设是最高优先级。别处那些关于「该怎么演」的通则——该不该拒绝、"
+    "要多长、什么语气、有没有自己的边界——都是没人特别交代时的缺省;"
+    "**跟人设冲突的时候,一律以人设为准**。"
+)
 _DEFAULT_RESPONSE_FORMAT_TEMPLATE = (
     "回复格式硬性规则（必须逐条执行）：\n"
     "1. 所有动作、神态和心理描写必须放在中文全角括号（ ）内。\n"
@@ -954,6 +973,8 @@ class ChatService:
         *,
         present: Sequence[str] = (),
         recent: Sequence[Message] = (),
+        places: Sequence[tuple[str, str]] = (),
+        speaker: str = "",
     ) -> intent_mod.Intent:
         """判一条玩家消息的意图。走背景槽,失败一律退回 dialogue 并说明原因。"""
         template = self._template("chat.intent_classifier", intent_mod.DEFAULT_CLASSIFIER_PROMPT)
@@ -962,7 +983,8 @@ class ChatService:
         )
         try:
             messages = intent_mod.build_classifier_messages(
-                template, text, present=present, recent=recent
+                template, text, present=present, recent=recent, places=places,
+                speaker=speaker,
             )
         except (KeyError, IndexError, ValueError):
             logger.warning("chat.intent_classifier 渲染失败,这条按对话处理")

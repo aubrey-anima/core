@@ -20,6 +20,9 @@ from typing import Any
 
 from anima_world.planner import _DEFAULT_PROMPT as _PLANNER_FREETIME
 from anima_world.chat_service import (
+    _DEFAULT_SYSTEM_PERSONA_TEMPLATE as _CHAT_SYSTEM_PERSONA,
+)
+from anima_world.chat_service import (
     _DEFAULT_PRESENCE_TEMPLATE as _CHAT_PRESENCE,
 )
 from anima_world.chat_service import (
@@ -48,6 +51,7 @@ from anima_world.chat_service import (
 )
 from anima_world.intent import DEFAULT_CLASSIFIER_PROMPT as _INTENT_CLASSIFIER
 from anima_world.autonomy import DEFAULT_DECIDE_PROMPT as _AUTONOMY_DECIDE
+from anima_world.contact import DEFAULT_COMPOSE_PROMPT as _CONTACT_COMPOSE
 from anima_world.perception import (
     DEFAULT_PERCEPTION_BLOCK_TEMPLATE as _CHAT_PERCEPTION,
 )
@@ -61,6 +65,8 @@ from anima_world.narrative import (
 from anima_world.relationship_judge import _DEFAULT_PROMPT as _JUDGE_RELATIONSHIP
 from anima_world.relationship_judge import _DEFAULT_RELABEL_PROMPT as _JUDGE_RELABEL
 from anima_world.relationship_judge import _DEFAULT_USER_JUDGE_PROMPT as _JUDGE_USER
+from anima_world.relationship_judge import _DEFAULT_HEARSAY_PROMPT as _JUDGE_HEARSAY
+from anima_world.relationship_judge import _DEFAULT_INVITE_PROMPT as _JUDGE_INVITE
 
 
 class PromptRenderError(ValueError):
@@ -93,6 +99,16 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         "a_name": "夏", "a_personality": "开朗", "b_name": "遥", "b_personality": "冷静",
         "old_r_type": "点头之交", "old_band": "熟识", "new_band": "亲近", "memories": "（无）",
     },
+    "judge.hearsay": {
+        "a_name": "夏", "a_personality": "开朗", "memories": "（无）",
+        "roster": "- 沈遥：+0.30\n- 阿檀：+0.60",
+        "rumor": "听沈遥说:阿檀最近老往柔那儿跑", "location": "cafe",
+    },
+    "judge.invite": {
+        "a_name": "遥", "a_personality": "话少,慢热", "memories": "（无）",
+        "inviter": "苏晚夏", "a_to_b": "0.42", "location": "cafe",
+        "invitation": "苏晚夏叫你一起在门口那棵老橡树下小坐",
+    },
     "chat.world_memory_block": {"memories": "- 债务解除了"},
     "chat.presence_block": {
         "day": 5, "hh": "20", "mm": "15", "location": "酒吧", "activity": "在值班",
@@ -108,7 +124,11 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
     "chat.tools_block": {"tool_menu": "- mute：屏蔽这个人一段时间 参数:minutes:必填"},
     "chat.overrides_block": {"rules": "- 怎么称呼玩家：霜霜"},
     "chat.refused_topic_block": {"keywords": "彩票"},
-    "chat.intent_classifier": {"present": "林素", "recent": "user: 冷不冷?"},
+    "chat.intent_classifier": {
+        "present": "林素", "recent": "user: 冷不冷?",
+        "places": "咖啡店(cafe)、家(home)、建筑工作室(workshop)",
+        "speaker": "苏晚夏",
+    },
     "chat.loop_continue": {"emitted": 2, "left": 3},
     "chat.loop_interrupt": {"text": "等等,我不是这个意思"},
     "autonomy.decide": {
@@ -117,6 +137,12 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         "present_block": "这会儿在你身边的人:阿檀(p1)。\n",
         "state_block": "- 你此刻的心气儿:0.62(0~1)\n",
         "tool_menu": "- reach_out:主动去找一个此刻在场的人开口 参数:player_id, text",
+    },
+    "contact.compose": {
+        "name": "苏晚夏", "personality": "开朗热情", "day": 3, "hh": "20", "mm": "15",
+        "location": "咖啡店", "player": "阿檀",
+        "reason_block": "- 他交代过我一件事:阿檀要我去把窗边那束花换掉\n",
+        "state_block": "- 你此刻的心气儿:0.62(0~1)\n",
     },
     "judge.user_relationship": {
         "a_name": "夏", "a_personality": "开朗", "player_name": "阿檀",
@@ -158,9 +184,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
         _WORLD_SETTING,
         "世界基础设定（世界观）——注入所有 agent 的 chat 与 narrative 提示词",
     ),
+    # 和 `chat_service._DEFAULT_SYSTEM_PERSONA_TEMPLATE` 逐字一致 ——
+    # 那边写着为什么末尾要有"以人设为准"这一句。
     "chat.system_persona": (
-        "你是{name}。{personality}",
-        "Chat 系统人设模板",
+        _CHAT_SYSTEM_PERSONA,
+        "Chat 系统人设模板（末句定下人设优先于通则，作者才写得出言听计从的角色）",
     ),
     "chat.memory_block": (
         "你和对方过去的对话回顾：\n{summaries}",
@@ -189,6 +217,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "autonomy.decide": (
         _AUTONOMY_DECIDE,
         "定时轮次的 prompt——没人跟她说话时问她要不要自己做点什么（autonomy.enabled）",
+    ),
+    "contact.compose": (
+        _CONTACT_COMPOSE,
+        "她想起一个不在跟前的玩家时，那句「想说什么」的线索（contact.enabled；"
+        "**判定不在这儿**，这条只写线索）",
     ),
     "chat.perception_block": (
         _CHAT_PERCEPTION,
@@ -233,6 +266,16 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "judge.user_relationship": (
         _JUDGE_USER,
         "玩家会话关闭后按真实转录判双向好感变化的 prompt（player-visitor）",
+    ),
+    "judge.hearsay": (
+        _JUDGE_HEARSAY,
+        "她听到一句八卦之后的反应——吃醋走的是这条判定，不是自动扣分"
+        "（social.hearsay_reaction.enabled）",
+    ),
+    "judge.invite": (
+        _JUDGE_INVITE,
+        "有人叫她一起做件事，她答不答应——一起做事那条拒绝路径走的是这份人设，"
+        "不是一条「关系够近就答应」的规则",
     ),
     "narrative.describe": (
         "请用中文生成一句适合作为这个 agent 的世界叙事或聊天回复。只输出正文，不要解释。",

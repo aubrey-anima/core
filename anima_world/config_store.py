@@ -22,6 +22,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from anima_world import together
+
 logger = logging.getLogger(__name__)
 
 _VALUE_TYPES = {"str", "int", "float", "bool"}
@@ -337,6 +339,21 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "autonomy.enabled": (False, "bool", "autonomy", False, "Ask each character every N ticks whether she wants to do something on her own"),
     "autonomy.interval_ticks": (72, "int", "autonomy", False, "World ticks between autonomy rounds (72 = 6 world hours at 5 min/tick)"),
     "autonomy.max_per_day": (2, "int", "autonomy", False, "How many times a day one character may act on her own"),
+    # contact:她会不会想起一个**不在跟前**的玩家。和 autonomy 是两条路(候选集
+    # 互补、额度两本账)—— 理由写在 `contact.py` 的模块说明里。
+    # ⚠️ 它**不要求** `chat.tools.enabled`:这一层不挑动词,只发一条事件,
+    # 没有 LLM 也成立(线索退回由头原文)。
+    "contact.enabled": (False, "bool", "contact", False, "Characters may decide on their own that they want to reach a player who is not present"),
+    "contact.interval_ticks": (24, "int", "contact", False, "World ticks between contact checks (24 = 2 world hours at 5 min/tick)"),
+    "contact.min_closeness": (0.35, "float", "contact", False, "Weighted three-axis closeness below which she never thinks of him"),
+    "contact.threshold": (0.25, "float", "contact", False, "Score (closeness x urge x readiness) needed to fire"),
+    "contact.cooldown_ticks": (144, "int", "contact", False, "Minimum world ticks between two wants-contact events for one (agent, player)"),
+    "contact.max_per_day": (2, "int", "contact", False, "How many times a day one character may want to reach one player"),
+    "contact.fatigue": (1.7, "float", "contact", False, "Threshold multiplier per already-fired contact today (the decay)"),
+    "contact.absence_ticks": (288, "int", "contact", False, "World ticks of silence before 'he has not been around' becomes a reason"),
+    "contact.recent_ticks": (288, "int", "contact", False, "How fresh a memory must be to count as a reason"),
+    "contact.initiative_stock": ("主动", "str", "contact", False, "Agent quantity that scales how readily she reaches out; undeclared = 1.0"),
+    "contact.compose.enabled": (True, "bool", "contact", False, "Use the background LLM to write the one-line topic hint (falls back to the reason text)"),
     "memory.capacity": (50, "int", "memory", False, "Per-agent memory row cap before strength-based eviction"),
     "memory.sentiment_threshold": (0.3, "float", "memory", False, "Relationship-shift memory trigger threshold"),
     "memory.half_life_days": (3.0, "float", "memory", False, "Recency half-life for memory retrieval (world days)"),
@@ -344,7 +361,55 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
     "economy.enabled": (False, "bool", "economy", False, "Items, money, shops and price drift"),
     "economy.daily_wage": (20.0, "float", "economy", False, "Per-agent daily wage from the town treasury"),
+    # 一个**世界自己声明的**量,把她的心气儿往下拖(熬夜攒的睡眠债是标准用法)。
+    # 空 = 关,和 perception / ontology 同一条:声明本身就是开关。引擎不认识
+    # 「睡眠债」,只认识"作者指着她身上的哪个量" —— 量怎么攒怎么还由规律写。
+    "needs.mood_penalty_stock": (
+        "", "str", "needs", False,
+        "An agent quantity (0~1) subtracted from mood; empty = off. "
+        "The world's rules decide how it accrues and how it is paid off",
+    ),
     "social.enabled": (False, "bool", "social", False, "Gossip propagation and clique detection"),
+    # 听到一句八卦之后她有没有反应(吃醋是其中一种)。**自成一个开关**,理由是
+    # 代价:它是每落地一条八卦就多一次模型往返,而 `social.enabled` 那一层本身
+    # 一次模型都不调。默认关,和引擎其余的开关一样;橱窗种子里点亮它。
+    "social.hearsay_reaction.enabled": (
+        False, "bool", "social", False,
+        "After hearing gossip, ask the judge how it lands (jealousy and its seven siblings); "
+        "one LLM round trip per rumor that lands",
+    ),
+    # 一起做事。**没有 `social.joint.enabled`** —— 声明本身就是开关(和 perception /
+    # ontology 逐字同构):没有哪个 kind 写过 `participants` 的世界,这一层整个缺席,
+    # 行为与从前逐位相同。这几个键是"点亮之后"的刻度,不是开关。
+    "social.joint.consent_stock": (
+        together.DEFAULT_CONSENT_STOCK, "str", "social", False,
+        "Agent quantity that scales how readily he says yes to an invitation; undeclared = 1.0",
+    ),
+    "social.joint.min_willingness": (
+        together.DEFAULT_MIN_WILLINGNESS, "float", "social", False,
+        "Willingness (closeness x agreeableness x stance) needed to accept, "
+        "when there is no invite judge to read his persona",
+    ),
+    "social.joint.relation_step": (
+        together.DEFAULT_RELATION_STEP, "float", "social", False,
+        "Base relationship step one shared experience is worth. Deliberately larger than "
+        "DeterministicRelationshipJudge.STEP (0.04): things done together should move a "
+        "relationship more than lines exchanged",
+    ),
+    "social.joint.full_duration_ticks": (
+        together.DEFAULT_FULL_DURATION_TICKS, "int", "social", False,
+        "How long together counts as 'the whole way' for the relationship effect "
+        "(12 = one world hour at 5 min/tick)",
+    ),
+    # 异地就只能打电话。**默认关**,而这不是犹豫,是账:引擎侧收紧会当场打断线上
+    # 世界 —— `player_move` 是宿主可选调用,今天线上根本没人调,于是"异地"是每一次
+    # 调用的默认值,一开就是 give / 一起做事全线开始拒绝。迁移次序只能是
+    # "先让宿主调 player_move,再开这个开关"(`anima-world presence` 就是查这个的)。
+    "presence.enforce_colocation": (
+        False, "bool", "presence", False,
+        "Capabilities declared requires_colocation refuse when the player is not "
+        "face to face with the character. Requires the host to call player_move",
+    ),
 }
 
 # **创世不播默认值**(DB-SPLIT.md 移动 1)。播下去的那 36 行看着无害,坏处要过一个

@@ -936,6 +936,22 @@ class RedisMemoryStore:
                 row["strength"] = fresh
                 self._rows.put(str(row["id"]), row)
 
+    def retick(self, memory_id: int, tick: int, created_at: int | None = None) -> bool:
+        """把一条记忆的 `tick` 改掉。**只给迁移用**(`World.repair_memory_ticks`)。
+
+        记忆是派生数据,而 `tick` 是它唯一的排序键;2.0 之前 `conversation` 事件
+        盖的是墙钟,那批行的 tick 是 1.78e9,于是 `query` 的前 k 条永远是它们。
+        改的是一份能从事件日志重折出来的投影,不是历史本身 —— 事件日志一个字
+        不动(见 `World.repair_memory_ticks` 的说明)。
+        """
+        row = self._rows.get(str(int(memory_id)))
+        if row is None:
+            return False
+        row["tick"] = int(tick)
+        row["created_at"] = int(tick if created_at is None else created_at)
+        self._rows.put(str(int(memory_id)), row)
+        return True
+
     def set_anchor(self, memory_id: int, anchor: bool) -> None:
         row = self._rows.get(str(memory_id))
         if row is not None:
@@ -1294,7 +1310,14 @@ class RedisChatStateStore(_ChatStateStore):
 class RedisKnowledgeGraph:
     """关系图的边。`(subject, predicate, object)` 唯一 —— **重复写不覆盖**
     (SQLite 那边是 `INSERT OR IGNORE`),所以第一次记下的 `source_event_seq`
-    与 `created_at` 说了算:一条边的出处是它第一次被证实的那一刻。"""
+    与 `created_at` 说了算:一条边的出处是它第一次被证实的那一刻。
+
+    这条**是设计**,不是缺陷:边记的是"这两人是朋友"这个**事实**,不是
+    "他们又亲近了一次"这个**事件**。关系在「亲近」「挚交」之间来回跨档时事实
+    没变,重写 `source_event_seq` 只会让"这条边是哪件事立起来的"每次都换个答案。
+    值本身的变化在 relations 那一层(它是可变的),边不是它的第二份拷贝。
+
+    可撤销**才是**缺陷,而且是被上面那条挡住看不见的那个:见 `drop`。"""
 
     __slots__ = ("_rows", "_redis", "_world")
 
@@ -1313,6 +1336,16 @@ class RedisKnowledgeGraph:
             "subject": subject, "predicate": predicate, "object": object,
             "source_event_seq": source_event_seq, "created_at": int(created_at),
         })
+
+    def drop(self, subject: str, predicate: str, object: str) -> bool:  # noqa: A002 - 对齐 add
+        """撤销一条边。返回它本来在不在。
+
+        存在的理由:边只增不减的话,一对从「亲近」跌进「交恶」的人身上会**同时**
+        挂着 friendship 和 rivalry,而且永远。`cliques.compute_cliques` 只看
+        friendship 的连通分量,于是那个小团体里坐着两个此刻互相看不顺眼的人 ——
+        算得出来、画得出来、一条日志都不会报错。
+        """
+        return bool(self._rows.drop(f"{subject}\x00{predicate}\x00{object}"))
 
     def query(self, subject: str | None = None, predicate: str | None = None,
               object: str | None = None) -> list[dict[str, Any]]:  # noqa: A002
@@ -1406,6 +1439,78 @@ class RedisReflectionStore:
 
     def reset(self, agent_id: str, tick: int) -> None:
         self._rows.put(agent_id, {"accumulated": 0.0, "last_reflection_tick": int(tick)})
+
+
+class RedisContactStore:
+    """她想起某个玩家这件事的当前值:上次是什么时候、今天几次了、他上次出现在
+    她面前是哪一 tick(contact)。
+
+    **一行是一对 (她, 他)**,主键 `agent\\x00player`,和 `stance` / `mutes` 同一个
+    形状。
+
+    ⚠️ **它必须落库,不能是进程内的字典。** 冷却是内存态的话,每次重启就把所有
+    人的冷却一起清零 —— 而重启在这个部署形态下是家常便饭(换引擎镜像)。玩家看到
+    的样子是"发一次版,四个角色同时来找我",而日志里一条错都没有。这正是 `:engaged`
+    那一条("真状态,不是缓存")的同一个坑。
+
+    `last_contact_tick` 是**她**这边看到的"他上次出现" —— 走 `World.chat` /
+    `record_chat_turn` 那扇门写。用世界时钟而不是墙钟:"很久没出现"里的"久"
+    是世界里的久,一个跑在演示速度上的世界一小时就过完一天。
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:contact")
+
+    @staticmethod
+    def _field(agent_id: str, player_id: str) -> str:
+        return f"{agent_id}\x00{player_id}"
+
+    def get(self, agent_id: str, player_id: str) -> dict[str, Any]:
+        row = self._rows.get(self._field(agent_id, player_id))
+        if not isinstance(row, dict):
+            return {"agent_id": agent_id, "player_id": player_id}
+        return dict(row)
+
+    def all(self) -> list[dict[str, Any]]:
+        return [row for row in self._rows.all().values() if isinstance(row, dict)]
+
+    def note_contact(
+        self, agent_id: str, player_id: str, tick: int, name: str = ""
+    ) -> None:
+        """他刚跟她说过话。**改的是这一两个字段,不是整行** —— 整行写回会把冷却
+        状态抹掉,而那正是"只填缺,不覆盖"这条纪律在这一层的样子。
+
+        顺手记下他叫什么:`World.players` 是刻意的内存态(重启即新访),而这一层
+        要在**他不在线的时候**发一条带着他名字的事件 —— 不记下来的话,重启之后
+        她想起的是一串 uuid。
+        """
+        row = self.get(agent_id, player_id)
+        row["last_contact_tick"] = int(tick)
+        if name:
+            row["player_name"] = str(name)
+        self._rows.put(self._field(agent_id, player_id), row)
+
+    def note_fired(self, agent_id: str, player_id: str, *, tick: int, day: int) -> int:
+        """记一次"她想起他了"。返回今天第几次(含这次)。
+
+        跨日自动归零:存的是 `fired_day` 而不是"今天的计数" —— 一个只存计数的
+        实现要靠别人在日切时来清它,而漏掉日切清理的样子是她从第二天起再也想不
+        起你,永远。
+        """
+        row = self.get(agent_id, player_id)
+        count = int(row.get("fired_today") or 0) if int(row.get("fired_day") or -1) == int(day) else 0
+        count += 1
+        row.update({"last_fired_tick": int(tick), "fired_day": int(day), "fired_today": count})
+        self._rows.put(self._field(agent_id, player_id), row)
+        return count
+
+    def fired_today(self, agent_id: str, player_id: str, day: int) -> int:
+        row = self.get(agent_id, player_id)
+        if int(row.get("fired_day") or -1) != int(day):
+            return 0
+        return int(row.get("fired_today") or 0)
 
 
 class RedisEconomyStore:

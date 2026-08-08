@@ -51,12 +51,36 @@ from anima_world.expressions import Expression, ExpressionError, compile_express
 
 logger = logging.getLogger(__name__)
 
-# 表达式里恒有的两个名字(不需要声明就能读)。
-BUILTIN_NAMES = ("dt", "now")
+# 表达式里恒有的名字(不需要声明就能读)。
+#
+# 前两个是流逝:`dt`(这些量上次被写到现在过了多少 tick)与 `now`(世界时钟)。
+# 后四个是**日历** —— 由 `world_time.clock_names` 从 `now` 和这个世界的
+# `world.minutes_per_tick` 折出来。它们是后加的,补的是一个把整类规律挡在门外的洞:
+# "半夜还醒着要还睡眠债""日落之后果子不再长"都需要"这一天里的哪个时刻",而
+# `now % 288` 这种手算解决不了 —— 一天多少 tick 是每个世界自己的配置。
+#
+# ⚠️ 内置名**盖过**同名的量(见 `stocks._apply` 的 namespace 组装顺序),所以
+# 声明一个叫 `hour` 的量是个静默的陷阱:规律读到的永远是钟点,而作者以为读的是
+# 他那个量。`ontology.parse_kinds` 因此把它当**加载期错误**拒掉。
+BUILTIN_NAMES = ("dt", "now", "day", "hour", "minute", "minute_of_day")
 # `world` 这个 owner 的量,在任何表达式里都能以 `world_<key>` 读到。
 WORLD_PREFIX = "world_"
 
-_SELECTOR_KINDS = ("kind", "owner", "action")
+# 谁参与这条规律。`action` / `not_action` 是一对:此刻**正在**做某件事的人,
+# 和此刻**没在**做某件事的人。
+#
+# `not_action` 是被「熬夜攒睡眠债」逼出来的,而它逼出来的方式值得记一笔:这条规律
+# 的意思是"半夜还醒着的人欠觉",而"醒着"在这个引擎里的写法只能是"没在睡"。少了
+# 补集,它只有两种写法,而**两种都是错的**:
+#
+#   - 一条 `{"kind": "agent"}` 的规律 —— 睡着的人也一起欠觉,语义整个反了;
+#   - 一条攒债 + 一条还债,都写 `睡眠债` —— 同一轮里两条规律抢同一个量,
+#     后写的赢(见 `evaluate_due` 里那句 warning)。而两条 `every` 不同的话
+#     它们只是**有时**相撞,于是错得断断续续,查都没法查。
+#
+# 补集本身没有引入任何新东西:它和 `action` 读的是同一份 `_current_action`,
+# 只是取反。而"取反"这件事在数据里不可表达,恰恰会逼作者去改引擎。
+_SELECTOR_KINDS = ("kind", "owner", "action", "not_action")
 
 
 class RuleError(ValueError):
@@ -80,7 +104,7 @@ class Emit:
 class Rule:
     id: str
     interval_ticks: int
-    selector_kind: str            # "kind" | "owner" | "action"
+    selector_kind: str            # "kind" | "owner" | "action" | "not_action"
     selector_value: str
     outputs: dict[str, Expression]
     conditions: tuple[Expression, ...] = ()
@@ -275,7 +299,7 @@ def _parse_selector(label: str, raw: Any, errors: list[str]) -> tuple[str, str]:
     if not isinstance(raw, dict) or len(raw) != 1:
         errors.append(
             f"{label}:for_each 必须正好一个键 —— "
-            f"{{\"kind\": …}} / {{\"owner\": …}} / {{\"action\": …}}"
+            f"{{\"kind\": …}} / {{\"owner\": …}} / {{\"action\": …}} / {{\"not_action\": …}}"
         )
         return ("owner", "world")
     key, value = next(iter(raw.items()))

@@ -48,8 +48,80 @@ def test_out_of_the_box_the_showcase_features_are_lit(flagship):
         "chat.tools.enabled",    # 她能走开 / 静音 / 拒谈
         "chat.intent.enabled",   # 导演场景 / 改对话规则
         "autonomy.enabled",      # 没人说话时她也会主动
+        "contact.enabled",       # 你不在的时候她也会想起你
+        "social.hearsay_reaction.enabled",   # 听到关于你的闲话之后她有反应(吃醋)
     ):
         assert flagship.config_get(flag) is True, f"橱窗里 {flag} 没点亮"
+
+
+def test_橱窗里熬夜真的有代价(flagship):
+    """做了却开箱看不见等于没做。这一条要三样一起在,少一样这个机制就是死的:
+
+    量声明了(而且**她自己感知得到** —— 起床气总得有个来源)、两条规律一攒一还、
+    以及那个把债接到 `mood` 上的键。只声明量不接消费方,就是又一个"声明过但没人读"。
+    """
+    agent = next(k for k in flagship.kinds() if k["id"] == "agent")
+    debt = next((q for q in agent["quantities"] if q["key"] == "睡眠债"), None)
+    assert debt is not None, "橱窗的 agent 没声明睡眠债"
+    assert debt["visibility"] == "self", "她自己感觉不到,那起床气从哪儿来"
+
+    rules = {r["id"]: r for r in flagship.rules()}
+    assert rules["熬夜攒睡眠债"]["for_each"] == {"not_action": "sleep"}, (
+        "写成 {kind: agent} 的话睡着的人也一起欠觉,语义整个反了"
+    )
+    assert rules["补觉还债"]["for_each"] == {"action": "sleep"}
+
+    assert flagship.config_get("needs.mood_penalty_stock") == "睡眠债", (
+        "债攒得起来却接不到她的心气儿上 —— 这个量就没有消费方"
+    )
+
+
+def test_橱窗里两个人真的能一起做点什么(flagship):
+    """做了却开箱看不见等于没做。一起做事要三样一起在,少一样这个机制就是死的:
+
+    能力声明了 `participants`、她身上有那个决定"肯不肯"的量、而且**这个世界里真的
+    存在一对答应得下来的人**。第三样最容易漏:一个人人都推掉的橱窗,和这一层没接上
+    在产物上完全一样。
+    """
+    tree = next(k for k in flagship.kinds() if k["id"] == "tree")
+    sit = next((a for a in tree["affordances"] if a["verb"] == "树下小坐"), None)
+    assert sit is not None, "橱窗里没有任何一件一起做的事"
+    assert sit["participants"] == {"min": 1, "max": 2}
+    assert sit["duration"] > 0, "一起待着要花时间 —— 时长是关系变化的一个因子"
+
+    agent = next(k for k in flagship.kinds() if k["id"] == "agent")
+    assert any(q["key"] == "随和" for q in agent["quantities"]), (
+        "没有这个量,没配 key 的世界里「肯不肯」就只剩关系一条 —— 而作者调不动它"
+    )
+    assert flagship.stocks("agent:遥").get("随和") != flagship.stocks("agent:夏").get("随和"), (
+        "橱窗里每个人一样随和的话,「别人凭什么答应」就展示不出来"
+    )
+
+
+def test_橱窗里她们真的坐得下来_而且不是谁都肯(flagship):
+    """**开箱就要看得见这一层的两面**:有人答应,有人推掉。刻度是照这个世界对过账的
+    (见 `together.DEFAULT_MIN_WILLINGNESS` 的长注释)—— 哪天有人调了权重或者改了
+    橱窗的关系,这里会红,而那正是该有人再对一次账的时刻。"""
+    # 把人搬到树跟前。**同地不是这条测试要验的东西**(那归 test_joint_activity),
+    # 而橱窗里三个人本来住在三个地方 —— 走过去要花世界时间。
+    for who in ("柔", "遥"):
+        flagship.scheduler.agents[who].agent.blackboard.write("loc", "cafe")
+
+    yes = flagship.act(
+        "夏", "interact",
+        {"target": "tree:harbor_oak", "verb": "树下小坐", "with": ["柔"]},
+        surface="body",
+    )
+    assert yes["ok"] is True, f"橱窗里没有任何一对坐得下来:{yes.get('error')}"
+
+    no = flagship.act(
+        "夏", "interact",
+        {"target": "tree:harbor_oak", "verb": "树下小坐", "with": ["遥"]},
+        surface="body",
+    )
+    assert no["ok"] is False and no["detail"]["reason"] == "declined", (
+        "谁都肯的话,「别人凭什么答应」这条红线在橱窗里就看不见"
+    )
 
 
 def test_the_loop_stays_off_in_the_showcase(flagship):
@@ -208,3 +280,36 @@ def test_橱窗里的世界自己长得出新东西也抹得掉(flagship):
     assert pulled["ok"] and pulled["destroyed"] == sapling["id"]
     assert flagship.entities("sapling") == []
     assert flagship.stocks(sapling["id"]) == {}, "抹掉了量还留着 = 一个不存在的东西还有高度"
+
+
+def test_橱窗里两个人想起你的频率本来就不一样(flagship):
+    """"她想起你"这件事橱窗里演得出来,而且**两个人不是一个频率**。
+
+    性格进这一层走的是**她声明过的量**(`contact.initiative_stock`),不是从人设
+    文本里猜关键词。橱窗里因此写死了两个刻度:开朗热情、喜欢主动搭话的苏晚夏是
+    1.4,惜字如金的陆知遥是 0.4 —— 一个作者读得懂、调得动、而且解释得清的差别。
+
+    没声明这个量的世界行为逐位不变(默认 1.0),所以这条钉的是"橱窗里展示了它",
+    不是"引擎强加了它"。
+    """
+    assert flagship.stocks("agent:夏")["主动"] == 1.4
+    assert flagship.stocks("agent:遥")["主动"] == 0.4
+    # 没被作者写过的那个人拿的是声明的默认值 —— 逐个量填,不是逐个人填。
+    assert flagship.stocks("agent:柔")["主动"] == 1.0
+
+    # 而且这个量是**她自己感知得到**的(visibility: self),不是引擎手里的暗桩。
+    assert "主动" in flagship.perception("夏")["own"]
+
+
+def test_橱窗里想起你这条链是接通的(flagship):
+    """开箱世界里,`contact` 的判定链真的算得动 —— 不是一个点亮了却没接上的开关。
+
+    这里不硬造关系(那是 `test_contact.py` 的活),只钉一件事:**问得出答案**。
+    `contact_forecast()` 是这一层唯一能证明"它在算"的窗口,而这一层默认不响,
+    静默失效正是它最可能的坏法。
+    """
+    assert flagship.contact_forecast() == [], "开箱时她跟任何玩家都还没关系"
+    assert flagship.contact_stats()["fired"] == 0
+    # hook 真的挂在时钟上(而不是"开关点亮了但没人读它")。
+    assert flagship.scheduler._contact_hook is not None
+    assert flagship.scheduler._contact_interval > 0

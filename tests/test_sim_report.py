@@ -199,8 +199,11 @@ def test_event_density_is_bucketed_per_world_day_and_the_buckets_are_exhaustive(
 # ── 双时基:聊天事件打的是墙钟,不是世界 tick ────────────────────────────────
 
 def _conversation(seq, who, target, *, ts=None):
-    """`conversation` 的 ts 是**墙钟**(chat_session.py:48 的 clock 是 time.time()),
-    而其余事件的 ts 是世界 tick。一条就够把按天统计撑到 620 万天。"""
+    """**老世界**的 `conversation` ts 是墙钟(2.0 之前 `chat_session` 自己盖
+    `time.time()`),而其余事件的 ts 是世界 tick。一条就够把按天统计撑到 620 万天。
+
+    源头已经修了(事件的时基统一由 `Scheduler._record_event` 盖),所以这里**合成**
+    那个形状 —— 报表要接的是导入进来的老日志,那批 ts 收不回来。"""
     return _ev(seq, int(time.time()) if ts is None else ts, "conversation", who,
                {"with": target, "summary": "聊了两句"})
 

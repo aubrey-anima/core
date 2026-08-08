@@ -63,3 +63,27 @@ def settle(
         out[need] = max(0.0, min(1.0, value))
     out["mood"] = 0.2 + 0.8 * min(out[n] for n in NEEDS)
     return out
+
+
+def drag_mood(mood: float, debt: float) -> float:
+    """一笔**世界自己声明的债**把心气儿拖下去多少。纯函数,clamp 到 [0, 1]。
+
+    这是"熬夜有代价"落到她的决定上的那一步,而它刻意长成这个形状:
+
+    - **债由世界定义,不由引擎定义。** 引擎不知道什么叫「睡眠债」,只知道
+      `needs.mood_penalty_stock` 指着她身上的哪个量。写进 `settle()` 的话,
+      每个世界都得吃同一条曲线 —— 而"熬夜"在一个修真世界里可能根本不是代价。
+      量怎么攒、怎么还,是作者用一条规律写的(见演示世界的 `熬夜攒睡眠债`)。
+    - **声明本身就是开关。** 没配那个键的世界这里一次都不会被调到,行为逐位不变
+      (和 perception / ontology 同一条)。
+    - **拖,不是清零。** 一个熬了通宵的人不是没有心气儿,是心气儿差 —— 减法而
+      不是乘法,是因为乘法在 mood 已经很低时几乎不起作用,而起床气恰恰是在
+      "又累又困"的时候最明显。
+    - **债本身要有界(0~1)**,由作者在规律里 clamp。这里再兜一次底:一个写漏了
+      上限的规律会让 mood 永远贴着 0,而那看起来和"这个人永远心情很差"一模一样。
+    """
+    try:
+        owed = float(debt)
+    except (TypeError, ValueError):
+        return mood
+    return max(0.0, min(1.0, float(mood) - max(0.0, min(1.0, owed))))

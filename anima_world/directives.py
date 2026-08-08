@@ -16,10 +16,28 @@
     〔tool:mute {"minutes": 5}〕           调一个能力,参数是 JSON 对象(可省略)
     〔wait〕                                显式让位:我说完了,轮到你
 
+**ASCII 方括号照收**(`[tool:mute {"minutes": 5}]`)。这不是宽容癖:真模型隔一会儿
+就会把 `〔〕` 打成 `[]`,而下场是标记一个字不落地漏进玩家看到的正文 —— 她"走开"
+没走成,玩家却看见一行 `[tool:walk_away {}]`。全角那套留着当**权威线格式**(提示词
+里教的是它,`〕` 不会在 JSON 里出现),ASCII 是收进来的降级写法。
+
+⚠️ `[` 在散文里太常见,所以它**不是无条件的开括号**:只有后面跟得上
+`tool:` / `stance:` / `wait` / `yield` 才当候选,跟不上就当场退回正文。于是
+`[waiting]`、`[停顿]` 原样交给玩家。ASCII 的闭括号还要**避开 JSON 里的 `]`**
+(`{"a":[1,2]}`),所以只认花括号深度为 0 的那个 `]`。
+
 解析器是**流式**的:`feed()` 逐 token 喂,散文原样吐出,指令攒够一整条才交出去。
-一个只写了半个 `〔` 的 token 不会把标记漏给玩家,而一个迟迟不闭合的 `〔`(模型在
-散文里手写了这个符号)在超过 `_MAX_BODY` 之后按原文吐出 —— 宁可玩家看到一个怪
-符号,也不能把她的话整段吞掉。
+一个只写了半个 `〔` 的 token 不会把标记漏给玩家。
+
+**没解析成的标记不许漏给玩家。** 一个迟迟不闭合的 `〔` 有两种来路,得分开:
+
+- 模型在散文里手写了这个符号(`〔她愣了一下`)—— 按原文吐出,宁可玩家看到一个
+  怪符号,也不能把她的话整段吞掉。这是原来的行为,一个字没动。
+- 它是个**打残了的控制标记**(`〔tool:wait_for_user {}` 少了闭括号)—— 这个照原文
+  吐出去就是让玩家看见引擎的内脏。判据是"开头像不像指令"(`_looks_like_directive`):
+  像,就交成一条 `unknown` 指令。下游本来就把 `unknown` 咽掉并记进
+  `meta["unknown_directives"]`,所以这条路上**既不漏给玩家、也不静默** ——
+  运维照旧看得见她那一轮想调什么而没调成。
 """
 
 from __future__ import annotations
@@ -33,9 +51,40 @@ logger = logging.getLogger(__name__)
 
 OPEN = "〔"
 CLOSE = "〕"
+ASCII_OPEN = "["
+ASCII_CLOSE = "]"
 
 # 一条指令最长能有多长。超过就判定"这不是指令,是散文里的符号"。
 _MAX_BODY = 240
+
+# 指令体的开头。`_HEADS` 同时干两件事:判一段完整的体是不是指令(前缀命中),
+# 以及判一段**还没写完**的体有没有可能长成指令(反过来,拿它当前缀)。
+# 后者是 ASCII 那条路能安全存在的全部理由 —— 没有它,`[` 就得一路缓冲到
+# `]` 或 240 字,而那期间玩家什么也看不到。
+_PREFIX_HEADS = ("tool:", "tool：", "stance:", "stance：")
+_EXACT_HEADS = ("wait", "wait_for_user", "yield")
+
+
+def _looks_like_directive(body: str) -> bool:
+    """这段完整的体像不像一条指令 —— **不管它解析得成解析不成**。
+
+    "像"和"成"必须分开:`tool:mute {坏 JSON}` 解析不成,但它显然是一条打残了的
+    指令,照原文吐给玩家就是让人看见引擎的内脏。判"像"只看开头。
+    """
+    text = body.strip().lower()
+    return text in _EXACT_HEADS or text.startswith(_PREFIX_HEADS)
+
+
+def _could_become_directive(partial: str) -> bool:
+    """这段**还没写完**的体,还有没有可能长成一条指令。
+
+    用来给 ASCII 的 `[` 早早地下车:`[停顿` 第一个字就否掉了,于是它原样流给玩家,
+    而不是被扣在缓冲区里等一个也许永远不来的 `]`。
+    """
+    text = partial.lower()
+    if _looks_like_directive(partial):
+        return True
+    return any(head.startswith(text) for head in (*_PREFIX_HEADS, *_EXACT_HEADS))
 
 
 @dataclass
@@ -86,43 +135,95 @@ class DirectiveParser:
 
     def __init__(self) -> None:
         self._buffer: str | None = None
+        self._ascii = False          # 这一条候选是 `[` 开的还是 `〔` 开的
+
+    # 没闭合/没解析成的候选怎么收场 —— 三处(超长、ASCII 早退、流结束)共用一份,
+    # 因为它们是同一个判断:像指令就咽掉并记账,不像就原样还给玩家。
+    def _abandon(self, opener: str, body: str) -> tuple[str, Any]:
+        if _looks_like_directive(body):
+            return ("directive", Directive(kind="unknown", raw=body))
+        return ("text", opener + body)
 
     def feed(self, text: str) -> list[tuple[str, Any]]:
         out: list[tuple[str, Any]] = []
         while text:
             if self._buffer is None:
-                start = text.find(OPEN)
-                if start < 0:
-                    if text:
-                        out.append(("text", text))
+                # 两种开括号取**先出现的那个**。分开找再比,是因为
+                # `str.find` 一次只认一个针,而谁先谁后决定了另一个算不算正文。
+                wide = text.find(OPEN)
+                ascii_at = text.find(ASCII_OPEN)
+                if wide < 0 and ascii_at < 0:
+                    out.append(("text", text))
                     break
+                if wide >= 0 and (ascii_at < 0 or wide < ascii_at):
+                    start, opener, is_ascii = wide, OPEN, False
+                else:
+                    start, opener, is_ascii = ascii_at, ASCII_OPEN, True
                 if start:
                     out.append(("text", text[:start]))
                 self._buffer = ""
-                text = text[start + len(OPEN) :]
+                self._ascii = is_ascii
+                text = text[start + len(opener) :]
                 continue
 
-            end = text.find(CLOSE)
-            if end < 0:
-                self._buffer += text
-                if len(self._buffer) > _MAX_BODY:
-                    # 不是指令。原样还给玩家 —— 吞掉她的话是更坏的错。
-                    out.append(("text", OPEN + self._buffer))
-                    self._buffer = None
+            opener = ASCII_OPEN if self._ascii else OPEN
+            consumed, done = self._consume(text, out, opener)
+            text = text[consumed:]
+            if not done:
                 break
-            self._buffer += text[:end]
-            out.append(("directive", parse_body(self._buffer)))
-            self._buffer = None
-            text = text[end + len(CLOSE) :]
         return out
 
+    def _consume(
+        self, text: str, out: list[tuple[str, Any]], opener: str
+    ) -> tuple[int, bool]:
+        """吃掉候选体的下一段。返回 `(吃了几个字, 这一条了结了没有)`。"""
+        end = self._find_close(self._buffer or "", text)
+        if end < 0:
+            self._buffer = (self._buffer or "") + text
+            # ASCII 那条路多一道**早退**:开头就不可能是指令的话,别扣着玩家的话。
+            if self._ascii and not _could_become_directive(self._buffer):
+                out.append(("text", opener + self._buffer))
+                self._buffer = None
+                return len(text), False
+            if len(self._buffer) > _MAX_BODY:
+                out.append(self._abandon(opener, self._buffer))
+                self._buffer = None
+            return len(text), False
+
+        body = (self._buffer or "") + text[:end]
+        self._buffer = None
+        if self._ascii and not _looks_like_directive(body):
+            # `[waiting]`、`[停顿]` —— 方括号在散文里本来就有它自己的用法。
+            out.append(("text", ASCII_OPEN + body + ASCII_CLOSE))
+        else:
+            out.append(("directive", parse_body(body)))
+        return end + 1, True
+
+    def _find_close(self, buffered: str, text: str) -> int:
+        """闭括号在 `text` 里的下标,没有就 -1。
+
+        全角那个直接找 —— `〕` 不会出现在 JSON 里。ASCII 的 `]` 会
+        (`{"a": [1, 2]}`),所以只认**花括号深度为 0** 的那个;不数这一笔,
+        带数组参数的调用会被从中间截断,然后当成散文漏出去。
+        """
+        if not self._ascii:
+            return text.find(CLOSE)
+        depth = buffered.count("{") - buffered.count("}")
+        for index, char in enumerate(text):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            elif char == ASCII_CLOSE and depth <= 0:
+                return index
+        return -1
+
     def flush(self) -> list[tuple[str, Any]]:
-        """流结束了。没闭合的 `〔` 按原文吐出。"""
+        """流结束了。没闭合的候选按 `_abandon` 那条规矩收场。"""
         if self._buffer is None:
             return []
-        buffered = self._buffer
-        self._buffer = None
-        return [("text", OPEN + buffered)]
+        buffered, self._buffer = self._buffer, None
+        return [self._abandon(ASCII_OPEN if self._ascii else OPEN, buffered)]
 
 
 def strip_directives(text: str) -> tuple[str, list[Directive]]:

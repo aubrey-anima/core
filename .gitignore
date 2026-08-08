@@ -20,3 +20,8 @@ saves/
 # Claude Code 本地权限,不入库
 .claude/settings.local.json
 .gstack/
+
+# 发布清单是本机留档:它照着线上那个世界写,里面是真的坐标(Redis 地址、模型端点)。
+# 这是公开仓库,而 `git add -A` 不会问第二遍 —— 所以把它挡在 add 之前,
+# 不指望每次提交的人都记得跳过它。真要入库的那份先把真值换成占位符,再 `git add -f`。
+docs/发布-*.md

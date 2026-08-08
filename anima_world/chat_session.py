@@ -61,6 +61,9 @@ class ChatSessionManager:
         if conv is None or conv["status"] == "closed":
             return False
 
+        # 墙钟,而且**只给转录用**:会话的开/关/闲置回收是按秒算的(`chat.idle_timeout`
+        # 是秒),`started_at` / `last_activity_at` 也都存的是秒。世界事件的 `ts` 不走
+        # 这个钟 —— 见下面那一段。
         ts = self._clock()
         messages = self._store.messages_for(conversation_id)
         if not messages:
@@ -88,10 +91,26 @@ class ChatSessionManager:
                 payload.update(self._meta_provider(conversation_id) or {})
             except Exception:  # noqa: BLE001 - 观测量读不到不该挡住关闭
                 logger.warning("读会话观测量失败 conversation=%s", conversation_id, exc_info=True)
+        # **不盖 `ts`** —— 让 `Scheduler._record_event` 的
+        # `event.setdefault("ts", self.clock)` 盖世界时钟,和引擎里**其余每一条
+        # 事件**同一条路。此前这里盖的是墙钟(`int(time.time())`),于是这一条
+        # 是全引擎唯一一条带着 1.78e9 的活事件,而它的下场没有一处是报错:
+        #   - `TriggerEngine._on_conversation` 把 ts 抄进记忆的 `tick`,
+        #     `MemoryStore.query` 按 `(tick, id)` DESC 排 —— 于是**每个角色召回
+        #     的前 k 条永远是跟玩家的对话**,占比 5% 的东西吃掉了 100% 的位置;
+        #   - `memory_retrieval.score` 的 `age = now_tick - tick` 变成负数被
+        #     `max(0, …)` 夹成 0 → recency 恒等于 1(满分);
+        #   - `decayed_strength` 的 idle_days 同样恒为 0 → 它永不衰减,而同期
+        #     真正的世界记忆衰减到 1e-160。
+        # 三样都"照跑",一样都不报错。此前的补法是在每个消费方前面加一道
+        # `WALL_CLOCK_FLOOR` 闸(时钟恢复、运行摘要各一道),而记忆这一路漏了 ——
+        # 补闸就要补到每一个消费方,漏一个就是这次的样子。所以改在源头。
+        # `payload` 里的 `started_at` / `closed_at` **照旧是墙钟**:它们是从转录行上
+        # 抄下来的,那一层本来就按秒记账,把其中一个换成 tick 才是把两套时基混进
+        # 同一个 payload。
         self._emit_event({
             "type": "conversation",
             "who": conv["agent_id"],
-            "ts": ts,
             "payload": payload,
         })
         if self._judge_hook is not None:

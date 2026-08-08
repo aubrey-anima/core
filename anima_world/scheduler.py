@@ -14,7 +14,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from anima_world.actions import ActionDescriptor, to_event
 from anima_world.agent import Agent
@@ -30,6 +30,7 @@ from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.events import EventLog
 from anima_world.narrative import NarrativeProvider
 from anima_world.perception import why_not_perceivable
+from anima_world import together as together_mod
 from anima_world.projection import project_events
 from anima_world.types import Event
 from anima_world.world_time import (
@@ -225,6 +226,12 @@ class Scheduler:
         # 必须立刻返回 —— 决定与执行都在世界自己那条事件循环上跑。
         self._autonomy_hook: Any | None = None
         self._autonomy_interval: int = 0   # 0 = 关着
+        # contact:"她想起某个不在跟前的玩家"的回调(World 注入),和 autonomy
+        # 同一个形状、**另一条节流**。为什么不合成一条见 `contact.py` 的模块说明:
+        # 候选集互补、额度两本账、判定的主语不同、节奏不同。
+        self._contact_hook: Any | None = None
+        self._contact_interval: int = 0    # 0 = 关着
+        self.contact_store: Any | None = None
         # world-rules:世界的规律(数据)与它们作用的存量。规律是纯算术,跑在 tick 上。
         self.stock_store: Any | None = None
         self.visibility_store: Any | None = None   # 可见性声明 + 东西在哪(perception)
@@ -746,14 +753,26 @@ class Scheduler:
             elif new_value <= -0.2:
                 predicate = "rivalry"
             if predicate is not None:
-                self.knowledge_graph.add(
-                    f"agent:{agent_id}", predicate, f"agent:{target_id}",
-                    source_event_seq=descriptor.event_seq,
-                )
-                self.knowledge_graph.add(
-                    f"agent:{target_id}", predicate, f"agent:{agent_id}",
-                    source_event_seq=descriptor.event_seq,
-                )
+                # 立起新边之前先撤掉**相反**的那一条。边只增不减的话,一对从
+                # 「亲近」跌进「交恶」的人身上会同时挂着 friendship 与 rivalry,
+                # 而 `compute_cliques` 只看 friendship —— 那个小团体里于是坐着
+                # 两个此刻互相看不顺眼的人,而没有任何一处会报错。
+                # **只撤相反的那一条,不撤中间那一档**:淡下来(落进中性带)
+                # 不等于反目,把它也算作撤销会让边随着数字的小幅摆动来回闪。
+                opposite = "rivalry" if predicate == "friendship" else "friendship"
+                for a, b in ((agent_id, target_id), (target_id, agent_id)):
+                    if self.knowledge_graph.drop(f"agent:{a}", opposite, f"agent:{b}"):
+                        logger.info(
+                            "关系反转:撤掉 %s -%s-> %s,换上 %s", a, opposite, b, predicate
+                        )
+                for a, b in ((agent_id, target_id), (target_id, agent_id)):
+                    self.knowledge_graph.add(
+                        f"agent:{a}", predicate, f"agent:{b}",
+                        source_event_seq=descriptor.event_seq,
+                        # 出处得说得出"哪一刻"。此前这里不传,默认值 0 让每条边
+                        # 都自称生于创世 —— 一个从来不报错、也从来对不上的答案。
+                        created_at=int(descriptor.tick),
+                    )
         if (
             payload.get("kind") == "sentiment_delta"
             and self._judge_pool is not None
@@ -809,7 +828,23 @@ class Scheduler:
             "b": persona(target_id),
             "memories": memories,
         }
-        self._judge_pool.submit(self._relabel_worker, agent_id, target_id, context)
+        # **改标签失败绝不许掀翻这条事件。** 这一处是从 `_record_event` 里面被调到的
+        # (跨档 → `_apply_memory_trigger` → 这里),而 `_record_event` 的后半截才是
+        # 把事件折进投影、写进记忆的地方。从这儿抛出去的话:事件已经发出去了,投影
+        # 却没折 —— 日志和世界当场分叉,而且一声不吭。
+        #
+        # 一个抛得出来的形状是现成的:判定池正在关(`shutdown` 之后再 submit 就是
+        # `RuntimeError`)。`stop()` 走的是"在锁里把池置空"那条路所以碰不到,但宿主
+        # 自己关池、以及任何一条新的 submit 路径都碰得到 —— 而这一条本来就写着
+        # "标签只是跨档之上的点缀,失败了保持旧文本"。
+        pool = self._judge_pool
+        if pool is None:
+            return
+        try:
+            pool.submit(self._relabel_worker, agent_id, target_id, context)
+        except RuntimeError:
+            logger.warning("relabel not scheduled for %s→%s (judge pool is closing)",
+                           agent_id, target_id)
 
     def _relabel_worker(self, agent_id: str, target_id: str, context: dict[str, Any]) -> None:
         """Worker body: LLM relabel → one r_type event. Never on the tick
@@ -956,6 +991,11 @@ class Scheduler:
 
             # 3.7 定时轮次:问问她此刻要不要自己做点什么(autonomy)。
             self._maybe_run_autonomy(now)
+
+            # 3.75 她会不会想起一个**不在跟前**的玩家(contact)。和 3.7 并列而不是
+            #      合并:那一条问的是"身边有什么可做",这一条问的是"有没有人我该
+            #      找一下" —— 候选集正好互补(见 `contact.py`)。
+            self._maybe_run_contact(now)
 
             # 4. World clock → every agent's blackboard, then run its BT.
             #    bt-duties D1: the tree is driven by TIME, not by boredom. The
@@ -1173,6 +1213,191 @@ class Scheduler:
                 "who": listener_id,
                 "payload": picked,
             })
+            # 听到之后有没有反应 —— 那是**她的**事,所以走判定,不走规则。
+            self._submit_hearsay_judgment(listener_id, str(picked.get("summary") or ""))
+
+    # ── 听到之后 ────────────────────────────────────────────────────────────
+
+    def _hearsay_reaction_enabled(self) -> bool:
+        return bool(
+            self.config_store is not None
+            and self.config_store.get("social.hearsay_reaction.enabled", default=False)
+        )
+
+    def _hearsay_roster(self, listener_id: str) -> tuple[dict[str, float], dict[str, str]]:
+        """她认识谁。返回 (名字 → 好感度, 名字 → id)。
+
+        名字是这一层唯一的货币:提示词里给的是名字,回包里认的也是名字,而 id
+        由这张表翻回来 —— 判定那一头永远碰不到 id,也就永远编不出一个。
+
+        ⚠️ **玩家的名字要从落库的那份读,不能只读在场名单。** 这一层最要紧的一句
+        闲话恰恰是"他跟别人走得近",而"他"多半**不在线** —— 只读 `_present_players`
+        的话,玩家在她下线期间从名单上消失,于是她永远吃不了关于他的醋,
+        而世界照跑、日志干净。`contact` 表在他每次跟她说话时就把名字记下来了
+        (`note_contact` 的第二个用途),正是为这种"他不在场时也要叫得出他名字"
+        的场合准备的。
+
+        同名的两个人只留一个,并且吭一声 —— 悄悄覆盖的话,她吃的醋会记到另一个
+        人头上。
+        """
+        weights: dict[str, float] = {}
+        ids: dict[str, str] = {}
+        present: dict[str, Any] = {}
+        if self._present_players is not None:
+            try:
+                present = self._present_players() or {}
+            except Exception:  # noqa: BLE001 - 读不到在场名单只是名字难看一点
+                logger.warning("could not read present players for hearsay roster", exc_info=True)
+        known_players: dict[str, str] = {}
+        store = getattr(self, "contact_store", None)
+        if store is not None:
+            try:
+                known_players = {
+                    str(row.get("player_id") or ""): str(row.get("player_name") or "")
+                    for row in store.all()
+                    if row.get("agent_id") == listener_id
+                }
+            except Exception:  # noqa: BLE001 - 读不到就退回在场名单
+                logger.warning("could not read the contact table for the hearsay roster",
+                               exc_info=True)
+        for (as_id, target_id), relation in self._memory_projection.relations.items():
+            if as_id != listener_id or target_id == listener_id:
+                continue
+            brain = self.agents.get(target_id)
+            if brain is not None:
+                name = brain.agent.name or target_id
+            else:
+                name = (
+                    str((present.get(target_id) or {}).get("display_name") or "").strip()
+                    or known_players.get(target_id, "").strip()
+                )
+                if not name:
+                    continue   # 认不出名字的对象不进名单:进去了模型只能照 id 读
+            if name in ids and ids[name] != target_id:
+                logger.warning(
+                    "%s 认识两个都叫 %r 的人(%s / %s)—— 这一轮只算前一个",
+                    listener_id, name, ids[name], target_id,
+                )
+                continue
+            ids[name] = target_id
+            weights[name] = round(float(relation.sentiment or 0.0), 3)
+        return weights, ids
+
+    def _submit_hearsay_judgment(self, listener_id: str, rumor: str) -> Any:
+        """把"她听到了这句话"丢给判定池(lock held)。
+
+        **绝不在 tick 线程上调模型** —— 和其余三个判定同一条。名单在锁里快照,
+        判定在池上跑,回来的结果再进锁写事件。
+
+        返回那个 Future,没提交时返回 `None`。**这是有意露出来的**:一条只在
+        别处冒出来的异步副作用没法验 —— 而"判定悄悄没跑"和"她听了不在乎"在
+        产物上完全一样,正是这一层最该分得开的两件事。
+        """
+        if not rumor or not self._hearsay_reaction_enabled():
+            return None
+        if self.relationship_judge is None or self._judge_pool is None:
+            return None
+        brain = self.agents.get(listener_id)
+        if brain is None:
+            return None
+        roster, ids = self._hearsay_roster(listener_id)
+        if not roster:
+            return None   # 谁都不认识的人听不出弦外之音,也就没有可写的落点
+        try:
+            memories = [
+                str(m.get("summary") or "")
+                for m in (self.memory_store.query(agent_id=listener_id)[:5]
+                          if self.memory_store is not None else [])
+            ]
+        except Exception:  # noqa: BLE001
+            memories = []
+        context = {
+            "a": {
+                "name": brain.agent.name or listener_id,
+                "personality": brain.agent.blackboard.read("personality") or "",
+            },
+            "rumor": rumor,
+            "roster": roster,
+            "memories": memories,
+            "location": brain.agent.blackboard.read("loc") or brain.agent.location or "",
+        }
+        pool = self._judge_pool
+        if pool is None or self._stopped:
+            return None
+        return pool.submit(self._hearsay_judge_worker, listener_id, context, ids)
+
+    def _hearsay_judge_worker(
+        self, listener_id: str, context: dict[str, Any], ids: dict[str, str]
+    ) -> None:
+        """判定回来了:她的反应落成真的关系变化 + 一条她自己的记忆。
+
+        **落点必须是既有的那套机制**(`sentiment_delta`),不是一张新表:关系跨档、
+        `relation_shift` 记忆、图谱边、planner 读到的那份东西全都挂在它上面。
+        另起一条路的话,她吃的醋就只存在于一个没人读的字段里 —— 而那正是这几轮
+        在治的病。
+        """
+        judge = self.relationship_judge
+        if judge is None:
+            return
+        judge_hearsay = getattr(judge, "judge_hearsay", None)
+        if judge_hearsay is None:
+            return
+        try:
+            verdict = judge_hearsay(
+                a=context["a"], rumor=context["rumor"], roster=context["roster"],
+                memories=context["memories"], location=context["location"],
+            )
+        except Exception:  # noqa: BLE001 - a dead judge must not stop the world
+            logger.warning("hearsay judge failed for %s", listener_id, exc_info=True)
+            self.note_subsystem("hearsay_reaction", False, "judge raised")
+            return
+        # **两件事要分得开**:`None` = 这次判定没产出可用的东西(要吭声);
+        # 空的 `reactions` = 她听了没往心里去(正常世界里最常见的结果)。
+        self.note_subsystem(
+            "hearsay_reaction", verdict is not None,
+            "" if verdict is not None else "没有可用的判定(多半是没配 key)",
+        )
+        if verdict is None or not verdict.reactions:
+            return
+
+        listener_name = context["a"]["name"]
+        with self._lock:
+            if self._stopped:
+                return
+            for reaction in verdict.reactions:
+                target_id = ids.get(reaction.about)
+                if target_id is None:
+                    continue   # 判定那一层已经拦过一次,这里是第二道
+                payload: dict[str, Any] = {
+                    "kind": "sentiment_delta", "as": listener_id, "target": target_id,
+                    "delta": float(reaction.delta),
+                    "as_name": listener_name, "target_name": reaction.about,
+                    "cause": "hearsay",
+                }
+                if reaction.axes:
+                    payload["axes"] = dict(reaction.axes)
+                self._record_and_deliver({
+                    "type": "state_change", "who": listener_id, "payload": payload,
+                })
+            # 她自己也要记得这件事,否则下一轮聊天里她"莫名其妙地冷淡"——
+            # 数字动了而她说不出为什么,是这一层最容易长成的假。
+            self._record_and_deliver({
+                "type": "memory_seed",
+                "who": listener_id,
+                "payload": {
+                    "agent_id": listener_id,
+                    # `reaction` 是**内心活动**,和 `reflection` 一样不外传
+                    # (见 `gossip.pick_gossip`)。不挡的话:她的反应又成为一条
+                    # 新八卦,传出去再引发一次判定,而转手数从 0 重新开始 ——
+                    # 一句闲话可以就这么永远活下去。
+                    "kind": "reaction",
+                    "summary": verdict.summary,
+                    "importance": round(
+                        min(0.9, 0.5 + max(abs(r.delta) for r in verdict.reactions)), 3
+                    ),
+                    "anchor": False,
+                },
+            })
 
     def _settle_agent_needs(self, brain: BrainLike) -> None:
         """needs-v3: advance one agent's need curves by tick_delta (lock held).
@@ -1194,6 +1419,23 @@ class Scheduler:
         action = self._current_action.get(agent_id)
         kind = action.kind if action else None
         settled = needs_mod.settle(values, self.tick_delta, kind)
+        # 世界自己声明的那笔债(熬夜攒的睡眠债是标准用法)把心气儿往下拖。
+        # **只改 mood,不改三条需求** —— mood 是派生值、从不落库,所以拖它不会
+        # 在存储里留下第二份真相;拖 energy 则会被下一次 `settle` 当成"她真的
+        # 睡了一觉",债就悄悄变成了精力。
+        penalty_key = ""
+        if self.config_store is not None:
+            penalty_key = str(
+                self.config_store.get("needs.mood_penalty_stock", default="") or ""
+            ).strip()
+        if penalty_key and self.stock_store is not None:
+            try:
+                debt = self.stock_store.of(f"agent:{agent_id}").get(penalty_key)
+            except Exception:  # noqa: BLE001 - 读不到量不该让 tick 停摆
+                logger.warning("读不到 %s 的 %s", agent_id, penalty_key, exc_info=True)
+                debt = None
+            if debt is not None:
+                settled["mood"] = needs_mod.drag_mood(settled["mood"], debt)
         for key, value in settled.items():
             bb.write(f"need.{key}", value)
         # 迟滞的判据(见 NeedAction):当前动作正在补哪几条需求。写成派生值而不是
@@ -1308,7 +1550,153 @@ class Scheduler:
         self.visibility_store.place(f"agent:{agent_id}", here, brain.agent.name)
         self._actor_placed[agent_id] = here
 
-    def perform_affordance(self, agent_id: str, target: str, verb: str) -> dict[str, Any]:
+    # ── 一起做事 ────────────────────────────────────────────────────────────
+    #
+    # `interact` 一直是单人的。这一段补的是"两个人站在同一个地方却只能各干各的"
+    # 那个洞。三条红线的落点分别在:
+    #   ① 别人凭什么答应 → `joint_gate`(世界那一段)+ api 层的同意判定(性格那一段)
+    #   ② 顺序不许有意义 → `_joint_outcomes`:先把所有人算完,一个字都不写
+    #   ③ 关系变化是经历的效果 → `_settle_joint_experience`,纯算术,不调 LLM
+    # 全文见 `together.py` 的模块说明。
+
+    PLAYER_PREFIX = "player:"
+
+    def joint_precheck(self, target: str, verb: str, count: int) -> tuple[str, str]:
+        """这个调用**讲不讲得通** —— 返回 `(reason, 那句话)`,讲得通就是 `("", "")`。
+
+        只问名单的形状,不问任何一个人肯不肯。**次序是这一段存在的全部理由**:
+        决定那一层(api)要先问过它再去挨个征求同意 —— 不然一个"这件事根本不用别人
+        一起做"的调用会先把人问一遍,而回执上写的是"沈遥他不想",于是调用方去改的是
+        名单,而错的是动词。
+
+        `perform_affordance` 在执行时**再问一遍同一个函数**(决定与执行之间世界还在
+        跑,而且排班那条路根本不经过 api)。两处共用一份判断,所以不会分叉。
+        """
+        ontology = self.ontology
+        affordance = (
+            ontology.affordance_of(target, verb) if ontology is not None else None
+        )
+        if affordance is None:
+            return ("", "")   # 不认识的东西 / 动词,归 `perform_affordance` 报
+        spec = affordance.participants
+        if spec is None:
+            if count:
+                return (
+                    "not_joint",
+                    f"{affordance.label or affordance.verb} 是一个人做的事 —— "
+                    f"本体里没给它声明 participants,叫不上别人",
+                )
+            return ("", "")
+        if not spec.accepts(count):
+            want = (
+                f"{spec.minimum} 个"
+                if spec.minimum == spec.maximum
+                else f"{spec.minimum}~{spec.maximum} 个"
+            )
+            return (
+                "participants_missing",
+                f"{affordance.label or affordance.verb} 得有人一起 —— "
+                f"除你之外还要 {want},这次给的是 {count} 个",
+            )
+        return ("", "")
+
+    def joint_gate(self, initiator: str, target: str, verb: str, who: str) -> str:
+        """这个人过不过得了「一起做这件事」的**世界那一段**。
+
+        返回 `together.GATE_LABELS` 里的一个键,过得了就是空串。**这几条不是她的
+        意思,是世界的状态** —— 所以它们判在性格之前:一句笼统的"她没答应"会让
+        玩家(和她自己)以为被拒绝的是这个人,而真正的原因可能只是他在赶路。
+
+        决定那一层(api)拿它去**问得像话一点**,执行这一层拿它去**保证正确** ——
+        两处调的是同一个函数,所以不会出现"问的时候行、做的时候不行"这种只在
+        真世界里才现形的分叉。
+
+        玩家不在这里判:引擎手上没有玩家的位置(那住在 `World.players`,是刻意的
+        内存态)。玩家那一半在 api 层用 `face_to_face` 判,理由和 `player_move`
+        是宿主可选调用同一条 —— 引擎不猜。
+        """
+        if not who or who == initiator:
+            return "self"
+        if who.startswith(self.PLAYER_PREFIX):
+            return ""      # 玩家那一半归 api 层
+        if who not in self.agents:
+            return "unknown"
+        if who in self._transit:
+            return "in_transit"
+        here = self._where_is(initiator)
+        if not here or self._where_is(who) != here:
+            return "elsewhere"
+        action = self._current_action.get(who)
+        if action is not None and getattr(action, "kind", "") == "sleep":
+            return "asleep"
+        if self._occupying(who) is not None:
+            return "busy"
+        # 这件事他做得了吗(力气够不够、带没带工具)。`apply_affordance` 本来就
+        # **只算不写**,所以问这一句几乎免费 —— 而不问的代价是:他答应了,然后
+        # 整件事因为他没力气而告吹,于是"他不肯"和"他做不到"在回执上长得一样。
+        ontology, store = self.ontology, self.stock_store
+        if ontology is None or store is None:
+            return ""
+        affordance = ontology.affordance_of(target, verb)
+        if affordance is None or not affordance.needs_actor:
+            return ""
+        from anima_world.ontology import apply_affordance
+
+        outcome = apply_affordance(
+            affordance, values=store.of(target), world_values=store.of("world"),
+            me_values=store.of(f"agent:{who}"),
+            held=self._memory_projection.inventories.get(who),
+            now=int(self.clock), minutes_per_tick=self._minutes_per_tick(),
+        )
+        if outcome.reason == "incapable":
+            return "incapable"
+        return ""
+
+    def _joint_outcomes(
+        self, party: Sequence[str], target: str, verb: str, affordance: Any
+    ) -> tuple[dict[str, Any], str, str]:
+        """把**所有人**的账先算完 —— 返回 `(每个人的 outcome, 谁没过, 那句话)`。
+
+        红线 ②:`participants: ["柔", "白霜"]` 和 `["白霜", "柔"]` 必须给出逐位
+        相同的世界。做法和规律那一层的双缓冲同源 —— **在快照上逐个算,全过了才
+        动手写**。边算边写的话,第一个人扣掉的体力会成为第二个人 `requires` 的
+        输入,于是名单顺序决定了谁做得成,而那是一条没有任何人写下过的规则。
+
+        **一个人过不了,整件事就不发生。** 三个人吃饭,一个人没钱,不该变成两个人
+        吃饭 —— 那是引擎替他们改了计划(和 `拒绝时一个字都不写` 同一条)。
+
+        玩家不在这一轮里:他身上没有量(`agent` 种类是给角色声明的),也没有随身
+        物品账本以外的东西可扣。**所以一场有玩家的共同经历,玩家不付量的代价** ——
+        这是实话,写出来比让它看起来像是被算过好。
+        """
+        from anima_world.ontology import apply_affordance
+
+        store = self.stock_store
+        values = store.of(target)
+        world_values = store.of("world")
+        now, mpt = int(self.clock), self._minutes_per_tick()
+        outcomes: dict[str, Any] = {}
+        for who in party:
+            if who.startswith(self.PLAYER_PREFIX):
+                continue
+            outcome = apply_affordance(
+                affordance, values=values, world_values=world_values,
+                me_values=store.of(f"agent:{who}") if affordance.needs_actor else None,
+                held=self._memory_projection.inventories.get(who),
+                now=now, minutes_per_tick=mpt,
+            )
+            if not outcome.ok:
+                return ({}, who, outcome.refusal or "这会儿不行")
+            outcomes[who] = outcome
+        return (outcomes, "", "")
+
+    def perform_affordance(
+        self,
+        agent_id: str,
+        target: str,
+        verb: str,
+        participants: Sequence[str] = (),
+    ) -> dict[str, Any]:
         """对一样东西做一件事 —— 本体声明的能力,真的兑现在世界的量上。
 
         **聊天里的 `interact` 动词和排班里的 `interact` 动作走的是这同一条**。
@@ -1327,8 +1715,20 @@ class Scheduler:
         聊天那条路把最后一摞报成错、前两摞报成一句话;行为树那条路都只是"下一 tick
         再试"—— 但**第二摞下一 tick 再试也一样**,所以它必须能被认出来。混成一个,
         一个累坏了的人就会挨棵树轮着试过去,每一棵都回她"再等等"。
+
+        `participants` 是**一起做这件事的人**(角色 id,或 `player:<id>`)。
+        本体没声明 `participants` 的能力给了名单一律拒绝(`not_joint`);声明了的
+        没给名单也一律拒绝(`participants_missing`)—— 两条都不许静默降级成单人,
+        因为降级之后世界照跑,而作者写下的"这件事一个人做不成"一声不响地没了。
+
+        **同意不在这一层。** 这一层只判世界那一段(`joint_gate`);"他肯不肯"由
+        api 层在**锁外**问过之后,把点过头的那份名单交进来。理由是那一步要打网络
+        (读人设的判定),而这一层跑在世界的锁里、也跑在 tick 线程上 ——
+        时钟永不等网络。
         """
         from anima_world.ontology import apply_affordance
+
+        party_in = [str(p).strip() for p in (participants or ()) if str(p).strip()]
 
         def no(reason: str, refusal: str) -> dict[str, Any]:
             return {"ok": False, "target": target, "verb": verb,
@@ -1388,13 +1788,54 @@ class Scheduler:
             if busy is not None:
                 return no("busy", busy)
 
+            # ── 跟谁一起 ────────────────────────────────────────────────────
+            #
+            # 两条都不许静默降级成单人:降级之后世界照跑,而作者写下的"这件事
+            # 一个人做不成"、或者调用方点名的那几个人,一声不响地没了。
+            spec = affordance.participants
+            bad_shape, shape_refusal = self.joint_precheck(target, verb, len(party_in))
+            if bad_shape:
+                return no(bad_shape, shape_refusal)
+            if spec is not None:
+                for who in party_in:
+                    gate = self.joint_gate(agent_id, target, verb, who)
+                    if gate:
+                        from anima_world import together as together_mod
+
+                        return {
+                            "ok": False, "target": target, "verb": verb,
+                            "reason": "participant_gate", "who": who, "gate": gate,
+                            "refusal": f"{self._display_name(who)}"
+                                       f"{together_mod.GATE_LABELS.get(gate, gate)}",
+                        }
+
             me = f"agent:{agent_id}"
+            party = [agent_id, *party_in]
+            if spec is not None:
+                outcomes, blocked, refusal = self._joint_outcomes(
+                    party, target, verb, affordance
+                )
+                if blocked:
+                    # **一个人过不了,整件事就不发生。** 三个人吃饭,一个人没钱,
+                    # 不该变成两个人吃饭 —— 那是引擎替他们改了计划。
+                    return {
+                        "ok": False, "target": target, "verb": verb,
+                        "reason": "participant_gate", "who": blocked,
+                        "gate": "incapable",
+                        "refusal": f"{self._display_name(blocked)}这会儿做不了:{refusal}",
+                    }
+                return self._perform_joint(
+                    agent_id, target, verb, affordance, outcomes, party,
+                    here=here, spec=spec,
+                )
+
             outcome = apply_affordance(
                 affordance, values=store.of(target),
                 world_values=store.of("world"),
                 me_values=store.of(me) if affordance.needs_actor else None,
                 held=self._memory_projection.inventories.get(agent_id),
                 now=int(self.clock),
+                minutes_per_tick=self._minutes_per_tick(),
             )
             if not outcome.ok:
                 # `incapable`(她做不了)和 `conditions`(这会儿不行)必须分开传上去 ——
@@ -1440,6 +1881,280 @@ class Scheduler:
                 **({"spawned": born} if born else {}),
                 **({"destroyed": target} if affordance.destroys_target else {}),
             }
+
+    def _display_name(self, who: str) -> str:
+        """**回执**里印的那个名字。玩家印「你」—— 拒绝的那句话是说给他听的。"""
+        if who.startswith(self.PLAYER_PREFIX):
+            return "你"
+        brain = self.agents.get(who)
+        return (brain.agent.name or who) if brain is not None else who
+
+    @staticmethod
+    def _relation_id(who: str) -> str:
+        """参与者 id → **关系表里的那个 id**。玩家要脱掉 `player:` 前缀。
+
+        ⚠️ 这一句是踩出来的。两张表对同一个人用的是**两套 id**,而且都对:
+
+        - 库存的 holder 是 `player:{pid}`(`item_transfer` / `_is_person`)——
+          那一层要在角色、玩家、货架、金库之间分门别类。
+        - 关系的 target 是**裸 `pid`**(`_user_judge_worker` / `contact` 的
+          `closeness` / `_hearsay_roster`)—— 那一层里"人"只有两种,不需要命名空间。
+
+        不脱前缀的话,一起做事长出来的关系会挂在 `player:p1` 上,而聊天判定长出来的
+        挂在 `p1` 上 —— **同一个人在关系表里有两行**,两边都在动、谁也不完整,而且
+        `contact` / 提示词只读得到其中一行。世界照跑,日志一行不错。
+        """
+        return who[len(Scheduler.PLAYER_PREFIX):] \
+            if who.startswith(Scheduler.PLAYER_PREFIX) else who
+
+    def _relation_name(self, who: str) -> str:
+        """**事件与记忆**里写的那个名字 —— 和回执那份不是同一件事。
+
+        名字随事件走,不靠事后回查(和 `give_item` 逐字同一条):这条 `sentiment_delta`
+        会长成一条 `relation_shift` 记忆,而那条记忆会被八卦原样转述给别人 ——
+        "她和「你」一起坐了会儿"传出去没有一个人看得懂。
+        """
+        if not who.startswith(self.PLAYER_PREFIX):
+            brain = self.agents.get(who)
+            return (brain.agent.name or who) if brain is not None else who
+        pid = self._relation_id(who)
+        if self._present_players is not None:
+            try:
+                row = (self._present_players() or {}).get(pid) or {}
+                name = str(row.get("display_name") or "").strip()
+                if name:
+                    return name
+            except Exception:  # noqa: BLE001 - 读不到在场名单不该挡住结算
+                logger.debug("读在场玩家名字失败", exc_info=True)
+        store = getattr(self, "contact_store", None)
+        if store is not None:
+            try:
+                for row in store.all():
+                    if str(row.get("player_id") or "") == pid:
+                        name = str(row.get("player_name") or "").strip()
+                        if name:
+                            return name
+            except Exception:  # noqa: BLE001
+                logger.debug("读 contact 里的玩家名字失败", exc_info=True)
+        return pid
+
+    def _perform_joint(
+        self, agent_id: str, target: str, verb: str, affordance: Any,
+        outcomes: Mapping[str, Any], party: Sequence[str], *,
+        here: str, spec: Any,
+    ) -> dict[str, Any]:
+        """一起把这件事做了。**到这里为止一个字都还没写。**
+
+        瞬间的事和长过程分两支,和单人那条逐字同构:
+        - `duration == 0`:效果落一次(目标身上的量只有一份,不是一人一份)、
+          代价每人各扣一次、然后当场结算共同经历。
+        - `duration > 0`:代价每人各扣一次,每个人各记一条在做的事;效果与共同
+          经历都等到**收尾那一刻**(`_settle_engagements`)。
+
+        目标身上的 `set` 用**发起人**那一份算。这不是顺序:发起人是一个有名有姓
+        的角色(是谁叫的这顿饭),而参与者名单的次序才是那个"没有任何人写下过的
+        规则"。`set` 里读 `me_*` 的世界要知道这一条 —— 写在 REFERENCE 里。
+        """
+        store = self.stock_store
+        agents_in_party = [p for p in party if not p.startswith(self.PLAYER_PREFIX)]
+        head = outcomes[agent_id]
+
+        if affordance.is_process:
+            for who in agents_in_party:
+                self._charge(
+                    who, f"agent:{who}", target, verb, outcomes[who], here
+                )
+            started, ends = int(self.clock), int(self.clock) + int(affordance.duration)
+            for who in agents_in_party:
+                record = {
+                    "agent": who, "target": target, "verb": verb,
+                    "label": affordance.label or verb,
+                    "started": started, "ends": ends,
+                    "occupies": bool(affordance.occupies),
+                    "loc": here,
+                    # 名单跟着**每一条**记录走,不只跟着发起人那条:收尾时要靠它
+                    # 算共同经历,而一条只有发起人知道名单的记录,在发起人中途走开
+                    # 之后就再也说不出这顿饭有谁在。
+                    "party": list(party),
+                    "joint_role": (
+                        "initiator" if who == agent_id else "participant"
+                    ),
+                    "initiator": agent_id,
+                }
+                self._engaged[self._engagement_key(who, target, verb)] = record
+                self._record_event({
+                    "type": "entity_engage", "who": who, "loc": here,
+                    "payload": {
+                        "target": target, "verb": verb,
+                        "duration": int(affordance.duration), "ends_tick": ends,
+                        "occupies": bool(affordance.occupies),
+                        "cost": dict(outcomes[who].me_updates),
+                        "consumed": dict(outcomes[who].consumed),
+                        # 每个人自己那条事件上都带全名单:重放时"她那一小时在跟
+                        # 谁待着"要问得出来,而只有发起人知道等于问不出来。
+                        "party": list(party),
+                        "joint_role": record["joint_role"],
+                    },
+                })
+            return {
+                "ok": True, "target": target, "verb": verb, "started": True,
+                "duration": int(affordance.duration), "ends_tick": ends,
+                "occupies": bool(affordance.occupies), "party": list(party),
+                "changed": {}, "cost": dict(head.me_updates),
+                "consumed": dict(head.consumed),
+            }
+
+        if head.updates:
+            store.set_many(target, head.updates, tick=int(self.clock))
+        for who in agents_in_party:
+            self._charge(who, f"agent:{who}", target, verb, outcomes[who], here)
+        for who in agents_in_party:
+            self._record_event({
+                "type": "entity_interaction", "who": who, "loc": here,
+                "payload": {
+                    "target": target, "verb": verb,
+                    # 目标身上的量只变了一次,所以只有发起人那条带 `changed` ——
+                    # 每条都带的话,按事件重算"这棵树长了多少"会得到人数倍。
+                    "changed": dict(head.updates) if who == agent_id else {},
+                    "cost": dict(outcomes[who].me_updates),
+                    "consumed": dict(outcomes[who].consumed),
+                    "party": list(party),
+                    "joint_role": "initiator" if who == agent_id else "participant",
+                },
+            })
+        born = self._settle_birth_and_death(agent_id, target, verb, affordance, here)
+        self._settle_joint_experience(
+            party, target=target, verb=verb, affordance=affordance,
+            duration_ticks=0, here=here,
+        )
+        return {
+            "ok": True, "target": target, "verb": verb, "party": list(party),
+            "changed": dict(head.updates), "cost": dict(head.me_updates),
+            "consumed": dict(head.consumed),
+            **({"spawned": born} if born else {}),
+            **({"destroyed": target} if affordance.destroys_target else {}),
+        }
+
+    # ── 共同经历的效果 ──────────────────────────────────────────────────────
+    #
+    # 红线 ③:**关系变化是这段经历的效果,不是再调一次判定。** 再调一次的话,
+    # "一起过了一夜"和"多聊了两句"又回到同一个入口上,而这一层存在的全部理由
+    # 就是它们不该一样。所以这里**一次模型都不调** —— 纯算术,跑得起在 tick
+    # 线程上,而且同样的经历永远给出同样的账(世界的可重放性不能靠随机数)。
+
+    def _joint_stayed(self, record: Mapping[str, Any], target: str) -> list[str]:
+        """这场共同经历里,谁真的从头待到了尾。
+
+        **按位置判,不按还剩没剩下一条 `_engaged` 记录判。** 后者要依赖结算的次序
+        (发起人那条恰好排在参与者前面),而 `dict` 的插入序是一个没有人写下过的
+        约定 —— 哪天有人改了 `_engaged` 的实现,这里就会静默地变成"谁都没留下"。
+
+        玩家不查:引擎不模拟他的身体,他的在场在起头那一刻由 `face_to_face` 验过
+        (api 层),此后世界对他一无所知。**照实说比假装查过好。**
+        """
+        party = [str(p) for p in (record.get("party") or []) if str(p)]
+        if not party:
+            return []
+        if not record.get("occupies"):
+            # 不占用的那种不要求她守在原地(和单人那一条逐字同构:怀胎不占用)。
+            return party
+        place = self._place_of(target)
+        stayed: list[str] = []
+        for who in party:
+            if who.startswith(self.PLAYER_PREFIX):
+                stayed.append(who)
+                continue
+            here = self._where_is(who)
+            if here and here == place:
+                stayed.append(who)
+        return stayed
+
+    def _joint_config(self) -> tuple[float, int]:
+        step = together_mod.DEFAULT_RELATION_STEP
+        full = together_mod.DEFAULT_FULL_DURATION_TICKS
+        if self.config_store is not None:
+            try:
+                step = float(self.config_store.get(
+                    "social.joint.relation_step", default=step))
+                full = int(self.config_store.get(
+                    "social.joint.full_duration_ticks", default=full))
+            except (TypeError, ValueError):
+                logger.warning("social.joint.* 配置读不成数,按默认刻度算", exc_info=True)
+        return (step, max(1, full))
+
+    def _settle_joint_experience(
+        self, party: Sequence[str], *, target: str, verb: str, affordance: Any,
+        duration_ticks: int, here: str,
+    ) -> None:
+        """一场共同经历落进世界:每一对有序对一条关系变化 + 每个人一条记忆。
+
+        **落点必须是既有的那套机制**(`sentiment_delta`),不是一张新表 —— 关系
+        跨档、`relation_shift` 记忆、图谱边、planner 读到的那份东西全都挂在它上面
+        (和吃醋那条逐字同一条理由)。另起一条路的话,他们一起过的那一晚就只存在
+        于一个没人读的字段里。
+
+        记忆是**另一半**:数字动了而她说不出为什么,是这一层最容易长成的假。
+        """
+        people = [p for p in dict.fromkeys(party) if p]
+        if len(people) < 2:
+            return
+        step, full = self._joint_config()
+        # 关系表用的是**裸 id**(玩家没有 `player:` 前缀)—— 见 `_relation_id`。
+        ids = {who: self._relation_id(who) for who in people}
+        keys = [ids[who] for who in people]
+        current = {
+            (a, b): (
+                rel.sentiment
+                if (rel := self._memory_projection.relations.get((a, b))) is not None
+                else 0.0
+            )
+            for a in keys for b in keys if a != b
+        }
+        deltas = together_mod.pair_deltas(
+            keys, current, duration_ticks=duration_ticks, step=step, full_duration=full,
+        )
+        names = {ids[who]: self._relation_name(who) for who in people}
+        for pair in deltas:
+            self._record_and_deliver({
+                "type": "state_change", "who": pair.who, "loc": here,
+                "payload": {
+                    "kind": "sentiment_delta", "as": pair.who, "target": pair.about,
+                    "delta": float(pair.delta), "axes": dict(pair.axes),
+                    "as_name": names.get(pair.who, pair.who),
+                    "target_name": names.get(pair.about, pair.about),
+                    # 由头写进事件。"她对他的好感涨了 0.04"回头查得出是哪一顿饭 ——
+                    # 查不出的话,关系又变回一个说不出来路的数字。
+                    "cause": "joint_activity",
+                },
+            })
+        label = affordance.label or verb
+        entity = self.ontology.entities.get(target) if self.ontology is not None else None
+        what = (entity.name if entity is not None and entity.name else target)
+        for who in people:
+            if who.startswith(self.PLAYER_PREFIX):
+                continue
+            others = "、".join(names[ids[p]] for p in people if p != who)
+            self._record_and_deliver({
+                "type": "memory_seed", "who": who, "loc": here,
+                "payload": {
+                    "agent_id": who,
+                    "kind": "shared_experience",
+                    # **动词的人话自己可能就带着「一起」**(作者写的 label 是
+                    # 「一起吃顿饭」这种),再拼一个就成了"我和零一起一起吃顿饭"。
+                    # 这条摘要会进她的提示词、也会被八卦转述出去,读起来必须像人话。
+                    "summary": (
+                        f"我和{others}{'' if label.startswith('一起') else '一起'}"
+                        f"{label},在{what}"
+                    ),
+                    # 比一句寒暄重、比创世锚点轻。**一起做过的事该比说过的话更
+                    # 容易被想起来** —— 这一层的全部主张就是这一句。
+                    "importance": 0.65,
+                },
+            })
+        logger.info(
+            "%s 一起 %s 了 %s(%s 条关系变化)", "、".join(names.values()), label, target,
+            len(deltas),
+        )
 
     # ── 长过程:做一件事要花的那段时间 ──────────────────────────────────────
     #
@@ -1582,6 +2297,12 @@ class Scheduler:
             # 挑到同一个动作会被"和当前相同"挡住,她就再也不动了。
             if record.get("occupies"):
                 self._current_action.pop(agent_id, None)
+            if record.get("joint_role") == "participant":
+                # 一起做的事**只结算一次**,由发起人那条记录做。参与者这条到点
+                # 只做一件事:把人放开。让每个人各结算一遍的话,目标身上的量会被
+                # 写上人数遍,而 `set: {树高: 树高 + 0.05}` 里的"上一轮"每次都不同 ——
+                # 于是一顿三个人的饭把那棵树长高了三次,账上完全看不出来。
+                continue
             # 实例查一次,能力再查一次。**只查能力不够** —— `affordance_of` 查不到
             # 实例时会回落到种类,于是一棵被砍掉的树照样"能被照料",这件事会安静地
             # 收尾在一个不存在的东西上,量还真的写回去了。
@@ -1622,6 +2343,7 @@ class Scheduler:
                 world_values=store.of("world"),
                 me_values=store.of(f"agent:{agent_id}") if affordance.needs_actor else None,
                 now=now_tick,
+                minutes_per_tick=self._minutes_per_tick(),
             )
             if not outcome.ok:
                 self._record_event({
@@ -1634,6 +2356,11 @@ class Scheduler:
             if outcome.updates:
                 store.set_many(target, outcome.updates, tick=now_tick)
             here = str(record.get("loc") or "")
+            spent = now_tick - int(record.get("started", now_tick))
+            # **谁真的从头待到尾。** 起头时每个人都过了同处一地那道闸,而这段时间
+            # 里谁都可能走开 —— 照名单发关系变化的话,一个开席就离场的人也算"一起
+            # 吃过饭了",而世界里根本没有那顿饭。
+            stayed = self._joint_stayed(record, target)
             self._record_event({
                 "type": "entity_interaction", "who": agent_id,
                 "loc": here,
@@ -1642,11 +2369,17 @@ class Scheduler:
                     # 代价在起头那条 `entity_engage` 上,这里不重复记 —— 记两遍的话
                     # 按事件重算"她今天花了多少力气"会得到两倍。
                     "cost": {}, "consumed": {},
-                    "duration": now_tick - int(record.get("started", now_tick)),
+                    "duration": spent,
+                    **({"party": stayed} if record.get("party") else {}),
                 },
             })
             # 十月怀胎落在这一行:孩子生在**收尾那一刻**,不是起头那一刻。
             self._settle_birth_and_death(agent_id, target, verb, affordance, here)
+            if record.get("party"):
+                self._settle_joint_experience(
+                    stayed, target=target, verb=verb, affordance=affordance,
+                    duration_ticks=spent, here=here,
+                )
 
     # ── 生与灭 ──────────────────────────────────────────────────────────────
     #
@@ -2519,6 +3252,7 @@ class Scheduler:
                 last_run=self._rule_last_run,
                 action_owners=self._agents_doing,
                 emit=self._record_and_deliver,
+                minutes_per_tick=self._minutes_per_tick(),
             )
         except Exception:  # noqa: BLE001 - 规律引擎自己挂了也不许掀翻 tick
             logger.warning("world-rules evaluation failed", exc_info=True)
@@ -2568,6 +3302,32 @@ class Scheduler:
             hook(due, now)
         except Exception:  # noqa: BLE001 - 自主轮次挂了绝不掀翻 tick
             logger.warning("autonomy hook failed", exc_info=True)
+
+    def _maybe_run_contact(self, now: WorldTime) -> None:
+        """到点了就喊一声"看看她们会不会想起谁",然后**立刻返回**(contact)。
+
+        和 `_maybe_run_autonomy` 逐字同构,包括那两条理由:节流在这里而不是在
+        回调里(漏了节流就是每 tick 一次判定,演示速度下是每秒一次);回调自己
+        负责把要打网络的那一段丢到别的线程去 —— **时钟永远不等网络**。
+
+        ⚠️ **在赶路的人这里不排除。** autonomy 排除他们是因为那一层要她当场做一件
+        事,而赶路时她做不了;想起一个人不需要她停下来 —— 在火车上想起谁是最常见
+        的情形之一。赶路进的是 `readiness` 那一层(`transit` 硬闸),由 `World` 侧
+        按配置决定,不在这里替它做主。
+        """
+        hook = self._contact_hook
+        if hook is None:
+            return
+        interval = max(1, int(self._contact_interval))
+        if self.clock % interval:
+            return
+        due = [brain.agent.id for brain in self.agents.values()]
+        if not due:
+            return
+        try:
+            hook(due, now)
+        except Exception:  # noqa: BLE001 - 想起谁这件事挂了绝不掀翻 tick
+            logger.warning("contact hook failed", exc_info=True)
 
     def _fire_due_followups(self) -> None:
         """她说的"等会儿再说"到点了 —— 真的回来敲一次门(chat-agent,#15)。
@@ -2746,13 +3506,17 @@ class Scheduler:
             # much did THIS conversation matter"; how much the Nth same-day
             # conversation still moves the world is the world's call.
             factor = self._damped_factor(a_id, b_id)
+            names = {a_id: context["a"].get("name") or a_id,
+                     b_id: context["b"].get("name") or b_id}
             for as_id, target_id, delta, axes in (
                 (a_id, b_id, result.delta_a_to_b * factor, result.axes_a_to_b),
                 (b_id, a_id, result.delta_b_to_a * factor, result.axes_b_to_a),
             ):
                 if abs(delta) < 0.01:
                     continue  # damped-to-noise or a no-op delta — event-log/SSE noise
-                payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id, "delta": delta}
+                payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id,
+                           "delta": delta,
+                           "as_name": names[as_id], "target_name": names[target_id]}
                 if axes:  # relations-v5: finer axes ride the same event, same damping
                     payload["axes"] = {k: v * factor for k, v in axes.items()}
                 self._record_and_deliver({
@@ -2840,13 +3604,20 @@ class Scheduler:
             if self._stopped:
                 return
             factor = self._damped_factor(agent_id, player_id)
+            # 名字随事件走。玩家的 id 是一串 uuid,而这条事件会长成一条
+            # `relation_shift` 记忆,那条记忆会被八卦原样转述给别人 ——
+            # "她对 8f3c-… 的关系进入「亲近」"传出去没有一个人看得懂。
+            names = {agent_id: context["a"].get("name") or agent_id,
+                     player_id: context.get("player_name") or player_id}
             for as_id, target_id, delta, axes in (
                 (agent_id, player_id, result.delta_a_to_b * factor, result.axes_a_to_b),
                 (player_id, agent_id, result.delta_b_to_a * factor, result.axes_b_to_a),
             ):
                 if abs(delta) < 0.01:
                     continue
-                payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id, "delta": delta}
+                payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id,
+                           "delta": delta,
+                           "as_name": names[as_id], "target_name": names[target_id]}
                 if axes:
                     payload["axes"] = {k: v * factor for k, v in axes.items()}
                 self._record_and_deliver({

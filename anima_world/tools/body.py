@@ -27,19 +27,34 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from anima_world.tools.base import BODY, ToolCallError, ToolContext, ToolResult, tool
+from anima_world.tools.base import BODY, PLAYER, ToolCallError, ToolContext, ToolResult, tool
 
 logger = logging.getLogger(__name__)
 
 
+def _here(ctx: ToolContext) -> str:
+    """施动者这会儿在哪。**不是"她在哪"** —— 玩家点"在这儿干活"说的是他自己站的地方。"""
+    if ctx.is_player:
+        return ctx.runtime.player_location(ctx.player_id)
+    return ctx.runtime.agent_location(ctx.agent_id)
+
+
 def _do(ctx: ToolContext, kind: str, params: dict[str, Any]) -> ToolResult:
-    """把一个动作交给行为树走的那条路。"""
-    took = ctx.runtime.do_action(ctx.agent_id, kind, dict(params))
+    """把一个动作交给行为树走的那条路;玩家走的是并排的那条。
+
+    **动词和它的后果是同一份**,分叉只在执行器:她有行为树,人没有。
+    """
+    if ctx.is_player:
+        took = ctx.runtime.player_do_action(ctx.player_id, kind, dict(params))
+        who = "你"
+    else:
+        took = ctx.runtime.do_action(ctx.agent_id, kind, dict(params))
+        who = "她"
     if not took:
-        # 世界说"还不行"——她在半路上,或者要找的人不在这儿。不是失败,是没成。
+        # 世界说"还不行"——他在半路上,或者要找的人不在这儿。不是失败,是没成。
         return ToolResult(
             ok=False,
-            error="世界这会儿不接这个动作(她在赶路,或者对方不在这儿)",
+            error=f"世界这会儿不接这个动作({who}在赶路,或者对方不在这儿)",
             detail={"kind": kind, "params": dict(params), "took": False},
         )
     return ToolResult(detail={"kind": kind, "params": dict(params), "took": True})
@@ -51,7 +66,7 @@ def _do(ctx: ToolContext, kind: str, params: dict[str, Any]) -> ToolResult:
     kind="walk",
     description="走到某个地方去。**要花时间**,途中她在路上(不是瞬移)",
     params={"location": {"type": "string", "description": "去哪儿", "required": True}},
-    surfaces=(BODY,),
+    surfaces=(BODY, PLAYER),
 )
 def walk(ctx: ToolContext, params: dict) -> ToolResult:
     where = str(params.get("location") or "").strip()
@@ -73,7 +88,7 @@ def walk(ctx: ToolContext, params: dict) -> ToolResult:
     surfaces=(BODY,),
 )
 def work(ctx: ToolContext, params: dict) -> ToolResult:
-    here = ctx.runtime.agent_location(ctx.agent_id)
+    here = _here(ctx)
     return _do(ctx, "work", {"location": here} if here else {})
 
 
@@ -113,7 +128,8 @@ def talk_to(ctx: ToolContext, params: dict) -> ToolResult:
     who = str(params.get("target") or "").strip()
     if not who:
         raise ToolCallError("没说跟谁")
-    if who == ctx.agent_id:
+    # 玩家点 talk_to 的对象**正是**这一轮的那个角色 —— 只有她自己搭自己才是错的。
+    if who == ctx.agent_id and not ctx.is_player:
         raise ToolCallError("她不能跟自己搭话")
     if who not in ctx.runtime.agent_ids():
         raise ToolCallError(f"这个世界里没有 {who}")
@@ -158,12 +174,22 @@ def seek_company(ctx: ToolContext, params: dict) -> ToolResult:
     kind="interact",
     description=(
         "对你这儿的一样东西做点什么(照料、收取产出、读……)。"
-        "东西的 id 和它能被怎么做,都写在【你此刻感觉到的】那一段里"
+        "东西的 id 和它能被怎么做,都写在【你此刻感觉到的】那一段里。"
+        "标着「得有人一起」的那些,要用 with 点名跟你一起做的人"
     ),
     params={
         "target": {"type": "string", "description": "东西的 id,像 tree:harbor_oak", "required": True},
         "verb": {"type": "string", "description": "做什么,比如 照料 / tend", "required": True},
+        # 一起做的事才用得上。**必须进 params_schema**:菜单上没有的参数她永远
+        # 不会填,于是那些能力对她等于不存在(#15 那一课的原话)。
+        "with": {
+            "type": "array",
+            "description": "跟你一起做这件事的人(名字或 id);只有标着「得有人一起」的才要填",
+        },
     },
+    # ⚠️ 暂不进 PLAYER 面。`interact_with` 的施动者、产出归属、`stocks` 的扣减
+    # 全按角色写的,给玩家开需要一份对应的账;而且今天线上那个世界一个实体都没
+    # 声明(`entity_names()` 是空的),开了也没有对象。要开先补这两样。
     surfaces=(BODY,),
 )
 def interact(ctx: ToolContext, params: dict) -> ToolResult:
@@ -173,8 +199,28 @@ def interact(ctx: ToolContext, params: dict) -> ToolResult:
         raise ToolCallError("没说对什么东西")
     if not verb:
         raise ToolCallError("没说做什么")
-    outcome = ctx.runtime.interact_with(ctx.agent_id, target, verb)
+    outcome = ctx.runtime.interact_with(
+        ctx.agent_id, target, verb,
+        participants=_party(params.get("with")), player_id=ctx.player_id,
+    )
     if not outcome.get("ok"):
         # 世界说"这会儿不行"(果子还没熟)。不是失败,是没成 —— 照实报。
         return ToolResult(ok=False, error=str(outcome.get("refusal") or "这会儿不行"), detail=outcome)
     return ToolResult(detail=outcome)
+
+
+def _party(raw: Any) -> list[str]:
+    """`with` 收成一份名单。
+
+    **一个字符串也收**:模型写 `"with": "柔"` 和 `"with": ["柔"]` 的概率各占一半,
+    而按 JSON 类型严格拒绝的话,她那一轮的下场是"没说跟谁一起",接着收到一句
+    "这件事得有人一起做" —— 一次她永远学不会的失败。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        # 「柔、白霜」和「柔,白霜」都得认:提示词里的顿号是中文写法的默认。
+        return [p.strip() for p in raw.replace("、", ",").replace(",", ",").split(",") if p.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(p).strip() for p in raw if str(p).strip()]
+    raise ToolCallError(f"with 得是一份名单,收到 {type(raw).__name__}")

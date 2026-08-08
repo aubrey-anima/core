@@ -26,10 +26,12 @@ from typing import Any, Callable, Iterable
 
 from anima_world.expressions import ExpressionError
 from anima_world.rules import WORLD_PREFIX, Rule
+from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, clock_names
 
 logger = logging.getLogger(__name__)
 
 WORLD_OWNER = "world"
+AGENT_KIND = "agent"   # `not_action` 的候选池:这个引擎里只有角色"在做一件事"
 
 
 def owner_kind(owner: str) -> str:
@@ -45,12 +47,17 @@ def evaluate_due(
     last_run: dict[str, int],
     action_owners: Callable[[str], list[str]] | None = None,
     emit: Callable[[dict[str, Any]], None] | None = None,
+    minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
 ) -> dict[str, Any]:
     """把到点的规律跑一遍。返回一份"这一轮干了什么"的小报告。
 
     `last_run` 由调用方持有(内存态):它只决定**要不要现在算**,不影响算出来的
     结果 —— 结果由 `dt` 决定,而 `dt` 来自量自己的 `updated_tick`。所以重启把
     `last_run` 清空是安全的:最多是多算一次,值不会错。
+
+    `minutes_per_tick` 只用来把 `now` 折成 `day`/`hour`/`minute`/`minute_of_day`
+    (见 `rules.BUILTIN_NAMES`)。**它是每个世界自己的配置**,所以必须由调用方传 ——
+    在这儿写死一个默认值等于让"半夜"在两个世界里指不同的时刻。
     """
     report: dict[str, Any] = {"evaluated": 0, "written": 0, "emitted": 0, "skipped": []}
 
@@ -70,10 +77,12 @@ def evaluate_due(
             kinds.add(rule.selector_value)
         elif rule.selector_kind == "owner":
             explicit.add(rule.selector_value)
-        else:   # action:此刻正在做这个动作的角色
+        elif rule.selector_kind == "action":   # 此刻正在做这个动作的角色
             owners = list(action_owners(rule.selector_value)) if action_owners else []
             action_owners_by_rule[rule.id] = owners
             explicit.update(owners)
+        else:   # not_action:此刻**没在**做这个动作的角色。名单要等快照之后才算得出
+            kinds.add(AGENT_KIND)               # 借 `agent` 那一次批量查询,不额外查
     if not due_rules:
         return report
 
@@ -99,6 +108,18 @@ def evaluate_due(
             ).items()
         } or {f"{WORLD_PREFIX}{k}": v for k, v in store.of(WORLD_OWNER).items()}
 
+    # `not_action` 的名单只能在这里算:它是"所有角色"减去"正在做这件事的角色",
+    # 而前者要等 `snapshot_kind("agent")` 回来才知道。**扣的是补集,不是差集的
+    # 反面** —— 一个此刻没有任何动作的角色(刚出生、树还没跑过一轮)算"没在睡",
+    # 因为她确实没在睡。
+    for rule in due_rules:
+        if rule.selector_kind != "not_action":
+            continue
+        busy = set(action_owners(rule.selector_value)) if action_owners else set()
+        action_owners_by_rule[rule.id] = [
+            owner for owner in owners_by_kind.get(AGENT_KIND, []) if owner not in busy
+        ]
+
     due = [
         (
             rule,
@@ -111,12 +132,18 @@ def evaluate_due(
         for rule in due_rules
     ]
 
+    # 日历折一次,这一轮所有 owner 共用 —— 它只依赖 `now`,逐个 owner 再折一遍
+    # 只是把同一个答案算一万次。
+    clock = clock_names(now, minutes_per_tick)
+
     pending: dict[str, dict[str, float]] = {}
     events: list[dict[str, Any]] = []
     for rule, owners in due:
         for owner in owners:
             try:
-                updates, fired = _apply(rule, snapshots.get(owner, {}), owner, now, world_stocks)
+                updates, fired = _apply(
+                    rule, snapshots.get(owner, {}), owner, now, world_stocks, clock
+                )
             except ExpressionError as exc:
                 # 运行期降级:一条算不出来的规律不该掀翻整个 tick(节拍脚本同一条
                 # 纪律)。但绝不无声 —— 它会出现在报告里,也会打一条日志。
@@ -153,6 +180,7 @@ def _apply(
     owner: str,
     now: int,
     world_stocks: dict[str, float],
+    clock: dict[str, int] | None = None,
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     """算一个 owner。**只算不写** —— 写入由调用方攒到一轮末尾(双缓冲)。
 
@@ -169,7 +197,14 @@ def _apply(
 
     # 双缓冲:这一轮所有表达式读到的都是**这一轮开始前**的值。规律之间因此
     # 与顺序无关 —— 否则"A 先算还是 B 先算"会变成隐藏的语义。
-    namespace: dict[str, Any] = {**world_stocks, **values, "dt": dt, "now": now}
+    # 内置名放最后 —— 它们**盖过**同名的量。同名本来就被 `parse_kinds` 当加载期
+    # 错误拒了,这里的顺序是那道闸的第二重保险:万一漏进来一个,读到的至少是
+    # 一个说得清的东西(钟点),而不是"有时是量、有时是钟点"。
+    namespace: dict[str, Any] = {
+        **world_stocks, **values,
+        **(clock or clock_names(now)),
+        "dt": dt, "now": now,
+    }
 
     for condition in rule.conditions:
         if not condition.evaluate(namespace):

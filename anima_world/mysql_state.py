@@ -440,6 +440,18 @@ class MySQLMemoryStore:
                 )
             self._conn.commit()
 
+    def retick(self, memory_id: int, tick: int, created_at: int | None = None) -> bool:
+        """见 `RedisMemoryStore.retick`。**两个后端都要有** —— 只修得动 Redis 世界
+        的迁移,等于让接了 MySQL 的世界永远带着那批脏 tick。"""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {self._table} SET tick = %s, created_at = %s WHERE id = %s",
+                (int(tick), int(tick if created_at is None else created_at), int(memory_id)),
+            )
+            changed = int(cur.rowcount or 0)
+        self._conn.commit()
+        return changed > 0
+
     def set_anchor(self, memory_id: int, anchor: bool) -> None:
         with self._conn.cursor() as cur:
             cur.execute(

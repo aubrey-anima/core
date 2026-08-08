@@ -71,6 +71,7 @@ from typing import Any, Iterable, Mapping
 from anima_world.expressions import Expression, ExpressionError, compile_expression
 from anima_world.perception import HIDDEN, VISIBILITIES
 from anima_world.rules import BUILTIN_NAMES, WORLD_PREFIX, bad_output_name
+from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, clock_names
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +241,39 @@ class SpawnSpec:
 
 
 @dataclass(frozen=True)
+class ParticipantSpec:
+    """这件事**得有人一起做**。
+
+    `interact` 一直是单人的 —— `Affordance` 的定义原话就是"一个人、一个东西、
+    一个瞬间"。于是两个站在同一个地方的人只能各干各的,而世界记不下"他们一起
+    吃了顿饭"。这一格补的就是那件事。
+
+    只有两个数,而且**没有 `consent` 开关**:同意永远是必须的。给作者一个
+    `consent: false` 等于把"别人凭什么答应"整个交回去关掉,而"拉着谁就一起吃饭"
+    正是这一层要挡的东西 —— 一个取消对方意志的能力,比没有这个能力坏得多。
+    理由的全文在 `together.py` 的模块说明里。
+
+    `maximum` 有个上限(`MAX_PARTICIPANTS`),理由是账面上的:一场共同经历要为
+    **每一对有序对**发一条关系事件,人数是平方进去的。上限不是配额哲学那一套
+    (代价才是世界的理由),是事件日志的有界性 —— 和"每个能进提示词的类型必须
+    声明一个带上限的选择器"同一条。
+    """
+
+    # 除了发起的那个人之外,还要几个。**至少 1** —— 写 0 的话这件事根本不是
+    # "一起",而作者写下 `participants` 时想的一定不是那个意思。
+    minimum: int = 1
+    maximum: int = 1
+
+    def accepts(self, count: int) -> bool:
+        return self.minimum <= int(count) <= self.maximum
+
+
+# 一场共同经历最多几个人一起。`n(n-1)` 条关系事件,8 个人 = 56 条 —— 这已经是
+# 一条事件日志该为"一顿饭"付的上限。
+MAX_PARTICIPANTS = 8
+
+
+@dataclass(frozen=True)
 class Affordance:
     """她能对这个东西做的一件事,以及**做完之后世界怎么变**。
 
@@ -286,6 +320,14 @@ class Affordance:
     # 无界。真实世界不是靠出生的代价封的,是靠会生的东西都会死。
     spawn: SpawnSpec | None = None
     destroys_target: bool = False
+    # 这件事得有人一起做。`None` = 单人的老样子(**默认**,所以已有的世界逐位不变)。
+    participants: ParticipantSpec | None = None
+
+    @property
+    def is_joint(self) -> bool:
+        """一起做的事。为真时 `perform_affordance` 要一份名单,而且每个人各自
+        过闸、各自付代价、各自答应。"""
+        return self.participants is not None
 
     @property
     def is_process(self) -> bool:
@@ -414,8 +456,12 @@ class Ontology:
         found = kind.affordances.get(verb)
         if found is not None:
             return found
+        # `describe()` 给一起做的事加了一句"(得有人一起)",而她照着提示词说话
+        # 时会把那几个字**一起**说出来。引擎自己写下的注解,不该由她来负责剥掉 ——
+        # 不剥的话下场是"不认识这个动词",而那个词就是引擎印给她的。
+        bare = verb.split("(", 1)[0].split("(", 1)[0].strip() if verb else verb
         for affordance in kind.affordances.values():
-            if affordance.label == verb:
+            if affordance.label == verb or (bare and affordance.label == bare):
                 return affordance
         return None
 
@@ -444,7 +490,14 @@ class Ontology:
         gloss = (entity.gloss if entity and entity.gloss else kind.gloss) or ""
         # 人话取自能力自己的 `label`(内置有默认,自造的由作者给)——
         # 从前这里查一张引擎的表,于是作者造得出的动词这里一个字也读不到。
-        verbs = [a.label or a.verb for a in kind.affordances.values()]
+        #
+        # **一起做的事要在这里就说出来。** 不说的话她会一个人去试,每次都收到
+        # 一句"这件事得有人一起做" —— 而提示词里那几个字正是引擎自己写给她的。
+        # 一个只在调用之后才说得出前提的能力,和声明了却没人兑现是同一种坏。
+        verbs = [
+            f"{a.label or a.verb}(得有人一起)" if a.is_joint else (a.label or a.verb)
+            for a in kind.affordances.values()
+        ]
         return (gloss, verbs)
 
     def is_declared_owner(self, owner: str) -> bool:
@@ -695,14 +748,14 @@ def _parse_affordance(
         return (None, [f"{label}.affordances.{verb}:效果必须是对象,收到 {type(spec).__name__}"])
     unknown = set(spec) - {
         "when", "set", "requires", "costs", "consumes", "label", "duration", "occupies",
-        "spawn", "destroys_target",
+        "spawn", "destroys_target", "participants",
     }
     if unknown:
         errors.append(
             f"{label}.affordances.{verb}:不认识的字段 {sorted(unknown)} —— "
             f"只认 when / set(关于它)、requires / costs / consumes(关于她)、"
-            f"duration / occupies(关于时间)、spawn / destroys_target(关于生灭)"
-            f"与 label(关于她怎么读它)。"
+            f"duration / occupies(关于时间)、spawn / destroys_target(关于生灭)、"
+            f"participants(关于跟谁一起)与 label(关于她怎么读它)。"
             f"门槛事件归规律那一层(能力只管这一下改了什么)"
         )
 
@@ -847,6 +900,12 @@ def _parse_affordance(
             continue
         spending[item_id] = int(source)
 
+    # ── 跟谁一起 ──────────────────────────────────────────────────────────
+    participants, participant_errors = _parse_participants(
+        label, verb, spec.get("participants")
+    )
+    errors.extend(participant_errors)
+
     # ── 生与灭 ────────────────────────────────────────────────────────────
     spawn, spawn_errors = _parse_spawn(label, verb, spec.get("spawn"))
     errors.extend(spawn_errors)
@@ -955,9 +1014,71 @@ def _parse_affordance(
             occupies=occupies,
             spawn=spawn,
             destroys_target=destroys,
+            participants=participants,
         ),
         [],
     )
+
+
+def _parse_participants(
+    label: str, verb: str, raw: Any
+) -> tuple[ParticipantSpec | None, list[str]]:
+    """`participants` 那一格 —— 这件事得有几个人一起。
+
+    **不写就是单人的老样子**,所以已有的世界一个字都不用改(和 `kinds` 这一层
+    整体"声明本身就是开关"逐字同构)。写了就是作者在说"一个人做不成这件事",
+    于是引擎开始要一份名单、逐个问过去。
+    """
+    if raw is None:
+        return (None, [])
+    where = f"{label}.affordances.{verb}.participants"
+    if not isinstance(raw, dict):
+        return (None, [
+            f"{where}:必须是对象(形如 {{\"min\": 1, \"max\": 2}}),"
+            f"收到 {type(raw).__name__}"
+        ])
+
+    errors: list[str] = []
+    unknown = set(raw) - {"min", "max"}
+    if unknown:
+        # `consent` 是这里最可能被写下来的那个词,所以单独点它的名 —— 静默忽略
+        # 的话,作者会以为自己关掉了同意,而世界照旧一个个去问。
+        errors.append(
+            f"{where}:不认识的字段 {sorted(unknown)} —— 只认 min / max。"
+            f"没有 `consent` 这个开关:同意永远是必须的,"
+            f"一个拉着谁就一起做事的能力等于取消对方的意志"
+        )
+
+    def count(key: str, default: int) -> int | None:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            errors.append(f"{where}.{key}:必须是整数(几个人),收到 {value!r}")
+            return None
+        return int(value)
+
+    minimum = count("min", 1)
+    if minimum is not None and minimum < 1:
+        # 写 0 的话这件事根本不是"一起",而作者写下 `participants` 时想的一定
+        # 不是那个意思。静默当成单人的话,他会以为自己已经表达过了。
+        errors.append(
+            f"{where}.min:至少是 1(除了发起的那个人之外还要几个),收到 {minimum} —— "
+            f"一个人做不成「一起」;不需要别人就别写 participants"
+        )
+        minimum = None
+
+    maximum = count("max", minimum if minimum is not None else 1)
+    if minimum is not None and maximum is not None:
+        if maximum < minimum:
+            errors.append(f"{where}.max:不能小于 min({minimum}),收到 {maximum}")
+        elif maximum > MAX_PARTICIPANTS:
+            errors.append(
+                f"{where}.max:最多 {MAX_PARTICIPANTS} 个,收到 {maximum} —— "
+                f"一场共同经历要为每一对有序对发一条关系事件,人数是平方进去的"
+            )
+
+    if errors:
+        return (None, errors)
+    return (ParticipantSpec(minimum=int(minimum or 1), maximum=int(maximum or 1)), [])
 
 
 def _parse_spawn(label: str, verb: str, raw: Any) -> tuple[SpawnSpec | None, list[str]]:
@@ -1051,6 +1172,16 @@ def _affordance_label(label: str, verb: str, raw: Any) -> tuple[str, list[str]]:
 
 def _parse_quantity(label: str, name: str, spec: Any) -> tuple[Quantity | None, list[str]]:
     errors: list[str] = []
+    # **量名不许和内置名撞车。** 内置名(`dt`/`now`/`day`/`hour`/`minute`/
+    # `minute_of_day`)在表达式的命名空间里放在最后,盖过同名的量 —— 于是一个
+    # 声明了 `hour` 的世界会安静地读到钟点,而作者以为读的是他那个量:量照存、
+    # 规律照跑、日志干净,只有算出来的数是别人的。放行的坏处不对称,所以当场拒。
+    if name in BUILTIN_NAMES:
+        return (None, [
+            f"{label}.quantities.{name}:`{name}` 是表达式的内置名"
+            f"(全部内置名:{sorted(BUILTIN_NAMES)}),声明成量之后规律读到的会是"
+            f"内置的那个值,而不是你这个量 —— 换个名字"
+        ])
     if isinstance(spec, (int, float)) and not isinstance(spec, bool):
         # 简写:只给默认值,可见性走默认(hidden)。
         return (Quantity(key=name, default=float(spec)), errors)
@@ -1269,8 +1400,9 @@ def resolve(
                 continue
             if not kind.builtin:
                 errors.extend(_check_rule_quantities(label, rule, kind))
-        # selector_kind == "action":作用在"此刻正在做这个动作的角色"上,
-        # 动作名是开集(作者可以自定义动作),这里不查 —— 查了会拒掉合法的世界。
+        # selector_kind == "action" / "not_action":作用在"此刻正在(没在)做这个
+        # 动作的角色"上,动作名是开集(作者可以自定义动作),这里不查 ——
+        # 查了会拒掉合法的世界。
 
     known_items = set(items)
     for kind in kinds.values():
@@ -1449,6 +1581,7 @@ def apply_affordance(
     me_values: Mapping[str, float] | None = None,
     held: Mapping[str, int] | None = None,
     now: int = 0,
+    minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
 ) -> AffordanceOutcome:
     """算一次能力调用:读目标与施动者此刻的量,给出两边要写回去的量。
 
@@ -1470,6 +1603,9 @@ def apply_affordance(
         **{f"{ME_PREFIX}{k}": v for k, v in (me_values or {}).items()},
         **{f"{HAVE_PREFIX}{k}": float(v) for k, v in holdings.items()},
         **dict(values),
+        # 日历(见 `rules.BUILTIN_NAMES`)。能力和规律读同一组名字 —— 一个能在
+        # 规律里写「日落之后不长」的作者,理应能在能力上写「天黑了砍不了柴」。
+        **clock_names(now, minutes_per_tick),
         "now": now,
         "dt": 0,
     }
@@ -1547,6 +1683,7 @@ def finish_affordance(
     world_values: Mapping[str, float] | None = None,
     me_values: Mapping[str, float] | None = None,
     now: int = 0,
+    minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
 ) -> AffordanceOutcome:
     """一个长过程走完了 —— 只算它对**那个东西**的效果。
 
@@ -1566,6 +1703,9 @@ def finish_affordance(
         **{f"{WORLD_PREFIX}{k}": v for k, v in (world_values or {}).items()},
         **{f"{ME_PREFIX}{k}": v for k, v in (me_values or {}).items()},
         **dict(values),
+        # 日历(见 `rules.BUILTIN_NAMES`)。能力和规律读同一组名字 —— 一个能在
+        # 规律里写「日落之后不长」的作者,理应能在能力上写「天黑了砍不了柴」。
+        **clock_names(now, minutes_per_tick),
         "now": now,
         "dt": 0,
     }

@@ -9,9 +9,12 @@ from __future__ import annotations
 from anima_world.tools import body as _body      # noqa: F401 - import 即登记
 from anima_world.tools import social as _social  # noqa: F401 - import 即登记
 from anima_world.tools.base import (
+    AGENT_ACTOR,
     BODY,
     AUTONOMY,
     CHAT,
+    PLAYER,
+    PLAYER_ACTOR,
     SURFACES,
     ToolCallError,
     ToolContext,
@@ -26,8 +29,12 @@ from anima_world.tools.base import (
 )
 
 __all__ = [
+    "AGENT_ACTOR",
     "AUTONOMY",
+    "BODY",
     "CHAT",
+    "PLAYER",
+    "PLAYER_ACTOR",
     "SURFACES",
     "ToolCallError",
     "ToolContext",

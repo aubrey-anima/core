@@ -66,6 +66,73 @@ _DEFAULT_USER_JUDGE_PROMPT = (
     "——按{a_name}的性格判断他吃不吃这一套。只输出 JSON，不要解释。"
 )
 
+# 吃醋(以及它的七个兄弟)。**这是一次判定,不是一条规则。**
+#
+# 最容易写错的版本是"听到关于亲近的人的八卦就自动扣分" —— 那又是一处引擎替角色
+# 做主,而且是最坏的那种:同一句"他跟楚夭夭走得近",别扭的人会闷着、坦荡的人会
+# 一笑而过、占有欲强的人才会记恨。写成自动机的话,这三个人的世界里长出的是同一
+# 个数字,而**世界看上去照跑,日志一行不错**。
+#
+# 所以这段提示词里最重要的一句是"不在乎也是一个真实的反应,reactions 留空就行"——
+# 少了它,模型会觉得自己被要求产出点什么,于是每一句闲话都成了心事。
+_DEFAULT_HEARSAY_PROMPT = (
+    "{a_name}刚听人说起一件事。\n\n"
+    "【{a_name}】{a_personality}\n"
+    "{a_name}最近记得的事：{memories}\n"
+    "{a_name}眼下和这些人有关系（好感度范围 -1 到 1）：\n{roster}\n\n"
+    "听到的原话是：「{rumor}」\n"
+    "地点：{location}\n\n"
+    "按{a_name}这个人的性格，判断这句话听在他耳朵里之后，"
+    "他对话里提到的人的观感变了多少。\n"
+    "输出一个 JSON 对象：\n"
+    '{{"summary": "<一句中文，写他听完心里是什么反应；没反应就写他没往心里去>", '
+    '"reactions": [{{"about": "<上面名单里的某个人，必须一字不差地照抄那个名字>", '
+    '"delta": <好感变化，-0.2 到 0.2 的小数>, '
+    '"axes": {{"trust": <信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}}}]}}\n'
+    "几条硬要求：\n"
+    "- **不在乎也是一个真实的反应。** 这句话跟他没关系、或者他这个人根本不往心里去，"
+    "reactions 就留一个空数组 —— 大多数闲话本来就该是这个结果。\n"
+    "- 只许写上面名单里有的人，一个字都不能改；名单外的人不要出现。\n"
+    "- 幅度要克制：真正让人记在心里的事才配得上 ±0.1 以上。\n"
+    "- 反应的方向由性格决定，不由亲疏决定：越在乎的人，听到的话越可能扎人，"
+    "但也可能只是替对方高兴。\n"
+    "只输出 JSON，不要解释。"
+)
+
+# 一条八卦最多能改动几个人的观感。没有上限的话,一个话痨模型会把整张名单都写一遍,
+# 于是"听说了一句话"变成一次全世界范围的关系重排 —— 而每一条都会进事件日志。
+_MAX_HEARSAY_REACTIONS = 3
+
+# 有人叫她一起做件事。**这是一次判定,不是一条规则**,和吃醋逐字同源。
+#
+# 最容易写错的版本是"关系够近就答应" —— 那又是一处引擎替角色做主,而且是最坏的
+# 那种:同一句"一起吃个饭吧",别扭的人会推掉、坦荡的人会跟着去、正忙着的人会说
+# 改天,而写成自动机的话三个人给出同一个答案,**世界照跑,日志一行不错**。
+#
+# 这段提示词里最重要的一句是"不想去是一个完全正常的回答" —— 少了它,模型会觉得
+# 自己被要求成全一件事,于是每一次邀请都被答应,而这条机制的全部意义就是它可以
+# 被拒绝。次重要的是"别替她客气":一个"虽然不太想但还是去了"在数据上就是 accept,
+# 而她那份不情愿一个字也留不下来。
+_DEFAULT_INVITE_PROMPT = (
+    "有人叫{a_name}一起做一件事。\n\n"
+    "【{a_name}】{a_personality}\n"
+    "{a_name}最近记得的事：{memories}\n"
+    "{a_name}眼下对{inviter}的观感：{a_to_b}（范围 0 到 1，0 是形同陌路）\n"
+    "地点：{location}\n\n"
+    "邀请是：「{invitation}」\n\n"
+    "按{a_name}这个人的性格判断，他这会儿去不去。\n"
+    "输出一个 JSON 对象，**两个字段的顺序不要换**：\n"
+    '{{"reason": "<一句中文，写他心里怎么想的，二十字以内>", "accept": true 或 false}}\n'
+    "几条硬要求：\n"
+    "- **推掉是一个完全正常的回答。** 别扭的人、想独处的人、嫌麻烦的人、跟对方还不熟"
+    "的人——推掉才是他会做的事。你不是在帮人促成一件事，你是在如实判断他会怎么做。\n"
+    "- **`reason` 和 `accept` 必须一致。** 先写他心里那句，再照那句填 accept："
+    "写了「嫌麻烦」「懒得动」「不想跟人凑一块儿」却填 true，就是把他那份不情愿"
+    "一笔勾销了——他心里不想去，accept 就是 false。\n"
+    "- 判的是**这个人这会儿**，不是这件事好不好，也不是他该不该合群。\n"
+    "只输出 JSON，不要解释。"
+)
+
 _DEFAULT_RELABEL_PROMPT = (
     "{a_name}对{b_name}的观感刚从「{old_band}」变为「{new_band}」。\n"
     "此前在{a_name}眼中，{b_name}是：{old_r_type}\n"
@@ -92,6 +159,41 @@ class JudgeResult:
     # single-axis verdicts stay fully valid.
     axes_a_to_b: dict[str, float] = field(default_factory=dict)
     axes_b_to_a: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HearsayReaction:
+    """她听完一句闲话之后,对**其中一个人**的观感变了多少。
+
+    `about` 是那个人的**名字**,不是 id —— 判定那一层只认识名字(提示词里给的
+    就是名字)。翻回 id 是调用方的事,而且必须照**它自己发出去的那张名单**翻:
+    让模型报 id 等于给它一个可以编造的东西,而编出来的 id 会安静地写到一个
+    不存在的人身上。
+    """
+
+    about: str
+    delta: float
+    axes: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HearsayVerdict:
+    """一次"听到了"的完整结论。`reactions` 可以是空的 —— **不在乎也是结论**。"""
+
+    summary: str
+    reactions: tuple[HearsayReaction, ...] = ()
+
+
+@dataclass(frozen=True)
+class InviteVerdict:
+    """有人叫她一起做件事,她答不答应 —— **以及一句她自己的理由**。
+
+    `reason` 不是装饰:它是回执里玩家读到的那半句,也是"她为什么不肯"唯一可查的
+    出处。少了它,一次拒绝在产物上和"这个世界的邀请判定没接上"长得一模一样。
+    """
+
+    accept: bool
+    reason: str = ""
 
 
 def _extract_json_obj(text: str) -> Any:
@@ -232,6 +334,142 @@ class RelationshipJudge:
             prompt = _DEFAULT_USER_JUDGE_PROMPT.format(**variables)
         return self._verdict(prompt)
 
+    def judge_hearsay(
+        self,
+        a: dict[str, Any],
+        rumor: str,
+        roster: dict[str, float],
+        memories: list[str],
+        location: str,
+    ) -> HearsayVerdict | None:
+        """她听到一句闲话之后的反应(吃醋那一条)。
+
+        `roster` 是**她认识的人 → 她此刻对他的好感度**,按名字。它同时是给模型的
+        输入和一道闸:回包里名单外的人一律丢掉。让模型自由指认第三方的话,它编出
+        的名字会翻不回任何 id,而"翻不回去就静默丢弃"和"根本没判定"在产物上一模
+        一样 —— 于是这一层坏掉的样子,和它没接上长得完全相同。
+
+        `None` 表示这次判定没产出可用的东西(模型挂了、回包读不懂);和空的
+        `reactions`(她听了不在乎)**是两件事**,调用方要分得开:前者要吭声,
+        后者是正常世界里最常见的结果。
+        """
+        template = _DEFAULT_HEARSAY_PROMPT
+        if self._prompt_store is not None:
+            template = self._prompt_store.get("judge.hearsay", default=_DEFAULT_HEARSAY_PROMPT)
+        variables = {
+            "a_name": a.get("name", "甲"),
+            "a_personality": a.get("personality", ""),
+            "memories": "；".join(memories) or "（无）",
+            "roster": "\n".join(f"- {name}：{value:+.2f}" for name, value in roster.items())
+            or "-（他跟谁都还没什么来往）",
+            "rumor": rumor or "（没说什么）",
+            "location": location or "（未知地点）",
+        }
+        try:
+            prompt = template.format(**variables)
+        except (KeyError, IndexError, ValueError):
+            logger.warning("judge.hearsay template failed to render; using the default")
+            prompt = _DEFAULT_HEARSAY_PROMPT.format(**variables)
+
+        try:
+            reply = self._llm.complete_sync([{"role": "user", "content": prompt}])
+        except Exception:  # noqa: BLE001 - a dead LLM must not stop the world
+            logger.warning("hearsay judge LLM call failed", exc_info=True)
+            return None
+        data = _extract_json_obj(reply or "")
+        if not isinstance(data, dict):
+            logger.warning("hearsay judge produced no usable JSON; dropping")
+            return None
+        summary = data.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            return None
+
+        reactions: list[HearsayReaction] = []
+        for item in data.get("reactions") or ():
+            if not isinstance(item, dict):
+                continue
+            about = str(item.get("about") or "").strip()
+            if about not in roster:      # 名单外的人:模型编的,丢掉
+                if about:
+                    logger.warning("hearsay judge named %r, who is not on the roster", about)
+                continue
+            try:
+                delta = _clamp(item.get("delta"))
+            except (TypeError, ValueError):
+                continue
+            if abs(delta) < 0.01:
+                continue                 # 判了个 0 等于没判 —— 别为它发一条事件
+            reactions.append(HearsayReaction(
+                about=about, delta=delta, axes=_clamp_axes(item.get("axes")),
+            ))
+            if len(reactions) >= _MAX_HEARSAY_REACTIONS:
+                break
+        return HearsayVerdict(summary=summary.strip(), reactions=tuple(reactions))
+
+    def judge_invite(
+        self,
+        a: dict[str, Any],
+        inviter: str,
+        invitation: str,
+        relation: dict[str, Any],
+        memories: list[str],
+        location: str,
+    ) -> InviteVerdict | None:
+        """有人叫她一起做件事,她答不答应(一起做事那条)。
+
+        `None` 表示这次判定没产出可用的东西(模型挂了、回包读不懂)——
+        和 `accept=False`(她不想去)**是两件事**,调用方要分得开:前者要吭声并
+        退回 `together.decide_alone`,后者是这个世界里最正常的一种结果。
+
+        ⚠️ **这条路上没有"世界说不行"**。同地、睡没睡、手上有没有事、做不做得了,
+        全在调用方那一段(`Scheduler.joint_gate`)判完了 —— 拿一个睡着的人去问
+        模型"你想不想去",它一定给得出一句像话的回答,而那句话是编的。
+        """
+        template = _DEFAULT_INVITE_PROMPT
+        if self._prompt_store is not None:
+            template = self._prompt_store.get("judge.invite", default=_DEFAULT_INVITE_PROMPT)
+        variables = {
+            "a_name": a.get("name", "他"),
+            "a_personality": a.get("personality", ""),
+            "inviter": inviter or "有人",
+            "invitation": invitation or "（没说清楚）",
+            "a_to_b": f"{float(relation.get('a_to_b', 0.0) or 0.0):.2f}",
+            "memories": "；".join(memories) or "（无）",
+            "location": location or "（未知地点）",
+        }
+        try:
+            prompt = template.format(**variables)
+        except (KeyError, IndexError, ValueError):
+            logger.warning("judge.invite template failed to render; using the default")
+            prompt = _DEFAULT_INVITE_PROMPT.format(**variables)
+        try:
+            reply = self._llm.complete_sync([{"role": "user", "content": prompt}])
+        except Exception:  # noqa: BLE001 - a dead LLM must not stop the world
+            logger.warning("invite judge LLM call failed", exc_info=True)
+            return None
+        data = _extract_json_obj(reply or "")
+        if not isinstance(data, dict) or "accept" not in data:
+            logger.warning("invite judge produced no usable JSON; falling back")
+            return None
+        raw = data.get("accept")
+        if isinstance(raw, str):
+            # 模型写 `"accept": "true"` 的概率不低,而按类型严格拒绝的话,这一次
+            # 判定退回确定性那条路 —— 她的性格白读了,而且看不出来。
+            lowered = raw.strip().lower()
+            if lowered in ("true", "yes", "是", "答应", "1"):
+                raw = True
+            elif lowered in ("false", "no", "否", "不", "0"):
+                raw = False
+            else:
+                return None
+        if not isinstance(raw, bool):
+            return None
+        reason = data.get("reason")
+        return InviteVerdict(
+            accept=raw,
+            reason=str(reason).strip()[:60] if isinstance(reason, str) else "",
+        )
+
     def relabel(
         self,
         old_r_type: str,
@@ -349,6 +587,35 @@ class DeterministicRelationshipJudge:
             f"{a_name}{where}和{player_name or '访客'}聊了一段",
             relation.get("a_to_b", 0.0), relation.get("b_to_a", 0.0),
         )
+
+    def judge_invite(self, *_args: Any, **_kwargs: Any) -> None:
+        """始终 None —— 调用方退回 `together.decide_alone`。
+
+        这里**故意**不给一个确定性替身,而 `judge` 那一格给了 —— 差别不在难易,
+        在**替身归谁写**:好感度漂移的替身只能由引擎写(它是引擎自己的机制),
+        而"他肯不肯"的替身早就写好了,写在**世界里** —— 关系有多近、作者给他
+        声明的「随和」是多少、他上一轮对这个人的姿态是什么。
+
+        所以这一格返回 `None` 不是缺席,是**把判断让回给那三样**(全文见
+        `together.py` 的模块说明)。在这儿再写一份"关系够近就答应",就成了引擎
+        手里的第二份判断,而两份判断迟早给出不同的答案。
+        """
+        return None
+
+    def judge_hearsay(self, *_args: Any, **_kwargs: Any) -> None:
+        """始终 None —— 没有模型时**她听过就算了**,这也是设计好的下限。
+
+        和 `relabel` 同一条理由,而且更硬:好感度漂移有个像样的替身(方向恒为正、
+        幅度只看剩余空间),因为"聊过的人彼此稍微熟一点"这件事**与说了什么无关**,
+        所以一个不看内容的近似还站得住。吃醋正相反 —— 它的全部内容就是
+        "**这个人**听到**这句话**的反应"。任何不看这两样的替身都只能是
+        "听到关于亲近的人的八卦就扣 0.05",而那恰恰是这条机制存在要否定的东西:
+        白霜和「零」会得到同一个数字,世界照跑,日志干净,而差别没了。
+
+        宁可这一层在没配 key 的世界里整个缺席 —— 缺席看得见(`contact_stats` /
+        `note_subsystem` 会点名),假装判断看不见。
+        """
+        return None
 
     def relabel(self, *_args: Any, **_kwargs: Any) -> None:
         """始终 None —— 旧 r_type 保持不变,这是设计好的下限。

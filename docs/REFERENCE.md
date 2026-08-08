@@ -99,8 +99,9 @@
 | `location_join` | `id`, `name`, `description` | 创世时播下的地点 |
 | `travel` | `from`, `to`, `minutes`, `arrive_at` | `arrive_at` 是到达的 tick |
 | `payment` | `from`, `to`, `amount`, `reason` | 经济账本的唯一真相,余额是它的投影 |
+| `item_transfer` | `from`, `to`, `item_id`, `qty`, `from_name`, `item_name` | 库存是它的投影。两个 `*_name` 是**那一刻的人话**（2.2.0 起，`World.give_item` 写）：玩家的显示名住在内存态、物品名住在经济表，重放时两样都可能不在手上 —— 不随事件走的话，重放出来就是「8f3c-… 把 sketchbook 给了我」。老事件缺这两个字段，读的一方要回落 |
 | `item_consume` | `who`, `item_id`, `source` | |
-| `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)或 `reflection`(反思) |
+| `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)、`reflection`(反思)或 `reaction`(听完一句闲话的反应)。后两种**不外传**(§2.8) |
 | `conversation` | `agent_id`, `conversation_id`, `summary`, `message_count`, `started_at`, `closed_at`, `participants`, `location` | 整场会话只发这一条,在关闭时 |
 | `capability_registered` | `id`, `kind`, `description`, `params_schema` | 首启生成的能力目录 |
 | `subsystem_health` | `subsystem`, `status`, `reason`, `previous` | 子系统档位**切换**(ok↔degraded)。只在切换时发,不是每次降级都发 |
@@ -232,8 +233,41 @@ tick 与不带它一致。
   `kind='hearsay<N>'`,每转一手重要度打折 15%,**三手之后自然消亡** —— 谣言有半衰期。
   声誉由此涌现:没见过你的人也可能"听说过你"。每对角色每世界日只掷一次骰子。
   `chat` 传给对话对象,`idle_social` 传给**同地在场的每一个人**。
+  **内心活动不外传**:`reflection`(反思)与 `reaction`(听完一句闲话的反应)不可传。
+- **听到之后的反应**(`social.hearsay_reaction.enabled`,默认关):一条八卦落地之后,
+  引擎问一次判定"这句话听在她耳朵里是什么感觉"。吃醋是其中一种。
 - **小团体**(`world.cliques`):friendship 边的连通分量(≥2 人),日切重算的派生缓存。
   刻意不用 LLM —— 50 角色毫秒级,结果确定、可测试。
+
+##### 吃醋:它是一次判定,不是一条规则
+
+最容易写错的版本是"听到关于亲近的人的八卦就自动扣分",而那是一处**引擎替角色做主**:
+同一句「他跟楚夭夭走得近」,别扭的人闷着、坦荡的人一笑而过、占有欲强的人才记恨。
+写成自动机的话三个人得到同一个数字,而世界照跑、日志一行不错。
+
+所以走 `RelationshipJudge.judge_hearsay`(提示词键 `judge.hearsay`):输入是她的性格、
+那句原话、**她认识的人的名单**(名字 → 此刻的好感度);输出是一句"她听完什么反应"
+加零到三条 `{about, delta, axes}`。反应落成普通的 `sentiment_delta`(跨档、图谱边、
+planner 全挂在它上面,`payload.cause="hearsay"` 标出来路),外加一条 `reaction` 记忆
+—— 少了它,数字动了而她说不出为什么,下一轮就成了莫名其妙的冷淡。
+
+四条硬纪律:
+
+| | |
+|---|---|
+| **名单是闸** | 回包里名单外的名字一律丢掉。判定那一层只认识**名字**,永远碰不到 id —— 也就编不出一个 |
+| **空 ≠ 失败** | 空的 `reactions` = 她不在乎(正常世界里最常见的结果);`None` = 判不出来(要吭声,`note_subsystem("hearsay_reaction")`) |
+| **最多三条** | 不封的话一个话痨模型会把整张名单写一遍 —— 一次全世界范围的关系重排,而每一条都进事件日志 |
+| **`reaction` 不外传** | 可传的话它会变成一条 hop=0 的新八卦,「三手消亡」整个绕过去 —— 一句闲话可以永远活下去,每转一手还要花一次模型调用 |
+
+**没配模型时这一层整个缺席,而且故意不给确定性替身**(`DeterministicRelationshipJudge.
+judge_hearsay` 恒为 `None`)。理由和 `relabel` 同一条,而且更硬:好感漂移有个像样的
+替身(方向恒为正、幅度只看剩余空间),因为"聊过的人彼此稍微熟一点"与说了什么无关;
+吃醋正相反,它的全部内容就是"**这个人**听到**这句话**的反应"。任何不看这两样的替身
+都只能是"听到亲近的人的八卦就扣 0.05" —— 那恰恰是这条机制存在要否定的东西。
+
+**代价**:每落地一条八卦一次模型往返。上限由八卦自己封着(每对角色每世界日只掷一次
+骰子,25% 命中),所以 N 个角色一天最多约 `0.25 × N²` 次。
 
 ### 2.9 聊天子系统
 
@@ -286,6 +320,33 @@ tick 与不带它一致。
   她可以描写看见你;否则是**手机文字私聊**,并禁止她臆造你在场。
   **没调过 `player_move` 就是没告诉世界你在哪,一律按手机私聊处理** —— 引擎不猜。
   (`anima-world chat` 会替你先走到对方跟前。)
+- **人和 NPC 共用同一套行动。** 玩家此前只有两个入口,而 `World.player_action()`
+  是个**空壳**:签名是一个自由字符串,进去只落一条日志事件,不校验、不产生任何后果。
+  于是同一个世界里有两套行为学 —— 她走路要花时间、吃饭要付钱;人点一下"走到哈尔滨",
+  世界里只多一行字。`World.player_tool(player_id, tool_id, params, agent_id=...)`
+  补的就是这笔账:它把玩家接到**同一份 `ToolSpec`** 上,同一套参数校验、同一个
+  handler、同一批副作用,区别只有"施动者是谁"(`ToolContext.actor`)。
+  `World.player_tools()` 列出人点得动的那些(`PLAYER` 面),宿主照它画按钮,
+  不必自己维护一份会和引擎分叉的清单。
+  ⚠️ **进这个面的门槛是"在世界里真发生了什么"**,不是"这个动作听起来人也能做"。
+  今天在面上的只有两个:`walk`(真在途、发 `travel`、到点补 `location_join`)与
+  `broadcast`(在场角色真的留下 `memory_seed`)。
+  `work` / `eat` / `sleep` / `wander` / `seek_company` / `talk_to` **暂不开放**:
+  玩家侧它们最终落到 `player_action`,那条只写一行事件日志、**不投递给任何角色的
+  感知**,也没有需求带和账本可扣 —— 开了就等于宿主照着"付钱是副作用"画出一个
+  点下去什么也不发生、还不报错的按钮。要开先补玩家侧的那份账(需求带 / 钱包 /
+  物品消耗),和 `interact` 门口挂的是同一条理由。`wait_for_user` 与 `reach_out`
+  则永远不给人(前者对人没有意义,后者人本来就是主动方)。
+- **人走路和她走路花一样的时间。** `World.player_walk(player_id, location)` 与
+  `player_move` 分工明确:后者是宿主**把他放在这儿**(进世界、换场景),瞬时;前者是
+  **他自己走**,共用 `Scheduler._travel_minutes`,发同一种 `travel` 事件,途中干不了
+  活 —— 但**说得了话**(`chat` 是唯一在途放行的动作)。第一次进世界(还没有位置)
+  不收路费,直接落地:没有出发地的话"走过去"量不出来。
+  `World.player_location(player_id)` 是**唯一**结算到达的地方:玩家没有 tick 循环
+  替他跑(角色由 `_land_arrivals` 放下),所以"他到了没有"在每次读的时候算,
+  到达那一次补发 `location_join`。`World.player_in_transit(player_id)` 问他还在不在
+  路上(内部先结算一次,免得一个已经到了的人被报成还在赶路)。
+  ⚠️ 行程和位置一样是**进程内内存态**,重启即失效。
 - **NPC 之间的关系需要 LLM,不是因为判定,是因为动作。** 判定有替身(见 §2.4),但
   NPC↔NPC 的判定只由带明确对象的 `chat` 动作触发,而选中 `chat_with_<某人>` 是
   planner 的决定 —— 没有 key 就没有 planner。`idle_social`(「想找个人说说话」)不指名
@@ -350,10 +411,60 @@ Mock 上,而本地 ollama 与若干 OpenAI 兼容端点的 function calling 支�
   可写的 kind 是白名单:`address_form` / `description_style` / `tone_preference` /
   `forbidden_topics` / `nickname_for_player`。宿主也可以直接
   `World.set_persona_override()`,不必经过分类器。
-- `narrative_direction` —— 交给 director:**v1 只对已经存在的角色动手**
-  (`come_here` / `leave` / `act`),而且不进提示词、进**世界** —— 让某人过来就是一次真的
+- `narrative_direction` —— 交给 director:**只对已经存在的角色动手**
+  (`come_here` / `go` / `leave` / `sleep` / `eat` / `work` / `talk_to` / `interact` /
+  `give` / `act`),而且不进提示词、进**世界** —— 让某人过来就是一次真的
   行程,于是她下一次读 grounding 时会真的看到那个人在场。不认识的人一律拒绝并指出
-  下一步(自然语言造人是 v2:那需要每日上限、作者 opt-in、`authored_by_user` 标记)。
+  下一步(自然语言造人还没做:那需要每日上限、作者 opt-in、`authored_by_user` 标记)。
+
+  params 是 `{"target", "action", "place", "object", "verb", "detail"}`。要点:
+
+  - **「指挥正在跟你说话的那个人」是头等场景。** 玩家嘴里绝大多数指令(「你去哈尔滨」)
+    都是这一类。它照常兑现,而且**不接管她的回话** —— 指令进世界,一句「刚刚真发生了
+    什么」作为 `extra` 块进这一轮的提示词,她自己开口。于是"一边答应一边真的走"是同一
+    件事的两面。(从前这条路回一句"(直接跟她说就好。)"并 `handled=True`,把玩家那句话
+    整个吞掉。)那句 grounding **只陈述事实,不下命令** —— 服从与否由人设决定,引擎不在
+    判定逻辑外面开第二道后门。
+  - **「你」由引擎认得,不只靠分类器。** 分类器会规规矩矩地把 `target` 填成字符串
+    `"你"`(真模型实测),`Director._resolve` 因此自己把第二人称(和空 target)归给说话人。
+    分类器提示词里同时给了 `{speaker}` 与 `{places}`,但那是省一次绕路,不是这条的依据。
+  - **地点是玩家给的参数。** `go` 收 `place`,按**名字**模糊匹配(「哈尔滨」→
+    「哈尔滨·冰雪大世界」);对不上就拒绝并列出有的是哪些地方,对得上好几个也拒绝
+    ——随便挑一个的话她真的会走过去,而一行日志都不报错。`leave` 不带 `place` 时才回退到
+    "挑一个别的地方",回执里说清楚挑了哪儿。
+  - **过日子的动作真的发生**(2.1.0)。`sleep` / `eat` / `work` / `talk_to` / `interact`
+    走的是行为树走的那条路(`do_action` → `Scheduler.emit_action`;`interact` 走
+    `perform_affordance`),**一行实现都不重复** —— 排班让她睡、她自己决定睡、玩家让她睡,
+    在世界里必须是同一件事。在这之前它们全部落进 `act`:一条记忆,世界里什么也没发生,
+    而她那一轮的回话是"（零找了个地方躺下，闭上眼睛。）"。**照跑、报成功、给错东西。**
+
+    分界不是"该不该替她答应",而是**引擎有没有这个动作**:有就兑现,没有(「把冰鞋扔了」)
+    就退回 `act`,照实说"她知道了"。`talk_to` 的 `object` 是**另一个人**,解析它时
+    **不给第二人称兜底**(否则"你去找你说话"变成她跟自己搭话);对方不在她这儿就照实说
+    "搭不上话",在场语义归引擎守。`interact` 的拒绝理由**原样带出来**,不合并成一句"没成"
+    —— 本体层特意把它分成三四类,合并等于把那份区分丢掉。
+  - **`give` 是玩家给她东西,方向反过来**(2.1.0)。施动者是玩家,所以不走行为树,走账本
+    (`item_transfer`)—— 库存是事件的投影,不记账的东西下一次重放就没了。**玩家手上没有的
+    给不出去**:不挡的话一句话就能凭空造物,而库存扣不到负数、账面上连痕迹都没有。
+    认名字只在**他手上有的那些**里面认 —— 先认全世界的物品定义会让"你没有这个"和"世界里
+    没这个"给出同一句回执,而玩家的下一步完全不同。
+    **她会记住是谁给的**(2.2.0):落一条 `gift` 记忆(「阿檀把速写本给了我」,重要度
+    0.65),走 `TriggerEngine` 那条唯一的路,所以重放折得出同一条。0.65 不是随手取的 ——
+    `contact` 判"强记忆"的线是 0.6,于是送过礼免费成了她主动想起你的由头(§2.9.8)。
+    ⚠️ **判据是「人给人的、且不是交易」**,不是"所有 `item_transfer`":那是账本上的一条
+    大路(买东西、创世注入、节拍发货都走它),给每一条都记一笔的话,一个跑着经济的世界
+    一天几十条,而记忆表**有界** —— 她真正的过去会被"从货架上拿了一杯咖啡"挤出去,而表
+    看上去满满当当。两头都得是人(`__town__` / `__world__` / `shop:*` / 没有 `from` 的
+    无中生有一律不算),且**不带 `reason`**(那是领料与买卖的账目标记)。写成"没有
+    `reason` 才算"而不是穷举交易种类,是因为两个方向漏掉的后果不对称。
+  - **`act` 兑现的是"他知道了",不是"他做了"。** 它现在是**兜底**:引擎没有对应动作时才
+    走到这儿。落 `memory_seed`(和 `broadcast` 同一条路)进目标的记忆,于是它真的进得了
+    他的提示词与 planner 的一天;回执也只说到这儿。从前它只发一条
+    `agent_action{action:"directed"}` —— 全仓库一个写入点、零个读取点 —— 却回
+    "(X 照做了。)",**什么都没做却报成功**,比不支持更坏。
+  - **冲突策略:玩家改得动「她此刻在哪」,改不动「她的日程」。** 导演的移动走
+    `emit_action` 那条真路(在途、走路花时间、可被需求紧急带打断),但不写计划表 ——
+    到点了作息表照样把她收回去。
 
 分类**往 dialogue 上偏**:置信度低于 `chat.intent.min_confidence`(默认 0.6)、参数不
 全、分类器抽风,一律退回对话,并把原因写进 `meta["intent_reason"]`。两种错的代价不
@@ -463,13 +574,42 @@ tool_call 落在**消息行**上(`messages` 表的四个新列,运维台照样�
   "emit": [{"when": "size >= max_size", "type": "tree_matured"}] }
 ```
 
-**选择器**三种:`{"kind": "tree"}`(某一类的全部)、`{"owner": "world"}`(指定一个)、
+**选择器**四种:`{"kind": "tree"}`(某一类的全部)、`{"owner": "world"}`(指定一个)、
 `{"action": "work"}`(**此刻正在做这个动作的角色** —— 修炼、采矿、耕种都是这一类:
-投入的是时间,速率由行为者自己的量决定)。
+投入的是时间,速率由行为者自己的量决定)、`{"not_action": "sleep"}`(**此刻没在做
+这个动作的角色**,`action` 的补集)。
+
+补集是被「半夜还醒着的人欠觉」逼出来的,而"醒着"在这个引擎里的写法只能是"没在睡"。
+少了它这条规律只有两种写法,**两种都是错的**:写成 `{"kind": "agent"}` 则睡着的人
+也一起欠觉(语义整个反了);写成一条攒债 + 一条还债则两条规律在同一轮里抢同一个量,
+后写的赢 —— 而两条 `every` 不同的话它们只是**有时**相撞,错得断断续续。
+候选池是 `agent` 那一类(这个引擎里只有角色"在做一件事");**此刻没有任何动作的
+角色算"没在睡"**,漏掉她的话新角色会安静地免疫掉所有 `not_action` 规律。
 
 **表达式**能用的东西刻意很少:四则、比较、与或非、三元(`a if 条件 else b`),以及
 `min` / `max` / `abs` / `round` / `clamp` / `floor` / `ceil`。变量先在这个 owner 自己的
-量里找,再找 `world_<key>`(全局),外加恒有的 `dt` 与 `now`。
+量里找,再找 `world_<key>`(全局),外加恒有的**内置名**:
+
+| 内置名 | 是什么 |
+|---|---|
+| `dt` | 这条规律要写的那些量,上次被写到现在过了多少 tick(真实流逝) |
+| `now` | 世界时钟(单调 tick 数) |
+| `day` / `hour` / `minute` / `minute_of_day` | 世界日历 —— 由 `now` 和这个世界的 `world.minutes_per_tick` 折出来 |
+
+日历那四个补的是一个把**整类**昼夜规律挡在门外的洞:"半夜还醒着要还睡眠债""日落
+之后果子不再长""子时行功事半功倍"都需要"这一天里的哪个时刻",而 `now % 288` 这种
+手算解决不了 —— 一天多少 tick 是每个世界自己的配置,写进表达式等于把一个配置值
+抄进了数据。**能力(§2.9.6)读同一组名字**:能写「日落之后不长」的作者,理应能写
+「天黑了砍不了柴」。
+
+⚠️ **量名不许和内置名撞车,撞了开不了机。** 内置名在命名空间里放最后,**盖过**同名
+的量 —— 一个声明了 `hour` 的世界会安静地读到钟点:量照存、规律照跑、日志干净,只有
+算出来的数是别人的。
+
+⚠️ **`when` 会让 `dt` 攒起来。** 一条只在夜里满足 `when` 的规律,白天一次都不写,
+于是 23:00 第一次求值时 `dt` 已经是几百 —— 一下就把量顶到上限。要按时段分速率,
+把判断写进**表达式**(`a if hour >= 23 else b`)而不是 `when`,这样它每轮都写、
+`dt` 始终是一个 `every`。演示世界的 `熬夜攒睡眠债` 就是这个形状。
 **绝不 `eval`** —— 表达式解析成 AST、逐节点过白名单,再由引擎自己的解释器求值;
 属性访问、下标、lambda、推导式一律在**解析时**被拒。
 
@@ -937,6 +1077,115 @@ world.check_entity("tree:oak")    # 只查这一个
 新增一个种类等于让"这条规律合不合法"随时间变化,重放就不再确定。而种一棵树只是多一个
 owner —— 规律早就写好了,量的默认值也早就声明过。
 
+##### 2.9.6.6 一起做事:`participants`(2.3.0)
+
+`interact` 一直是**单人**的 —— 上面那句定义的原话就是"一个人、一个东西、一个瞬间"。
+于是两个站在同一个地方的人只能各干各的,而世界记不下"他们一起吃了顿饭"。
+
+这一格补的就是那件事。**而共同经历正是关系的主要来源** —— 在这之前关系只有两条来路:
+说了多少句话(§2.9 的对话判定)和听说了什么(§2.8 的八卦 / 吃醋),两条都是**语言**。
+一个只靠说话改变关系的世界,和一个聊天机器人的差别只剩下背景板。
+
+```json
+{"id": "tree", "affordances": {
+  "树下小坐": {
+    "label": "在树下坐会儿",
+    "participants": {"min": 1, "max": 2},
+    "duration": 6,
+    "requires": ["me_体力 >= 5"],
+    "costs": {"体力": "me_体力 - 5"}
+  }
+}}
+```
+
+```python
+world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "树下小坐",
+                             "with": ["遥"]}, surface="body")
+```
+
+`with` 认三种写法:角色 id、角色的名字、以及 `player:<id>`(玩家的显示名和一句「我」
+也认)。**声明本身就是开关**:不写 `participants` 的能力和从前逐位相同,写了的一个人
+调不动(`participants_missing`),没写的给了名单也一样拒(`not_joint`)—— 两条都不许
+静默降级成单人,因为降级之后世界照跑,而作者写下的"这件事一个人做不成"一声不响地没了。
+
+**没有 `consent` 这个开关。** 给作者一个"不用问对方"等于把下面整段话交回去关掉,而
+"拉着谁就一起吃饭"正是这一层要挡的东西 —— 一个取消对方意志的能力,比没有这个能力坏
+得多。写了 `participants.consent` 会**开不了机**(点名报错,不静默忽略)。
+
+###### 别人凭什么答应:两段,次序是有意的
+
+**第一段是世界,不是她。** `Scheduler.joint_gate` 判六条:`self`(他就是发起人)/
+`unknown` / `in_transit`(在赶路)/ `elsewhere`(不在这儿)/ `asleep` / `busy`
+(手上有件占着他的长过程,§2.9.6.3)/ `incapable`(他做不了 —— 走 `apply_affordance`
+空跑一遍,和出生自检同一条路)。api 层再加两条只有它知道的:`muted`(他把这个玩家静
+音了,§2.9.1)和 `player_not_here`(玩家不在她跟前)。
+
+**这几条一条都不是"她的意思"**,所以要和下面那一段分得开:一句笼统的"她没答应"会让
+玩家(和她自己)以为被拒绝的是这个人,而真正的原因可能只是他在赶路。
+
+**第二段是性格,而且引擎不替角色做主。** 和吃醋(§2.9 的「它是一次判定,不是一条规
+则」)逐字同源:
+
+- **有判定器**(配了 key):`judge.invite` 读他的人设、他跟邀请人的关系、他最近记得的
+  事,给一个 `{"accept", "reason"}`。同一句"一起吃个饭吧",别扭的人会推掉、坦荡的人会
+  跟着去 —— 而这个差别只有读得到人设的东西给得出来。
+- **没有判定器**(默认状态):退回 `together.willingness` = 亲密度 × 「随和」× stance。
+  这**不是引擎做主**:关系是世界长出来的(别扭的人和你的好感爬得慢),「随和」是
+  **作者在数据里声明过的**(`social.joint.consent_stock`,默认量名「随和」,
+  **没声明 = 1.0** —— 和 `contact.initiative_stock` / 声明本身就是开关逐字同构)。
+
+  这个替身站得住,是因为"他跟谁走得近就更肯跟谁一起做事"这句话**与邀请的内容无关**。
+  (对照 `judge_hearsay` 为什么**不**给替身:吃醋的全部内容就是"这句话"。)
+  **降级要吭声** —— `subsystem_health` 里的 `joint_consent`。
+
+一次调用只替**一个**玩家说话(`player_not_you`):替别人点头等于把他的意志也取消掉,
+只是换成了玩家。
+
+###### 代价对每个人各扣一次,而**顺序不许有意义**
+
+`with: ["柔", "白霜"]` 和 `["白霜", "柔"]` 必须给出**逐位相同**的世界。做法和规律那一
+层的双缓冲(§2.9.3)同源:**先把所有人的量与随身物读成快照,在快照上逐个算,全过了才
+动手写**。边算边写的话,第一个人扣掉的体力会成为第二个人 `requires` 的输入 —— 于是
+名单顺序决定了谁做得成,而那是一条没有任何人写下过的规则。
+
+**一个人过不了闸,整件事就不发生。** 三个人吃饭,一个人没钱,不该变成两个人吃饭。
+
+两条要知道的:目标身上的 `set` 只落**一次**(量只有一份,不是一人一份),用**发起人**
+那一份算 —— 发起人是一个有名有姓的角色,和参与者名单的次序不是一回事;**玩家不付量
+的代价**(他身上没有量,`agent` 种类是给角色声明的),照实说比让它看起来像被算过好。
+
+###### 关系变化是共同经历的**效果**,不是再调一次判定
+
+**这一条是这一批需求要治的病本身。** 再调一次 LLM 判定的话,"一起过了一夜"和"多聊了
+两句"又回到同一个入口上,而这一层存在的全部理由就是它们不该一样。所以它是**算出来**
+的,一次模型都不调,跑得起在 tick 线程上,同样的经历永远给出同样的账:
+
+```
+delta = social.joint.relation_step × 人数因子 × 时长因子 × (1 - |当前值|)
+        人数因子 = 2 / max(2, n)                    两个人最亲,人越多越淡
+        时长因子 = 0.5 + 0.5 × min(1, duration / social.joint.full_duration_ticks)
+                                                    一下子的事拿一半,不是零
+```
+
+`relation_step` 默认 **0.06**,而 `DeterministicRelationshipJudge.STEP` 是 **0.04** ——
+这个大小关系是有意的,`tests/test_together.py` 钉着它:**一起经历过的事,应该比说过
+多少句话更能改变关系。**
+
+三轴上也和聊天不一样:聊天给 `affection=d, trust=d/2, respect=0`,共同经历给
+`affection=d, trust=d/2, respect=d/2` —— **`respect` 唯一长得出来的地方**。这个引擎里
+它从来没动过一次(线上二十条关系全是 0),不是因为它不重要,是因为此前没有任何机制会
+写它。一起把一件事做完会。
+
+落点是既有的 `state_change{kind: sentiment_delta, cause: "joint_activity"}` 加每人一条
+`memory_seed{kind: "shared_experience"}` —— 不是一张新表:关系跨档、`relation_shift`
+记忆、图谱边、planner 读到的那份东西全挂在它上面。数字动了而她说不出为什么,是这一层
+最容易长成的假。
+
+长过程(`duration > 0`)每个人各记一条在做的事,而**只有发起人那条结算** —— 每人结算
+一遍的话,目标身上的量会被写上人数遍。收尾时按**位置**重查谁真的从头待到尾(不按还剩
+没剩下一条记录:那要依赖结算次序,而那是一个没有人写下过的约定),中途走开的人不算
+"一起吃过饭"。
+
 #### 2.9.7 有界性是**渲染器**的属性,不是存储的属性
 
 本体层加进来之后,世界里可以有一万棵树。它们住 Redis 还是 MySQL 一样把提示词撑爆 ——
@@ -952,6 +1201,167 @@ owner —— 规律早就写好了,量的默认值也早就声明过。
 不随世界**变大**而涨(20 棵树 vs 3000 棵树,实测 989 字 vs 991 字)、黑板按她的树封顶、
 以及**让有界的东西保持有界的那个前提**(`edges` 有上界只因为谓词是闭集 —— 哪天让 LLM
 自己造谓词,存储分家的账要重算)。
+
+#### 2.9.8 她自己想起你(`contact.enabled`,2.1.0,默认关)
+
+§2.9.2 的定时轮次让世界自己转了起来,但它问的是"**你身边**有什么可做" —— 它的主力
+能力 `reach_out` 明文拒绝不在场的人。于是玩家不开口时,世界是活的而**世界和玩家的
+关系**是死的:她过她的日子,你不来她就永远不知道你存在。
+
+这条开关补的是那一半:她会想起一个**不在跟前**的人,并把这个念头落成一条
+`agent_wants_contact` 事件。
+
+**边界:引擎只负责"她产生了这个念头"。** 怎么送到玩家眼前(推送、红点、消息列表)
+归宿主那一层 —— 引擎里塞推送等于把"她想找你"和"你的手机响了"焊死在一起,而后者
+根本不是这个世界里的事。
+
+**它和 `agent_hail` 互补,不是同一件事的两种强度。** 敲门(§2.9.2 / `World.inbox`)
+的语义是"她已经在你面前开口了",只在你在场时成立;这一条**只在你不在跟前时成立**
+(`face_to_face` 是它的硬闸之一)。合成一个的话,宿主没法把"她来打招呼"和"她想联系
+你"显示成两件事 —— 而对玩家来说那是完全不同的两件事。
+
+##### 判定从世界里长出来,不从提示词里编出来
+
+    score = closeness × urge × readiness
+
+三个因子各管一件事,**各自都能单独把她挡下来**(所以是乘法不是加法):
+
+| 因子 | 是什么 | 从哪儿读 |
+|---|---|---|
+| `closeness` | 够不够近 | 三轴关系加权 `0.6·sentiment + 0.25·affection + 0.15·trust`。**`respect` 不进** —— 敬重不使人想念,一个你很敬重的人完全可以是你一辈子不会主动联系的人。⚠️ **`sentiment` 占大头是照真数据定的**:一个跑了 1975 条事件的真世界里,二十条关系的 `trust`/`affection`/`respect` **全是 0**(判定确实在问,真模型那一路上从没落地)。三轴均摊的话那个世界最大只到 0.27,而闸在 0.35 —— 这一层在生产上一次都不会触发,表现和"今天没人想你"逐字相同 |
+| `urge` | **有没有由头** | 四类由头合成 `1-Π(1-w)`。**没有由头就是 0** |
+| `readiness` | 她这会儿是不是这个状态 | 六条硬闸(见下)归零;其余是心气儿 × 她自己的主动性 × 上一轮对你的 stance |
+
+四类**由头**,每条都带着 `ref`(出处),顺着它翻得回世界里那件事:
+
+| 由头 | 从哪儿长出来 | 权重 |
+|---|---|---|
+| `errand` 他交代过我一件事 | 她的 `directive` 记忆(玩家经 `chat.intent` 的"让他做件事"投递的那条,§2.9.1) | 0.65 |
+| `strong_memory` 刚发生的事让我想起他 | 她近期(`contact.recent_ticks`)一条 `importance ≥ 0.6` 且提到他的记忆 | 0.60 |
+| `absence` 他很久没出现了 | 他上次跟她说话是哪一 tick(`contact` 表)。**一个世界日起步、三个世界日封顶** —— 不封的话一个下线三个月的玩家一登录就被所有人同时想起 | ≤0.55 |
+| `gossip` 我听人说起他 | 她的 `hearsay*` 记忆里提到他的那条(§2.9 八卦传播) | 0.40 |
+
+同一类只取最重的一条:不这么做的话二十条八卦会把 `1-Π(1-w)` 顶到 1.0,于是"由头"
+退化成"记忆条数",而那和拍脑袋只差一个名字。
+
+**六条硬闸**(`blocked_by` 会说出是哪一条 —— 说不出原因的静默和这层机制没接上长得
+一模一样):在睡觉 / 在赶路 / 手上有件**占着她**的长过程(`occupies`,§2.9.6.3;
+怀胎不算,做椅子算)/ 正在跟人说话 / 他就在她跟前 / 她把他静音了。
+
+**LLM 在这一层没有否决权。** 它只写那句 `topic`(想说什么的线索)。理由有两条:
+判定要能复现(由头是哪条记忆、关系多近、她那会儿在干什么 —— 一次"我觉得该找他"把
+这三样换成一次掷骰子);以及没配 key 是这个引擎的默认状态,一个"没 key 就不成立"
+的机制等于在默认状态下缺席。模型挂了 / 没配 / 读不懂,**事件照发**,`topic` 退回
+由头原文并把 `topic_source` 标成 `reason`。
+
+##### 性格怎么进来,而且不靠猜
+
+三条路,都不是从人设文本里猜关键词(那是最脆的一种,改一个字就换一个行为):
+
+1. **关系本身。** 别扭的人和你的 sentiment/affection 爬得慢 → `closeness` 低 →
+   她本来就更晚才想起你。这条不用写任何代码。
+2. **她自己声明过的量**(`contact.initiative_stock`,默认「主动」)。作者在
+   `kinds.agent.quantities` 里给她声明一个,这一层就读得到;**没声明 = 1.0**,
+   和本体层"声明本身就是开关"逐字同构 —— 不写这个量的世界行为逐位不变。
+3. **stance**(§2.9.1)。「回避」×0.25、「挑逗」×1.30,中性 1.0,所以 stance 关着的
+   世界行为同样逐位不变。
+
+##### 上限与衰减,两条都要
+
+`contact.max_per_day` 管的是**绝不超过几次**,`contact.fatigue` 管的是**越找过越难
+再找**(今天每触发一次,门槛乘一次)。只有上限的话,今天那两次会挤在同一个小时里 ——
+过了闸之后再触发一次的代价是零。冷却(`contact.cooldown_ticks`)与次数**落库**
+(`anima:{world_id}:contact`),不是进程内的字典:内存态的冷却让"换个引擎镜像重启"
+变成"一发版就四个人同时来找我",而日志里一条错都没有。
+
+**它不复用 autonomy 的额度**,也不挂在 `autonomy.enabled` 或 `chat.tools.enabled` 上。
+`autonomy.max_per_day` 管的是"她主动做事几次"(广播、走开、找身边的人搭话)——
+今天照料了两棵树就再也想不起你,不是节制,是错。
+
+```bash
+anima-world config set contact.enabled true --world-id w
+anima-world contact --world-id w                 # 谁想起过谁、由头是什么
+anima-world contact --world-id w --why           # 此刻算出来是多少(含没触发的)
+```
+
+`--why` 走 `World.contact_forecast()`,**和真轮次共用同一个判定函数**。调阈值要看
+的正是它:只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。
+
+#### 2.9.9 异地就只能打电话(`presence.enforce_colocation`,2.3.0,默认关)
+
+在这之前**玩家是个幽灵**:不管角色在哈尔滨还是三亚,他都能面对面说话、给东西、一起
+做事 —— 位置这个维度等于白设计了。而引擎里位置从来都是真的:走路要花时间(§2.2)、
+同地才看得见对方身上的量(§2.9.4)、`reach_out` 老早就拒绝不在场的人(§2.9.2)、
+`interact` 隔着半个地图就是 `absent`(§2.9.6)。只有玩家这一侧一直没人管。
+
+**判据是施动者是谁**,不是这件事重不重要:
+
+| 玩家做的事 | 要不要当面 | 为什么 |
+|---|---|---|
+| 说话(`dialogue`) | 不要 | 提示词里早就分了两段身份声明:同地是面对面,异地是手机私聊 |
+| 「你去睡觉」「你去雕那座冰雕」(导演) | **不要** | 那是**一句话**,而一句话打电话也说得出来 |
+| 把围巾递过去(`give`) | **要** | 隔着三亚递不过去,这一条不需要论证 |
+| 一起做事(`together`,§2.9.6.6) | **要** | "一起"的前提就是两个人在同一个地方 |
+
+把导演那几条一起挡掉,等于宣称"异地就不能跟她说话",而那正是这一层想保住的另一半。
+
+##### 声明在能力上,不是写死在引擎里
+
+`ToolSpec.requires_colocation`(`@tool(..., requires_colocation=True)`)。`World.act()`
+与 `World.intend()` 按它判,`world.verbs()` 与能力目录里都带这一格 —— 宿主界面照它决定
+按钮什么时候可点,**点下去才发现的话,那是一次没有任何人预告过的失败**。
+`reach_out` 是第一条声明它的内置能力(它的处理器一直在手写同一件事)。
+`intend()` 直接拒绝这类动词:一份打算是给未来几个 tick 的,那时候谁在她跟前没有人知道。
+
+##### ⚠️ 默认关,而这不是犹豫,是账
+
+引擎侧收紧会**当场打断线上世界**:`player_move` 是宿主的**可选**调用,今天线上根本
+没人调,于是"异地"是每一次调用的默认值 —— 那道闸打开的当天,`give` 和一起做事全线
+开始拒绝,而回执看上去像是玩家自己站错了地方。**关着时行为与 2.2.0 逐位相同。**
+
+玩家的位置,四个问题一次答完:
+
+| 问题 | 答案 |
+|---|---|
+| 从哪来 | **只有 `World.player_move(player_id, location)`** —— 引擎不猜,也没有第二个入口 |
+| 谁维护 | **宿主**。`anima-world chat` 每轮调一次;网站后端要自己调 |
+| 默认值 | **没有默认值。** 没调过就是空串 = 不在场 = 异地 |
+| 现在有人维护吗 | `world.presence()` / `anima-world presence` 的 `unplaced` |
+
+**迁移次序只有一条**,反过来就是事故:
+
+```bash
+anima-world presence --world-id w        # ① 先体检:跑世界的那个进程手上有位置吗
+# ② 让**跑世界的那个进程**每轮调一次 player_move(CLI 的 chat 已经在调了)
+anima-world config set presence.enforce_colocation true --world-id w   # ③ 再开
+```
+
+##### ⚠️⚠️ 玩家的位置是**进程内**的,而这道闸认的就是它
+
+`World.players` 是**刻意的内存态**(重启即新访 —— 见 `contact` 那一层为什么要另外
+落一份名字)。于是有两条必须先知道的后果:
+
+1. **`anima-world presence` 是另开的一个进程**,它手上当然没有任何人的位置。所以那
+   条命令的名单是从落库的 `contact` 表补齐的(`seen_before`),位置那一格只反映**本
+   进程**,而且它会把这句话直接印出来 —— 不印的话,读的人会照着一个假警报去改宿主。
+2. **多进程宿主先别开这道闸。** 引擎明确支持"很多进程同时操作同一个世界",而
+   `player_move` 只写调用它的那个进程的内存:A 进程把玩家挪到咖啡店,B 进程照样认为
+   他不在场,于是 B 上的 `give` 全线拒绝。**要在多进程下开这道闸,得先把玩家位置搬进
+   共享存储**(键前缀是跨仓库契约,所以那是一次独立的改动,不该顺手做在这一版里)。
+
+单进程宿主(`anima-world run` / 一个网站后端进程持有 `World`)不受这条影响 ——
+那也是今天线上那个世界的形态。
+
+##### 拒绝要有回执,而且三种原因分得开
+
+| 原因 | 回执 | 玩家该干什么 |
+|---|---|---|
+| `elsewhere` | 你在 X,她在 Y —— 这件事得当面 | 走过去,或者只跟她说话 |
+| `unknown_player_location` | 世界不知道你这会儿在哪 —— 宿主没调过 `player_move` | **宿主的事**,玩家做什么都改不了 |
+| `agent_in_transit` | 她这会儿在路上,不在任何地方 | 等她落脚 |
+
+合成一句"你不在她跟前"的话,第二种会看起来像是玩家自己站错了地方 —— 那是这个仓库最
+怕的"技术上没错、读起来是谎"。
 
 ### `anima-world map` —— 把地图画出来,看得见她今天去了哪儿
 
@@ -1124,6 +1534,8 @@ from anima_world.api import World
 | `world.memories(agent_id)` | 某角色的全部记忆行(按存储序) |
 | `world.retrieve_memories(agent_id, query=None, k=5)` | 三因子检索(时近×重要×相关),返回最相关的 k 条。**命中即加固**遗忘曲线 —— 这个「读」接口会写库,是设计不是副作用。底层 `MemoryStore.retrieve(..., reinforce=False)` 可走纯读路径(调试 / 只读视图) |
 | `world.reflections(agent_id)` | 该角色的反思(由记忆归纳出的洞察) |
+| `world.repair_memory_ticks(*, dry_run=False)` | **迁移,幂等**:把 2.0 之前写下的墙钟 `tick` 折回世界时钟。那时 `chat_session` 给 `conversation` 事件盖的是 `time.time()`,`TriggerEngine` 照抄进记忆的 `tick`,而 `memories` 按 `(tick, id)` DESC 排序 —— 于是**跟玩家的那几条对话把每个角色的召回列表整个占满**(实测 382 条记忆里它只占 20 条,而前 20 条 100% 是它),planner / 反思源 / 八卦源 / 叙事吃的都是这个列表,没有一处报错。折法:事件按 seq 单调、世界时钟单调不减,所以 `event_seq` 之前最近那条正常事件的 ts 就是它真正发生的一刻(与 `TriggerEngine._tick_of` 同一条 —— 两处不一致的话,修完再 rebuild 一次就又变回去了)。**事件日志一个字不动**:日志记的是发生过什么,记忆是能重折出来的派生数据。查不到出处的行(没有 `event_seq`)**一律不动** —— 编一个 tick 出来比留着更坏,因为它从此看不出来了。返回 `{"scanned","repaired","unresolved","rows"}`。CLI:`anima-world memory repair-ticks [--dry-run] [--json]`(有 `unresolved` 时退出码 1) |
+| `world.repair_agent_goals(*, dry_run=False)` | **迁移,幂等**:把被按**字**拆开的 `goals` 拼回来。创作台的世界生成器一度对模型回的一整行目标(`"摆脱母亲的控制；重新定义自己的人生"`)做列表推导,于是每个角色背着十几个单字目标进了世界(线上 897e282865f5 九个角色全中)。它是 `list[str]`,**任何 schema 校验都挑不出毛病**,而 `{goals}` 直接进 planner 每天排一天日子的提示词 ——照跑、日志干净。产出侧已修(创作台 `concept.py` 的 `_short_lines`),收进来这一头也修了(`beats.coerce_goals`:字拼回去再按 `；;、\n` 拆开,拼接无损,所以不是猜一个答案)。这个方法管**已经写下的那些**:改黑板,并把修好的那份落成一条 `persona_update` 事件 —— 只改黑板的话那份坏 spec 还躺在世界里,下一个读它的人又拿到单字。⚠️ **别指望重启把它修好**:开机确实会过一遍 `coerce_goals`,但有种子的世界紧接着会被种子那份盖回去,所以这一步在发版清单里是必跑的。返回 `{"scanned","repaired","rows"}`。CLI:`anima-world agent repair-goals [--dry-run] [--json]` |
 | `world.needs(agent_id)` | 当前需求 `{energy, hunger, social, mood}`;未点亮或首 tick 前返回 `{}` |
 | `world.graph(agent_id=None)` | 关系图谱三元组 |
 | `world.cliques()` | 小团体(friendship 连通分量,日切重算) |
@@ -1133,6 +1545,7 @@ from anima_world.api import World
 | `world.report(*, ticks=None)` | 把跑出来的历史读成一份运行摘要,与 `simulate --report` **同一口径**(`report_format_version` 见 `contract`) |
 | `world.paused` | 这个世界的时钟停没停(属性,不是方法) |
 | `world.subscribe()` / `world.unsubscribe(q)` | 事件推送订阅(线程安全队列,批量帧 `{type:'batch', events:[…]}`) |
+| `world.presence(player_id=None)` | **谁在谁跟前**(§2.9.9):`{"enforced", "agents": {id: 地点}, "players": [{"player_id","name","location","known","present","face_to_face":[角色 id]}], "unplaced"}`。**为迁移写的**:`unplaced` 是没有位置的玩家数 —— 它大于 0 而 `enforced` 为真,就是那道闸正在拒绝一批谁也帮不了的调用。玩家的位置**只有 `player_move` 一个入口**,没调过就是空串(引擎不猜),CLI 出口是 `anima-world presence` |
 | `world.agent_context(agent_id, interlocutor_id)` | 有界 grounding:锁内一次快照角色的 lived state(检索 `chat.recall_k` 条记忆 + 在场 + 关系档位),只读、无 LLM、无 IO。`world.world_context(...)` 是同一个函数的别名 |
 
 ### 聊天与玩家
@@ -1148,13 +1561,15 @@ from anima_world.api import World
 | `world.close_conversation(conversation_id)` | 手动关会话(摘要+事件+判定) |
 | `world.player_move(player_id, location)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError |
 | `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
-| `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条 |
+| `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条。**只在你在场时成立** —— 敲门是"她已经在你面前开口了" |
+| `world.contact_requests(player_id=None, *, since_seq=0, limit=50)` | **她想起过你**(`agent_wants_contact`,见 §2.9.8)。和 `inbox()` 互补:这一条**只在你不在跟前时成立**。`payload` 带 `reason`(主由头)/ `reasons[]`(每条带 `ref` 出处)/ `topic`(想说什么的线索)/ `components`(分数怎么算出来的)/ `day` + `at`。不给 `player_id` 就是全部。⚠️ **引擎不负责送达**:推送/红点归宿主 |
+| `world.contact_forecast(agent_id=None)` | **此刻**每对 (角色, 玩家) 算出来是多少,含没触发的与被冷却挡下的。调 `contact.threshold` 用 —— 只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。只读:不占额度、不写冷却、不发事件,且**和真轮次共用同一个判定函数** |
 
 ### 让外面的进程做事(见 `docs/AGENT-RUNTIME.md`)
 
 | 函数 | 说明 |
 |---|---|
-| `world.act(agent_id, verb, params=None, *, player_id="", surface="autonomy")` | **以某个角色的身份做一件事** —— 外面的进程改变这个世界的唯一入口。整个执行期持有世界那把唯一的锁,所以**一个动作是原子的**(world-rules 的双缓冲、三源仲裁、`events.seq` 的折叠顺序都要求它)。**在执行时校验,不在决定时**:她想了 6.5 秒,决定送达时世界早变了,所以"还在不在场""走不走得掉"由动词自己在执行那一刻查。未知动词 / 不在这个面上 / 工具失败一律返回 `ok=False` **并说明原因**(一个 agent 进程挑错动词不该让世界崩);未知角色抛 `KeyError`。结果形状与聊天里的工具调用**逐字相同**。⚠️ 它**不推进世界的时间** |
+| `world.act(agent_id, verb, params=None, *, player_id="", surface="autonomy")` | **以某个角色的身份做一件事** —— 外面的进程改变这个世界的唯一入口。整个执行期持有世界那把唯一的锁,所以**一个动作是原子的**(world-rules 的双缓冲、三源仲裁、`events.seq` 的折叠顺序都要求它)。**在执行时校验,不在决定时**:她想了 6.5 秒,决定送达时世界早变了,所以"还在不在场""走不走得掉"由动词自己在执行那一刻查。未知动词 / 不在这个面上 / 工具失败一律返回 `ok=False` **并说明原因**(一个 agent 进程挑错动词不该让世界崩);未知角色抛 `KeyError`。结果形状与聊天里的工具调用**逐字相同**。⚠️ 它**不推进世界的时间**。⚠️ 声明了 `requires_colocation` 的动词在玩家不在她跟前时拒绝(§2.9.9)——**默认不生效**,闸在 `presence.enforce_colocation` 上。`interact` 的 `with` 参数是一起做事那条(§2.9.6.6) |
 | `World.open(world_id, *, redis, …)` | 给了 `redis`,**世界的运行时状态整个搬进 Redis**,这个进程不再持有它。黑板那 20 个键(她在哪/在干嘛/饿不饿/打算做什么)、时钟、在途、当前动作、规划、需求、意图、关系图、姿态/静音/拒谈、量与规律 —— 此前全是纯内存,于是两个进程各开同一个世界文件会读到同一份历史、然后在各自内存里跑出**两个不同的世界**。`world_id` 进键名(一个 Redis 上跑十个世界是常态)。**接上一个已经在跑的世界不会把她按回原点**:搬家只填 Redis 里还没有的键(逐键 `HSETNX`),和时钟的 `setnx` 同一条道理 |
 | — | **记忆投影仍在进程里,而且是有意的**:它是从事件重折出来的派生数据,存两份只会多一种不一致的坏法。别的进程记了一条 `payment`,这个进程靠 `catch_up_projection()` 补折 —— 重折廉价且必然正确 |
 | — | 给了 `redis` 之后:**时钟**住进 Redis(只能有一个答案),`act()` / `intend()` 在一把**跨进程的世界锁**下执行(可重入、有 ttl、释放比对 token)。那把锁在调度器的 RLock **之外**,不是替代 —— RLock 还被 `threading.Condition` 用着 |
@@ -1165,7 +1580,7 @@ from anima_world.api import World
 | `world.durability_warning()` | 这个世界的存储会不会在重启后忘掉它,不会就是 `None`。**Redis 主要活在内存里**,持久化是配置选项而默认 AOF 是关的 —— 忘掉的样子不是报错,是世界悄悄退回创世那一刻然后接着跑(实测:跑完一天 104 条事件,重启后 50 条)。探不到就沉默(`CONFIG GET` 可能被禁用) |
 | `world.intend(agent_id, steps)` | **告诉她接下来打算做什么** —— 一串过日子的动作(`[{"verb","params"}]`),世界替她走完脚步。传 `None` / `[]` 取消。**调用即设定意图,不是执行到底**:立刻返回,之后每个 tick 由仲裁器在 [身体 → 她刚决定的 → 排班 → 空闲规划 → 兜底] 之间挑,所以饿到紧急线她会**先去吃再回来接着走**,路上被叫住也能被打断。一步真生效了队列才往前走一格 |
 | `world.intent(agent_id)` | 她此刻还打算做的事(队首是下一步) |
-| `world.verbs(agent_id="*", surface=None)` | 她能做什么 —— `act()` 的配套目录,逐条带 `id` / `kind` / `description` / `params` / `surfaces`。给了能力却不给目录等于没给 |
+| `world.verbs(agent_id="*", surface=None)` | 她能做什么 —— `act()` 的配套目录,逐条带 `id` / `kind` / `description` / `params` / `surfaces` / `writes` / `requires_colocation`。给了能力却不给目录等于没给。`requires_colocation` 决定界面上那个按钮什么时候可点(§2.9.9)—— 点下去才发现的话,那是一次没有任何人预告过的失败 |
 
 #### Redis 里到底有什么(键前缀 `anima:<world_id>:`)
 
@@ -1245,6 +1660,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.set_persona_override(agent_id, player_id, kind, value)` / `world.clear_persona_override(...)` | 直接写/删一条规则(宿主自己做 UI 时用,不必经过分类器)。kind 是白名单 |
 | `world.broadcasts(*, since_seq=0, limit=50)` | 她公开说过的话(`agent_broadcast` 事件) |
 | `world.autonomy_stats()` | 定时轮次(§2.9.2)到底跑没跑:`{asked, acted, quiet, failed, last}` |
+| `world.contact_stats()` | "她想起你"(§2.9.8)这条链跑没跑:`{checked, fired, blocked, composed, compose_failed, last}`。`checked` 是 0 = hook 没挂上或没有候选;`checked` 不为 0 而 `fired` 是 0,配上 `last` 那句话就能分清是"还不够近"、"没有由头"还是"她在睡觉"。**本次运行内的计数**(冷却与次数才落库) |
 
 ### 世界的规律与存量(1.3.0,见 §2.9.3)
 
@@ -1266,7 +1682,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 
 | 函数 | 说明 |
 |---|---|
-| `world.kinds()` | 声明过的种类:`{"id","gloss","builtin","budget","quantities":[{"key","default","visibility","label","unit"}],"affordances":[{"verb","label","duration","occupies","changes_world","needs_actor","conditions","sets","requires","costs","consumes"}]}`(`requires`/`costs`/`consumes` 是关于**施动者**的那一半,见 §2.9.6.1;`duration`/`occupies` 见 §2.9.6.2)。**能力表只有这一个地方问得到** —— `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在,宿主猜一份动词表出来是猜错了也不报错。`label` 是她提示词里读到的那几个字,也是界面上该印的那几个字(动词可以是作者自造的,引擎手上没有别的地方查得到它) |
+| `world.kinds()` | 声明过的种类:`{"id","gloss","builtin","budget","quantities":[{"key","default","visibility","label","unit"}],"affordances":[{"verb","label","duration","occupies","changes_world","needs_actor","conditions","sets","requires","costs","consumes","spawn","destroys_target","participants"}]}`(`requires`/`costs`/`consumes` 是关于**施动者**的那一半,见 §2.9.6.1;`duration`/`occupies` 见 §2.9.6.2;`participants` 是**得有人一起做**的那一格 `{"min","max"}`,`None` = 单人,见 §2.9.6.6 —— 界面上它决定"叫谁一起"那个选人框该不该出现)。**能力表只有这一个地方问得到** —— `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在,宿主猜一份动词表出来是猜错了也不报错。`label` 是她提示词里读到的那几个字,也是界面上该印的那几个字(动词可以是作者自造的,引擎手上没有别的地方查得到它) |
 | `world.entities(kind=None)` | 实例:`{"id","kind","name","gloss","location","values"}`,**带此刻的量**。分开问的话宿主得先 `entities()` 再逐个 `stocks()`,而两次之间世界还在跑 |
 | `world.check_entity(entity_id=None)` | **这些东西活得了吗**:`{"entity","kind","ok","problems":[…]}`,不给 id 就查全部。引擎在每次出生时自己跑同一套(见 §2.9.6.5),这是手动入口——写声明时问"我这么写生出来的东西活得了吗",或查一个已经在世界里的东西为什么不动弹 |
 | `world.engagements(agent_id=None)` | **谁正在做一件要花时间的事**:`{"agent","target","verb","label","started_tick","ends_tick","remaining","occupies"}`。少了它,一个埋头干了十个月的人和一个闲着的人在宿主眼里长得一模一样(同样的信息也进 `state()` 里那个人的 `activity.engaged`) |
@@ -1390,6 +1806,52 @@ anima-world ontology --world-id w --check         # 逐个跑出生自检;有问
 能力那几行印的是 `动词(人话)`(两者一样时只印一个)—— 作者调的是动词 id,她读到的是
 人话,而排错时要对得上的正是这两者。带 `duration` 的能力多印一行"要花几个 tick,
 这期间她腾不腾得出手"(§2.9.6.3)。
+
+### 4.2.3 anima-world contact —— 谁想起过玩家,以及为什么没想起
+
+```bash
+anima-world contact --world-id w                       # 已经发生的(agent_wants_contact)
+anima-world contact --world-id w --player u1           # 只看想起这个人的
+anima-world contact --world-id w --why                 # 此刻算出来是多少,含没触发的
+anima-world contact --world-id w --json                # 契约
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--player` | 全部 | 只看想起这个玩家的 |
+| `--since-seq` / `--limit` | `0` / `50` | 增量拉取:拿最后一条的 `seq` 当下次的 `--since-seq` |
+| `--why` | - | 不看已发生的,改问**此刻**每对 (角色, 玩家) 算出来是多少 —— 走 `World.contact_forecast()`,和真轮次**共用同一个判定函数**。只读:不占额度、不写冷却、不发事件 |
+| `--json` | - | `{"enabled", "stats", "requests"}`(或 `"forecast"`) |
+
+两张脸是故意分开的。这一层**默认关着、默认不响**,所以"静默失效"是它最可能的坏法:
+只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。`--why`
+把 `closeness × urge × readiness` 三个成分和每条由头的出处逐行打出来,调
+`contact.threshold` 靠它。开关关着时**先说出来** —— 空表加上一个关着的开关读起来
+像"没人想你",而真相是这一层压根没跑。
+
+### 4.2.4 anima-world presence —— 谁在谁跟前(开那道闸之前的体检)
+
+```bash
+anima-world presence --world-id w                 # 角色在哪 / 玩家在哪 / 谁跟谁面对面
+anima-world presence --world-id w --player-id u1  # 只看一个人
+anima-world presence --world-id w --json          # 契约
+```
+
+**这道命令是为迁移写的**,不是为好看。`presence.enforce_colocation`(§2.9.9)一开,
+声明了 `requires_colocation` 的能力会开始拒绝所有不在场的调用 —— 而 `player_move` 是
+宿主的**可选**调用,没人调过的世界里"异地"是每一次调用的默认值。于是那道闸打开的
+当天,`give` 和一起做事全线开始拒绝,而回执看上去像是玩家自己站错了地方。
+
+所以它先答"**这个世界里有没有人在维护玩家的位置**",再给一句能照着做的结论:
+
+- `unplaced > 0` 且闸关着 → "开之前先让宿主每轮调一次 `player_move`",**退出码 1**
+- `unplaced > 0` 且闸开着 → "这道闸正在拒绝一批谁也帮不了的调用",**退出码 1**
+- 全都有位置 → "这道闸开得起来",退出码 0
+
+退出码是 1 所以**它能进 CI**(和 `ontology --check`、`--ticks 0` 同一个用法)。
+`known` 那一格是关键:**"不知道他在哪"和"他在一个没有角色的地方"是两件事** ——
+合成一个的话,一个宿主根本没接 `player_move` 的世界,看起来会像是玩家都碰巧站在没人
+的地方,而那是改不回来的误诊。
 
 #### `anima-world world drop` —— 把一个世界整个抹掉
 
@@ -1623,9 +2085,27 @@ readline。
 | `memory.half_life_days` | float | 3.0 | 检索时近因子的半衰期(世界日) |
 | `memory.reflection_threshold` | float | 3.0 | 累计重要度越过它就触发一次反思 |
 | `needs.enabled` | bool | false | 需求曲线(energy/hunger/social)驱动行为 |
+| `needs.mood_penalty_stock` | str | `""` | **世界自己声明的**一笔债（0~1，挂在她身上的量）从 `mood` 里减掉；空 = 关。引擎不认识「睡眠债」，只认识作者指着哪个量 —— 怎么攒怎么还由规律写（§2.9.3）。只改 `mood` 不改三条需求：mood 是派生值、从不落库，拖 `energy` 会被下一次 `settle` 当成「她真的睡了一觉」 |
 | `economy.enabled` | bool | false | 物品、金钱、店铺与价格漂移 |
 | `economy.daily_wage` | float | 20.0 | 小镇金库每日发给每个角色的工资 |
 | `social.enabled` | bool | false | 八卦传播与小团体检测(三轴关系不受此开关影响,常开) |
+| `social.joint.consent_stock` | str | 随和 | 拿哪个 agent 量当"他有多肯答应一起做事"的系数。**没声明 = 1.0**（§2.9.6.6） |
+| `social.joint.min_willingness` | float | 0.20 | **没有邀请判定器时**（没配 key）答应的门槛：亲密度 × 随和 × stance。有判定器时读人设判，这个键不参与 |
+| `social.joint.relation_step` | float | 0.06 | 一次共同经历值多少关系。**故意大于** `DeterministicRelationshipJudge.STEP`（0.04）——一起经历过的事该比说过多少句话更能改变关系（`tests/test_together.py` 钉着这个大小关系） |
+| `social.joint.full_duration_ticks` | int | 12 | 一起待多久算"待满了"（12 = 5 分钟/tick 时的一个世界小时）。一下子的事拿一半，不是零 |
+| `presence.enforce_colocation` | bool | false | 声明了 `requires_colocation` 的能力，在玩家不在她跟前时拒绝（§2.9.9）。⚠️ **开之前先让宿主调 `player_move`**——`anima-world presence` 就是查这个的；不查就开等于让 `give` 和一起做事全线拒绝，而回执看上去像玩家自己站错了地方 |
+| `social.hearsay_reaction.enabled` | bool | false | 一条八卦落地后问一次判定「这句话听在她耳朵里什么感觉」（吃醋；§2.8）。**每条八卦一次模型往返** —— 自成一个开关就是因为这个代价 |
+| `contact.enabled` | bool | false | 她会想起一个**不在跟前**的玩家,落成 `agent_wants_contact`(§2.9.8)。**不搭 `chat.tools.enabled`**:这一层不挑动词,没有 LLM 也成立 |
+| `contact.interval_ticks` | int | 24 | 隔多久算一次(24 = 5 分钟/tick 下的 2 个世界小时) |
+| `contact.min_closeness` | float | 0.35 | 三轴加权低于它就绝不想起 |
+| `contact.threshold` | float | 0.25 | `closeness × urge × readiness` 要到多少才触发 |
+| `contact.cooldown_ticks` | int | 144 | 同一对 (她, 他) 两次之间至少隔多久(12 个世界小时) |
+| `contact.max_per_day` | int | 2 | 一天最多想起同一个人几次 |
+| `contact.fatigue` | float | 1.7 | **衰减**:今天每触发一次,门槛乘一次。和上限是两回事,少了它今天那两次会挤在同一小时 |
+| `contact.absence_ticks` | int | 288 | 多久不见才算得上"很久没出现"(一个世界日) |
+| `contact.recent_ticks` | int | 288 | 由头的保鲜期:多旧的记忆还算数 |
+| `contact.initiative_stock` | str | 主动 | 拿哪个 agent 量当"她有多主动"的系数。**没声明 = 1.0**(§2.9.8) |
+| `contact.compose.enabled` | bool | true | 用后台模型写那句线索;关了(或模型挂了)就退回由头原文,**事件照发** |
 
 ## 7. 提示词模板
 
@@ -1640,14 +2120,19 @@ readline。
 括号内以角色名开头。**英文世界或不要动作描写的世界改这里** —— 它此前是写死在
 `chat_service` 里的一段中文规则,每次聊天都注入,作者在 `prompt_list()` 里看不见,
 于是永远关不掉)· `narrative.describe`(叙事)· `planner.freetime`(自由时间规划)·
-`judge.relationship` / `judge.user_relationship` / `judge.relabel`(关系判定三件套)·
+`judge.relationship` / `judge.user_relationship` / `judge.relabel` / `judge.hearsay` /
+`judge.invite`（关系判定五件套；`judge.hearsay` 是「她听完一句闲话什么反应」，
+`social.hearsay_reaction.enabled`；**`judge.invite` 是「有人叫她一起做件事她答不答应」**，
+§2.9.6.6 —— 没配 key 时这一格退回关系与作者声明的「随和」，而且会在 `subsystem_health`
+的 `joint_consent` 上点名）·
 `world.setting`(世界观,**原样使用不做 format**,可放字面量 `{}`)。
 
 1.3.0 起还有 **chat-agent 的七块**(只在对应开关点亮时才进提示词,见 §2.9.1):
 `chat.stance_block`(关系性意图菜单 + 惯性)· `chat.tools_block`(能力菜单)·
 `chat.overrides_block`(玩家教过的对话规则)· `chat.refused_topic_block`(她拒绝谈的
 话题又被提起)· `chat.intent_classifier`(意图分类器)· `chat.loop_continue` /
-`chat.loop_interrupt`(连续输出的续说提醒与插话)。
+`chat.loop_interrupt`(连续输出的续说提醒与插话)· `contact.compose`(她想起一个不在
+跟前的玩家时,那句"想说什么"的线索 —— §2.9.8。**判定不在这条模板里**,它只写线索)。
 
 另有 **Mock 叙事模板**:`narrative.mock.<动作种类>`(`walk` / `chat` / `work` / `sleep` /
 `eat` / `idle_wander` / `idle_social` / `custom`,占位符 `{agent}` `{location}` `{target}`)
@@ -1692,6 +2177,7 @@ readline。
 | `conversations` / `messages` | 转录(同上,搬 MySQL;stance/intent/tool_call 落在 `messages` 行上,跟着一起走) |
 | `edges` | 关系边。**有界**(谓词是闭集,上界 2×N²),所以它不进 MySQL —— §2.9.7 |
 | `cliques` / `stance` / `mutes` / `refused_topics` / `followups` | 小团体 / 关系性意图 / 静音 / 拒谈话题 / 回头找你 |
+| `contact` | 她想起某个玩家这件事的冷却与水位(见 §2.9.8)。一行一对 (她, 他):上次是哪一 tick、今天几次了、他上次跟她说话是什么时候。**有界**(上界 = 角色数 × 玩家数),所以它不进 MySQL |
 | `needs` / `item_defs` / `shop_stock` | 需求 / 物品定义 / 货架 |
 | `locations` / `bt_nodes` / `bt_actions` | 地图 / 行为树节点与动作 |
 | `config` / `prompts` | 作者动过的配置 / 作者改过的提示词模板(见 §2.11) |

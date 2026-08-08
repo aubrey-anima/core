@@ -56,7 +56,14 @@ def test_report_reads_the_world_the_host_just_ran(tmp_path):
 
 
 def test_report_covers_a_player_conversation_without_exploding(tmp_path):
-    """聊过天的世界:墙钟事件不该把摘要撑爆,也不该被吞掉。"""
+    """聊过天的世界:会话事件落在世界时间轴上,摘要不撑爆也不吞事件。
+
+    这条测试原本断言 `wall_clock_events >= 1` —— 它钉的是 `chat_session` 给
+    `conversation` 盖 `time.time()` 那个**缺陷**,而不是一条契约。源头改成由
+    `Scheduler` 盖世界时钟之后,活着的世界不该再产出任何墙钟事件;
+    `wall_clock_events` 这个字段留着,是给老世界的日志用的(它那半边由
+    `test_sim_report.py` 直接合成事件来验)。
+    """
     with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.fast_forward(50)
         reply = world.chat_reply("夏", [{"role": "user", "content": "在吗"}],
@@ -66,7 +73,13 @@ def test_report_covers_a_player_conversation_without_exploding(tmp_path):
             {"role": "assistant", "content": reply},
         ])
         report = world.report()
-        assert report["events"]["wall_clock_events"] >= 1
+        assert report["events"]["wall_clock_events"] == 0, (
+            "活着的世界不该再产出墙钟 ts —— 事件的时基由 Scheduler 统一盖"
+        )
+        assert report["events"]["by_type"].get("conversation", 0) >= 1, "也没被吞掉"
+        # 不撑爆:会话真的进了按天统计,而不是被排除在外才显得干净。
+        assert sum(day["total"] for day in report["events"]["by_day"]) == \
+            report["events"]["total"]
         assert report["world"]["days"] < 10
 
 

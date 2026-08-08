@@ -25,9 +25,11 @@ REPORT_FORMAT_VERSION = 2
 
 # 事件密度的分桶。一个事件只进一个桶,`other` 兜底。
 #
-# 口径(format 2):**按天的统计只覆盖世界 tick 上的事件**。聊天子系统给
+# 口径(format 2):**按天的统计只覆盖世界 tick 上的事件**。2.0 之前聊天子系统给
 # `conversation` 盖的是墙钟(见 `WALL_CLOCK_FLOOR`),按 tick 折算成"天"会得到
-# 六百多万 —— 所以这类事件不进 `by_day`,也不参与 horizon。它们仍然计入
+# 六百多万 —— 所以这类事件不进 `by_day`,也不参与 horizon。源头已经修了(事件的
+# 时基统一由 `Scheduler._record_event` 盖),这道口径留给**导入进来的老日志**:
+# 那批 ts 收不回来,而报表还得读得动它们。它们仍然计入
 # `total` 与 `by_type`,并在 `wall_clock_events` 里单独点名:少算比算错更隐蔽,
 # 一个聊了一整晚的世界不该拿到一份干干净净、chat 桶为 0 的摘要。
 # 于是等式是:`sum(by_day[*].total) + wall_clock_events == total`。

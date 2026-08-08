@@ -244,6 +244,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ontology_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
+    contact_cmd = sub.add_parser(
+        "contact", help="谁想起过玩家、由头是什么(contact;--why 连没触发的一起解释)",
+    )
+    _add_world_args(contact_cmd)
+    contact_cmd.add_argument("--player", default=None, help="只看想起这个玩家的")
+    contact_cmd.add_argument("--since-seq", type=int, default=0,
+                             help="增量拉取:上次拿到的最后一条 seq")
+    contact_cmd.add_argument("--limit", type=int, default=50, help="最多几条")
+    contact_cmd.add_argument(
+        "--why", action="store_true",
+        help="不看已发生的,改问「此刻每个人对每个玩家算出来是多少」—— 调阈值用",
+    )
+    contact_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
+
+    presence_cmd = sub.add_parser(
+        "presence",
+        help="谁在谁跟前(presence.enforce_colocation 的迁移体检:宿主调过 player_move 吗)",
+    )
+    _add_world_args(presence_cmd)
+    presence_cmd.add_argument("--player-id", default=None, help="只看这一个玩家")
+    presence_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
+
     run = sub.add_parser(
         "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
     )
@@ -304,6 +326,36 @@ def _build_parser() -> argparse.ArgumentParser:
     events_export = events_commands.add_parser("export", help="导出成 JSONL")
     _add_world_args(events_export)
     events_export.add_argument("--output", required=True, help="写到文件;`-` = stdout")
+
+    memory_cmd = sub.add_parser(
+        "memory", help="记忆层的维护(迁移/体检)"
+    )
+    memory_commands = memory_cmd.add_subparsers(dest="memory_command", required=True)
+    memory_repair = memory_commands.add_parser(
+        "repair-ticks",
+        help="把老世界里盖了墙钟的记忆 tick 折回世界时钟(2.0 之前的 conversation 事件)",
+    )
+    _add_world_args(memory_repair)
+    memory_repair.add_argument(
+        "--dry-run", action="store_true", help="只报要改哪些,不动库"
+    )
+    memory_repair.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+
+    agent_cmd = sub.add_parser("agent", help="角色数据的维护")
+    agent_commands = agent_cmd.add_subparsers(dest="agent_command", required=True)
+    goals_repair = agent_commands.add_parser(
+        "repair-goals",
+        help="把被按字拆开的 goals 拼回来(创作台老版本生成的世界)",
+    )
+    _add_world_args(goals_repair)
+    goals_repair.add_argument(
+        "--dry-run", action="store_true", help="只报要改什么,不动库"
+    )
+    goals_repair.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
 
     report_cmd = sub.add_parser(
         "report", help="对着一个世界出运行摘要 —— 只读,不跑世界"
@@ -904,7 +956,8 @@ def build_serve_scheduler(
     """
     from anima_world.mysql_state import GROWS_FOREVER
     from anima_world.redis_state import (
-        RedisBTStore, RedisChatStore, RedisClock, RedisConfigBackend, RedisDict,
+        RedisBTStore, RedisChatStore, RedisClock, RedisConfigBackend, RedisContactStore,
+        RedisDict,
         RedisEconomyStore, RedisEventLog, RedisKnowledgeGraph, RedisLocationStore,
         RedisMemoryStore, RedisNeedsStore, RedisCliqueStore, RedisPromptStore,
         RedisOntologyStore, RedisReflectionStore, RedisRulesStore, RedisStockStore,
@@ -1133,6 +1186,10 @@ def build_serve_scheduler(
     scheduler.clique_store = RedisCliqueStore(redis, world_id)
     scheduler.reflection_store = RedisReflectionStore(redis, world_id)
     scheduler.economy_store = economy_store
+    # 她想起某个玩家这件事的冷却与水位(contact)。**和 `_engaged` 同一个理由落库**:
+    # 内存态的冷却等于每次换镜像重启都把所有人的冷却清零,而玩家看到的是"一发版
+    # 就四个人同时来找我"。
+    scheduler.contact_store = RedisContactStore(redis, world_id)
     # 量与规律。
     scheduler.stock_store = stock_store
     scheduler.visibility_store = visibility_store
@@ -2386,6 +2443,93 @@ def run_map(args: argparse.Namespace) -> int:
         world.close()
 
 
+def run_contact(args: argparse.Namespace) -> int:
+    """`anima-world contact` —— 谁想起过玩家、由头是什么(contact)。
+
+    两张脸,故意分开:
+
+    - 默认打**已经发生的**(`agent_wants_contact` 事件)。这是上层要消费的那份。
+    - `--why` 打**此刻算出来是多少**,包括没触发的。调 `contact.threshold` 的人
+      要的是这一份 —— 只看已发生的话,一个永远不触发的配置和一个刚好差一点的
+      配置长得一模一样,而这一层默认关着、默认不响,静默失效是它最可能的坏法。
+
+    渲染是赠品,`--json` 才是契约(和 `map` / `ontology` 同一条)。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "contact"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[contact] {exc}", file=sys.stderr)
+        return 2
+    try:
+        if getattr(args, "why", False):
+            rows = world.contact_forecast()
+            if args.player:
+                rows = [r for r in rows if r["player_id"] == args.player]
+            stats = world.contact_stats()
+        else:
+            rows = world.contact_requests(
+                args.player, since_seq=args.since_seq, limit=args.limit,
+            )
+            stats = world.contact_stats()
+        enabled = bool(world.config_get("contact.enabled", False))
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(
+            {"enabled": enabled, "stats": stats,
+             ("forecast" if getattr(args, "why", False) else "requests"): rows},
+            ensure_ascii=False, indent=2, default=str,
+        ))
+        return 0
+
+    if not enabled:
+        # 关着的时候先说出来。空表加上一个关着的开关,读起来像"没人想你",
+        # 而真相是这一层压根没跑。
+        print("(contact.enabled 是关的 —— 这一层没在跑;开:"
+              f"anima-world config set contact.enabled true --world-id {world_id})")
+
+    if getattr(args, "why", False):
+        if not rows:
+            print("没有一对 (角色, 玩家) 可算 —— 她们跟任何玩家都还没有关系。")
+            return 0
+        for row in sorted(rows, key=lambda r: -r["components"]["score"]):
+            mark = "→" if row["would_fire"] else " "
+            print(
+                f"{mark} {row['agent_name']}({row['agent_id']}) → "
+                f"{row['player_name']}({row['player_id']}):"
+                f"{row['components']['score']:.2f} / 门槛 {row['components']['threshold']:.2f}"
+            )
+            print(
+                f"    近 {row['components']['closeness']:.2f} × "
+                f"由头 {row['components']['urge']:.2f} × "
+                f"状态 {row['components']['readiness']:.2f}    {row['explain']}"
+            )
+            for reason in sorted(row["reasons"], key=lambda r: -r["weight"]):
+                print(f"    · {reason['label']}({reason['weight']:.2f}):{reason['note']}")
+        return 0
+
+    if not rows:
+        print("还没有人想起过谁。" if enabled else "")
+        return 0
+    for event in rows:
+        payload = event.get("payload") or {}
+        print(
+            f"#{event.get('seq')} 第{payload.get('day')}天 {payload.get('at')} "
+            f"{payload.get('agent_name') or payload.get('agent_id')} 想起了 "
+            f"{payload.get('player_name')}"
+        )
+        print(f"    「{payload.get('topic')}」({payload.get('topic_source')})")
+        for reason in payload.get("reasons") or []:
+            print(f"    · {reason.get('label')}({reason.get('weight')}):{reason.get('note')}")
+    return 0
+
+
 def run_ontology(args: argparse.Namespace) -> int:
     """`anima-world ontology` —— 这个世界里有哪些东西,以及**能对它们做什么**。
 
@@ -2504,6 +2648,18 @@ def run_ontology(args: argparse.Namespace) -> int:
                 print(f"         ✦ 生出一个 {spawn['kind']} @{where}")
             if a.get("destroys_target"):
                 print("         ✦ 做完之后这个东西就没了")
+            # 得有人一起做的事。和生灭一样要显眼:它决定这条能力**一个人调不动**,
+            # 而一个人调不动这件事,只有这里问得到 —— 猜不出来,试出来的代价是
+            # 一次拒绝。
+            party = a.get("participants")
+            if party:
+                want = (
+                    f"{party['min']} 个"
+                    if party["min"] == party["max"]
+                    else f"{party['min']}~{party['max']} 个"
+                )
+                print(f"         ✦ 得有人一起:除发起的人之外还要 {want}"
+                      f",而且每个人都要点头(拒得掉)")
         if not kind["builtin"]:
             # 内置种类没有实例住在本体里(角色在投影里),那条上限对它没有意义。
             print(f"    同一个地方最多带 {kind['budget']} 个进提示词")
@@ -2514,6 +2670,70 @@ def run_ontology(args: argparse.Namespace) -> int:
             if values:
                 print(f"      {values}")
         print()
+    return 0
+
+
+def run_presence(args: argparse.Namespace) -> int:
+    """`anima-world presence` —— 开 `presence.enforce_colocation` 之前的体检。
+
+    **这道命令是为迁移写的。** 引擎侧收紧位置语义会当场打断线上世界:
+    `player_move` 是宿主的可选调用,今天线上根本没人调,于是"异地"是每一次调用的
+    默认值 —— 那道闸打开的当天,`give` 和一起做事全线开始拒绝,而回执看上去像是
+    玩家自己站错了地方。
+
+    所以它先答"这个世界里有没有人在维护玩家的位置",再给一句**能照着做的**结论。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "presence"):
+        return 2
+    world = World.open(world_id, redis=redis, mysql=mysql)
+    try:
+        report = world.presence(args.player_id)
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
+    names = report["agents"]
+    print(f"{world_id}:同地这道闸 "
+          f"{'开着' if report['enforced'] else '关着(默认)'}\n")
+    print("角色在哪:")
+    for aid, here in sorted(names.items()):
+        print(f"  {aid:<20}{here or '在路上 / 不知道'}")
+    print("\n玩家在哪:")
+    if not report["players"]:
+        print("  (这个世界跟谁都还没打过交道 —— 没人跟她说过话)")
+    for row in report["players"]:
+        where = row["location"] or "✗ 这个进程不知道(没调过 player_move)"
+        face = "、".join(row["face_to_face"]) or "没有人"
+        print(f"  {row['player_id']:<20}{where}")
+        print(f"  {'':<20}此刻面对面:{face}"
+              f"{'' if row['present'] else '(而且他不在这个进程的在场名单里)'}")
+    print()
+    # ⚠️ **这一句不许省。** 玩家的位置是**进程内**的(`World.players` 是刻意的
+    # 内存态),而这道命令永远是一个新开的进程 —— 于是它看到的"没位置"里,一部分
+    # 只是"我不是那个进程"。不说的话,读的人会照着一个假警报去改宿主。
+    print("说明:玩家的位置住在**进程内存**里(`World.players`),这条命令是另开一个"
+          "进程问的 —— 所以这里的位置只反映本进程。名单是从落库的那份补齐的。")
+    if report["unplaced"]:
+        # **不许只报数字。** 这一句是这道命令唯一真正的产出:读的人要知道下一步
+        # 该改哪儿,而不是知道有几个玩家没位置。
+        tail = (
+            "这道闸正在拒绝调用 —— 确认跑世界的那个进程每轮都调 player_move。"
+            if report["enforced"] else
+            "开 presence.enforce_colocation 之前,先让**跑世界的那个进程**每轮调一次 "
+            "player_move,否则一开就是 give / 一起做事全线拒绝。"
+        )
+        print(f"\n⚠ {report['unplaced']} 个玩家在本进程里没有位置。{tail}")
+        print("  多进程宿主要留意:那道闸认的是**本进程**的位置,"
+              "A 进程调了 player_move,B 进程照样认为他不在场(REFERENCE §2.9.9)。")
+        return 1
+    if report["players"]:
+        print("✓ 本进程手上每个玩家都有位置 —— 这道闸开得起来。")
     return 0
 
 
@@ -3205,6 +3425,82 @@ def run_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_memory(args: argparse.Namespace) -> int:
+    """`anima-world memory repair-ticks` —— 迁移那批墙钟 tick。
+
+    算法一个字都不在这儿:它在 `World.repair_memory_ticks`,和
+    `TriggerEngine._tick_of` 同一条折法。CLI 只负责开世界、印出来、定退出码。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "memory"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[memory] {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = world.repair_memory_ticks(dry_run=bool(args.dry_run))
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        verb = "要改" if args.dry_run else "改了"
+        print(f"[memory] 扫到 {result['scanned']} 条盖着墙钟的记忆,{verb} {result['repaired']} 条。")
+        for row in result["rows"]:
+            if row["repaired_to"] is None:
+                print(f"  #{row['id']} {row['agent_id']} {row['kind']} "
+                      f"tick={row['tick']} —— 查不到出处(event_seq={row['event_seq']}),没动")
+            else:
+                print(f"  #{row['id']} {row['agent_id']} {row['kind']} "
+                      f"tick={row['tick']} → {row['repaired_to']}")
+        if result["unresolved"]:
+            # 降级不许无声:剩下的那些还会继续占着召回列表的前排。
+            print(f"[memory] 有 {result['unresolved']} 条查不到出处,一律没动 —— "
+                  f"编一个 tick 出来比留着更坏,因为它从此看不出来了。", file=sys.stderr)
+    return 1 if result["unresolved"] else 0
+
+
+def run_agent(args: argparse.Namespace) -> int:
+    """`anima-world agent repair-goals` —— 把单字目标拼回来。
+
+    和 `memory repair-ticks` 同一个形状:算法在 `World.repair_agent_goals`,
+    CLI 只开世界、印出来、定退出码。**改之前先 `--dry-run` 看一眼**是这类命令的
+    用法,不是客套 —— 它动的是作者写的东西。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "agent"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[agent] {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = world.repair_agent_goals(dry_run=bool(args.dry_run))
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    verb = "要改" if args.dry_run else "改了"
+    print(f"[agent] 扫了 {result['scanned']} 个角色,{verb} {result['repaired']} 个。")
+    for row in result["rows"]:
+        print(f"  {row['name']}({row['agent_id']}):")
+        print(f"    现在 {len(row['before'])} 条:{json.dumps(row['before'], ensure_ascii=False)}")
+        print(f"    改成 {len(row['after'])} 条:{json.dumps(row['after'], ensure_ascii=False)}")
+    if not result["repaired"]:
+        print("[agent] 没有要修的 —— 这个世界的 goals 是好的。")
+    return 0
+
+
 def run_report(args: argparse.Namespace) -> int:
     """对着一个已经存在的世界出摘要。**只读,不推时钟,不建任何东西。**
 
@@ -3836,6 +4132,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_map(args)
     if args.command == "ontology":
         return run_ontology(args)
+    if args.command == "contact":
+        return run_contact(args)
+    if args.command == "presence":
+        return run_presence(args)
     if args.command == "chat":
         return run_chat(args)
     if args.command == "run":
@@ -3844,6 +4144,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_simulate(args)
     if args.command == "events":
         return run_events(args)
+    if args.command == "memory":
+        return run_memory(args)
+    if args.command == "agent":
+        return run_agent(args)
     if args.command == "report":
         return run_report(args)
     if args.command == "validate":
