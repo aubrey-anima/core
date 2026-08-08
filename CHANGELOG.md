@@ -22,6 +22,33 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 `db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
 spot rather than silently written to.
 
+## [2.3.1] —— 封皮上的店面栏没跟着包走,而两边的日志都是干净的
+
+### Fixed
+
+**`world inspect --json` 少报三栏:`genre` / `setting` / `theme`。**
+
+这三栏是**作者在创作台填的店面字段**,经运维台的注册表直通玩家看到的世界卡片
+(platform `docs/工作台-运维台契约.md` §4)。v2 时代运维台是从解包出来的
+`manifest.json` 里读它们的(`lib/enginePackage.js` 的 `readManifest`);**v3 不再
+解包成目录**,于是它改从 `world inspect --json` 读同一批字段 —— 而这个命令从来
+只报 `name` 和 `summary`。
+
+于是 v3 那条导入路径上,这三栏一律落成空串。**没有任何一处会报错**:包是好的
+(manifest 里三栏都在)、导入返回 201、世界跑得好好的,只有玩家看到的卡片上那
+几栏空着。实测:一个 `genre` 填了「生活/语言学习」的包导进运维台,
+`/directory/v1/worlds` 里回来的是 `"genre": ""`。
+
+修法是**把 manifest 上的封皮字段一个不漏地报出来** —— 而不是让运维台自己去扒包。
+后者会在系统里养出第二份对包格式的理解,那正是"全 import"这条基调要防的事。
+`world inspect` 的人类渲染跟着多印三行:一栏有没有跟着包走过来,看一眼就知道。
+
+`tests/test_packaging.py::test_封皮把店面栏报全` 盯着这一条。
+
+**为什么是 2.3.1 而不是并进 2.3.0**:2.3.0 已经作为镜像 `anima-world:2.3.0` 在跑
+世界了,而镜像 tag 就是引擎版本。同一个版本号对应两种 `inspect` 输出,正是 2.1.0
+那份发布说明点名要防的"第二个同名不同行为的镜像"。
+
 ## [2.3.0] —— 位置终于算数了,而且两个人能一起做点什么
 
 **为什么是 2.3.0 而不是并进 2.2.0。** 三条,每条单独成立:

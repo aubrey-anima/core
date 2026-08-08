@@ -138,6 +138,33 @@ def test_封皮读得懂而不必跑得动(tmp_path):
     assert payload["size_bytes"] > 0
 
 
+def test_封皮把店面栏报全(tmp_path):
+    """`inspect` 是运维台读作者填的店面栏的**唯一**来源,v3 起。
+
+    v2 时代运维台从解包出来的 `manifest.json` 里读 name/summary/genre/setting/theme
+    (platform `lib/enginePackage.js` 的 `readManifest`);v3 不再解包成目录,它改从
+    `world inspect --json` 读同一批字段。少报一栏的下场不是报错 —— 是玩家看到的
+    世界卡片上那一栏空着,而两边日志全是干净的(实测:一个 genre 填得好好的包
+    导进运维台,目录里 `"genre": ""`)。所以这条钉的是**报全**,不是"报了几个"。
+    """
+    import fakeredis
+
+    from anima_world.api import World
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with World.open("pkg-src", redis=client, force_mock_llm=True) as world:
+        package = tmp_path / "storefront.cyberworld"
+        world.export_snapshot(package, world_id="storefront", name="灯塔湾",
+                              summary="靠英语过活的小镇", genre="生活/语言学习",
+                              setting="当代海边小镇", theme="seaside")
+    payload = inspect_world_file(package)
+    assert payload["name"] == "灯塔湾"
+    assert payload["summary"] == "靠英语过活的小镇"
+    assert payload["genre"] == "生活/语言学习"
+    assert payload["setting"] == "当代海边小镇"
+    assert payload["theme"] == "seaside"
+
+
 def test_更新的格式版本读不了但说得清(tmp_path):
     import gzip
     import json as _json

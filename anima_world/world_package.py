@@ -698,6 +698,14 @@ def inspect_world_file(path: str | Path) -> dict[str, Any]:
     `runnable` 是一个字段,不是一个异常。
 
     只读第一行,所以一个 5 GB 的世界也是一次 open + 一次 readline。
+
+    **封皮上的字要报全。** 这里报的是 manifest,而 manifest 上的
+    `name/summary/genre/setting/theme` 是**作者填的店面栏** —— 它们经运维台的
+    注册表直通玩家看到的世界卡片(platform `docs/工作台-运维台契约.md` §4)。
+    v3 之前运维台是从解包出来的 `manifest.json` 读它们的;v3 不再解包成目录,
+    于是它唯一的来源就是这个函数。少报一栏的下场不是报错,是**世界卡片上那一栏
+    空着**,而两边的日志都干净 —— 所以这里的规矩是:manifest 上有的封皮字段,
+    一个不漏地报出来。
     """
     from anima_world.world_file import WORLD_FILE_VERSION, read_world_file
 
@@ -709,6 +717,9 @@ def inspect_world_file(path: str | Path) -> dict[str, Any]:
         "world_id": manifest.world_id,
         "name": manifest.name,
         "summary": manifest.summary,
+        "genre": manifest.genre,
+        "setting": manifest.setting,
+        "theme": manifest.theme,
         "format_version": manifest.version,
         "engine_min": manifest.engine_min,
         "source_engine_version": manifest.source_engine_version,

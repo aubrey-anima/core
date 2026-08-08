@@ -3959,6 +3959,11 @@ def _print_inspect_human(payload: dict[str, Any]) -> None:
     rows = [
         ("世界 id", payload["world_id"]),
         ("一句话", payload["summary"] or "—"),
+        # 店面栏:作者填的,直通玩家的世界卡片。渲染上看得见,是"这几栏到底有没有
+        # 跟着包走过来"最省事的一次自查 —— JSON 那份是契约,这份是给人看的回执。
+        ("题材", payload.get("genre") or "—"),
+        ("背景", payload.get("setting") or "—"),
+        ("主题", payload.get("theme") or "default"),
         ("格式版本", f"v{payload['format_version']}(本引擎读到 v{payload['reader_format_version']})"),
         ("要的引擎", f">= {payload['engine_min'] or '不限'}"),
         ("导出自", payload["source_engine_version"] or "—"),

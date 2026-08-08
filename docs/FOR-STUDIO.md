@@ -899,3 +899,26 @@ anima-world config set presence.enforce_colocation true --world-id w
 | 查这个世界的位置维护得怎么样 | `anima-world presence [--json]` | ✅ 新增 |
 | 开/关这道闸 | `anima-world config set presence.enforce_colocation …` | ✅ |
 | 知道哪个能力要当面 | `contract --json` / `world.verbs()` 的 `requires_colocation` | ✅ 新增 |
+
+## 3.16 修复:你们填的店面栏,`inspect` 此前只报一半(2.3.1)
+
+**症状在你们看不见的那一头。** 打包对话框里作者填的名称/简介/**题材/背景/主题**
+经 CLI 写进包内 manifest —— 这一步一直是对的,包里三栏都在。丢的是下一站:
+运维台 v3 那条导入路径从 `world inspect --json` 读这批字段登记进注册表,而
+`inspect` 从来只报 `name` 和 `summary`。于是**题材和背景在玩家的世界卡片上是空的**,
+而你们这侧、运维台那侧、引擎这侧的日志全是干净的。
+
+2.3.1 起 `inspect` 把 manifest 上的封皮字段报全:
+
+```bash
+anima-world world inspect x.cyberworld --json
+# → {..., "name": …, "summary": …, "genre": …, "setting": …, "theme": …}
+```
+
+**对你们的影响只有一条:出包前可以自己验一眼。** 你们的 `export_package` 已经把
+这五栏全填进 manifest 了,不用改代码;但**验的必须是发出去的那一份** ——
+`inspect` 现在就是那面镜子(人类渲染也多印了「题材/背景/主题」三行)。
+
+⚠️ 这一栏的权威链是:**你们填 → manifest → `inspect` → 运维台注册表 → 玩家卡片**。
+中间任何一环少读一栏,后果都是"卡片上空着"而不是报错 —— 所以出包后请顺手
+`inspect` 一次,那比在运维台上发现要早两站。
