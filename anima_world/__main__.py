@@ -1333,7 +1333,9 @@ def build_serve_scheduler(
             _seed_stock_visibility(world_seed, visibility_store)
             _seed_stock_places(world_seed, visibility_store)
         _seed_ontology(ontology_store, world_seed, fresh_world=seed_author_layer)
-        scheduler.world_rules = _load_world_rules(rules_store)
+        # `warn=True` 全仓库只有这一处:装载走一次,拿到的又是**这个世界真正在跑
+        # 的那份**规律(播种那份可能根本没落库,预检那份还没落库)。
+        scheduler.world_rules = _load_world_rules(rules_store, warn=True)
         # 本体的解析在规律之后:它要拿规律去查引用。声明过种类的世界从此走闸,
         # 没声明的照旧走警告 —— 那条警告只对后者还有意义。
         scheduler.ontology_store = ontology_store
@@ -1678,20 +1680,25 @@ def _seed_world_rules(rules_store: Any, world_seed: dict[str, Any] | None) -> No
     rules_store.seed(entries, datetime.now(timezone.utc).isoformat())
 
 
-def _load_world_rules(rules_store: Any) -> list[Any]:
+def _load_world_rules(rules_store: Any, *, warn: bool = False) -> list[Any]:
     """从 store 读出规律并编译。被人手改坏了也当场报错,不带着坏规律开机。
 
-    **常数步长那条 lint 在这里打,而且只在这里打。** 一次开机会解析三遍规律
-    (播种 / 装载 / 本体预检),`parse_rules` 里打就是同一句话说三遍 —— 而说三遍
-    的警告等于没说。装载这一处每次开机恰好走一次,且它拿到的是**这个世界真正
-    在跑的那份**规律(播种那份可能根本没落库)。
+    **常数步长那条 lint 由调用方开口(`warn=True`),而全仓库只有一处开。**
+    一次开机要解析好几遍规律(播种 / 本体预检 / 装载),在 `parse_rules` 里打
+    就是同一句话说好几遍 —— 而说好几遍的警告和没说过一样,人会开始略过它。
+    默认关的理由是**将来新加的调用点默认闭嘴**:开口要显式写出来,才看得见。
+
+    ⚠️ 这里原本无条件打,并且注释里写着"每次开机恰好走一次"。那句是假的 ——
+    `_precheck_ontology` 也走这个函数,于是线上那次重启把同一条警告说了两遍。
+    单测没逮到,是因为它直接调这个函数、只调一次:**测的是函数,不是那条真路**。
     """
     definitions = rules_store.definitions()
     if not definitions:
         return []
     rules = parse_rules(definitions)
-    for warning in drift_warnings(rules):
-        logger.warning("%s", warning)
+    if warn:
+        for warning in drift_warnings(rules):
+            logger.warning("%s", warning)
     return rules
 
 

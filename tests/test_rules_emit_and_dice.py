@@ -389,8 +389,12 @@ def test_解析本身不打这条警告(caplog):
     assert not caplog.records, "解析这一层不该打警告,否则一次开机要说三遍"
 
 
-def test_装载那一处恰好点名一次(caplog):
-    """真路径:`_load_world_rules` 是每次开机走且只走一次的那一处。"""
+def test_装载默认闭嘴要显式开口(caplog):
+    """开口是 `warn=True`,而全仓库只有装载那一处写了它。
+
+    默认关的理由是**将来新加的调用点默认闭嘴** —— 反过来(默认开、要静音的人
+    自己去关)正是下面那条真路 bug 的形状:预检顺手复用了这个函数,谁都没注意到。
+    """
     from anima_world.__main__ import _load_world_rules
 
     class _Store:
@@ -399,8 +403,57 @@ def test_装载那一处恰好点名一次(caplog):
 
     with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
         _load_world_rules(_Store())
+    assert not [r for r in caplog.records if "dt" in r.getMessage()], "默认不该开口"
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        _load_world_rules(_Store(), warn=True)
     said = [r.getMessage() for r in caplog.records if "dt" in r.getMessage()]
-    assert len(said) == 1, f"该恰好说一次,实际 {len(said)} 次:{said!r}"
+    assert len(said) == 1, f"开了口该说一次,实际 {len(said)} 次:{said!r}"
+
+
+def test_一次真开机恰好点名一次(tmp_path, caplog):
+    """**这条才是真路**:上面那条只证明了"这个函数说一次",而线上重启说了两遍。
+
+    走的是容器里那条路(`build_serve_scheduler`,一次完整开机)。原因是
+    `_precheck_ontology` 也调 `_load_world_rules` —— 同一条警告因此说两遍,而
+    说两遍的警告和没说过一样。**只钉函数级的那条测试等于把这个门开着。**
+
+    ⚠️ **必须验第二次开机**:预检读的是**库里那份**规律,首启时那张表还空着,
+    于是它一个字都不说,bug 还在测试也是绿的。线上撞见它的场合正是重启。
+    """
+    import fakeredis
+
+    from anima_world.__main__ import build_serve_scheduler
+
+    from _worldfile import write_seed_file
+
+    # ⚠️ **必须声明 `kinds`**:重复那一遍来自 `_precheck_ontology`,而它只在作者
+    # 写了 `kinds` 时才跑。不带种类的世界只说一遍 —— 拿那样的夹具去钉,这条测试
+    # 会在 bug 还在的时候就绿。线上那个世界是有种类的。
+    path = write_seed_file(tmp_path / "drifty.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "stocks": [{"owner": "world", "key": "雨天数", "value": 0.0}],
+        "rules": [DRIFTY],
+        "kinds": [{"id": "tree", "name": "树", "quantities": {"树高": {"default": 1.0}}}],
+        "entities": [{"id": "tree:oak", "name": "橡树", "location": "cafe"}],
+    })
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w", client, world_file=path, force_mock_llm=True).stop()
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        scheduler = build_serve_scheduler(
+            "w", client, world_file=path, force_mock_llm=True,
+        )
+    try:
+        said = [r.getMessage() for r in caplog.records
+                if "dt" in r.getMessage() and DRIFTY["id"] in r.getMessage()]
+        assert len(said) == 1, f"一次开机该恰好说一次,实际 {len(said)} 次"
+    finally:
+        scheduler.stop()
 
 
 def test_validate_也报得出这条():
