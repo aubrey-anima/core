@@ -98,3 +98,24 @@ def test_money_shows_up_only_when_the_economy_is_on(tmp_path):
         world.config_set("economy.enabled", "true")
         world.tick(5)
         assert "money" in _planner_situation(world.scheduler, "夏")
+
+
+def test_the_prompt_says_how_late_a_step_may_start():
+    """空窗的末端印作 `24:00`,而 `24:00` 不是一个能起头的时刻。
+
+    真跑一轮的样子:模型照着窗口写出 `start_min` 1440 / 1500 / 1530,
+    `validate_steps` 一条条丢掉,只在日志里留一行 "starts outside the day"。
+    世界照跑、计划照落,只是她傍晚那几步没了 —— 而不会有人去看那行日志。
+    丢弃那道闸必须留着(LLM 说的东西不许不经核对就进世界),这里钉的是
+    **它得先被告知范围**。
+    """
+    from anima_world.planner import MINUTES_PER_DAY, validate_steps
+
+    assert str(MINUTES_PER_DAY - 1) in _DEFAULT_PROMPT, (
+        "提示词没说 start_min 的上界,模型只能照着 24:00 猜"
+    )
+    # 闸还在:说了范围不代表就信它。
+    assert validate_steps(
+        [{"kind": "walk", "start_min": MINUTES_PER_DAY, "params": {"location": "cafe"}}],
+        {"walk": {"location": ["cafe"]}},
+    ) == ()

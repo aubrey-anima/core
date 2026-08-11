@@ -2433,6 +2433,20 @@ def run_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _place_names(state: dict[str, Any]) -> dict[str, str]:
+    """地点 id → 人话名。**印给人看的一律走它。**
+
+    和提示词那侧的 `ChatService._place_name` 同一条纪律,只是这边的来源是
+    `world.state()`:名册里已经这么翻了,而 `chat` 的抬头漏了,于是同一个命令
+    先印「苏晚夏 @ home」,底下的地图和提示词都写「家」。不报错,只是这个世界
+    对着用户说了半句英文 —— 而演示与模板一律中文是这个仓库的明文纪律。
+    """
+    return {
+        str(row.get("id")): str(row.get("name") or row.get("id"))
+        for row in state.get("locations", [])
+    }
+
+
 def _print_roster(world: Any, world_id: str, *, in_play: bool = False) -> None:
     """这个世界住着谁 —— 一个 .cyberworld 至今没有办法自报家门(#6)。
 
@@ -2444,7 +2458,7 @@ def _print_roster(world: Any, world_id: str, *, in_play: bool = False) -> None:
     state = world.state()
     agents = state.get("agents", {})
     now = state.get("world_time", {})
-    places = {row.get("id"): (row.get("name") or row.get("id")) for row in state.get("locations", [])}
+    places = _place_names(state)
     print(f"\n  {onboarding.bold(world_id)}  第{now.get('day', 0)}天 "
           f"{now.get('hour', 0):02d}:{now.get('minute', 0):02d}\n")
     if not agents:
@@ -2958,7 +2972,9 @@ def run_chat(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        roster = world.state().get("agents", {})
+        state = world.state()
+        roster = state.get("agents", {})
+        places = _place_names(state)
         if args.list_only or args.agent is None:
             _print_roster(world, world_id)
             return 0
@@ -2979,7 +2995,10 @@ def run_chat(args: argparse.Namespace) -> int:
                 logger.debug("player could not be placed at %r", info.get("location"))
 
         degraded = world.state().get("runtime", {}).get("llm", {}).get("degraded_reason")
-        print(onboarding.rule(f"{info.get('name', agent_id)} @ {info.get('location') or '?'}"))
+        where = info.get("location") or ""
+        print(onboarding.rule(
+            f"{info.get('name', agent_id)} @ {places.get(where, where) or '?'}"
+        ))
         if degraded:
             print(f"  {onboarding.yellow('这个世界正跑在 Mock 上')}({degraded})——"
                   f"回复会是模板。配一个:anima-world config set llm.api_key sk-…")
@@ -3000,10 +3019,16 @@ def run_chat(args: argparse.Namespace) -> int:
             if not line:
                 break
             history.append({"role": "user", "content": line})
+            # `meta` 是出参:她这一轮摆的姿态、这句话被判成什么意图、调了哪个
+            # 能力,都从这里回来。**必须一路带到 `record_chat_turn`** ——
+            # 不带的话那四列("她这一轮赌了气")永远是 null,而消息本身好好地
+            # 落了库:运维台上气泡照常显示,只是永远没有 tag,没有一处会报错。
+            # `play` 那条路一直是带的,这条路忘了 —— 两条门,一条把观测量丢了。
+            meta: dict[str, Any] = {}
             try:
                 reply = world.chat_reply(
                     agent_id, history[-20:],
-                    player_id=args.player_id, display_name=display_name,
+                    player_id=args.player_id, display_name=display_name, meta=meta,
                 )
             except (KeyError, ValueError) as exc:
                 print(f"[chat] {exc}", file=sys.stderr)
@@ -3013,7 +3038,7 @@ def run_chat(args: argparse.Namespace) -> int:
             print(f"{info.get('name', agent_id)} > {reply}\n")
             history.append({"role": "assistant", "content": reply})
             # 一轮一记:关系判定在这里发生,世界也在这里落盘。
-            world.record_chat_turn(agent_id, args.player_id, history[-2:])
+            world.record_chat_turn(agent_id, args.player_id, history[-2:], meta=meta)
             turns += 1
 
         if turns:
@@ -3866,6 +3891,47 @@ def run_contract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
+    """定时轮次这条链跑没跑 —— 返回"需要处理"的项数。
+
+    为什么在 `doctor` 里:这一层是这个引擎里**最容易静默地不工作**的一条。开关
+    点亮了、时钟在走、日志一行不错,而她一次也没主动过 —— 分不清是"她确实没什么
+    想做的"、hook 没挂上、LLM 一直失败,还是根本没人在跑这个世界。而在这之前
+    `World.autonomy_stats()` 只有 Python 出口:一个开着 `anima-world run` 的人
+    **没有任何办法问出这句话**(FOR-STUDIO 的判据:库里有而 CLI 上没有,
+    对外面等于不存在)。
+    """
+    from anima_world.redis_state import meta_rows
+
+    if not store.get("autonomy.enabled", default=False):
+        print(f"  {onboarding.dim('定时轮次关着(autonomy.enabled)')}")
+        return 0
+    row = meta_rows(redis, world_id).get("autonomy_stats")
+    if not isinstance(row, dict):
+        print(f"  {onboarding.yellow(onboarding.WARN)} 定时轮次开着,但**一轮都没跑过** —— "
+              f"她不会自己做任何事")
+        print(f"      {onboarding.dim('快进(simulate)不跑它;要它跑得用 anima-world run 或 start')}")
+        return 1
+    asked = int(row.get("asked") or 0)
+    acted = int(row.get("acted") or 0)
+    quiet = int(row.get("quiet") or 0)
+    failed = int(row.get("failed") or 0)
+    last = str(row.get("last") or "")
+    tail = f",最近一次:{last}" if last else ""
+    line = f"定时轮次:问过 {asked} 次,做了 {acted} 次,歇了 {quiet} 次,没成 {failed} 次{tail}"
+    if failed and failed >= acted:
+        print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+        print(f"      {onboarding.dim('做的没有没成的多 —— 多半是动词的前提不满足,或者 LLM 在编参数')}")
+        return 1
+    if asked and not acted and not quiet:
+        # 问了却既没做也没"想了想算了" —— 那是每一轮都半路掉了(渲染失败 / LLM 报错)。
+        print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+        print(f"      {onboarding.dim('问过却一次都没走完 —— 看 last 那句话')}")
+        return 1
+    print(f"  {onboarding.green(onboarding.OK)} {line}")
+    return 0
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     """Check the things that fail quietly. Non-zero exit when one of them has."""
     from anima_world.redis_state import durability_warning, events_key, RedisEventLog
@@ -3945,6 +4011,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     rate = store.get("scheduler.tick_rate", default=1.0)
     mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
     print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
+
+    problems += _report_autonomy_chain(redis, world_id, store)
 
     print()
     if problems:

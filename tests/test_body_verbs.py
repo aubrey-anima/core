@@ -280,3 +280,46 @@ def test_交互进世界的历史(world):
     assert events and events[-1]["who"] == "夏"
     assert events[-1]["loc"] == where
     assert events[-1]["payload"]["target"] == "tree:harbor_oak"
+
+
+def test_the_class_of_a_refusal_survives_to_the_public_boundary(world):
+    """四类拒绝在引擎里分得清清楚楚,在 `World.act()` 出口上不许合成一句话。
+
+    `tools.call` 捕到 `ToolCallError` 时只留一句散文(`error=…`,没有 detail),
+    于是 `reason` 那个词在出口上消失。而这一层存在的全部理由就是让这几类分得开:
+    `conditions` 是"等一会儿"、`incapable` 是"她做不了,去歇着"、`busy` 是
+    "先把手上这件做完"。合成一句之后,拿 `act()` 驱动角色的宿主只能去正则匹配
+    中文散文 —— 一个累坏了的人于是挨棵树轮着试过去,每一棵都回她"再等等"。
+
+    她读到的那句话一直是对的,坏的是**程序读到的那一份**。
+    """
+    agent = "夏"
+    where = world.scheduler.visibility_store.place_of("tree:harbor_oak")
+    world.scheduler.agents[agent].agent.blackboard.write("loc", where)
+    world.scheduler._transit.pop(agent, None)   # 在路上的人"不在任何地方"
+    world.tick(1)
+
+    world.set_stock(f"agent:{agent}", "体力", 0)
+    tired = world.act(agent, "interact",
+                      {"target": "tree:harbor_oak", "verb": "tend"}, surface="body")
+    assert tired["ok"] is False
+    assert tired.get("detail", {}).get("reason") == "incapable", (
+        f"「她做不了」丢了类别,只剩一句话:{tired!r}"
+    )
+
+    world.set_stock(f"agent:{agent}", "体力", 100)
+    started = world.act(agent, "interact",
+                        {"target": "tree:harbor_oak", "verb": "嫁接"}, surface="body")
+    assert started["ok"] is True and started["detail"]["occupies"]
+    blocked = world.act(agent, "interact",
+                        {"target": "tree:harbor_oak", "verb": "tend"}, surface="body")
+    assert blocked.get("detail", {}).get("reason") == "busy", (
+        f"「手上还有一件事」丢了类别:{blocked!r}"
+    )
+
+    # 讲不通的调用照旧是调用方的错,没有世界状态可报 —— 这一半不许跟着放开。
+    nonsense = world.act(agent, "interact",
+                         {"target": "tree:harbor_oak", "verb": "没这个动词"},
+                         surface="body")
+    assert nonsense["ok"] is False
+    assert "reason" not in nonsense.get("detail", {})

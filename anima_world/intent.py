@@ -653,10 +653,18 @@ class Director:
             )
         if not outcome.get("ok"):
             refusal = str(outcome.get("refusal") or "这会儿不行")
+            # **两套词分两格。** 这一层的 `reason` 是导演动作自己的词表
+            # (`unknown_place` / `not_colocated` / `not_held` / `refused` / …),
+            # 而能力那一层的词是 `conditions` / `incapable` / `busy` / `absent`。
+            # `**outcome` 摊在后面会把前者盖掉,于是同一个键在不同的失败上说着
+            # 两种语言 —— 宿主照着 `reason` 分支,遇上"她累坏了"就掉进 else。
+            # 细的那个照样交出去,只是它有自己的名字。
+            world_said = {k: v for k, v in outcome.items() if k != "reason"}
             return DirectorOutcome(
                 ok=False, text=f"({name}没能动手:{refusal})",
                 detail={"target": resolved, "action": "interact", "object": obj,
-                        "verb": verb, "reason": "refused", **outcome},
+                        "verb": verb, **world_said, "reason": "refused",
+                        "refusal_kind": str(outcome.get("reason") or "")},
             )
         return DirectorOutcome(
             ok=True, text=f"({name}对{obj}动手了。)",

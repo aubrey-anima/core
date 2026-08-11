@@ -608,6 +608,9 @@ def test_an_interaction_refusal_is_passed_through_word_for_word(tmp_path):
         meta: dict = {}
         reply = _say(world, "你去照料那棵老橡树", meta)
         assert meta["intent_detail"]["reason"] in ("refused", "invalid")
+        # 导演层的词表(`refused`)和能力层的词表(`incapable`)各占一格 ——
+        # 合成一个键的话,宿主照着 `reason` 分支时"她累坏了"会掉进 else。
+        assert meta["intent_detail"].get("refusal_kind") == "incapable", meta["intent_detail"]
         assert "没能动手" in reply or "(" in reply
 
 

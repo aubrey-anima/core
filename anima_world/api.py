@@ -486,6 +486,24 @@ class AgentUnavailable(RuntimeError):
 # 挡住的是手上的活 —— 没人能在半路上把觉睡了、把活干了。
 _PLAYER_TRANSIT_OK = frozenset({"chat"})
 
+# 一次能力调用被拒,分两种:**世界说不行**(下面这些)和**这次调用讲不通**
+# (`unknown_entity` / `unknown_verb` / `no_ontology` / `error`)。只有后者才是
+# `ToolCallError`。
+#
+# 分界为什么重要:`tools.call` 捕获 `ToolCallError` 时只留一句话
+# (`ToolResult(ok=False, error=…)`,**没有 detail**),于是 `reason` 那个词在
+# `World.act()` 的出口上就没了。而这一层的全部意义正是让这几类分得开 ——
+# `conditions` 是"等一会儿"、`incapable` 是"她做不了,去歇着或者去变强"、
+# `busy` 是"先把手上这件做完"、`absent` 是"走过去"、`declined`/`participant_gate`
+# 是"换个人或者晚点再约"。合成一句话之后,拿 `act()` 驱动角色的宿主(它存在的
+# 全部理由就是让别的进程里的角色够得着动词)只能去正则匹配中文散文;
+# 一个累坏了的人于是挨棵树轮着试过去,每一棵都回她"再等等"。
+#
+# 她读到的那句话一直是对的 —— 坏的是**程序读到的那一份**。
+_WORLD_SAID_NO = frozenset({
+    "conditions", "participant_gate", "incapable", "busy", "absent", "declined",
+})
+
 
 class _ToolRuntime:
     """工具与 director 能碰到的世界(`tools.base.ToolRuntime` 的实现)。
@@ -1000,12 +1018,7 @@ class _ToolRuntime:
                 scheduler.checkpoint()  # 交互即检查点(RLock,可重入)
         if consents:
             outcome = {**outcome, "consents": consents}
-        if not outcome.get("ok") and outcome.get("reason") not in (
-            "conditions", "participant_gate"
-        ):
-            # `participant_gate` 是**世界的状态**(他刚走了 / 他睡了),不是一次
-            # 讲不通的调用 —— 抛成 `ToolCallError` 的话,她会读到一句"你这次调用
-            # 是错的",而正确的下一步是等一会儿或者换个人。
+        if not outcome.get("ok") and outcome.get("reason") not in _WORLD_SAID_NO:
             raise tools_mod.ToolCallError(str(outcome.get("refusal")))
         return outcome
 
@@ -1147,9 +1160,14 @@ class World:
             meta_provider=self.chat_state.conversation_meta,
             place_name=self._location_display_name,
         )
-        # autonomy:(角色, 世界日) -> 今天主动过几次;以及那四个"通没通"的计数。
-        # 都是内存态:重启即清 —— 上限是"别把玩家的收件箱刷满",不是需要审计的账。
+        # autonomy:(角色, 世界日) -> 今天主动过几次。**内存态是对的** ——
+        # 上限是"别把玩家的收件箱刷满",不是需要审计的账,重启即清可以接受。
         self._autonomy_done: dict[tuple[str, int], int] = {}
+        # 那四个"这条链通没通"的计数**不一样,它要给别的进程看**:一个人开着
+        # `anima-world run`,想知道"她到底主动过没有"只能另开一个进程问,而
+        # 内存态的答案永远是全 0 —— 那正是这四个数存在的理由(分开"她不想做"和
+        # "根本没跑")在进程外反过来给了错答案。所以这里只是**写缓冲**,
+        # 真相发布在 `:meta` 上,`autonomy_stats()` 一律读那一份。
         self._autonomy_stats: dict[str, Any] = {
             "asked": 0, "acted": 0, "quiet": 0, "failed": 0, "last": None,
         }
@@ -2701,6 +2719,7 @@ class World:
         except Exception as exc:  # noqa: BLE001 - 记录下来,不许无声
             logger.warning("autonomy round crashed", exc_info=True)
             self._autonomy_stats["last"] = f"自主轮次崩溃({type(exc).__name__}:{exc})"
+            self._publish_autonomy_stats()
 
     def _autonomy_cap(self) -> int:
         return max(0, int(self.config_get("autonomy.max_per_day", autonomy.DEFAULT_MAX_PER_DAY) or 0))
@@ -2762,6 +2781,14 @@ class World:
 
         跑在世界自己那条事件循环上(不是 tick 线程)。任何一个角色出错只影响她自己。
         """
+        try:
+            await self._autonomy_round_body(contexts, day)
+        finally:
+            # 崩了也要发布:一轮半路炸掉留下的 `asked` 与 `last` 正是排查要看的
+            # 那两行 —— 只在成功时发布,等于这条链坏得最厉害的时候最看不见。
+            self._publish_autonomy_stats()
+
+    async def _autonomy_round_body(self, contexts: list[Any], day: int) -> None:
         specs = tools_mod.tools_for("*", surface=tools_mod.AUTONOMY)
         menu = "\n".join(spec.prompt_line() for spec in specs)
         allowed = [spec.id for spec in specs]
@@ -3734,8 +3761,40 @@ class World:
         存在的理由是这条路**最容易静默地不工作**:开关点亮了、时钟在走,而她一次也
         没主动过 —— 那可能是"她确实没什么想做的"(正常),也可能是 hook 没挂上、
         LLM 一直失败、或者额度早就用完了。这四个数把它们分开。
+
+        **读的是 `:meta` 上发布的那一份,不是这个进程的内存。** 驱动世界的是
+        `anima-world run` 那个进程,而问这句话的人多半在另一个进程里(CLI、
+        运维台、宿主的健康检查)。读内存的话他永远拿到全 0 —— 一个"这条链从没
+        跑过"的答案,而那正是这四个数要用来排除的那种情况。**诊断本身给出假阴性,
+        比没有诊断更坏。**
         """
-        return dict(self._autonomy_stats)
+        published = self._published_autonomy_stats()
+        return published if published is not None else dict(self._autonomy_stats)
+
+    def _published_autonomy_stats(self) -> dict[str, Any] | None:
+        store = getattr(self.scheduler, "meta_store", None)
+        if store is None:
+            return None
+        try:
+            row = store.get("autonomy_stats")
+        except Exception:  # noqa: BLE001 - 读不到诊断不该掀翻调用方
+            logger.warning("读 autonomy_stats 失败", exc_info=True)
+            return None
+        return dict(row) if isinstance(row, dict) else None
+
+    def _publish_autonomy_stats(self) -> None:
+        """把这一轮的计数发布到 `:meta` —— 别的进程只看得见这一份。
+
+        一轮结束发一次(而不是每次自增发一次):一轮是每 `interval_ticks` 一次,
+        本来就稀疏,而"这一轮最后发生了什么"正是 `last` 要说的那句话。
+        """
+        store = getattr(self.scheduler, "meta_store", None)
+        if store is None:
+            return
+        try:
+            store.put("autonomy_stats", dict(self._autonomy_stats))
+        except Exception:  # noqa: BLE001 - 发布失败不该让这一轮跟着炸
+            logger.warning("写 autonomy_stats 失败", exc_info=True)
 
     # ── chat-agent(1.3.0):stance / 能力 / 玩家教的规则 ─────────────────────
 

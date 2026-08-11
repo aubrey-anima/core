@@ -290,3 +290,77 @@ def test_declarations_survive_a_reopen(tmp_path, bare_seed):
         world.set_stock("world", "season", 4)
     with open_world_at(db, force_mock_llm=True) as reopened:
         assert reopened.perception("夏")["public"] == {"season": 4.0}
+
+
+def test_someone_who_walked_off_is_not_still_standing_here(tmp_path):
+    """人上了路,可见性表要跟着松手。
+
+    `_settle_actor_place` 在途时 `return`,注释写的是"在路上:不在任何地方,也就
+    不该被任何地方看见"—— 但 `return` 只是**不写新的**,上一次写进表里的地点还
+    留在原处。于是同一份提示词里两块打架:presence 走 `_agent_locations()`
+    (在途的人被排除)说「同在这里的还有:没有别人」,perception 走可见性表说
+    「这里的陆知遥」。LLM 挑一边编,而且无声 —— 玩家看着地图上两个人站在一间屋
+    子里,角色却当自己一个人待着;反过来更糟:人走了半天,她还在对着他说话。
+
+    用橱窗种子:`_settle_actor_place` 那道闸问的是**本体里 agent 声明过
+    别人看得见的量吗**,而毛坯世界没有 `kinds`,整条路不跑。
+    """
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        scheduler = world.scheduler
+        here = _where(world)
+        for aid in ("夏", "遥"):
+            scheduler.agents[aid].agent.blackboard.write("loc", here)
+        world.tick(1)   # 让 _settle_actor_place 把两个人都落进可见性表
+
+        assert "陆知遥" in _prompt_now(world), "前提没成立:同地时本该感知到他"
+
+        # 他起身走了 —— 引擎眼里"在路上的人不在任何地方"
+        scheduler._transit["遥"] = {
+            "from": here, "to": "workshop", "arrive_at": scheduler.clock + 99,
+        }
+        world.tick(1)
+
+        assert "遥" not in scheduler._agent_locations(), "前提没成立:在途该被排除"
+        assert scheduler.visibility_store.place_of("agent:遥") is None, (
+            "他已经上路了,可见性表还把他按在原地"
+        )
+        assert "陆知遥" not in _prompt_now(world), (
+            "他已经上路了,perception 还把他算在这儿 —— "
+            "而同一份提示词的 presence 块说这里没有别人"
+        )
+
+
+def test_the_table_lets_go_the_moment_the_journey_starts(tmp_path):
+    """松手要在**起程那一下**,不是下一个 tick。
+
+    真跑一遍(1 tick/秒,39 次在途取样)漏掉的 6 次全在上路那一 tick 上:一趟路
+    在这一 tick 的 `_settle_actor_place` 跑完之后才开始,于是要等下一 tick 才撤。
+    窗口从"整段路"缩成"一个 tick",可那一 tick 里她的提示词照样自相矛盾一次。
+    """
+    from anima_world.actions import ActionDescriptor
+
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        scheduler = world.scheduler
+        here = _where(world)
+        for aid in ("夏", "遥"):
+            scheduler.agents[aid].agent.blackboard.write("loc", here)
+        world.tick(1)
+        assert scheduler.visibility_store.place_of("agent:遥") == here
+
+        there = next(
+            r["id"] for r in scheduler.location_store.all()
+            if r.get("kind", "point") == "point" and r["id"] != here
+        )
+        started = scheduler._start_journey(
+            scheduler.agents["遥"].agent, ActionDescriptor("walk", {"location": there}),
+        )
+        assert started, "前提没成立:这一步没起得了程"
+        assert scheduler.visibility_store.place_of("agent:遥") is None, (
+            "起程那一下没松手 —— 到下一个 tick 之前,她的提示词一直在自相矛盾"
+        )
+
+
+def _prompt_now(world: World) -> str:
+    spy = PromptSpy()
+    _say(world, spy)
+    return spy.prompts[-1]

@@ -85,6 +85,29 @@ def _bring_together(world: World, mover: str, where: str) -> bool:
     return False
 
 
+def _stand_together(world: World, a: str, b: str, where: str) -> bool:
+    """把两个人凑到 `where`,而且**同时**站在那儿。
+
+    只搬一个是不够的:搬他要 tick 最多 80 次,而这 80 tick 里行为树完全可能让
+    **另一个**起身走掉 —— 于是 `talk_to` / `broadcast` 被"你们不在同一个地方"
+    挡回来,测试红在一个和它要验的东西无关的地方。全量套件里逮到过一次
+    (隔离重跑 5/5 全绿),那正是一道会假绿的闸最难看的样子:它红不红取决于
+    这一回她想不想出门。
+    """
+    for _ in range(6):
+        drifted = [
+            who for who in (a, b)
+            if world._tool_runtime.agent_location(who) != where
+            or who in world.scheduler._transit
+        ]
+        if not drifted:
+            return True
+        for who in drifted:
+            if not _bring_together(world, who, where):
+                return False
+    return False
+
+
 def _snapshot(world: World, places: tuple[str, ...]) -> dict[str, object]:
     """世界在这些地方现在是什么样。表数行数,事件数那个类型的条数。"""
     # 逻辑表名 → Redis 键(world.db 退役后动词的 writes 声明仍用表名说话)。
@@ -132,9 +155,9 @@ def _setup_for(world: World, verb: str) -> tuple[dict, dict]:
         assert _bring_together(world, agent, pantry), "没能把她挪到有饭的地方"
     here = world._tool_runtime.agent_location(agent)
     if verb in ("broadcast", "talk_to"):
-        assert _bring_together(world, other, here), "没能把两个人凑到一起"
+        assert _stand_together(world, agent, other, here), "没能把两个人凑到一起"
     if verb == "reach_out":
-        assert _bring_together(world, other, here)
+        assert _stand_together(world, agent, other, here)
         world.player_move("p1", here)
     if verb in ("mute", "delay_reply", "walk_away", "end_conversation", "refuse_topic"):
         world.player_move("p1", here)

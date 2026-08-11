@@ -430,3 +430,43 @@ def test_the_notice_stays_quiet_when_autonomy_is_off(tmp_path, bare_seed):
          "--ticks", "1", "--llm", "mock")
     assert done.returncode == 0, done.stderr
     assert "定时轮次" not in done.stdout
+
+
+# ---- 别的进程也得问得出来 ---------------------------------------------------
+
+
+def test_another_process_can_ask_whether_the_chain_ever_ran(tmp_path):
+    """这四个数**必须跨进程看得见**,否则它们的用处正好反过来。
+
+    驱动世界的是 `anima-world run` 那个进程,而问"她到底主动过没有"的人几乎总在
+    另一个进程里(CLI、运维台、宿主的健康检查)。计数器只活在内存里的时候,他拿到
+    的永远是全 0 —— 一个"这条链从没跑过"的答案,而那恰恰是这四个数要用来**排除**
+    的那种情况。诊断本身给出假阴性,比没有诊断更坏。
+    """
+    world, _ = _world(tmp_path, "无")
+    with world:
+        _seat_player(world)
+        world.tick(1)
+        _settle(world, lambda: world.autonomy_stats()["asked"])
+        assert world.autonomy_stats()["asked"] >= 1, "前提没成立:这一轮没问过她"
+
+    # 另一个 World 实例 = 另一个进程的替身:它自己的内存计数器是全 0。
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as onlooker:
+        assert onlooker._autonomy_stats["asked"] == 0, "前提没成立:它不该有内存计数"
+        seen = onlooker.autonomy_stats()
+        assert seen["asked"] >= 1, (
+            f"另一个进程问出来是「一轮都没跑过」,而这个世界明明跑过:{seen}"
+        )
+
+
+def test_doctor_says_whether_she_ever_acted_on_her_own(tmp_path):
+    """CLI 上问得到 —— 库里有而 CLI 上没有,对外面等于不存在(FOR-STUDIO 的判据)。"""
+    world, _ = _world(tmp_path, "无")
+    with world:
+        _seat_player(world)
+        world.tick(1)
+        _settle(world, lambda: world.autonomy_stats()["asked"])
+
+    done = run_cli("doctor", "--world-id", "w")
+    assert "定时轮次" in done.stdout, done.stdout
+    assert "问过" in done.stdout, done.stdout

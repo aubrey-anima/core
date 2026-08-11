@@ -81,6 +81,9 @@ class _BeatWorldReader:
 JUDGE_PAIR_COOLDOWN_TICKS = 6
 MAX_TICKS_PER_SECOND = 1000
 MAX_IDLE_LOOP_DEPTH = 5
+# `_actor_placed` 里表示"她此刻不在任何地方"(在路上)。地点 id 永远非空,
+# 所以空串不会和真地点撞车,而它与 `None`(这个进程还没管过她)不是一回事。
+_NOWHERE = ""
 
 
 class BrainLike(Protocol):
@@ -258,7 +261,8 @@ class Scheduler:
         self._stock_watch_cache: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {}
         self._stock_watch_warned: set[tuple[str, str, str, str]] = set()
         # 她身上有没有别人看得见的量(本体加载完就定死),以及她上次被放在哪 ——
-        # 位置没变时不必再写一次(见 `_settle_actor_place`)。
+        # 位置没变时不必再写一次(见 `_settle_actor_place`)。上路的人记
+        # `_NOWHERE`,那也是一个"写过了"的状态,不是"没写过"。
         self._actor_visible_cache: bool | None = None
         self._actor_placed: dict[str, str] = {}
         # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
@@ -1543,12 +1547,41 @@ class Scheduler:
             return
         agent_id = brain.agent.id
         if agent_id in self._transit:
-            return   # 在路上:不在任何地方,也就不该被任何地方看见
+            # 在路上:不在任何地方,也就不该被任何地方看见。
+            #
+            # **光是"不写新的"不够**:上一次落进表里的地点会原样留着,于是同一份
+            # 提示词里两块打架 —— presence 走 `_agent_locations()`(在途的人被
+            # 排除)说「同在这里的还有:没有别人」,perception 走这张表说「这里的
+            # 陆知遥」。LLM 挑一边编,而且无声:她要么当自己一个人待着,要么对着
+            # 一个走了半天的人说话。`unplace` 的注释早就写了同一条理由。
+            #
+            # 拿 `_actor_placed` 当哨子,所以一段路只删一次而不是每 tick 一次;
+            # 记的是 `_NOWHERE` 而不是 `pop` —— 进程中途重启时这张缓存是空的,
+            # `pop` 会读成"本来就没落过地"而把那行陈的留在库里(而在途是持久的)。
+            self._unplace_actor(agent_id)
+            return
         here = brain.agent.blackboard.read("loc") or brain.agent.location or ""
         if not here or self._actor_placed.get(agent_id) == here:
             return
         self.visibility_store.place(f"agent:{agent_id}", here, brain.agent.name)
         self._actor_placed[agent_id] = here
+
+    def _unplace_actor(self, agent_id: str) -> None:
+        """她此刻不在任何地方 —— 把可见性表上那一行撤掉(锁内)。
+
+        **两个调用点,不是一个。** `_start_journey` 是起点(上路的那一下当场松手),
+        `_settle_actor_place` 是兜底(进程中途重启、或者别处把人塞进 `_transit`)。
+        只钉后者的话会留下**一个 tick 的窗口**:一趟路在这一 tick 的
+        `_settle_actor_place` 跑完之后才开始,要等下一 tick 才撤 —— 而那一 tick 里
+        presence 说"这儿没别人"、perception 说"这里的陆知遥",正是要修的那句矛盾,
+        只是窄了一点。真跑一遍 39 次在途取样,漏的 6 次全在上路那一 tick 上。
+        """
+        if self.visibility_store is None or not self._actor_is_visible_to_others():
+            return
+        if self._actor_placed.get(agent_id) == _NOWHERE:
+            return   # 已经撤过了,一段路只写一次
+        self.visibility_store.unplace(f"agent:{agent_id}")
+        self._actor_placed[agent_id] = _NOWHERE
 
     # ── 一起做事 ────────────────────────────────────────────────────────────
     #
@@ -3681,6 +3714,9 @@ class Scheduler:
         self._transit[agent.id] = {
             "from": origin, "to": destination, "arrive_at": self.clock + ticks,
         }
+        # 上路的那一下就从可见性表上撤下来 —— 晚一个 tick 撤,那一 tick 里她的
+        # 提示词就自相矛盾一次(见 `_unplace_actor`)。
+        self._unplace_actor(agent.id)
         self._record_and_deliver({
             "type": "travel",
             "who": agent.id,

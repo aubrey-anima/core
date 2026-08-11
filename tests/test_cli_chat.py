@@ -94,3 +94,59 @@ def test_命令行上你只有一个身份():
         for cmd, extra in (("chat", []), ("play", []), ("prompt", ["--agent", "夏"]))
     }
     assert set(defaults.values()) == {DEFAULT_PLAYER_ID}, defaults
+
+
+def test_the_header_names_the_place_in_chinese(tmp_path):
+    """抬头印的是「苏晚夏 @ 家」,不是「苏晚夏 @ home」。
+
+    同一个命令的名册早就把地点 id 翻成人话了,抬头漏了 —— 于是用户第一眼看到
+    的是「@ home」,而紧接着的地图、提示词、她自己的台词里全写「家」。它不报错,
+    只是这个世界对着用户说了半句英文,而中文优先是明文纪律。
+    """
+    result = _chat(_a_world(tmp_path), "--agent", "夏", stdin="\n")
+    assert result.returncode == 0, result.stderr
+    header = next(
+        (line for line in result.stdout.splitlines() if "苏晚夏" in line and "@" in line),
+        "",
+    )
+    assert header, f"没找到抬头:{result.stdout!r}"
+    assert "home" not in header and "cafe" not in header, (
+        f"抬头把地点 id 直接印出来了:{header!r}"
+    )
+
+
+def test_a_turns_observations_land_on_the_message_row(tmp_path, monkeypatch):
+    """她这一轮摆的姿态得跟着消息一起落库。
+
+    `chat_reply` 的 `meta` 是出参 —— 姿态、意图、调过的能力都从那里回来,而
+    `record_chat_turn(..., meta=meta)` 才把它们写到消息行的四列上。`chat` 这条门
+    从来没建过那个 dict:消息本身好好地落了库,四列永远是 null。运维台上气泡照常
+    显示,只是永远没有 tag,而没有一处会报错。`play` 那条门一直是对的 ——
+    **两条门,一条把观测量丢了**。
+    """
+    from anima_world import llm_client as llm_mod
+
+    class _DeclaresAStance(llm_mod.MockLLMClient):
+        async def complete(self, messages):
+            return "〔stance:provoke〕\n哼。"
+
+        async def stream(self, messages):
+            yield "〔stance:provoke〕\n哼。"
+
+    monkeypatch.setattr(llm_mod, "MockLLMClient", _DeclaresAStance)
+
+    db = _a_world(tmp_path)
+    result = _chat(db, "--agent", "夏", "--name", "阿檀", stdin="你这店真差劲\n\n")
+    assert result.returncode == 0, result.stderr
+
+    with open_world_at(db, force_mock_llm=True) as world:
+        # 观测量不走 `messages_for`(那一份只给 role/content/created_at)——
+        # 运维台读的是 `annotation_rows` / `conversation_meta` 这一份。
+        metas = [
+            world.chat_state.conversation_meta(conversation["id"])
+            for conversation in world.conversations("夏")
+        ]
+        assert metas, "她一句话都没说,这条测试验不了"
+        assert any(m.get("stances") or m.get("stance") for m in metas), (
+            f"她声明了姿态,消息行上却一个字没记:{metas!r}"
+        )
