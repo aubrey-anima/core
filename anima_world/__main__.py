@@ -3891,6 +3891,26 @@ def run_contract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _autonomy_is_overdue(redis: Any, world_id: str, store: Any, row: dict) -> str:
+    """上一轮过去太久了吗 —— 是就返回该说的那句话,否则空串。
+
+    宽限给两个间隔:一个间隔是正常节奏,卡在第二个间隔上多半是这个世界压根没人
+    在跑(`run` 停了 / 只被 `simulate` 快进过)。留一个间隔的余量,免得每次正常
+    的轮次间隙都报一次警 —— 一句总在响的警告等于没有警告。
+    """
+    try:
+        last_tick = int(row.get("last_tick"))
+        now = int(redis.get(f"anima:{world_id}:clock") or 0)
+    except (TypeError, ValueError):
+        return ""   # 老世界发布的行没有这一格,那就只按四个数判
+    interval = max(1, int(store.get("autonomy.interval_ticks", default=72) or 72))
+    behind = now - last_tick
+    if behind <= interval * 2:
+        return ""
+    return (f"上一轮在第 {last_tick} tick,现在第 {now} tick —— 隔了 {behind} 个 tick"
+            f"(间隔本该是 {interval});这个世界多半没人在跑,或者 hook 掉了")
+
+
 def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
     """定时轮次这条链跑没跑 —— 返回"需要处理"的项数。
 
@@ -3918,9 +3938,24 @@ def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
     failed = int(row.get("failed") or 0)
     last = str(row.get("last") or "")
     tail = f",最近一次:{last}" if last else ""
-    line = f"定时轮次:问过 {asked} 次,做了 {acted} 次,歇了 {quiet} 次,没成 {failed} 次{tail}"
+    line = (f"定时轮次(本次开机以来):问过 {asked} 次,做了 {acted} 次,"
+            f"歇了 {quiet} 次,没成 {failed} 次{tail}")
+
+    # **判据是"离上一轮过去多久了",不是那四个数。** 数只说本次开机以来,而重启
+    # 之后库里躺着的还是上一次开机那一行 —— 光看数的话,"刚重启"和"这条链死了"
+    # 长得一模一样,那正是这一节要分开的两件事。
+    stale = _autonomy_is_overdue(redis, world_id, store, row)
+    if stale:
+        print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+        print(f"      {onboarding.dim(stale)}")
+        return 1
     if failed and failed >= acted:
         print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+        # 报出**那一次是什么**。只说"没成 1 次"的话,人下一步无处可去 ——
+        # `last` 每轮都被改写,失败的理由早被后面的沉默盖掉了。
+        why = str(row.get("last_failure") or "").strip()
+        if why:
+            print(f"      {onboarding.dim('最近一次没成:' + why)}")
         print(f"      {onboarding.dim('做的没有没成的多 —— 多半是动词的前提不满足,或者 LLM 在编参数')}")
         return 1
     if asked and not acted and not quiet:

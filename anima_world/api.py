@@ -1169,7 +1169,8 @@ class World:
         # "根本没跑")在进程外反过来给了错答案。所以这里只是**写缓冲**,
         # 真相发布在 `:meta` 上,`autonomy_stats()` 一律读那一份。
         self._autonomy_stats: dict[str, Any] = {
-            "asked": 0, "acted": 0, "quiet": 0, "failed": 0, "last": None,
+            "asked": 0, "acted": 0, "quiet": 0, "failed": 0,
+            "last": None, "last_failure": None,
         }
         # contact:那条链"通没通"的计数。**冷却与次数不在这里** —— 那两样落库
         # (`RedisContactStore`),因为重启不该把所有人的冷却一起清零。这里只是诊断。
@@ -2836,7 +2837,14 @@ class World:
                 logger.info("%s 自己决定了:%s %s", ctx.agent_id, decision["tool"], result.detail)
             else:
                 self._autonomy_stats["failed"] += 1
-                self._autonomy_stats["last"] = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
+                said = f"{ctx.agent_id}:{decision['tool']} 没成 —— {result.error}"
+                self._autonomy_stats["last"] = said
+                # **失败单独留一格。** `last` 每轮都被改写,而"什么都不做"是这一层
+                # 的常态 —— 一次失败后面跟上两轮沉默,那句理由就没了,只剩计数器上
+                # 一个 `failed: 1`:你知道有一次没成,永远不知道是什么没成。而这一层
+                # 的全部意义就是把失败的方式分开。真世界上撞见的:一个跑了 18 天的
+                # 世界报 `failed: 1`,而库里、日志里都找不到那一次是什么。
+                self._autonomy_stats["last_failure"] = said
 
     # ── contact:她想起一个不在跟前的玩家 ──────────────────────────────────
 
@@ -3791,8 +3799,14 @@ class World:
         store = getattr(self.scheduler, "meta_store", None)
         if store is None:
             return
+        row = dict(self._autonomy_stats)
+        # **上一轮发生在第几 tick** —— 四个计数只说"本次开机以来",而重启之后
+        # 库里躺着的还是上一次开机那一行,读的人分不出"刚重启,新的一轮还没到"
+        # 和"这条链死了"。而那正好又是这四个数要分开的那两件事,只是换了个地方
+        # 犯。有了它,判据变成"离上一轮过去多久了",重启不影响这句话。
+        row["last_tick"] = int(self.scheduler.clock)
         try:
-            store.put("autonomy_stats", dict(self._autonomy_stats))
+            store.put("autonomy_stats", row)
         except Exception:  # noqa: BLE001 - 发布失败不该让这一轮跟着炸
             logger.warning("写 autonomy_stats 失败", exc_info=True)
 

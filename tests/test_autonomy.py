@@ -332,9 +332,13 @@ def test_it_is_off_by_default(tmp_path, bare_seed):
 
         assert llm.prompts == [], "开关关着还去问她要不要做点什么 = 白花 LLM"
         assert world.inbox("p1") == []
-        assert world.autonomy_stats() == {
-            "asked": 0, "acted": 0, "quiet": 0, "failed": 0, "last": None,
+        # 只钉"四个数都是 0、没有最近一次" —— 整份对比会让**加一格诊断**
+        # 变成一条红色测试,而这条问的是开关关不关,不是这个 dict 有几个键。
+        stats = world.autonomy_stats()
+        assert {k: stats[k] for k in ("asked", "acted", "quiet", "failed")} == {
+            "asked": 0, "acted": 0, "quiet": 0, "failed": 0,
         }
+        assert stats["last"] is None
 
 
 def test_tools_off_means_autonomy_off(tmp_path):
@@ -470,3 +474,59 @@ def test_doctor_says_whether_she_ever_acted_on_her_own(tmp_path):
     done = run_cli("doctor", "--world-id", "w")
     assert "定时轮次" in done.stdout, done.stdout
     assert "问过" in done.stdout, done.stdout
+
+
+def test_doctor_tells_a_dead_chain_from_a_fresh_restart(tmp_path):
+    """判据是"离上一轮过去多久了",不是那四个数。
+
+    四个数只说得清"本次开机以来",而重启之后库里躺着的还是上一次开机那一行 ——
+    光看数的话,"刚重启、新的一轮还没到"和"这条链死了"长得一模一样。而那正好
+    就是这一节要分开的两件事,只是换了个地方犯同一个错。
+    """
+    world, _ = _world(tmp_path, "无")
+    with world:
+        _seat_player(world)
+        world.tick(1)
+        _settle(world, lambda: world.autonomy_stats()["asked"])
+        assert world.autonomy_stats().get("last_tick") is not None, "没记下上一轮在第几 tick"
+
+    fresh = run_cli("doctor", "--world-id", "w")
+    assert "隔了" not in fresh.stdout, f"刚跑过就报「太久没跑」了:{fresh.stdout}"
+
+    # 时钟往前跳过两个间隔,而没有任何一轮跟上 —— 这才是"这条链死了"的样子。
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as onlooker:
+        interval = int(onlooker.config_get("autonomy.interval_ticks", 72) or 72)
+        last = int(onlooker.autonomy_stats()["last_tick"])
+        onlooker.scheduler.redis.set(
+            f"anima:{onlooker.scheduler.world_id}:clock", last + interval * 3
+        )
+
+    dead = run_cli("doctor", "--world-id", "w")
+    assert "隔了" in dead.stdout, f"这条链停了三个间隔,doctor 一声不吭:{dead.stdout}"
+
+
+def test_a_failure_keeps_its_own_line_after_later_rounds_go_quiet(tmp_path):
+    """一次失败的理由不许被后面的沉默盖掉。
+
+    `last` 每轮都被改写,而"什么都不做"是这一层的**常态** —— 一次失败后面跟上
+    两轮沉默,那句理由就没了,只剩计数器上一个 `failed: 1`:你知道有一次没成,
+    永远不知道是什么没成。而这一层的全部意义就是把失败的方式分开。
+
+    真世界上撞见的:一个跑了 18 天的世界报 `failed: 1`,而库里、日志里都找不到
+    那一次到底是什么。
+    """
+    world, _ = _world(tmp_path, '〔tool:reach_out {"player_id": "谁也不是"}〕', "无", "无")
+    with world:
+        _seat_player(world)
+        world.tick(1)
+        _settle(world, lambda: world.autonomy_stats()["failed"])
+        assert world.autonomy_stats()["failed"] >= 1, "前提没成立:这一轮没失败"
+        failure = str(world.autonomy_stats()["last_failure"])
+        assert failure and failure != "None", "失败没有留下自己那一格"
+
+        # 再来两轮沉默 —— `last` 会被改写,`last_failure` 不该跟着没。
+        world.tick(2)
+        _settle(world, lambda: world.autonomy_stats()["quiet"])
+        assert str(world.autonomy_stats()["last_failure"]) == failure, (
+            "后面的沉默把那次失败的理由盖掉了"
+        )
