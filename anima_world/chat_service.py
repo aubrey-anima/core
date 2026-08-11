@@ -132,6 +132,29 @@ _DEFAULT_LOOP_INTERRUPT_TEMPLATE = (
     "你自己决定:接着说你原来那段,还是转过去回应他 —— 也可以先按住他"
     "（「等我说完」）。这是你的选择,不是规则。"
 )
+# 没名字时她怎么称呼对方。**称呼不是名字** —— 身份块里那一段把这件事说死了,
+# 这里只负责挑一个说得出口的词。
+DEFAULT_ADDRESS = "访客"
+# `role=` 那几个参数的默认值就是这些机器词:宿主**没说**身份时它们才出现。
+# 印进提示词是噪音,拿来当称呼("你好,player")更糟。判据是"这是不是一个值,
+# 而不是一句人话" —— 所以只收这几个引擎/宿主自己写下的默认值,不做启发式。
+_PLACEHOLDER_ROLES = frozenset({"player", "user", "guest", "visitor", "member"})
+
+
+def _is_placeholder_role(role: str) -> bool:
+    return (role or "").strip().lower() in _PLACEHOLDER_ROLES
+
+
+def address_for(role: str) -> str:
+    """他没报名字的时候,她该怎么称呼他 —— 有人话身份就用身份,否则「访客」。
+
+    这里**只挑称呼**。"这不是他的名字"那句话归身份块说,而且必须说 ——
+    否则她下一次被问到"我叫什么"时,会把称呼当名字答出来。
+    """
+    role = (role or "").strip()
+    return role if role and not _is_placeholder_role(role) else DEFAULT_ADDRESS
+
+
 _DEFAULT_MEMORY_BLOCK_TEMPLATE = "你和对方过去的对话回顾：\n{summaries}"
 _DEFAULT_WORLD_MEMORY_TEMPLATE = "你最近记得的事：\n{memories}"
 _DEFAULT_PRESENCE_TEMPLATE = (
@@ -459,6 +482,50 @@ class ChatService:
             logger.warning("chat.overrides_block 渲染失败,这轮不带玩家的规则")
             return None
 
+    def taught_address(self, agent_id: str, player_id: str) -> str:
+        """这位玩家**教过**她怎么叫他 —— 教过就是教过,没教过是空字符串。
+
+        身份块和 `overrides` 块此前各读各的,于是同一份提示词里两块互相打脸:玩家刚说
+        完「以后叫我小林」,`style_adjust` 把它写进了库,`overrides` 块照着说「怎么称呼
+        玩家:小林」,而紧接着自称"最高优先级事实"的身份块还在说「他**没有告诉过你他
+        叫什么名字**……不许自己给他起一个」。两条指令顶着的下场实测是模型摇摆(见
+        2.1.0 末尾那条),而这一次顶牛的两条是引擎自己写的。
+
+        `nickname_for_player` 优先于 `address_form`:昵称是他点名要的那一个,称呼形式
+        更像是口气偏好("别那么客气")。两个都没有就回落到 `address_for(role)`。
+        """
+        if self._state is None:
+            return ""
+        try:
+            rules = self._state.overrides(agent_id, player_id)
+        except Exception:  # noqa: BLE001 - 读不到规则不该让聊天告吹
+            logger.warning("读 persona override 失败", exc_info=True)
+            return ""
+        by_kind = {str(rule.get("kind")): str(rule.get("value") or "").strip() for rule in rules}
+        return by_kind.get("nickname_for_player") or by_kind.get("address_form") or ""
+
+    def told_name(self, agent_id: str, player_id: str) -> str:
+        """他**自己说过**他叫什么 —— 说过就是说过,没说过是空字符串。
+
+        和 `taught_address` 分成两个方法,因为身份块要说的是两句不同的话:教过的叫法
+        「不一定是他的本名」,而报过的名字**就是**他说的那个名字,她答得上来。合成一个
+        的话,一个刚说完「我叫林越」的玩家问她"我叫什么",还是会听到"你只教过我这样叫你"。
+
+        出处仍然是**他自己**,不是宿主认证的 `display_name`(纪律 3)——
+        身份块因此说「他告诉过你」,不说「他是」。
+        """
+        if self._state is None:
+            return ""
+        try:
+            rules = self._state.overrides(agent_id, player_id)
+        except Exception:  # noqa: BLE001 - 读不到规则不该让聊天告吹
+            logger.warning("读 persona override 失败", exc_info=True)
+            return ""
+        for rule in rules:
+            if str(rule.get("kind")) == "player_name":
+                return str(rule.get("value") or "").strip()
+        return ""
+
     def refused_topic_block(self, agent_id: str, user_text: str) -> str | None:
         """她拒绝谈的话题又被提起了。**不硬拦**:拦下来玩家只会看到沉默,
         而她自己表明态度才是那个角色该有的反应。"""
@@ -658,7 +725,15 @@ class ChatService:
         if interlocutor:
             display_name = str(interlocutor.get("display_name") or "").strip()
             role = str(interlocutor.get("role") or "").strip()
-            if display_name:
+            # 玩家教过的叫法**压过**按身份算出来的兜底称呼:`_interlocutor_for` 认不得
+            # 它(它不知道是跟哪个角色说话,而规则是按 (角色, 玩家) 存的),于是那一边
+            # 只会给出「访客」。两个称呼同时进一份提示词就是一次顶牛。
+            taught = self.taught_address(agent_id, interlocutor_id)
+            told = self.told_name(agent_id, interlocutor_id)
+            address = taught or told or str(interlocutor.get("address") or "").strip() or (
+                display_name or address_for(role)
+            )
+            if address:
                 # 和在场块**同一份快照** —— 各读一次会让这两块互相打脸(见 `_world_snapshot`)
                 presence = ctx.get("presence") or {}
                 agent_location = str(presence.get("location_id") or "").strip()
@@ -667,14 +742,65 @@ class ChatService:
                 member_location_name = str(
                     interlocutor.get("location_name") or member_location
                 ).strip()
-                identity = f"【认证对话身份｜最高优先级事实】正在与你交谈的人是 {display_name}"
-                if role:
-                    identity += f"，身份是{role}"
+                identity = "【认证对话身份｜最高优先级事实】"
+                if display_name:
+                    identity += f"正在与你交谈的人是 {display_name}"
+                    if role and not _is_placeholder_role(role):
+                        identity += f"（身份：{role}）"
+                    identity += (
+                        f"。你必须把对话中的‘你’理解为 {display_name} 这个人。"
+                        "**认人不许变**；至于当面怎么称呼他，若这位玩家教过你别的叫法"
+                        "（见上面那一块），按他教的来。"
+                    )
+                else:
+                    # **名字和称呼是两件事。** 没有名字时给她一个称得出口的词是必要的
+                    # (兜底成 `player-3f9a2c` 那种 id,她念不出来就会自己编一个,而编
+                    # 出来的那个会进转录、进会话摘要、进她 0.8 重要度的长期记忆 ——
+                    # 真世界里撞见过)。但**称呼不许升格成名字**:他问"我叫什么"的时候,
+                    # 照实说不知道,才是这个世界里真实发生过的事。
+                    known = (
+                        f"你只知道他的身份：{role}。" if role and not _is_placeholder_role(role)
+                        else "你连他的身份也不清楚。"
+                    )
+                    if told:
+                        # 他**自己报过**名字。这一支存在的全部理由是:上面那两支的
+                        # 结尾都许过「他要是告诉了你名字,这一轮之后就照那个名字认他」,
+                        # 而在这之前没有一行代码兑现它 —— 于是同一个人第二次来,
+                        # 又被当成没报过名字的生客。
+                        # 出处照实说(「他告诉过你」而不是「他是」):这个名字来自他
+                        # 自己的一句话,不是宿主认证的身份。
+                        called = f"，不过他要你叫他「{address}」，就这样称呼他" if taught else ""
+                        identity += (
+                            f"正在与你交谈的人告诉过你他叫「{told}」{called}。{known}"
+                            f"**认人不许变**：他问起自己叫什么、或者你要说出他的名字，"
+                            f"就是「{told}」——这是他亲口说的,你答得上来,"
+                            f"不许再说「你还没告诉过我」,也不许自己另给他起一个。"
+                        )
+                    elif taught:
+                        # 他**教过**你这样叫他。再说一句"他没告诉过你"就是引擎自己
+                        # 在同一份提示词里推翻自己(见 `taught_address`)。名字与称呼
+                        # 照旧分成两格:她照他教的叫,但那仍然不等于知道他叫什么。
+                        identity += (
+                            f"正在与你交谈的人让你叫他「{address}」，你就这样称呼他。{known}"
+                            f"**那是他教你的叫法，不一定是他的本名**："
+                            f"他要是问起你知不知道他的真名，照实说他只教过你这样叫，"
+                            f"别把「{address}」说成是他的本名，也不许自己再给他起一个。"
+                            f"他要是告诉了你本名，这一轮之后就照那个名字认他。"
+                        )
+                    else:
+                        identity += (
+                            f"正在与你交谈的人**没有告诉过你他叫什么名字**。{known}"
+                            f"你可以称他「{address}」——**那是称呼，不是名字**："
+                            f"他要是问起自己叫什么、或者你要说出他的名字，照实说你还不知道、他还没说过，"
+                            f"不许把「{address}」当成他的名字说出口，也不许自己给他起一个。"
+                            f"他要是告诉了你名字，这一轮之后就照那个名字认他。"
+                        )
                 identity += (
-                    f"。你必须把对话中的‘你’理解为 {display_name}，并始终用这个名字认识和称呼对方。"
                     "不得质疑、遗忘或改写该身份，不得回答‘你是谁’或把其他角色当成发消息的人。"
                     "如果历史回复曾写错对方身份，那是旧错误，必须忽略并纠正。"
                 )
+                # 下面几句讲的是"谁在哪",用**称呼**就行 —— 名字不名字与位置无关,
+                # 而没名字那一支再插一次 display_name 只会插出一个空字符串。
                 # 在途不算在场:黑板的 `loc` 落地才改写,途中仍是出发地。少了
                 # `in_transit` 这道闸,角色会一边说"正在去建筑工作室的路上"一边
                 # 说"我们面对面" —— 同一段 prompt 自相矛盾,LLM 挑一边编,无声。
@@ -687,19 +813,19 @@ class ChatService:
                 ):
                     place = agent_location_name or member_location_name
                     identity += (
-                        f"{display_name}和你都在{place}，因此这是面对面交谈。"
-                        f"可以自然描写双方在场互动，但不得替{display_name}编造动作、台词或感受。"
+                        f"{address}和你都在{place}，因此这是面对面交谈。"
+                        f"可以自然描写双方在场互动，但不得替{address}编造动作、台词或感受。"
                     )
                 elif agent_in_transit and member_location_name:
                     # 别说"你在 X"——她正离开 X。在场块已经说了她在去哪的路上。
                     identity += (
-                        f"{display_name}当前在{member_location_name}，而你正在赶路途中，"
+                        f"{address}当前在{member_location_name}，而你正在赶路途中，"
                         "因此对话媒介是手机文字私聊。"
                     )
                 else:
                     if member_location_name and agent_location_name:
                         identity += (
-                            f"{display_name}当前在{member_location_name}，你当前在{agent_location_name}，"
+                            f"{address}当前在{member_location_name}，你当前在{agent_location_name}，"
                             "因此对话媒介是手机文字私聊。"
                         )
                     else:

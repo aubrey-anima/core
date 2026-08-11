@@ -100,13 +100,19 @@ def test_config_set_coerces_and_validates(world):
 def test_world_reopens_from_the_event_log(tmp_path):
     """时钟恢复语义:回到事件日志里最后一个世界时间戳。没有事件的静默 tick
     不是历史(事件溯源的本义),所以用一个确定性事件钉住最后时刻 ——
-    依赖异步叙事事件恰好落盘的写法会 flaky。"""
+    依赖异步叙事事件恰好落盘的写法会 flaky。
+
+    断的是**推进了三格**,不是钟面上的绝对数字:这个世界几点开门是它作者的意见
+    (`world.start_time`),而"重开接不接得上最后那个事件"和几点开门毫无关系。
+    把创世那一刻的绝对值抄进断言,等于让这条测试改成靠一个巧合站着。
+    """
     db = str(tmp_path / "w.db")
     with open_world_at(db, force_mock_llm=True) as world:
+        genesis = world.state()["world_time"]["tick"]
         world.tick(3)
         world.player_action("p1", "留下到此一游")  # ts = 当前时钟,同步落盘
         tick = world.state()["world_time"]["tick"]
-        assert tick == 3
+        assert tick == genesis + 3
 
     with open_world_at(db, force_mock_llm=True) as reopened:
         state = reopened.state()

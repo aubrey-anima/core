@@ -324,17 +324,31 @@ diff <(zcat a.cyberworld) <(zcat b.cyberworld)         # 两次导出差在哪
 
 ## 命令
 
+分两拨:**人打的**和**部署/脚本打的**。分界是承重的 —— `start` 会引导、会替新世界
+换成演示速度,`run` 一概不做。
+
 ```bash
-anima-world start          # 创建 + 运行,带引导 —— 从这里开始
-anima-world chat           # 和角色说话;不带 --agent 列出谁住在这里
+# 人打的
+anima-world start          # 引导配 LLM → 创世 → 前台运行 —— 从这里开始
+anima-world play           # 在活着的世界里说话:时钟一边走,她可能自己走过来找你
+anima-world chat           # 说一轮话就退(时钟不走);不带 --agent 列出谁住在这里
 anima-world prompt         # 她收到的提示词,逐块带来源
 anima-world map            # 地图、谁在哪、谁去了哪儿(--json)
 anima-world ontology       # 有哪些种类的东西、量与动词(--json / --check)
 anima-world doctor         # 体检:Redis 持久化、密钥、真调一次 LLM、时钟
 anima-world config         # 读写配置;api key 自动进机器配置,不进世界
-anima-world run            # 无引导前台宿主(部署用)
-anima-world simulate       # 无头快进(--report 落一份运行摘要)
-anima-world world          # export / import / inspect .cyberworld
+
+# 部署 / 脚本打的
+anima-world run            # 只把时钟跑在前台:不引导、不问、不改时钟
+anima-world simulate       # 无头快进(--report 落一份运行摘要;--ticks 0 = 只创世)
+anima-world world          # export / import / inspect / migrate / drop 一个世界
+anima-world validate       # 不建世界就查一份 .cyberworld 或一份节拍脚本
+anima-world contract       # 引擎自报存储契约与包格式版本 —— 持镜像的仓库拿它对账
+anima-world report         # 只读地出一份运行摘要,不跑世界
+anima-world events         # 事件流导出成 JSONL
+anima-world contact        # 谁想起过玩家、由头是什么(--why 连没触发的一起解释)
+anima-world presence       # 谁在谁跟前(开同处一地那道闸之前的体检)
+anima-world memory / agent # 老世界的数据修补(记忆 tick、被拆碎的 goals)
 ```
 
 ## 文档

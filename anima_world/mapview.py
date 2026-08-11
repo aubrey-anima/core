@@ -22,6 +22,11 @@
 
 3. **两个人走同一条路。** 后画的把先画的整条盖掉,于是图上看不出那个人来过 ——
    "照跑但给错东西"的原样。重合处画 `#`,而不是让谁消失。
+
+4. **地点名压掉区域边框。** 一个贴着框边的长名字会把那一行的 `│` 写掉,于是
+   「建筑工作室」看上去在港街**外面** —— 而它明明在里面。框线承载的是"谁在谁
+   里面"这个**事实**,名字只是名字:名字少几个字,读的人看得出来是少了;边框断
+   一格,读的人只会安静地读到一句假话。所以标签给边框让路(`_label_beside`)。
 """
 
 from __future__ import annotations
@@ -38,6 +43,12 @@ DEFAULT_HEIGHT = 26
 # 轨迹记号:**单宽**且彼此好认。中文首字是双宽的,拿它画线会把格子撑歪。
 _MARKERS = "abcdefghijkmnopqrstuvwxyz"   # 去掉 l(和 1、|、框线太像)
 SHARED = "#"                             # 两个人以上走过的那一段
+
+# 框线字符。它们是这张图上唯一**说事实**的东西("谁在谁里面"),所以标签让它们。
+_FRAME = frozenset("─│┌┐└┘")
+# 截断的记号。和 `◉`、框线一样是"东亚宽度不定"的字符 —— 这个模块一律按一格记账,
+# 三者同进同退;要是哪天改成按两格,得一起改,不然框线自己先歪。
+_ELLIPSIS = "…"
 
 
 def display_width(text: str) -> int:
@@ -128,6 +139,23 @@ class _Canvas:
             self.put(col, y, ch)
             col += display_width(ch)
 
+    def room(self, x: int, y: int, step: int) -> int:
+        """从 (x, y) 起沿 step 方向走,**撞上框线之前**还有几格可写。
+
+        为什么问画布而不问几何:一个点旁边可能有好几层框(自己的、父级的、隔壁
+        区域的),而"哪一条会被写掉"只取决于路上先遇到谁。照几何算等于把画序又
+        推演一遍,推错了不会报错 —— 而画布上摆着的就是答案。
+        """
+        if not (0 <= y < self.height):
+            return 0
+        row = self._cells[y]
+        free = 0
+        col = x
+        while 0 <= col < self.width and row[col] not in _FRAME:
+            free += 1
+            col += step
+        return free
+
     def at(self, x: int, y: int) -> str | None:
         if 0 <= y < self.height and 0 <= x < self.width:
             return self._cells[y][x]
@@ -189,6 +217,57 @@ def _line(a: tuple[int, int], b: tuple[int, int]) -> Iterable[tuple[int, int]]:
             y0 += sy
 
 
+def _fit(text: str, room: int) -> str:
+    """把标签截进 `room` 格,**按显示宽度截**,截了就说出来。
+
+    两条都踩得着:按字符个数截会把一个双宽字劈成半个,那半个字在终端上占一格,
+    整行往左错一格 —— 框线又歪了。而截了不留痕更坏:「建筑工作」看上去是一个
+    完整的地名,读的人没有任何办法知道自己看的是半个名字。
+    """
+    if room <= 0:
+        return ""
+    if display_width(text) <= room:
+        return text
+    budget = room - display_width(_ELLIPSIS)
+    kept, used = "", 0
+    for ch in text:
+        step = display_width(ch)
+        if used + step > budget:
+            break
+        kept += ch
+        used += step
+    # 一个字都放不下时也要留个省略号:那是在说"这儿有个名字,只是写不下"
+    return kept + _ELLIPSIS
+
+
+def _label_beside(canvas: _Canvas, col: int, row: int, text: str, *, gap: str = " ") -> None:
+    """把标签摆在记号旁边,**绝不写到框线上**。
+
+    右边优先:中文和西文都从左往右读,`◉ 咖啡店` 比 `咖啡店 ◉` 更像"这个点叫
+    咖啡店"。右边挤不下就整块挪到左边 —— 换边只是不好看,写穿框线是**说假话**,
+    所以宁可换边、再不行宁可截。两边都放不下才截,截在宽的那一边。
+    """
+    if not text:
+        return
+    need = display_width(text) + display_width(gap)
+    right = canvas.room(col + 1, row, 1)
+    left = canvas.room(col - 1, row, -1)
+    if right >= need:
+        canvas.text(col + 1, row, f"{gap}{text}")
+        return
+    if left >= need:
+        canvas.text(col - need, row, f"{text}{gap}")
+        return
+    if right >= left:
+        shown = _fit(text, right - display_width(gap))
+        if shown:
+            canvas.text(col + 1, row, f"{gap}{shown}")
+    else:
+        shown = _fit(text, left - display_width(gap))
+        if shown:
+            canvas.text(col - display_width(shown) - display_width(gap), row, f"{shown}{gap}")
+
+
 def render(
     places: list[MapPlace],
     *,
@@ -233,13 +312,9 @@ def render(
             continue
         col, row = _to_cell(place.x, place.y, width, height)
         canvas.put(col, row, "◉")
-        # 右边放不下就放左边。一个被画布边缘截断的地点名等于没有名字,
-        # 而这张图的一半意义就是"那个点是哪儿"。
-        label = f" {place.name}"
-        if col + 1 + display_width(label) < width:
-            canvas.text(col + 1, row, label)
-        else:
-            canvas.text(max(0, col - display_width(place.name) - 1), row, f"{place.name} ")
+        # 挤不下时往左让、再不行截 —— 挡住它的既有画布边缘,也有区域框线:
+        # 写穿框线的那一版把「在港街里」画成了「在港街外」。
+        _label_beside(canvas, col, row, place.name)
 
     for place_id, agents in (marks or {}).items():
         place = by_id.get(place_id)
@@ -247,7 +322,9 @@ def render(
             continue
         col, row = _to_cell(place.x, place.y, width, height)
         label = "".join(markers.get(a, "?") for a in agents)
-        canvas.text(col + 1, row + 1, f"[{label}]")
+        # 站在这儿的人也贴着记号写,同一条规矩:`[n]` 写穿框线和地点名写穿一样骗人。
+        # 这一层不留空格 —— `[n]` 本来就紧贴在 `◉` 下面那一格,挪一格会和上一行错开。
+        _label_beside(canvas, col, row + 1, f"[{label}]", gap="")
 
     return "\n".join(canvas.lines())
 

@@ -42,8 +42,26 @@ class ScriptedLLM:
         yield await self.complete(messages)
 
 
-def _world(tmp_path, *replies: str, boom: bool = False, interval: int = 1) -> tuple[World, ScriptedLLM]:
-    world = open_world_at(str(tmp_path / "w.db"), agents=1, force_mock_llm=True)
+def _at(tmp_path, hhmm: str) -> str:
+    """内置世界的作者层 + 一行"几点开门",写成一个世界文件。
+
+    有几条测试要的是**世界处在一天里的某个时刻**(她那会儿睡没睡着),而这一点
+    从来不是常数 —— 它由 `world.start_time` 决定,内置世界声明的是下午两点半。
+    从内置世界派生而不是另写一份:作息表一旦改了,这里跟着改,不会悄悄脱节。
+    """
+    from _worldfile import bundled_seed, write_seed_file
+
+    seed = bundled_seed()
+    seed["config"] = {**(seed.get("config") or {}), "world.start_time": hhmm}
+    return write_seed_file(tmp_path / f"at_{hhmm.replace(':', '')}.cyberworld", seed)
+
+
+def _world(tmp_path, *replies: str, boom: bool = False, interval: int = 1,
+           start_time: str | None = None) -> tuple[World, ScriptedLLM]:
+    world = open_world_at(
+        str(tmp_path / "w.db"), agents=1, force_mock_llm=True,
+        world_file=_at(tmp_path, start_time) if start_time else None,
+    )
     llm = ScriptedLLM(*replies, boom=boom)
     world.chat_service._background_llm = llm
     world.config_set("contact.enabled", True)
@@ -177,8 +195,14 @@ def test_no_reason_no_contact(tmp_path):
 
 
 def test_she_does_not_think_of_you_in_her_sleep(tmp_path):
-    """在睡觉不该想起你。**归零不是打折** —— 而且要说得出是哪一条挡的。"""
-    world, _ = _world(tmp_path)
+    """在睡觉不该想起你。**归零不是打折** —— 而且要说得出是哪一条挡的。
+
+    世界得**真的在夜里**:注入一格 `sleep` 只按得住这一瞬,下一 tick 行为树照
+    作息表重挑一个动作就把它盖掉了 —— 于是"她睡着"这个前提在 `world.tick(3)`
+    里活不到断言那一行。这条以前站得住只是因为所有世界都从午夜开始,而几点开门
+    如今是这个世界作者的意见。所以把它写出来:这条测试要的是半夜。
+    """
+    world, _ = _world(tmp_path, start_time="00:00")
     with world:
         _befriend(world)
         _give_reason(world)
@@ -189,6 +213,8 @@ def test_she_does_not_think_of_you_in_her_sleep(tmp_path):
         assert "sleep" in world._contact_blockers("夏", "p1")
 
         world.tick(3)
+        assert world.scheduler._current_action["夏"].kind == "sleep", \
+            "跑了三 tick 她就醒了 —— 这条测试后面验的已经不是'她睡着不想你'"
         time.sleep(0.3)
         assert world.contact_requests() == []
         assert world.contact_stats()["blocked"] > 0
@@ -440,7 +466,11 @@ def test_talking_at_tick_zero_still_counts_as_having_shown_up(tmp_path):
     "他从没跟她说过话",于是"很久没出现"这条由头对他**永远**不成立。两个角色跑满
     两个世界日,一条都没触发,日志里一个字的异常都没有。
     """
-    world, _ = _world(tmp_path)
+    # 创世那一 tick 必须真的是 **0** —— 这条撞出来的场景就是"世界刚开机的第一个
+    # 访客"。引擎默认值仍旧是午夜(不声明 `world.start_time` 的世界逐位不变),
+    # 所以这个形状照样是真世界里长得出来的;内置世界声明了下午两点半,写出来才不是
+    # 蹭一个巧合。
+    world, _ = _world(tmp_path, start_time="00:00")
     with world:
         assert world.scheduler.clock == 0, "这条测试要的就是创世那一 tick"
         world.scheduler.contact_store.note_contact("夏", "p1", 0, "阿檀")

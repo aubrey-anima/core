@@ -27,8 +27,27 @@ from anima_world.needs import URGENT
 def world(tmp_path):
     w = open_world_at(str(tmp_path / "world.db"), force_mock_llm=True)
     w.tick(50)
+    _settle(w, sorted(w.scheduler.agents)[0])
     yield w
     w.close()
+
+
+def _settle(world: World, agent: str, limit: int = 288) -> None:
+    """等到她手上没有正在赶的路 —— 这几条测试都得从"她此刻能起程"开始。
+
+    在途时 `emit_action("walk")` 会被"她在赶路"挡回来,于是队列的第一步永远不生效、
+    永远不往前走一格,而这几条要验的根本不是那道闸。更坏的是 `_elsewhere()` 拿的是
+    她**此刻站在哪**:人在路上时那是她刚离开的地方,于是"走去别处"算出来的目的地
+    正是她自己已经在走的那一个,断言便再也分不清"世界没执行"和"她本来就要去那儿"。
+
+    从前这里不必等,只是因为所有世界都从午夜起步、跑 50 tick 恰好是凌晨没人动 ——
+    而几点开门如今是这个世界作者的意见(`world.start_time`)。
+    """
+    for _ in range(limit):
+        if agent not in world.scheduler._transit:
+            return
+        world.tick(1)
+    raise AssertionError(f"{agent} 整整一个世界日都在路上,这条测试没法起头")
 
 
 def _an_agent(world: World) -> str:

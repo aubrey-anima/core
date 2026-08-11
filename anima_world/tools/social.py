@@ -275,6 +275,10 @@ def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
     在场以 TTL 为准(`World.who_is_present`)**并且要同地**:找一个不在场、或者在场
     但不在她这儿的人都是空动作(隔着半个地图"走过来跟你说话"没有意义)——
     那正是这个仓库最在意的"给不在的人写事件",所以当场拒绝而不是照发。
+
+    **一天开一次口,而且今天说过话就不算开口了**(`claim_hail`,水位和闲着时那条
+    `_maybe_hail_player` 共用)。少了这一句的样子是实测出来的:玩家正一句一句跟她
+    聊着,这条能力插了两次话,两次都是招呼生客的口气。
     """
     target = str(params.get("player_id") or "").strip()
     present = ctx.runtime.present_player_ids(ctx.agent_id)
@@ -284,6 +288,9 @@ def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
         target = present[0]
     if target not in present:
         raise ToolCallError(f"{target} 不在她身边 —— 给不在场的人发一条搭话是空动作")
+    refusal = ctx.runtime.claim_hail(ctx.agent_id, target)
+    if refusal:
+        raise ToolCallError(refusal)
     text = str(params.get("text") or "").strip()
     here = ctx.runtime.agent_location(ctx.agent_id)
     ctx.runtime.emit({

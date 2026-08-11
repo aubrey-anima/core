@@ -106,7 +106,7 @@ def test_state_names_the_reason_the_llm_is_mocked(tmp_path):
     with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         llm = world.state()["runtime"]["llm"]
     assert llm["mock"] is True
-    assert llm["degraded_reason"] == "llm.api_key is not configured"
+    assert llm["degraded_reason"] == "llm.api_key 还没配"
 
 
 def test_malformed_rich_seed_sections_degrade_instead_of_stranding_the_world(tmp_path, caplog):

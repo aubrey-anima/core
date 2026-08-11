@@ -246,6 +246,48 @@ def test_she_cannot_reach_out_to_someone_present_but_elsewhere(tmp_path):
         assert world.inbox("p1") == []
 
 
+def test_she_does_not_hail_someone_she_is_already_talking_with(tmp_path):
+    """一次真的对局逼出来的:玩家正一句一句跟她聊着,自主轮次让她插了两次话,
+    两次都是招呼生客的口气(「你是第一次来吧」)—— 而她刚给这个人做过一杯咖啡。
+
+    搭话是开场白,今天已经说过话就不再是开口了。判据取 contact 水位,所以
+    `World.chat` 和 `record_chat_turn` 两扇门进来的对话都算数。
+    """
+    world, _ = _world(tmp_path, '〔tool:reach_out {"player_id": "p1", "text": "你是第一次来吧?"}〕')
+    with world:
+        _seat_player(world)
+        world.record_chat_turn("夏", "p1", [
+            {"role": "user", "content": "老板,还是老样子"},
+            {"role": "assistant", "content": "好嘞,一杯拿铁"},
+        ])
+
+        world.tick(1)
+        _settle(world, lambda: world.autonomy_stats()["failed"])
+
+        assert world.inbox("p1") == [], "她把正在聊天的人当成了生客"
+        assert "说过话" in str(world.autonomy_stats()["last"])
+
+
+def test_the_hail_watermark_is_shared_with_the_idle_hail(tmp_path):
+    """两条路(闲着时的 `_maybe_hail_player`、自主轮次的 `reach_out`)共用一个水位。
+
+    各记各的话,一天之内玩家会连挨两次搭话 —— 而"一天一次"这条闸看上去还在。
+    """
+    reach = '〔tool:reach_out {"player_id": "p1", "text": "还在吗?"}〕'
+    world, _ = _world(tmp_path, *[reach] * 6, interval=1)
+    with world:
+        _seat_player(world)
+        assert world.scheduler.claim_hail("夏", "p1") == ""   # 闲着时那条先开了口
+
+        for _ in range(4):
+            world.tick(1)
+            time.sleep(0.05)
+        _settle(world, lambda: world.autonomy_stats()["failed"])
+
+        mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
+        assert mine == [], f"同一天里她开了两次口:{mine}"
+
+
 def test_a_chat_only_capability_is_not_offered_in_a_timed_round(tmp_path):
     """自主轮次里没有"对方"这个人:end_conversation / walk_away 在那儿没有意义,
     给了只会写出一堆关掉空会话的动作。"""

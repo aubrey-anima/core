@@ -117,6 +117,12 @@
 - 1 tick = `world.minutes_per_tick` 世界分钟(默认 5)→ 1 世界日 = 288 tick
 - `scheduler.tick_rate` = 每现实秒走多少 tick(热更新配置)。默认 1/300,即世界与现实 1:1;
   `start` 给新世界设为 1.0(演示速度,约 5 分钟走完一个世界日)
+- `world.start_time`(HH:MM,默认 `00:00`)= **创世那一刻钟面上是几点**。tick 0 是午夜,
+  而新世界跑演示速度,于是不声明它的世界开箱头一分半钟是所有人在睡觉。**几点开门是
+  这个世界作者的意见**(和作息表是同一件事),所以它是配置而不是引擎默认值 ——
+  内置的旧港声明 `14:30`。只在这个前缀**第一次有钟**时生效(`setnx`),跑了三天的世界
+  重开钟一格不动;写错的时刻当场抛,因为这里的降级只有一种样子(悄悄退回午夜),
+  而那正是作者永远不会发现的那种坏。
 
 ### 2.3 角色决策(行为树 + LLM 规划)
 
@@ -409,8 +415,31 @@ Mock 上,而本地 ollama 与若干 OpenAI 兼容端点的 function calling 支�
 - `style_adjust` —— 写 `persona_overrides`,**按 (角色, 玩家) 永久**:一次教会,跨会话
   跨天不忘("以后叫我霜霜" 的核心是"以后")。回一句轻确认,不走 in-character 生成。
   可写的 kind 是白名单:`address_form` / `description_style` / `tone_preference` /
-  `forbidden_topics` / `nickname_for_player`。宿主也可以直接
+  `forbidden_topics` / `nickname_for_player` / `player_name`。宿主也可以直接
   `World.set_persona_override()`,不必经过分类器。
+
+  ⚠️ **`player_name`(他说他叫什么)不是分类器写的**,见下面那一段:分类器写它就会把
+  玩家自报家门那一轮的话吞掉。宿主直接写它是可以的 —— 但要知道它和 `display_name`
+  的分工:后者是**宿主认证过的**身份,前者是**他自己说的**,身份块照着说
+  「他告诉过你他叫 X」而不是「他是 X」。
+
+**自报家门不经分类器,引擎自己认**(`intent.read_self_introduction`):
+「我叫林越,你叫我小林就行」在 `World.chat` / `chat_burst` 的共用前奏里被识别出来,
+`player_name` = 林越、`address_form` = 小林 两格分别落库,**然后这一轮照旧走对话**。
+
+三条理由:分类器默认不跑(`chat.intent.enabled` 默认关),而身份块每个世界都在;
+判成 `style_adjust` 会让玩家自报家门收到一句「(记下了:…)」的系统回执,他刚说的
+话被整个吞掉;而分类是一次 LLM 往返,有权抽风 —— 和 `SECOND_PERSON` 同一条纪律。
+
+**只填空不覆盖**(改口走 `style_adjust` 那条明路),**不升格成 `display_name`**
+(纪律 3),**认不准就空手**(「我叫他小林」「我叫了一杯咖啡」「别叫我先生」一律不认;
+汉字名字卡在 6 个字以内)。
+
+⚠️ **开关开着的世界里分类器还会再判一次,而闸在分派那一头**:`_dispatch_intent` 里
+这一轮要是 `read_self_introduction` 认得的自报家门,`style_adjust` 那一支直接退回
+`dialogue`。分类器给的是同一件事的第二个答案,而第二个答案在这里不是重复,是吞掉 ——
+真世界实测判成 `style_adjust(0.95)`,她回「（记下了:玩家的昵称 —— 小林。）」。
+闸**只挡 `style_adjust`**:「我叫林越,让遥也过来」的后半句照旧要兑现。
 - `narrative_direction` —— 交给 director:**只对已经存在的角色动手**
   (`come_here` / `go` / `leave` / `sleep` / `eat` / `work` / `talk_to` / `interact` /
   `give` / `act`),而且不进提示词、进**世界** —— 让某人过来就是一次真的
@@ -711,6 +740,18 @@ seen["blocks"]        # [{"label","chars","text"}, …] 按真实顺序
 seen["absent"]        # {块名: 为什么没出现} —— 照着这句话就能让它出现
 seen["system"]        # 并起来的整段,和真聊天送进 LLM 的逐字相同
 ```
+
+**名字和称呼是两件事**(身份块)。`display_name` 是**他报过的名字**,`role` 是他的身份
+(宿主传什么就是什么;`"player"` 这类机器默认值不算身份)。宿主没给名字时:
+
+- 她仍然有个称得出口的称呼 —— 有人话身份就用身份(「旅人」),否则「访客」;
+- 但身份块会明说**那是称呼不是名字**:他问起自己叫什么,她照实说还不知道,
+  且不许自己给他起一个。他一说,下一轮就照名字认人。
+
+⚠️ **别指望引擎替宿主编一个名字。** 从前这里兜底成 `player-3f9a2c`,而身份块紧接着
+命令她「始终用这个名字称呼对方」—— 一条必然执行不了的命令,于是真模型自己编一个,
+而编出来的那个会进转录、进会话摘要、进她 0.8 重要度的长期记忆。线上世界里这么
+"改"过一次玩家的名字,照跑、报成功、日志一行不错。宿主该做的是**把名字传进来**。
 
 #### 2.9.6 本体层(ontology):世界里有哪些**种类**的东西,以及能对它们做什么
 
@@ -1732,10 +1773,11 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--redis` / `--world-id` | `$ANIMA_REDIS_URL` 或 `redis://127.0.0.1:6379/0` / `$ANIMA_WORLD_ID` 或 `world` | 世界住在哪个 Redis、叫什么名字(键前缀 `anima:<world_id>:`)。可选 `--mysql DSN` 让无限增长的四样进 MySQL |
-| `--seed` | 内置种子 | 世界种子 JSON,**只对新建世界生效** |
+| `--world-file` | 内置 `demo.cyberworld` | 世界文件 `.cyberworld`,**只对新建世界生效**(`--seed` 已随"种子"这个概念一起移除) |
 | `--beats` | 无 | 节拍脚本 JSON |
 | `--no-input` | - | 不交互提问(CI / 脚本) |
 | `--real-time` | - | 新世界也用真实时间,不用演示速度 |
+| `--verbose` | - | 引擎的日志照原样打 —— 见 §4.2 末尾那条 |
 
 ### 4.2 anima-world chat —— 和一个角色说话
 
@@ -1749,15 +1791,26 @@ anima-world chat --world-id world --agent 夏 --name 阿檀
 | `--redis` / `--world-id` | `$ANIMA_REDIS_URL` 或 `redis://127.0.0.1:6379/0` / `$ANIMA_WORLD_ID` 或 `world` | 世界住在哪个 Redis、叫什么名字(键前缀 `anima:<world_id>:`)。可选 `--mysql DSN` 让无限增长的四样进 MySQL |
 | `--agent` | 无 | 找谁说话;省略或写错都会列出名册(写错时退出码 2) |
 | `--player-id` | `cli` | 你的身份 id —— **角色对你的印象记在它头上**,换 id 就是换个人 |
-| `--name` | `访客` | 你在角色眼里的称呼 |
+| `--name` | 无(= 他还没说过名字) | 你在这个世界里叫什么。不给不等于你叫「访客」:那是**称呼**,不是名字(§2.9.5.1) |
 | `--list` | - | 只列名册就退出 |
+| `--verbose` | - | 引擎的日志照原样打 |
 
 空行或 Ctrl-D / Ctrl-C 结束。每说完一轮就落进世界(会话关闭、摘要、关系判定),
 所以**说完一句话那一刻 db 就是完整的**。
 
-**时钟不走**:对话发生在世界的此刻,退出时世界还停在原地。要一边活一边聊,那是
-宿主应用的事(`World.open` + `start_clock` + `World.chat`)—— 一个 CLI 不该趁你
-打字偷偷推进别人的世界。转录留在这个进程里,每轮只把最近 20 条传进世界。
+**时钟不走**:对话发生在世界的此刻,退出时世界还停在原地。要一边活一边聊,用
+`play`(§4.2.5);嵌进程序里是 `World.open` + `start_clock` + `World.chat` ——
+一个 CLI 不该趁你打字偷偷推进别人的世界。转录留在这个进程里,每轮只把最近 20 条
+传进世界。
+
+**`--player-id` 三个命令共用一个默认值**(`chat` / `play` / `prompt` 都是 `cli`)。
+它们记的和问的必须是同一个人:分开的时候,玩完 `play` 再用 `prompt` 去看她收到了
+什么,看到的是一个从没跟她说过话的陌生 id —— 不报错,只是空着。
+
+**人在等一句台词的时候,引擎的日志不插在中间。** `start` / `chat` / `play` 三个
+命令里,引擎的 WARNING 收着不打,散场报一行「这一场里引擎记了 N 条警告」;
+`--verbose` 就照原样打,什么都不拦。别的命令(`run` / `simulate` / …)不变 ——
+那里没有人在等一句台词。
 
 ### 4.2.1 anima-world prompt —— 看一眼她收到了什么
 
@@ -1853,6 +1906,32 @@ anima-world presence --world-id w --json          # 契约
 合成一个的话,一个宿主根本没接 `player_move` 的世界,看起来会像是玩家都碰巧站在没人
 的地方,而那是改不回来的误诊。
 
+### 4.2.5 anima-world play —— 在**活着**的世界里说话
+
+```bash
+anima-world play --world-id w                      # 跟名册第一个人说话,时钟一边走
+anima-world play --world-id w --agent 夏 --name 阿檀
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--agent` | 名册第一个 | 先跟谁说话;进去以后用 `/at <id>` 换人 |
+| `--player-id` | `cli` | 同 `chat`(§4.2),三个命令共用 |
+| `--name` | 无(= 他还没说过名字) | 同 `chat` |
+| `--world-file` / `--beats` / `--agents` | - | 只对新建的世界生效 |
+| `--verbose` | - | 引擎的日志照原样打 |
+
+`chat` 说话但时钟不走,`run` 时钟走但说不了话 —— **两个都不是"跟一个正在过日子的
+角色对话"**,而那恰好是这个引擎最想让人看到的一件事:你上一句话说完到下一句之间,
+她可能已经走去了别的地方,可能自己过来找你(`agent_hail` 会当场显示成
+「· 夏 主动来找你了」)。
+
+与 `chat` 的另一处不同:每说一句之前先把玩家挪到对方所在地,所以"面对面还是手机
+私聊"会**随她走动而变**。
+
+会话里的斜杠命令:`/who` 名册(它给的下一步是 `/at`,不是另开一个 `chat` 进程 ——
+两个进程操作同一个世界,而这边时钟还在走)、`/at <id>` 换人、`/quit` 结束。
+
 #### `anima-world world drop` —— 把一个世界整个抹掉
 
 ```bash
@@ -1878,7 +1957,7 @@ anima-world world drop --world-id w --yes    # 真删
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--redis` / `--world-id` | `$ANIMA_REDIS_URL` 或 `redis://127.0.0.1:6379/0` / `$ANIMA_WORLD_ID` 或 `world` | 世界住在哪个 Redis、叫什么名字(键前缀 `anima:<world_id>:`)。可选 `--mysql DSN` 让无限增长的四样进 MySQL |
-| `--seed` / `--beats` / `--agents` | - | 同 start;坏 seed / 坏 beats 拒绝启动(退出码 2) |
+| `--world-file` / `--beats` / `--agents` | - | 同 start;坏世界文件 / 坏 beats 拒绝启动(退出码 2)。`--seed` 已随"种子"这个概念一起移除 |
 | `--quiet` | - | 不回显叙事事件 |
 
 ### 4.4 anima-world config
@@ -1914,7 +1993,7 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 | `--no-llm` | `--llm mock` 的别名,同时给时它赢 |
 | `--plan-wait-cap` | 每世界日等待在途计划的秒数上限(默认 2×planner.timeout) |
 | `--report PATH` | 跑完写一份运行摘要 JSON(`-` = 写到 stdout) |
-| `--seed` / `--beats` / `--agents` | 同 run |
+| `--world-file` / `--beats` / `--agents` | 同 run |
 
 非 mock 档会**先预检 LLM 再建世界**(坏 key 不会把降级能力目录种进新库)。内置"计划
 等待预算":连续两个世界日等待耗尽则判定 planner 死亡、不再等待,绝不挂起。
@@ -1965,7 +2044,7 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 
 ```bash
 anima-world world export --world-id w --output my.cyberworld \
-    --package-id my-world --name "我的世界" [--seed seed.json] [--beats beats.json]
+    --package-id my-world --name "我的世界" [--beats beats.json]
 anima-world world import my.cyberworld --world-id w2      # 目标必须是空世界
 anima-world world drop   --world-id w --yes               # 整个抹掉一个世界
 anima-world world inspect my.cyberworld [--json]          # 它需要什么引擎?
@@ -1975,7 +2054,8 @@ anima-world world inspect my.cyberworld [--json]          # 它需要什么引�
 **包的世系 id**。1.x 里这两件事共用一个参数,2.0 拆开了 —— 因为源世界的名字是运维的
 事,而世系 id 印在分发物上。走校验的是 `--package-id`(`^[a-z0-9][a-z0-9._-]{0,63}$`)。
 
-**`--mode` 没有了**:v2 只有 snapshot。`--seed` 缺省时用世界自己的创世出生证明。
+**`--mode` 与 `--seed` 都没有了**:导出的是这个世界**此刻**的状态记录,不是它的创世
+输入 —— 出生证明(`:meta.world_seed`)随 v3 一并去掉了,它是同一份内容的第二份拷贝。
 导入**只进空世界**,目标非空当场拒绝 —— 往一个跑着的世界上盖一份快照没有正确的语义。
 
 成功时 stdout 输出一行 JSON(`export` / `import`)或一份清单(`inspect`,`--json` 给
@@ -2062,6 +2142,7 @@ readline。
 | `agent.idle_timeout` | float | 30.0 | 行为树 idle 看门狗阈值(秒) |
 | `world.minutes_per_tick` | int | 5 | 一 tick 代表的世界分钟(5 → 一天 288 tick) |
 | `world.travel_minutes_per_unit` | int | 60 | 步行横穿一个画布单位的世界分钟 |
+| `world.start_time` | str | `"00:00"` | **创世那一刻钟面上是几点**(HH:MM)。只在这个前缀第一次有钟时生效(`setnx`),跑着的世界重开钟一格不动;写错当场抛 |
 | `planner.enabled` | bool | true | 是否用 LLM 规划自由时间 |
 | `planner.timeout` | float | 30.0 | 规划调用超时 |
 | `judge.timeout` | float | 30.0 | 关系判定调用超时 |

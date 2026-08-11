@@ -119,7 +119,15 @@ def test_walking_away_moves_her_in_the_world_not_in_the_prose(tmp_path):
         in_transit = "夏" in world.scheduler._transit
         assert in_transit or _where(world, "夏") == destination
         if in_transit:
-            world.tick(A_DAY)  # 让她走完
+            # **只推到她走完那一刻。** 再往后推推的是排班:她本来就有一段在店里的
+            # 勤务,下一段勤务会把她叫回去 —— 那是她的作息,不是"她没走"。推一整天
+            # 之后再断言,验到的是"一天结束时她在哪",而这条要验的是她说走真的起了
+            # 程、而且真的走到了。世界从几点开始如今是作者的意见,两者更不该搅在一起。
+            for _ in range(A_DAY):
+                world.tick(1)
+                if "夏" not in world.scheduler._transit:
+                    break
+            assert "夏" not in world.scheduler._transit, "整整一天她都没走到"
             assert _where(world, "夏") == destination
 
 

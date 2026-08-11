@@ -147,25 +147,35 @@ def test_the_clock_lives_in_redis_and_has_one_answer(world, redis):
     """
     from anima_world.redis_state import RedisClock, clock_key
 
+    # 断的是**推进了多少格**,不是钟面上的绝对数字。世界从几点开始是这个世界作者的
+    # 意见(`world.start_time`),而"两个进程读到的是不是同一个现在"和它毫无关系 ——
+    # 把创世那一刻的绝对值抄进断言,等于让这条测试改成靠一个巧合站着。
+    genesis = world.scheduler.clock
     world.tick(30)
     outsider = RedisClock(redis, clock_key("t"))
-    assert outsider.get() == world.scheduler.clock == 30
+    assert outsider.get() == world.scheduler.clock == genesis + 30
     world.tick(5)
-    assert outsider.get() == 35, "别的进程读到的时钟停在了旧值"
+    assert outsider.get() == genesis + 35, "别的进程读到的时钟停在了旧值"
 
 
 def test_reopening_does_not_wind_the_clock_back(tmp_path, redis):
-    """重开一个世界不该把时钟拨回去 —— Redis 里已有的值说了算。"""
+    """重开一个世界不该把时钟拨回去 —— Redis 里已有的值说了算。
+
+    基准取创世那一刻的钟(而不是写死 0):这个世界几点开门由 `world.start_time`
+    决定,而这条守的是"跑过的那几格不许丢"。`setnx` 是那道真闸 —— 换成 `set` 的话
+    第二次 `World.open` 会把这个前缀的现在写回起始时刻,世界照跑、日志干净。
+    """
     from anima_world.redis_state import RedisClock, clock_key
 
     first = World.open("t", redis=redis, force_mock_llm=True)
+    genesis = first.scheduler.clock
     first.tick(40)
     first.close()
-    assert RedisClock(redis, clock_key("t")).get() == 40
+    assert RedisClock(redis, clock_key("t")).get() == genesis + 40
 
     again = World.open("t", redis=redis, force_mock_llm=True)
     try:
-        assert again.scheduler.clock == 40, "重开把时钟拨回去了"
+        assert again.scheduler.clock == genesis + 40, "重开把时钟拨回去了"
     finally:
         again.close()
 
@@ -240,6 +250,15 @@ def test_another_process_knows_she_is_on_the_road(world, redis):
 
     agent = _an_agent(world)
     world.tick(50)
+    # 这一趟必须由**这条测试**发起,所以先等到她手上没有别的路要赶 —— 排班里本来
+    # 就有"下班走回家"这种一段路,而世界跑到第 50 tick 时钟面上是几点,取决于这个
+    # 世界几点开门(`world.start_time`)。写死一个 tick 数等于赌她那会儿正好闲着:
+    # 赌输了 `walk` 会被"她在赶路"挡掉,而这条要验的根本不是那道闸。
+    for _ in range(288):
+        if agent not in world.scheduler._transit:
+            break
+        world.tick(1)
+    assert agent not in world.scheduler._transit, "她整整一天都在路上,这条测试没法起头"
     target = next(
         p for p in world._tool_runtime.point_ids()
         if p != world._tool_runtime.agent_location(agent)

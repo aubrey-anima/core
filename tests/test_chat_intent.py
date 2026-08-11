@@ -306,3 +306,97 @@ def test_with_the_flag_off_the_classifier_is_never_called(tmp_path, bare_seed):
         assert classifier.prompts == [], "开关关着还去调分类器 = 白花一次 LLM"
         assert "intent" not in meta
         assert world.persona_overrides("夏", "p1") == []
+
+
+# ── 自报家门:引擎自己认得,不经分类器 ──────────────────────────────────────
+
+@pytest.mark.parametrize("said, want", [
+    ("我叫林越", {"player_name": "林越"}),
+    ("你好，我叫林越。很高兴认识你", {"player_name": "林越"}),
+    ("我的名字是林越", {"player_name": "林越"}),
+    ("我就叫林越了", {"player_name": "林越"}),
+    ("my name is Lin", {"player_name": "Lin"}),
+    ("你可以叫我小林", {"address_form": "小林"}),
+    ("叫我老板就行", {"address_form": "老板"}),
+    ("你叫我「小林」吧", {"address_form": "小林"}),
+    ("call me Lin", {"address_form": "Lin"}),
+    ("我叫林越，你叫我小林就行", {"player_name": "林越", "address_form": "小林"}),
+])
+def test_他自报家门那几句引擎自己认得(said, want):
+    """不交给分类器,三条理由:分类器默认不跑(`chat.intent.enabled` 默认关)而身份块
+    每个世界都在;判成 style_adjust 会把他这一轮的话整个吞掉;而且它是一次 LLM 往返,
+    有权抽风 —— 和 `SECOND_PERSON` 同一条纪律(引擎手上认得的东西不许依赖它)。"""
+    from anima_world.intent import read_self_introduction
+
+    assert read_self_introduction(said) == want
+
+
+@pytest.mark.parametrize("said", [
+    "我叫他小林",          # 我怎么称呼别人
+    "我叫苏晚夏做一杯咖啡",  # 同上,而且没人叫这个名字
+    "我叫了一杯咖啡",       # 「叫」的另一个动词义
+    "我今天叫了外卖",
+    "我叫你一声哥",
+    "别叫我先生",          # 反过来的意思
+    "我不叫小林",
+    "你叫我什么？",         # 他在问,不是在报
+    "我叫什么",
+    "我是来喝咖啡的",       # 「我是X」太松,一律不认
+    "外面雨好大啊",
+])
+def test_不是自报家门的一律空手而归(said):
+    """**空手比记错强**:记错的那个会进身份块、进转录、进她 0.8 重要度的长期记忆,
+    而玩家永远不会知道是哪一句让她这么叫他的(`night-tide` 那条链的教训)。"""
+    from anima_world.intent import read_self_introduction
+
+    assert read_self_introduction(said) == {}
+
+
+def test_分类器开着时自报家门也不许换成一张收条(tmp_path):
+    """`test_报名字不吃掉他这一轮的话` 的**真世界版**:那一条跑在分类器关掉的世界里,
+    于是它验的只有正则那一层 —— 而内置的橱窗世界 `chat.intent.enabled` 是**开着的**。
+
+    真世界(`finalD`)重演逮到的:「我叫林越，你叫我小林就行」判成 `style_adjust(0.95)`,
+    她回了一句「（记下了:玩家的昵称 —— 小林。）」。名字确实记下了(`_note_self_introduction`
+    早一步就落了库),但**他开口说的第一句话一个字都没得到回应** —— 自我介绍换来一张
+    系统收条,比不记还伤。分类器给的是同一件事的第二个答案,而第二个答案在这里不是重复,
+    是吞掉。
+    """
+    world, chat, _ = _world(
+        tmp_path,
+        _classification("style_adjust", 0.95, kind="address_form", value="小林"),
+        replies=("（夏抬起头。）林越。记住了。",),
+    )
+    reply = _say(world, "我叫林越，你叫我小林就行")
+
+    assert "记下了" not in reply, "分类器把他的自我介绍换成了一张收条"
+    assert reply.strip() and chat.prompts, "这一轮她根本没被叫醒 —— 话被吞了"
+
+    kinds = {r["kind"]: r["value"] for r in world.persona_overrides("夏", "p1")}
+    assert kinds.get("player_name") == "林越"
+    assert kinds.get("address_form") == "小林"
+
+
+def test_自报家门里夹着的导演指令照旧兑现(tmp_path):
+    """闸只挡 `style_adjust` 那一支,不是"这句话里有名字就绕开分类器"。
+
+    「我叫林越，让遥也过来」两件事都要发生:名字记下、人真的挪过来。整句跳过分类的
+    写法会让后半句安静地不生效 —— 世界照跑、日志干净,而玩家等的人永远不来。
+    """
+    world = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
+    with world:
+        target = _someone_elsewhere(world, "夏")
+        world.chat_service._llm = ScriptedLLM()
+        world.chat_service._background_llm = ScriptedLLM(
+            _classification("narrative_direction", 0.95, target=target, action="come_here")
+        )
+        world.config_set("chat.intent.enabled", True)
+        world.player_move("p1", _where(world, "夏"))
+
+        here = _where(world, "夏")
+        _say(world, f"我叫林越，让{target}也过来")
+
+        kinds = {r["kind"]: r["value"] for r in world.persona_overrides("夏", "p1")}
+        assert kinds.get("player_name") == "林越", "前半句没记下"
+        trip = world.scheduler._transit.get(target)
+        assert (trip and trip["to"] == here) or _where(world, target) == here, "后半句没兑现"

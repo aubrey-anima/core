@@ -7,6 +7,8 @@
 2. **中文是双宽字符**,按字符个数排版会把边框推歪 —— 而这个引擎的世界是中文的
 3. **两个人走同一条路**,后画的把先画的盖掉,那个人就从图上消失了
 4. **在路上的人不站在任何地方**,漏了这一层她会在图上凭空消失半段路
+5. **地点名写穿区域边框**,于是框里的地点看上去在框外 —— 图给出的是一句
+   排版整齐的假话
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from anima_world.mapview import (
     MapPlace,
     SHARED,
     Track,
+    _fit,
     display_width,
     legend,
     markers_for,
@@ -36,6 +39,139 @@ def _places() -> list[MapPlace]:
         MapPlace("cafe", "咖啡店", "point", 0.2, 0.2),
         MapPlace("home", "家", "point", 0.8, 0.8),
     ]
+
+
+def _wall_hugging_places() -> list[MapPlace]:
+    """内置世界「旧港」的形状:一个长名字的地点贴在内层区域的右边框上。
+
+    这就是那一格出事的地方 —— 建筑工作室在港街**里**,靠右;它的名字往右一写,
+    港街的 `│` 就没了。
+    """
+    return [
+        MapPlace("outer", "旧港区", "region", 0.05, 0.05, 0.9, 0.9),
+        MapPlace("inner", "港街", "region", 0.1, 0.1, 0.4, 0.4),
+        MapPlace("cafe", "咖啡店", "point", 0.2, 0.25),
+        MapPlace("workshop", "建筑工作室", "point", 0.45, 0.35),
+        MapPlace("home", "家", "point", 0.8, 0.8),
+    ]
+
+
+def _cells(line: str) -> list[str]:
+    """把一行摊成**显示格**:宽字符占两格,右半格记成 `''`(它不是一个字符)。
+
+    按字符下标去数第几列,中文一多就全错 —— 而这个模块的世界是中文的。
+    """
+    out: list[str] = []
+    for ch in line:
+        out.append(ch)
+        if display_width(ch) == 2:
+            out.append("")
+    return out
+
+
+def _assert_frames_are_closed(art: str) -> None:
+    """每个区域框的左右两条边,**每一行该在的那一列上都得是边框字符**。
+
+    只断言"没抛异常"或者"名字出现了"是抓不到这个 bug 的:图照样画得出来、
+    排版照样整齐,只是少了一格 `│` —— 而少的那一格把"在里面"变成了"在外面"。
+    """
+    lines = art.split("\n")
+    rows = [_cells(line) for line in lines]
+    tops = [
+        (y, r.index("┌"), r.index("┐"))
+        for y, r in enumerate(rows) if "┌" in r and "┐" in r
+    ]
+    assert tops, "一个区域框都没画出来 —— 这条测试验不到它想验的"
+    for y0, x0, x1 in tops:
+        bottom = next(
+            (y for y in range(y0 + 1, len(rows))
+             if x0 < len(rows[y]) and rows[y][x0] == "└"),
+            None,
+        )
+        assert bottom is not None, f"第 {y0} 行开的那个框没有底边"
+        for y in range(y0 + 1, bottom):
+            for x, side in ((x0, "左"), (x1, "右")):
+                got = rows[y][x] if x < len(rows[y]) else ""
+                assert got == "│", (
+                    f"第 {y} 行第 {x} 列的{side}边框被写掉了(那一格是 {got!r})——"
+                    f"框里的地点看上去跑到框外去了:\n" + "\n".join(lines[y0:bottom + 1])
+                )
+
+
+# ── 标签不许写穿边框 ────────────────────────────────────────────────────────
+
+
+def test_a_long_label_never_writes_over_a_region_border():
+    """**这是这一层最坏的坏法:图没错在难看,错在事实。**
+
+    「建筑工作室」在港街里,它的名字却把港街的右边框写掉了 —— 读图的人只会
+    得到一个结论:这个地点在港街外面。而没有任何东西会报错。
+    """
+    art = render(_wall_hugging_places(), width=68, height=22)
+    assert "建筑工作室" in art, "长名字整个没画出来 —— 这条测试验不到它想验的"
+    _assert_frames_are_closed(art)
+
+
+def test_a_label_flips_to_the_left_when_the_wall_is_on_the_right():
+    """右边是框线就往左摆:换边只是不好看,写穿框线是说假话。"""
+    art = render(_wall_hugging_places(), width=68, height=22)
+    row = next(line for line in art.split("\n") if "建筑工作室" in line)
+    assert row.count("◉") == 1, f"这一行不止一个地点,验不到摆在哪边:{row!r}"
+    assert row.index("建筑工作室") < row.index("◉"), (
+        f"名字还摆在记号右边,而右边是墙:{row!r}"
+    )
+
+
+def test_a_truncated_label_says_that_it_was_truncated():
+    """两边都摆不下时才截,**而截了必须留痕**。
+
+    「建筑工作」看上去是一个完整的地名 —— 读的人没有任何办法知道自己看的是
+    半个名字,和边框断掉一样是无声地给错东西。
+    """
+    places = [
+        MapPlace("inner", "港街", "region", 0.1, 0.1, 0.25, 0.6),
+        MapPlace("workshop", "建筑工作室", "point", 0.22, 0.4),
+    ]
+    art = render(places, width=60, height=18)
+    _assert_frames_are_closed(art)
+    assert "建筑工作室" not in art, "这么窄的框里居然整个名字都写下了 —— 换个更窄的框"
+    assert "…" in art, f"名字被截了却一声不吭:\n{art}"
+
+
+def test_a_truncated_label_never_splits_a_wide_char():
+    """按字符个数截会把一个双宽字劈成半个,整行往左错一格 —— 框线又歪了。"""
+    for room in range(1, 12):
+        shown = _fit("建筑工作室", room)
+        assert display_width(shown) <= room, (
+            f"截到 {room} 格,结果占了 {display_width(shown)} 格:{shown!r}"
+        )
+        if shown and shown != "建筑工作室":
+            assert shown.endswith("…"), f"截了没留痕:{shown!r}"
+
+
+def test_standing_agents_do_not_break_the_border_either():
+    """站在这儿的人那一格 `[abc]` 和地点名同一条规矩 —— 它也在框线上写字。"""
+    places = _wall_hugging_places()
+    crowd = ["夏", "柔", "遥", "宁", "岚"]
+    art = render(places, marks={"workshop": crowd},
+                 markers=markers_for(crowd), width=68, height=22)
+    _assert_frames_are_closed(art)
+
+
+def test_the_builtin_world_map_has_no_broken_borders(tmp_path):
+    """**拿真产物演一遍那个用户故事。**
+
+    这个 bug 是玩内置演示世界「旧港」时看见的,不是构造出来的:真实几何、
+    真实地名、CLI 默认的 78 格画布。
+    """
+    db_path = str(tmp_path / "w.db")
+    with open_world_at(db_path, force_mock_llm=True) as world:
+        world.tick(288)
+
+    done = run_cli("map", "--world-id", "w", "--width", "78")
+    assert done.returncode == 0, done.stderr
+    art = done.stdout.split("世界时钟")[0]
+    _assert_frames_are_closed(art)
 
 
 # ── 中文世界的排版 ──────────────────────────────────────────────────────────

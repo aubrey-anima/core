@@ -76,3 +76,21 @@ def test_chat_does_not_advance_the_world_clock(tmp_path):
     _chat(db, "--agent", "夏", stdin="在吗\n\n")
     with open_world_at(db, force_mock_llm=True) as world:
         assert world.scheduler.clock == before
+
+
+def test_命令行上你只有一个身份():
+    """`play` 从前默认 `p1`,`chat` / `prompt` 默认 `cli`。
+
+    于是玩完 `play` 再照 `--help` 去 `prompt` 看她收到什么,看到的是**另一个人**:
+    名字、关系、玩家教过的规则全记在 `p1` 头上,而调试视图问的是一个从没说过话的
+    `cli`。它不报错,只是空着 —— "调试视图撒谎比没有调试视图更坏"的一种,而且这
+    一次撒的谎是"她根本不认识你"。
+    """
+    from anima_world.__main__ import DEFAULT_PLAYER_ID, _build_parser
+
+    parser = _build_parser()
+    defaults = {
+        cmd: parser.parse_args([cmd] + extra).player_id
+        for cmd, extra in (("chat", []), ("play", []), ("prompt", ["--agent", "夏"]))
+    }
+    assert set(defaults.values()) == {DEFAULT_PLAYER_ID}, defaults

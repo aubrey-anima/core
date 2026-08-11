@@ -37,6 +37,41 @@ def _an_agent(world: World) -> str:
     return sorted(world.scheduler.agents)[0]
 
 
+def _settle(world: World, agent: str, limit: int = 288) -> None:
+    """等到她手上没有正在赶的路。
+
+    在途时任何动作都会被"她在赶路"挡回来 —— 那是引擎该有的闸(`test_the_world_saying_
+    not_yet_is_reported_honestly` 专门验它),而下面几条要验的是别的事。从前这里不必等,
+    只是因为所有世界都从午夜起步、跑 50 tick 恰好是凌晨没人动;几点开门如今是这个世界
+    作者的意见(`world.start_time`),再靠那个巧合就是让测试站在沙子上。
+    """
+    for _ in range(limit):
+        if agent not in world.scheduler._transit:
+            return
+        world.tick(1)
+    raise AssertionError(f"{agent} 整整一个世界日都在路上,这条测试没法起头")
+
+
+def _bring_to(world: World, agent: str, where: str, limit: int = 288) -> None:
+    """把她挪到 where,并等她**真的走到**。
+
+    在场是 `interact` 的前提(隔着半个地图照料不到,`test_隔着半个地图照料不到` 验的
+    就是这道闸),所以要验"照料真的让树长高"就得先让她站在树跟前。这一步走的是
+    `move_agent` —— BT 走的那条路,不是把位置直接写进表里:后者会造出一个"她瞬移到了
+    cafe"的世界,而那种世界里验出来的东西不作数。
+    """
+    _settle(world, agent)
+    if world._tool_runtime.agent_location(agent) == where:
+        return
+    world._tool_runtime.move_agent(agent, where)
+    for _ in range(limit):
+        world.tick(1)
+        if (agent not in world.scheduler._transit
+                and world._tool_runtime.agent_location(agent) == where):
+            return
+    raise AssertionError(f"没能把 {agent} 挪到 {where}")
+
+
 def test_deciding_to_walk_is_the_same_thing_as_being_scheduled_to_walk(world):
     """全部意义在这一条:两条路发同样的事件、花同样的时间。
 
@@ -44,6 +79,7 @@ def test_deciding_to_walk_is_the_same_thing_as_being_scheduled_to_walk(world):
     她会在提示词里"走了",在世界里还站在原地。
     """
     agent = _an_agent(world)
+    _settle(world, agent)   # 这一趟必须由这条测试发起,不能是她本来就在赶的那一趟
     start = world._tool_runtime.agent_location(agent)
     target = next(p for p in world._tool_runtime.point_ids() if p != start)
     before = len(world.history(limit=999)["events"])
@@ -163,13 +199,26 @@ def _tree_height(world: World) -> float:
     return float(world.scheduler.stock_store.of("tree:harbor_oak")["树高"])
 
 
+def _at_the_tree(world: World, agent: str = "夏") -> str:
+    """让她站到那棵树跟前,返回树在哪儿。**问世界要地名,不写死 "cafe"** ——
+    橱窗世界哪天把橡树挪到码头去,这几条该跟着走,而不是变红。"""
+    where = world.scheduler.visibility_store.place_of("tree:harbor_oak")
+    _bring_to(world, agent, where)
+    return where
+
+
 def test_照料真的让树长高(world):
     """这一条是整个本体层的收口。
 
     在这之前她的提示词里写着"可以照料",而**没有任何路径让她照料** —— 那正是
     `tools/base.py` 开头那句"声明了却没人兑现的能力,比没有更坏"。判据只有一个:
     世界的量变没变。
+
+    先把她挪到树跟前:在场是这个动词的前提(隔壁那条测试验的就是它),而她此刻站在
+    哪、有没有在赶路,取决于这个世界几点开门(`world.start_time`)——不是这条要验的事。
+    `before` 因此必须在挪完之后取:生长规律每 tick 都在长树,挪之前取就把那几格算进来了。
     """
+    _at_the_tree(world)
     before = _tree_height(world)
     result = world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "tend"},
                        surface="body")
@@ -181,8 +230,13 @@ def test_照料真的让树长高(world):
 
 def test_她读到的动词就是她调得动的动词(world):
     """提示词里是"照料",引擎里是 `tend`。**两边必须对得上** —— 她照着提示词说的话
-    被引擎回一句"不认识这个动词",是这一层最容易埋进去的谎。"""
-    line = world._perceive("夏", "cafe").describe_here("tree:harbor_oak")
+    被引擎回一句"不认识这个动词",是这一层最容易埋进去的谎。
+
+    她得真的站在树跟前:这条要验的是**动词表对不对得上**,而不是在场那道闸 —— 不挪
+    过去的话,一句"她在赶路"就会把这条测试变成绿的另一种谎(它不再验动词表了)。
+    """
+    where = _at_the_tree(world)
+    line = world._perceive("夏", where).describe_here("tree:harbor_oak")
     assert "照料" in line
     assert "tree:harbor_oak" in line, "没给她 id,她说得出却指不着"
 
@@ -215,9 +269,14 @@ def test_做不到的事当场拒绝而不是静默成功(world):
 
 
 def test_交互进世界的历史(world):
-    """她对世界做的事是**世界里发生的事**,所以它是事件 —— 不是一行日志。"""
+    """她对世界做的事是**世界里发生的事**,所以它是事件 —— 不是一行日志。
+
+    事件上那个 `loc` 要的是"这事发生在哪儿",所以拿她真正站的地方去对,而不是抄一个
+    "橡树在 cafe"的常数:两者只在她恰好在树跟前时才相等,而那正是这条要连带钉住的。
+    """
+    where = _at_the_tree(world)
     world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "tend"}, surface="body")
     events = [e for e in world.history(limit=999)["events"] if e["type"] == "entity_interaction"]
     assert events and events[-1]["who"] == "夏"
-    assert events[-1]["loc"] == "cafe"
+    assert events[-1]["loc"] == where
     assert events[-1]["payload"]["target"] == "tree:harbor_oak"

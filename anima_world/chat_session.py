@@ -25,6 +25,26 @@ JudgeHook = Callable[[dict[str, Any]], Any]
 _DEFAULT_IDLE_TIMEOUT = 600  # seconds of inactivity before a session auto-closes
 _DEFAULT_SUMMARY_TEMPLATE = "用一句中文概括这次对话的主要内容和情绪基调。只输出摘要，不要解释。"
 
+# ── 摘要提示词的两半,以及边界为什么划在这儿 ────────────────────────────────
+#
+# **引擎拼「谁是谁、在哪、不许编」,作者的模板只管语气与详略。**
+#
+# 这条摘要不是印一下就完了:它进她的长期记忆(重要度 0.8 那一档),又进下一场对话
+# 的记忆块(`chat_service` 的 `past_summaries` → 「你和对方过去的对话回顾」)。所以
+# 一次幻觉会被她当成既成事实反复复述,而玩家永远查不出是哪一句造成的 —— 真事:在
+# 旧港的**咖啡店**跟夏聊完,摘要里写着**酒吧**和**酒保**,这个世界两样都没有。
+# 成因是这一层原本只喂给模型 `user:` / `assistant:` 两个标签的转录:谁是谁、在哪、
+# 什么身份,模型只能猜,猜出来的就是酒保。
+#
+# 于是事实与禁令由引擎拼,**不能只写进 `chat.session_summary`** —— 那个模板是作者
+# 可覆盖的,作者一覆盖闸就没了,**而没了不报错**,只是从某一天起摘要又开始长出酒吧。
+# 留给模板的是它真正独有的那部分:一句话还是三句话、什么口气、要不要带情绪基调。
+_SUMMARY_FACT_HEADER = "以下是这场对话的事实，由世界给出，不可更改："
+_SUMMARY_GUARD = (
+    "只依据上面的事实和下面的转录写摘要：不要写出其中没有出现过的人物、地点、"
+    "场所、身份或职业，也不要替谁补上没说过的话。拿不准就略过，宁可少写。"
+)
+
 
 class ChatSessionManager:
     """Closes chat sessions and emits the one summary event per closed session."""
@@ -41,6 +61,7 @@ class ChatSessionManager:
         prompt_store: Any | None = None,
         judge_hook: JudgeHook | None = None,
         meta_provider: Callable[[int], dict[str, Any]] | None = None,
+        place_name: Callable[[str], str] | None = None,
     ) -> None:
         self._store = store
         self._llm = llm
@@ -54,6 +75,10 @@ class ChatSessionManager:
         # 出去一次** —— 每轮一个事件等于把聊天转录搬进世界的历史,而那条不变量
         # (聊天子系统与事件核解耦)是这个子系统存在的前提。
         self._meta_provider = meta_provider
+        # 地点 id → 人话名。摘要**进的是她的长期记忆和下一场的记忆块**,所以一个
+        # 漏进去的 `cafe` 不是印错一次:她从此会把这个英文 id 当成地名说出口。
+        # 接不上的世界照旧用 id —— 那仍然比空着强(空着正是模型自己补一个的地方)。
+        self._place_name = place_name
 
     async def close_conversation(self, conversation_id: int) -> bool:
         """Close a conversation. Returns True iff a `conversation` event was emitted."""
@@ -158,26 +183,92 @@ class ChatSessionManager:
                 closed.append(int(conv["id"]))
         return closed
 
+    @staticmethod
+    def _speaker_labels(conv: dict[str, Any]) -> tuple[str, str]:
+        """(她叫什么, 对方叫什么) —— **只认转录行上真有的字段,不猜**。
+
+        名字优先取 `participants` 上的(`chat()` 那条路把玩家的显示名记了进来)。
+
+        ⚠️ **取不到名字时退的是「访客」,不是玩家 id。** 空标签确实是模型自己补一个
+        身份出来的地方,但 id 补的是**另一种**错:这条摘要进的是她的长期记忆,于是
+        `p1` / `player-3f9a2c` 会被她当成这个人的名字说出口 —— 线上 `night-tide`
+        就是这么让玩家改名叫「旅人」的。**编一个泛称比漏一个 id 强**,因为「访客」
+        一望而知是泛称,而 `p1` 看上去像个名字。
+        """
+        agent_label = str(conv.get("agent_id") or "").strip() or "她"
+        player_label = ""
+        for participant in conv.get("participants") or []:
+            kind = participant.get("kind")
+            name = str(participant.get("name") or "").strip()
+            if kind == "agent" and name:
+                agent_label = name
+            elif kind == "user" and name:
+                player_label = name
+        return agent_label, player_label or "访客"
+
+    def _summary_facts(
+        self, conv: dict[str, Any], agent_label: str, player_label: str
+    ) -> list[str]:
+        facts = [
+            f"- 说话的角色是{agent_label}，这个世界里的人。",
+            f"- 和她说话的是{player_label}。",
+        ]
+        # 转录行上存的是地点 **id**(`cafe`),而摘要要进她的长期记忆和下一场的
+        # 记忆块 —— 一个漏进去的英文 id 会被她当成地名说出口(这一轮已经在提示词
+        # 那一层修过同一个病)。所以宿主给了译名就用译名;没给才退回 id,而 id
+        # 仍然比空着强:空着正是模型自己补一个地点的地方。
+        location = str(conv.get("location") or "").strip()
+        if location:
+            if self._place_name is not None:
+                try:
+                    location = str(self._place_name(location) or location).strip() or location
+                except Exception:  # noqa: BLE001 - 查不到地名不该让一场会话关不掉
+                    logger.warning("摘要里的地点 %s 翻不成人话", location, exc_info=True)
+            facts.append(f"- 地点：{location}。")
+        else:
+            # 没记地点就明说没有 —— **留空正是模型自己补一个地点的地方**,
+            # 而补出来的那个会被她当成去过的地方反复复述。
+            facts.append("- 这场对话没有记录地点，所以摘要里不要写地点。")
+        return facts
+
     async def _summarize(self, conv: dict[str, Any], messages: list[dict[str, Any]]) -> str:
-        transcript = "\n".join(f'{m["role"]}: {m["content"]}' for m in messages)
+        agent_label, player_label = self._speaker_labels(conv)
+        # 转录的标签换成真名字:`user:` / `assistant:` 不告诉模型谁是谁,
+        # 而"谁说的这句"正是它编身份时缺的那一样。
+        speakers = {"assistant": agent_label, "user": player_label}
+        transcript = "\n".join(
+            f'{speakers.get(m["role"], m["role"])}: {m["content"]}' for m in messages
+        )
         instruction = (
             self._prompt_store.get("chat.session_summary", default=_DEFAULT_SUMMARY_TEMPLATE)
             if self._prompt_store is not None
             else _DEFAULT_SUMMARY_TEMPLATE
         )
+        # 事实在前、作者的模板在中、禁令在末:模板夹在中间就改不掉两头,而**位置即
+        # 权重** —— 最后一句是这份提示词里最重的一句,禁令该待在那儿。
+        system = "\n".join([
+            _SUMMARY_FACT_HEADER,
+            *self._summary_facts(conv, agent_label, player_label),
+            "",
+            instruction,
+            "",
+            _SUMMARY_GUARD,
+        ])
         prompt = [
-            {
-                "role": "system",
-                "content": instruction,
-            },
+            {"role": "system", "content": system},
             {"role": "user", "content": transcript},
         ]
         try:
             summary = (await self._llm.complete(prompt)).strip()
             if summary:
                 return summary
-        except Exception:
-            pass
+            # 降级不许无声(和 llm degraded_reason 同一条纪律):退回模板摘要之后
+            # 世界里躺着一条「与夏的一次对话,共 4 条消息」,它看上去完全正常。
+            logger.warning("会话 %s 的摘要为空,退回模板摘要", conv.get("id"))
+        except Exception:  # noqa: BLE001 - 摘要失败不该挡住关闭
+            logger.warning(
+                "会话 %s 的摘要生成失败,退回模板摘要", conv.get("id"), exc_info=True
+            )
         return self._template_summary(conv, messages)
 
     @staticmethod

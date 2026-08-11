@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 from datetime import datetime, timezone
@@ -44,6 +45,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
 DEFAULT_WORLD_ID = "world"
 
+# 命令行上"你"是谁。**一个,不是每个子命令一个** —— `play` 从前默认 `p1` 而
+# `chat`/`prompt` 默认 `cli`,于是玩完 `play` 再照 `--help` 去 `prompt` 看她收到
+# 什么,看到的是**另一个人**:名字、关系、玩家教过的规则全记在 `p1` 头上,而调试
+# 视图问的是一个从没说过话的 `cli`。它不报错,只是空着 —— "调试视图撒谎比没有调试
+# 视图更坏"的一种,而且这一次撒的谎是"她根本不认识你"。
+DEFAULT_PLAYER_ID = "cli"
+
 
 def _redis_url_default() -> str:
     return os.environ.get("ANIMA_REDIS_URL", DEFAULT_REDIS_URL)
@@ -69,6 +77,53 @@ def _add_world_args(p: argparse.ArgumentParser, *, suppress: bool = False,
     if mysql:
         p.add_argument("--mysql", default=default, metavar="DSN",
                        help="可选:无限增长的历史归 MySQL(mysql://user:pass@host:3306/db)")
+
+
+class _CollectedLogs(logging.Handler):
+    """引擎的日志记在这儿,而不是横插进人和角色的对话里。"""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.records.append(record.getMessage())
+        except Exception:  # noqa: BLE001 - 日志自己出错不该掀翻会话
+            self.records.append(str(record.msg))
+
+
+@contextlib.contextmanager
+def _engine_logs_out_of_the_way(verbose: bool = False):
+    """人正在跟她说话的这段时间里,引擎的日志收起来 —— `start` / `chat` / `play`。
+
+    实测的样子:玩家问了一句,屏幕上先冒出来
+    `plan step starts outside the day (1440), dropping`,再才是她的回答。那是一句
+    英文的、跟玩家无关的、他也无从处理的话,横在对话正中间;而 `run` / `simulate`
+    那边同一句是真信号(那里没有人在等一句台词)。
+
+    **不是丢掉。** 收着,散场时报一行"这一场引擎记了几条";`--verbose` 就照原样打,
+    什么都不拦。丢掉的话,这个仓库最怕的那种坏法(照跑但给错东西)就少了一个出口。
+
+    此前只有关系判定那一个 logger 被单独按下去(而且只在已降级时),于是别的模块
+    照旧插话 —— 一个一个按下去就是给下一个模块留一个洞。
+    """
+    if verbose:
+        yield None
+        return
+    engine = logging.getLogger("anima_world")
+    sink = _CollectedLogs()
+    # 挂在 `anima_world` 上就够了:records 在这里找到 handler,`logging.lastResort`
+    # (没配 handler 时那个直接往 stderr 打 WARNING 的兜底)便不再触发。
+    engine.addHandler(sink)
+    try:
+        yield sink
+    finally:
+        engine.removeHandler(sink)
+        if sink.records:
+            note = (f"这一场里引擎记了 {len(sink.records)} 条警告;"
+                    f"最后一条:{sink.records[-1][:60]}。加 --verbose 看全部。")
+            print(f"  {onboarding.dim(note)}")
 
 
 def _connect_redis(url: str | None):
@@ -143,7 +198,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- start / config / doctor: the commands a person types --
     start = sub.add_parser(
-        "start", help="创建并启动一个世界(引导配置 LLM,前台运行)—— 从这里开始"
+        "start",
+        help="人的门:引导配 LLM → 创世 → 前台运行(新世界用演示速度)—— 从这里开始",
     )
     _add_world_args(start)
     start.add_argument("--world-file", dest="world_file", default=None,
@@ -154,6 +210,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--real-time", action="store_true",
         help="新世界也用真实时间(5 现实分钟 = 5 世界分钟),不用演示速度",
     )
+    start.add_argument("--verbose", action="store_true",
+                      help="引擎的日志照原样打出来(默认收着,散场报一行)")
 
     config_cmd = sub.add_parser("config", help="读写世界配置(LLM 密钥、时钟快慢…),不用 curl")
     _add_world_args(config_cmd)
@@ -195,9 +253,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--agent", default=None,
         help="要找谁说话(角色 id);不给就列出这个世界住着谁",
     )
-    chat.add_argument("--player-id", default="cli", help="你的身份 id —— 角色对你的印象记在它头上")
-    chat.add_argument("--name", default=None, help="你在角色眼里的称呼(默认「访客」)")
+    chat.add_argument("--player-id", default=DEFAULT_PLAYER_ID,
+                      help="你的身份 id —— 角色对你的印象记在它头上(chat/play/prompt 共用一个)")
+    chat.add_argument("--name", default=None,
+                  help="你的名字;不给就是「他还没告诉你名字」,她会称你「访客」但不会当成名字")
     chat.add_argument("--list", action="store_true", dest="list_only", help="只列出角色名册就退出")
+    chat.add_argument("--verbose", action="store_true",
+                      help="引擎的日志照原样打出来(默认收着,散场报一行)")
 
     world_map = sub.add_parser(
         "map", help="把地图画出来 —— 谁在哪、这段时间里谁去了哪儿",
@@ -222,7 +284,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_world_args(prompt)
     prompt.add_argument("--agent", default=None, help="看谁的(角色 id);不给就列出名册")
-    prompt.add_argument("--player-id", default="cli", help="以谁的身份跟她说话")
+    prompt.add_argument("--player-id", default=DEFAULT_PLAYER_ID,
+                        help="以谁的身份跟她说话(chat/play/prompt 共用一个)")
     prompt.add_argument("--name", default=None, help="你在她眼里的称呼")
     prompt.add_argument("--message", default="在吗", help="假设这一刻你说的是哪句话")
     prompt.add_argument(
@@ -267,51 +330,52 @@ def _build_parser() -> argparse.ArgumentParser:
     presence_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
     run = sub.add_parser(
-        "run", help="Run a world's clock in the foreground until Ctrl-C (no onboarding)"
+        "run",
+        help="程序的门:只把时钟跑在前台,Ctrl-C 停 —— 不引导、不问、不改时钟(部署与脚本用)",
     )
     _add_world_args(run)
     run.add_argument("--world-file", dest="world_file", default=None,
                      help="世界文件 .cyberworld(默认内置的 demo.cyberworld)")
     run.add_argument(
         "--beats", default=None,
-        help="Beat script JSON path (beat-director; invalid script fails startup)",
+        help="节拍脚本 JSON(导演节拍);脚本有错当场拒绝启动,不会流进世界",
     )
     run.add_argument(
         "--agents", type=int, default=None,
-        help="Number of agents (default: full seed roster, or 3 without a seed)",
+        help="创世时上场几个人(只对新建的世界生效;默认:世界文件里的整份名册,没有就 3 个)",
     )
-    run.add_argument("--quiet", action="store_true", help="Do not echo narrative events")
+    run.add_argument("--quiet", action="store_true", help="不回显叙事事件")
     # -- simulate (novel-benchmark-loop) --
     simulate = sub.add_parser(
-        "simulate", help="Fast-forward a world headlessly (no sleep, no onboarding)"
+        "simulate",
+        help="无头快进:不等真实时间、不引导 —— 攒历史 / 跑基准;--ticks 0 = 只创世,当校验器用",
     )
     _add_world_args(simulate)
     simulate.add_argument("--world-file", dest="world_file", default=None,
                           help="世界文件 .cyberworld(默认内置的 demo.cyberworld)")
     simulate.add_argument(
         "--agents", type=int, default=None,
-        help="Number of agents (default: full seed roster, or 3 without a seed)",
+        help="创世时上场几个人(只对新建的世界生效;默认:世界文件里的整份名册,没有就 3 个)",
     )
     window = simulate.add_mutually_exclusive_group(required=True)
-    window.add_argument("--days", type=int, help="World days to fast-forward")
-    window.add_argument("--ticks", type=int, help="Ticks to fast-forward")
+    window.add_argument("--days", type=int, help="快进几个世界日")
+    window.add_argument("--ticks", type=int, help="快进几个 tick(给 0 就是只创世,不往前走)")
     simulate.add_argument(
         "--llm", choices=("full", "planner", "mock"), default="full",
-        help="LLM tier: full=narrative+planner per config; planner=real planner, "
-             "mock narrative (recommended for long runs); mock=everything mock",
+        help="真调到哪一档:full=叙事和规划都照配置来;planner=规划真调、叙事用模板"
+             "(长跑推荐);mock=全都用模板,一次也不联网",
     )
     simulate.add_argument(
         "--no-llm", action="store_true",
-        help="Alias for --llm mock (wins when both are given)",
+        help="等于 --llm mock(两个都给时以它为准)",
     )
     simulate.add_argument(
         "--plan-wait-cap", type=float, default=None,
-        help="Max seconds to wait per world day for in-flight plans "
-             "(default: 2x planner.timeout)",
+        help="每个世界日最多等在途的规划几秒,免得快进被网络拖住(默认 planner.timeout 的两倍)",
     )
     simulate.add_argument(
         "--beats", default=None,
-        help="Beat script JSON path (beat-director; invalid script fails startup)",
+        help="节拍脚本 JSON(导演节拍);脚本有错当场拒绝启动,不会流进世界",
     )
     simulate.add_argument(
         "--report", default=None, metavar="PATH",
@@ -386,41 +450,53 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_world_args(play)
     play.add_argument("--agent", help="先跟谁说话(缺省是名册里第一个)")
-    play.add_argument("--name", help="你在这个世界里叫什么(缺省「访客」)")
-    play.add_argument("--player-id", default="p1")
+    play.add_argument("--name",
+                  help="你在这个世界里叫什么;不给就是「还没说过」,她称你「访客」而已")
+    play.add_argument("--player-id", default=DEFAULT_PLAYER_ID,
+                      help="你的身份 id —— 角色对你的印象记在它头上(chat/play/prompt 共用一个)")
     play.add_argument("--world-file", dest="world_file", default=None,
                       help="世界文件 .cyberworld(只对新建的世界生效)")
-    play.add_argument("--beats", help="Beat script")
-    play.add_argument("--agents", type=int, help="Roster size for a brand-new world")
+    play.add_argument("--beats", help="节拍脚本 JSON(只对新建的世界生效)")
+    play.add_argument("--agents", type=int, help="创世时上场几个人(只对新建的世界生效)")
+    play.add_argument("--verbose", action="store_true",
+                      help="引擎的日志照原样打出来(默认收着,散场报一行)")
 
     contract = sub.add_parser(
         "contract", help="引擎自报它的线格式版本与 schema 形状 —— 给持有镜像的仓库对齐用"
     )
     contract.add_argument("--json", action="store_true", help="机器可读输出")
 
-    world = sub.add_parser("world", help="Export or import portable world data packages")
+    world = sub.add_parser(
+        "world", help="世界的进出:导出 / 装回 / 看一眼 / 从 1.x 迁过来 / 整个抹掉",
+    )
     world_commands = world.add_subparsers(dest="world_command", required=True)
-    world_export = world_commands.add_parser("export", help="Export a .cyberworld package")
+    world_export = world_commands.add_parser(
+        "export", help="把这个世界导出成一个 .cyberworld 文件 —— 可以发给别人",
+    )
     _add_world_args(world_export)
-    world_export.add_argument("--beats", default=None, help="Optional beats JSON path")
-    world_export.add_argument("--output", required=True, help="Output .cyberworld path")
+    world_export.add_argument("--beats", default=None,
+                              help="可选:把配套的节拍脚本一起打进包里")
+    world_export.add_argument("--output", required=True, help="写到哪个 .cyberworld 文件")
     world_export.add_argument("--package-id", required=True,
                               help="包的世系 id(小写;--world-id 是源世界在 Redis 上的名字)")
-    world_export.add_argument("--name", "--title", required=True, help="World display name")
-    world_export.add_argument("--summary", default="")
-    world_export.add_argument("--genre", default="")
-    world_export.add_argument("--setting", default="")
-    world_export.add_argument("--theme", default="default")
+    world_export.add_argument("--name", "--title", required=True,
+                              help="世界的展示名 —— 别人看到的那个名字")
+    world_export.add_argument("--summary", default="", help="一句话简介(写进清单,inspect 看得到)")
+    world_export.add_argument("--genre", default="", help="题材,给挑世界的人看")
+    world_export.add_argument("--setting", default="", help="背景设定,给挑世界的人看")
+    world_export.add_argument("--theme", default="default", help="展示主题,交给宿主界面用")
     world_inspect = world_commands.add_parser(
         "inspect", help="读一个 .cyberworld 需要什么引擎 —— 跑不了也照样回答"
     )
-    world_inspect.add_argument("package", help="Package archive path")
+    world_inspect.add_argument("package", help="要看的 .cyberworld 文件")
     world_inspect.add_argument(
         "--json", action="store_true", dest="as_json",
         help="输出一行 JSON(给启动器/工具消费),而不是给人看的清单",
     )
-    world_import = world_commands.add_parser("import", help="Import a .cyberworld package")
-    world_import.add_argument("package", help="Package archive path")
+    world_import = world_commands.add_parser(
+        "import", help="把一个 .cyberworld 装进 --world-id 那个世界(目标必须是空的)",
+    )
+    world_import.add_argument("package", help="要装的 .cyberworld 文件")
     _add_world_args(world_import)
 
     world_migrate = world_commands.add_parser(
@@ -431,7 +507,7 @@ def _build_parser() -> argparse.ArgumentParser:
     world_migrate.add_argument("--output", required=True, help="写出的 .cyberworld")
     world_migrate.add_argument("--package-id", required=True, help="迁过去之后世界叫什么")
     world_migrate.add_argument("--name", default="", help="展示名")
-    world_migrate.add_argument("--summary", default="")
+    world_migrate.add_argument("--summary", default="", help="一句话简介(写进新包的清单)")
     world_migrate.add_argument("--json", action="store_true", help="机器可读输出")
 
     world_drop = world_commands.add_parser(
@@ -814,22 +890,24 @@ def _planner_situation(scheduler: Any, agent_id: str) -> dict[str, Any]:
     return ctx
 
 
-def _warn_if_llm_degraded(config_store: ConfigStore, world_id: str) -> None:
-    """Say out loud, at boot, that this world will run on the Mock LLM.
+def _warn_if_llm_degraded(world: Any) -> None:
+    """开机说一句:这个世界会跑在 Mock 上。**只有 `run` 需要它。**
 
-    A world that boots fine, ticks fine, and produces nothing but template
-    text is the failure mode `onboarding.probe_llm` exists to stop for
-    `simulate`. `run` cannot borrow that check (a world that refuses to
-    start is worse than a degraded one), so it warns instead. `start`
-    reports the same thing in its banner and turns this off.
+    一个开得起来、跑得动、而说出来的全是模板的世界,正是 `onboarding.probe_llm`
+    替 `simulate` 挡掉的那种失败。`run` 借不到那道闸(一个开不了机的世界比一个
+    降级的更糟),所以它改成说一声。
+
+    从前这句话挂在 `build_serve_scheduler` 里 —— 于是**每一条**开世界的路都要
+    听一遍,包括 `start` / `chat` / `play` 这三个自己已经用中文把同一件事说得更
+    清楚的。实测的样子是引导流程里横插进来一句英文,而它下面两行就是同一句话的
+    中文版。挂在这里,是因为"没有别的办法说"正是它存在的全部理由。
     """
-    if not (config_store.get("llm.api_key", default="") or ""):
-        logger.warning(
-            "llm.api_key is not configured — narrative, free-time planner and relationship "
-            "judge degrade to Mock (world %s still runs, but its text is templated and its "
-            "agents have no plans). Set it with `anima-world config set llm.api_key sk-…`.",
-            world_id,
-        )
+    degraded = (world.state().get("runtime", {}) or {}).get("llm", {}).get("degraded_reason")
+    if not degraded:
+        return
+    print(f"[run] 这个世界跑在 Mock 上({degraded})——叙事、空闲规划、关系判定"
+          f"都会退成模板,世界照跑。配一个:anima-world config set llm.api_key sk-…",
+          file=sys.stderr)
 
 
 def _away_agents(persisted: list[Event]) -> set[str]:
@@ -929,6 +1007,36 @@ def _apply_seed_config_at_genesis(
         )
 
 
+def _genesis_tick(config_store: Any) -> int:
+    """创世那一刻钟面上是几点 —— `world.start_time`(HH:MM)换算成 tick 数。
+
+    这一层存在的理由是开箱那一分钟。tick 0 是午夜,而新世界跑在演示速度上,
+    于是"装上包看到的第一屏"是三个人在各自家里睡觉 —— 一个世界引擎最没有说服力
+    的一帧。而**几点开门是这个世界作者的意见**(它和作息表是同一件事),所以修法
+    是把它交出去、引擎的默认值仍旧是午夜,不是把午夜改成九点。
+
+    两个值都从配置里读:一天有多少 tick 取决于这个世界的 `world.minutes_per_tick`,
+    把 288 抄进换算就是把一个配置值写死回引擎里。时刻解析走 `world_time.parse_hhmm`
+    ——世界日历只能有一个来源,另写一份 "HH:MM" 解析迟早和它给出不同答案。
+
+    写错了当场抛:这里的降级只有一种样子(悄悄退回午夜),而那正是作者永远不会
+    发现的那种坏 —— 他只会觉得"这个世界怎么老是从半夜开始"。
+    """
+    from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, parse_hhmm
+
+    raw = str(config_store.get("world.start_time") or "00:00")
+    try:
+        minute_of_day = parse_hhmm(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"world.start_time 不是一个 HH:MM 时刻:{raw!r}(世界的起始时刻)"
+        ) from exc
+    minutes_per_tick = max(
+        1, int(config_store.get("world.minutes_per_tick") or DEFAULT_MINUTES_PER_TICK)
+    )
+    return minute_of_day // minutes_per_tick
+
+
 def build_serve_scheduler(
     world_id: str,
     redis: Any,
@@ -938,7 +1046,6 @@ def build_serve_scheduler(
     force_mock_llm: bool = False,
     mock_narrative: bool = False,
     beats_path: str | Path | None = None,
-    llm_warning: bool = True,
 ) -> Scheduler:
     """Build a world that lives in Redis (+ MySQL for the unbounded four).
 
@@ -1066,8 +1173,6 @@ def build_serve_scheduler(
         # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
         # 剩下的行就是"这个世界的作者决定了什么"。
         _apply_seed_config_at_genesis(config_store, world_seed)
-    if llm_warning and not force_mock_llm:
-        _warn_if_llm_degraded(config_store, world_id)
     _seed_world_defs(location_store, bt_store, world_seed)
     # economy-v4: default items + cafe shelf, empty-store-only (authored
     # rows always win). #12: the seed's own material layer goes in FIRST,
@@ -1169,7 +1274,13 @@ def build_serve_scheduler(
     scheduler.mysql_prefix = mysql_prefix
     # 时钟第一个接上:后面的 load_persisted_events 会拿事件 ts 和它取 max。
     # setnx 只填缺 —— 重开一个世界不许把时钟拨回去。
-    scheduler._clock_store = RedisClock(redis, clock_key(world_id), initial=0)
+    #
+    # 起始时刻**只在这个前缀还没有钟的时候**算一次。setnx 才是那道真闸(算出来的
+    # 初值本来就进不去一个已有的世界),这里先问一句是为了另一半:一个跑了三天的
+    # 世界不该因为 `world.start_time` 写错了一个字而开不了机 —— 那个值对它已经
+    # 没有任何意义了,而在创世那一刻它是承重的,所以严格只留在那一刻。
+    initial_tick = 0 if redis.exists(clock_key(world_id)) else _genesis_tick(config_store)
+    scheduler._clock_store = RedisClock(redis, clock_key(world_id), initial=initial_tick)
     # 在途 / 当前动作 / 规划:真状态,全进程可见。
     scheduler._transit = RedisDict(redis, transit_key(world_id))
     scheduler._current_action = RedisDict(
@@ -1226,11 +1337,13 @@ def build_serve_scheduler(
         # 就被塞进橱窗那棵 `tree:harbor_oak` 和两个世界量。世界照跑、日志干净,
         # 只是它凭空多了一棵别人世界里的橡树。
         if seed_author_layer:
-            _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology)
+            _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology,
+                         tick=scheduler.clock)
         if scheduler.ontology is None:
             _warn_unresolved_rule_names(stock_store, scheduler.world_rules)
         else:
-            _apply_ontology(scheduler.ontology, stock_store, visibility_store)
+            _apply_ontology(scheduler.ontology, stock_store, visibility_store,
+                            tick=scheduler.clock)
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -1484,7 +1597,7 @@ def _rebuild_memories(
 
 
 def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
-                 *, ontology: Any = None) -> None:
+                 *, ontology: Any = None, tick: int = 0) -> None:
     """种子里的初始存量(`"stocks": [{"owner": …, "values": {…}}]`)。空库一次。
 
     坏条目逐条丢弃 —— 和种子里其它可选字段同一条宽容原则(规律本身不是这样:
@@ -1527,7 +1640,9 @@ def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
                     "world_seed stocks[%s] 的 %s 不是数(%r);跳过这一项", index, key, raw
                 )
         if clean:
-            store.set_many(owner, clean, tick=0)
+            # 创世那一刻,不是 tick 0 —— 一个从下午两点半开门的世界里,写死的 0
+            # 会让每个量在第一帧就补上一整个上午的变化(理由同 `_apply_ontology`)。
+            store.set_many(owner, clean, tick=int(tick))
     if problems:
         from anima_world.ontology import OntologyError
 
@@ -1703,11 +1818,18 @@ def _load_ontology(
     return ontology_store.load(rules=rules, locations=locations, items=items)
 
 
-def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any) -> None:
+def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
+                    *, tick: int = 0) -> None:
     """把本体声明兑现成量、可见性、位置。**三样都只填缺,不覆盖。**
 
     每次开机都跑,不只创世 —— 它表达的是一条不变量:**一个实体存在,它声明过的量
     就存在**。整份写回则会把长了三十天的树倒带回幼苗(创世那条纪律踩过两次)。
+
+    `tick` 是**此刻**,不是 0 —— 一个量的 `updated_tick` 决定下一次规律求值的 `dt`,
+    所以钉错它的下场不是"少写一个字段",是这个量当场跳一大截:世界的钟在 174 上
+    而量记的是 0,第一帧就补上 175 tick 的生长。它以前恒等于 0 只是因为世界都从
+    午夜开始 —— 而"往一个跑着的世界里补一层声明"这条路上,它一直就是错的
+    (`api.py` 的 `stock_set` 早就写着"写进来的 updated_tick 是此刻")。
     """
     from anima_world.ontology import seed_quantities, visibility_declarations
 
@@ -1722,7 +1844,7 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any) -> N
             if key not in have
         }
         if missing:
-            stock_store.set_many(entity.id, missing, tick=0)
+            stock_store.set_many(entity.id, missing, tick=int(tick))
 
     declared = visibility_store.rules_map()
     for kind, key, visibility, label in visibility_declarations(ontology):
@@ -2302,6 +2424,7 @@ def run_run(args: argparse.Namespace) -> int:
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[run] {exc}", file=sys.stderr)
         return 2
+    _warn_if_llm_degraded(world)
     roster = "、".join(brain.agent.name for brain in world.scheduler.agents.values())
     print(f"[run] {world_id}  {len(world.scheduler.agents)} 个角色:{roster}")
     print("[run] 时钟已启动,Ctrl-C 停止(嵌入用法见 anima_world.api.World)")
@@ -2310,30 +2433,42 @@ def run_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_roster(world: Any, world_id: str) -> None:
-    """这个世界住着谁 —— 一个 .cyberworld 至今没有办法自报家门(#6)。"""
+def _print_roster(world: Any, world_id: str, *, in_play: bool = False) -> None:
+    """这个世界住着谁 —— 一个 .cyberworld 至今没有办法自报家门(#6)。
+
+    `in_play=True` 是 `play` 里的 `/who`。**末尾那句"找谁说话"必须跟着变**:
+    在 play 里换人是 `/at 夏`,而这张表照旧教人去开一个新进程跑
+    `anima-world chat --agent 夏` —— 照做的下场是两个进程操作同一个世界,
+    时钟那边还在走。它不报错,只是把人支到了另一条路上。
+    """
     state = world.state()
     agents = state.get("agents", {})
     now = state.get("world_time", {})
+    places = {row.get("id"): (row.get("name") or row.get("id")) for row in state.get("locations", [])}
     print(f"\n  {onboarding.bold(world_id)}  第{now.get('day', 0)}天 "
           f"{now.get('hour', 0):02d}:{now.get('minute', 0):02d}\n")
     if not agents:
         print("  这个世界还没有住人。\n")
         return
     for agent_id, info in agents.items():
-        where = info.get("location") or "?"
+        where = places.get(info.get("location")) or info.get("location") or "?"
         doing = info.get("activity") or {}
         transit = doing.get("transit") if isinstance(doing, dict) else None
         if transit:
-            doing_text = f"在去 {transit['to']} 的路上"
+            doing_text = f"在去 {places.get(transit.get('to')) or transit.get('to')} 的路上"
         else:
-            doing_text = (doing.get("kind") or "") if isinstance(doing, dict) else ""
+            kind = (doing.get("kind") if isinstance(doing, dict) else None)
+            doing_text = _ACTION_LABELS.get(kind, kind or "")
         tail = onboarding.dim(doing_text) if doing_text else ""
         away = onboarding.dim("(不在场)") if info.get("away") else ""
         print(f"    {_pad(agent_id, 12)}{_pad(info.get('name', agent_id), 16)}"
               f"{_pad('@' + str(where), 14)}{tail}{away}")
-    print(f"\n  找谁说话:{onboarding.bold(f'anima-world chat --agent {next(iter(agents))}')}"
-          f"{'' if world_id == _world_id_default() else f' --world-id {world_id}'}\n")
+    first = next(iter(agents))
+    if in_play:
+        print(f"\n  换个人说话:{onboarding.bold(f'/at {first}')}\n")
+    else:
+        print(f"\n  找谁说话:{onboarding.bold(f'anima-world chat --agent {first}')}"
+              f"{'' if world_id == _world_id_default() else f' --world-id {world_id}'}\n")
 
 
 def _map_frame(world: Any, args: argparse.Namespace) -> str:
@@ -2768,7 +2903,7 @@ def run_prompt(args: argparse.Namespace) -> int:
         seen = world.debug_prompt(
             args.agent,
             player_id=args.player_id,
-            display_name=args.name or "访客",
+            display_name=args.name or "",
             message=args.message,
         )
     finally:
@@ -2834,7 +2969,7 @@ def run_chat(args: argparse.Namespace) -> int:
 
         agent_id = args.agent
         info = roster[agent_id]
-        display_name = args.name or "访客"
+        display_name = args.name or ""
         # 走到对方跟前再开口:在场块(时间/地点/同地者)靠玩家所在地才成立,
         # 会话也才知道自己发生在哪儿。地点读不出来就算了,聊天不该因此告吹。
         if info.get("location"):
@@ -2988,7 +3123,7 @@ def run_play(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 2
 
-        display_name = args.name or "访客"
+        display_name = args.name or ""
         world.start_clock()
         degraded = world.state().get("runtime", {}).get("llm", {}).get("degraded_reason")
         print(onboarding.rule(f"{world_id} —— 时钟在走"))
@@ -3032,7 +3167,7 @@ def run_play(args: argparse.Namespace) -> int:
             if line in ("/quit", "/q", "/exit"):
                 break
             if line == "/who":
-                _print_roster(world, world_id)
+                _print_roster(world, world_id, in_play=True)
                 continue
             if line.startswith("/at "):
                 target = line[4:].strip()
@@ -4125,6 +4260,16 @@ def _print_welcome() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # 人在屏幕前等一句台词的那三个命令,引擎的日志收起来(见
+    # `_engine_logs_out_of_the_way`)。挂在这儿而不是三个 `run_*` 里面,是因为
+    # 最吵的那几条发生在 `World.open` 里面 —— 函数体开头才拦就已经晚了。
+    if args.command in ("start", "chat", "play"):
+        with _engine_logs_out_of_the_way(getattr(args, "verbose", False)):
+            return _dispatch(args)
+    return _dispatch(args)
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "start":
         return run_start(args)
     if args.command == "config":

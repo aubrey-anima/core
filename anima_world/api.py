@@ -42,13 +42,14 @@ from anima_world import contact
 from anima_world import together
 from anima_world import tools as tools_mod
 from anima_world.actions import ActionDescriptor
+from anima_world import chat_service as chat_service_mod
 from anima_world.chat_service import ChatService
 from anima_world.beats import coerce_goals
 from anima_world.chat_session import ChatSessionManager
 from anima_world.chat_state import ChatStateStore
 from anima_world.chat_store import ChatStore
 from anima_world.config_store import coerce_to_declared_type, mask_secret
-from anima_world.intent import FIRST_PERSON, Director
+from anima_world.intent import FIRST_PERSON, Director, read_self_introduction
 from anima_world.llm_client import (
     create_background_llm_client_from_config,
     create_llm_client_from_config,
@@ -324,16 +325,20 @@ class _WorldView:
         }
 
     def _llm_degraded_reason(self) -> str | None:
-        """Why this world is answering with the Mock LLM — the one place that
-        distinguishes a never-configured key from an unreadable one."""
+        """这个世界为什么在用 Mock 回答 —— "从没配过"和"读不回来"分得开的那一处。
+
+        **是给人看的一句话**(`start` / `chat` / `play` / `run` 四个横幅、doctor
+        的报告、宿主的界面都直接把它显示出来),所以说中文;键名 `llm.api_key`
+        照旧原样,因为那正是他要去敲的那个东西。
+        """
         config_store = self.scheduler.config_store
         if config_store is None:
-            return "no config store: this world has no LLM configuration (in-memory run)"
+            return "这个世界没有配置存储,也就没有 LLM 配置(纯内存跑)"
         undecryptable = getattr(config_store, "undecryptable_secrets", None)
         if callable(undecryptable) and "llm.api_key" in undecryptable():
-            return "llm.api_key could not be decrypted — did <db>.key travel with the database?"
+            return "llm.api_key 读不回来"
         if not (config_store.get("llm.api_key", default="") or ""):
-            return "llm.api_key is not configured"
+            return "llm.api_key 还没配"
         return None
 
     def _runtime_status(self, recent_events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -570,6 +575,12 @@ class _ToolRuntime:
         here = self.agent_location(agent_id)
         where = self._world.player_location(player_id).strip()
         return bool(here) and bool(where) and here == where
+
+    def claim_hail(self, agent_id: str, player_id: str) -> str:
+        """`reach_out` 的"她今天开过口了吗"那道闸 —— 和闲着时的搭话共用一个水位。
+        能搭话返回空串并当场记下,不能就返回一句人话的理由(见
+        `Scheduler.claim_hail`)。"""
+        return self._world.scheduler.claim_hail(agent_id, player_id)
 
     def point_ids(self) -> list[str]:
         store = self._world.scheduler.location_store
@@ -1134,6 +1145,7 @@ class World:
             prompt_store=scheduler.prompt_store,
             judge_hook=lambda info: scheduler.submit_user_chat_judgment(**info),
             meta_provider=self.chat_state.conversation_meta,
+            place_name=self._location_display_name,
         )
         # autonomy:(角色, 世界日) -> 今天主动过几次;以及那四个"通没通"的计数。
         # 都是内存态:重启即清 —— 上限是"别把玩家的收件箱刷满",不是需要审计的账。
@@ -1785,13 +1797,17 @@ class World:
         quiet = self.chat_state.quiet_until(agent_id, player_id)
         if quiet is not None:
             raise AgentUnavailable(agent_id, player_id, quiet)
-        interlocutor: dict[str, str] = {
-            "display_name": display_name or f"player-{player_id[:8]}",
-            "role": role,
-        }
+        # 他自报家门的话,在这儿就落库 —— **要早于 `_interlocutor_for`**,这一轮的
+        # 身份块才读得到"他刚说了他叫什么"。记完照旧往下走:这一轮仍然是对话。
+        self._note_self_introduction(agent_id, player_id, str(messages[-1].get("content") or ""))
+        interlocutor = self._interlocutor_for(player_id, display_name, role)
         # 记住这个玩家叫什么。记忆文本里写的是名字,不是 id —— 检索 query 用得上
         # (见 world_context)。身份即参数,所以世界只在被告知时才知道。
-        self._touch_player(player_id, display_name=interlocutor["display_name"])
+        self._touch_player(
+            player_id,
+            name=interlocutor["display_name"],      # 他报过的名字,没报就是空
+            display_name=interlocutor["address"],   # 给人和模型看的称呼,永不是 id
+        )
         self.players[player_id].setdefault("role", role)
         # 玩家在哪,决定角色是"看见你"还是"收到你的消息":`chat_service.respond`
         # 按这个字段在面对面/手机私聊两段身份声明里选一段。这里曾经不传,于是
@@ -1804,10 +1820,74 @@ class World:
             interlocutor["location_name"] = self._location_display_name(where)
         # "他上次出现"的水位(contact)。落在这里而不是 `_touch_player`:那一个是
         # 玩家侧的入口(不知道是跟谁),而"久别"是**她**和他之间的事。
-        self._note_player_contact(agent_id, player_id, interlocutor["display_name"])
+        self._note_player_contact(agent_id, player_id, interlocutor["address"])
         return {
             "interlocutor": interlocutor,
             "user_text": str(messages[-1].get("content") or ""),
+        }
+
+    def _note_self_introduction(self, agent_id: str, player_id: str, user_text: str) -> None:
+        """「我叫林越,你叫我小林就行」—— 记下来,然后**放行**(见
+        `intent.read_self_introduction`)。
+
+        兑现的是身份块自己许下的那个诺:它两支结尾都写着「他要是告诉了你名字,这一轮
+        之后就照那个名字认他」,而在这之前没有一行代码做这件事。玩家报了名字,她当场
+        叫得出来(那一轮的原文还在上下文里),下一场开局身份块又以"最高优先级事实"的
+        口气说「他没有告诉过你他叫什么名字」。
+
+        **只填空,不覆盖**:他改口("以后叫我老林")该走 `style_adjust` 那条明路,
+        而不是被一句偶然命中的正则悄悄改掉 —— 和创世那条纪律同一个理由。
+        """
+        found = read_self_introduction(user_text)
+        if not found:
+            return
+        try:
+            known = {
+                str(rule.get("kind")) for rule in self.chat_state.overrides(agent_id, player_id)
+            }
+            for kind, value in found.items():
+                if kind not in known:
+                    self.chat_state.set_override(agent_id, player_id, kind, value)
+        except Exception:  # noqa: BLE001 - 记不下名字不该让这一轮聊天告吹
+            logger.warning("记玩家自报的名字失败 agent=%s player=%s",
+                           agent_id, player_id, exc_info=True)
+
+    def _interlocutor_for(
+        self, player_id: str, display_name: str | None, role: str
+    ) -> dict[str, str]:
+        """"对面那个人"是谁 —— **真聊天(`_chat_prelude`)和调试视图共用这一份**。
+
+        两条路各拼一遍就会分叉,而这份 dict 正是身份块的全部输入;调试视图撒起谎来
+        比没有调试视图更坏。(它已经撒过一次:`debug_prompt` 的 `role` 默认值
+        `"player"` 盖过了世界里真正的身份,于是同一个世界,真聊天里她读到的是
+        「身份是旅人」,调试视图里是「身份是player」。)
+
+        **`display_name` 空着就让它空着 —— 不许兜底成一个假名字。** 从前这里兜底成
+        `player-3f9a2c`,而身份块紧接着命令她「始终用这个名字称呼对方」:一条必然
+        执行不了的命令。她于是自己编一个,而编出来的那个会进转录、进会话摘要、进她
+        0.8 重要度的长期记忆。线上 `night-tide` 就是这么让玩家改名叫「旅人」的 ——
+        照跑、报成功、日志一行不错。
+
+        名字与称呼分成两格之后,"他还没说过名字"才是一件她说得出口的事。
+
+        **宿主这一轮没给,回落到世界自己记着的那一格** —— 这不是上面禁的那件事。
+        `players[pid]["name"]` 只有一个写点(`_chat_prelude`),写进去的只有宿主亲口
+        传过的 `display_name`;出处仍然是宿主,纪律 3 没有松。松掉的是"世界明明记得
+        却装作不知道":宿主第一轮传了「林越」,第二轮没传,她当场又不认识他了。
+        (玩家**自己说**「我叫林越」是另一格 —— `player_name` override,由
+        `chat_service.told_name` 读,身份块对这两种出处说的是两句不同的话。)
+
+        **空串必须和 `None` 走同一支**:CLI 不给 `--name` 时传的就是 `""`,而回落只认
+        `None` 的话,那个空串还会顺着 `_touch_player(name=…)` 把记着的名字**冲掉** ——
+        第一轮认得他、从第二轮起永远不认识,日志一行不错。
+        """
+        known = self.players.get(player_id) or {}
+        name = str(display_name or "").strip() or str(known.get("name") or "").strip()
+        resolved_role = str(role or known.get("role") or "").strip()
+        return {
+            "display_name": name,     # 他报过的名字;空 = 他还没说过
+            "role": resolved_role,
+            "address": name or chat_service_mod.address_for(resolved_role),
         }
 
     def _present_names(self, agent_id: str) -> list[str]:
@@ -1845,6 +1925,22 @@ class World:
             speaker=self._tool_runtime.agent_names().get(agent_id, agent_id),
         )
         outcome.update(verdict.to_dict())
+        if verdict.intent == "style_adjust" and read_self_introduction(user_text):
+            # 「我叫林越,你叫我小林就行」—— 这一轮**已经**在 `_note_self_introduction`
+            # 里落库了,分类器给出的那份是同一件事的第二个答案,而它带来的不是重复,
+            # 是**吞掉**:style_adjust 那条路以一句系统回执收尾,于是玩家开口说的
+            # 第一句话她一个字都没答。真世界实测判成 `style_adjust(0.95)`,她回
+            # 「（记下了:玩家的昵称 —— 小林。）」,**自我介绍换来一张收条**。
+            # (`read_self_introduction` 的 docstring 写的就是"记下来之后必须让这一轮
+            # 继续走对话" —— 那句诺在这儿之前没人守。)
+            # 只挡 style_adjust:「我叫林越,你过来一下」里的导演那半照旧要兑现。
+            logger.info(
+                "这一轮是自报家门,已经记下了 —— 不按 style_adjust 收条处理 agent=%s player=%s",
+                agent_id, player_id,
+            )
+            outcome["intent"] = "dialogue"
+            outcome["reason"] = "自报家门已由世界记下,这一轮照旧是对话"
+            return outcome
         if verdict.intent == "style_adjust":
             kind = str((verdict.params or {}).get("kind") or "").strip()
             value = str((verdict.params or {}).get("value") or "").strip()
@@ -2425,7 +2521,7 @@ class World:
         player_id: str = "p1",
         message: str = "在吗",
         display_name: str | None = None,
-        role: str = "player",
+        role: str = "",
         history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """把这一刻这个角色**会收到的提示词**原样交出来,逐块带来源标签。
@@ -2452,11 +2548,7 @@ class World:
             raise KeyError(f"agent {agent_id} not found")
         turns = list(history or []) + [{"role": "user", "content": message}]
         known = self.players.get(player_id) or {}
-        interlocutor: dict[str, str] = {
-            "display_name": display_name or known.get("display_name")
-            or f"player-{player_id[:8]}",
-            "role": role or str(known.get("role") or "player"),
-        }
+        interlocutor = self._interlocutor_for(player_id, display_name, role)
         where = str(known.get("location") or "").strip()
         if where:
             interlocutor["location"] = where
@@ -4143,15 +4235,24 @@ class World:
                 except Exception:  # noqa: BLE001 - memories are flavor, never fatal
                     pass
             now = scheduler.world_time()
+            def _place_name(point_id: str) -> str:
+                """地点 id → 人话名。**进提示词的一律走它。**
+
+                她读到什么就说什么:漏掉一处的样子是「你在建筑工作室，正在去cafe
+                的路上」—— 同一句话里一个地方用人话、另一个用 id,而她会照着把
+                `cafe` 念出口。不报错,只是出戏。
+                """
+                if not point_id or scheduler.location_store is None:
+                    return point_id
+                row = scheduler.location_store.get(point_id)
+                return str((row or {}).get("name") or point_id)
+
             loc_id = brain.agent.blackboard.read("loc") or brain.agent.location or ""
-            loc_name = loc_id
-            if scheduler.location_store is not None and loc_id:
-                row = scheduler.location_store.get(loc_id)
-                if row is not None:
-                    loc_name = row.get("name") or loc_id
+            loc_name = _place_name(loc_id)
             activity = self._view._agent_activity(agent_id)
             if activity.get("transit"):
-                label = f"正在去{activity['transit'].get('to', '别处')}的路上"
+                to_name = _place_name(str(activity["transit"].get("to") or ""))
+                label = f"正在去{to_name or '别处'}的路上"
             else:
                 label = _ACTIVITY_LABELS.get(activity.get("kind"), "闲着")
             others = [

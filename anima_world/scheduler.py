@@ -2884,12 +2884,15 @@ class Scheduler:
             rate = self.config_store.get("world.travel_minutes_per_unit", default=rate)
         return dist * float(rate)
 
-    def world_time(self) -> WorldTime:
-        """The world calendar, derived from `clock` — never stored (D3)."""
+    def world_time(self, tick: int | None = None) -> WorldTime:
+        """The world calendar, derived from `clock` — never stored (D3).
+
+        给了 `tick` 就折算那一刻(比如某个落库的水位是"哪一天")。
+        """
         mpt = DEFAULT_MINUTES_PER_TICK
         if self.config_store is not None:
             mpt = self.config_store.get("world.minutes_per_tick", default=mpt)
-        return world_time(self.clock, int(mpt))
+        return world_time(self.clock if tick is None else int(tick), int(mpt))
 
     def _write_plan_step(self, agent: Agent, now: WorldTime) -> None:
         """Put the current plan step on the blackboard (clearing it when the
@@ -3392,6 +3395,40 @@ class Scheduler:
                 },
             })
 
+    def claim_hail(self, agent_id: str, player_id: str) -> str:
+        """她这会儿能不能主动去跟这个玩家搭话 —— 能就当场记下水位并返回空串,
+        不能就返回一句人话的理由。
+
+        **查和记是同一个调用。** 分成两步的话,两条路(闲着时的
+        `_maybe_hail_player`、autonomy 里的 `reach_out` 工具)会各查各的、
+        各记各的,水位迟早对不上 —— 而对不上的样子就是玩家连着挨两次搭话。
+
+        这条闸是一次真的对局逼出来的:玩家正一句一句跟她聊着,autonomy 让她
+        `reach_out` 插了两次话,两次都是招呼生客的口气(「你是第一次来吧」)——
+        而她刚给这个人做过一杯咖啡。`_hailed` 那道"一天一次"只挡住了它自己
+        这条路,工具那条整个绕过去了。
+
+        **今天已经跟他说过话也算开过口。** 搭话是开场白,而开场白一天只有一次;
+        接着说的那句叫接话,不叫搭话。判据取 `contact_store.last_contact_tick`
+        (`World.chat` / `record_chat_turn` 两扇门都写它),所以宿主走哪条门
+        进来的对话都算数。
+        """
+        day = self.world_time().day
+        if self._hailed.get((agent_id, player_id)) == day:
+            return "今天已经跟他打过招呼了"
+        store = getattr(self, "contact_store", None)
+        if store is not None:
+            try:
+                last = store.get(agent_id, player_id).get("last_contact_tick")
+            except Exception:  # noqa: BLE001 - 读不到水位不该掀翻 tick
+                logger.warning("读 contact 水位失败 agent=%s player=%s",
+                               agent_id, player_id, exc_info=True)
+                last = None
+            if last is not None and self.world_time(int(last)).day == day:
+                return "今天已经跟他说过话了 —— 这会儿开口是接话,不是搭话"
+        self._hailed[(agent_id, player_id)] = day
+        return ""
+
     def _maybe_hail_player(self, agent: Agent) -> None:
         """「想找个人说说话」时,同地的在场玩家也算一个人(issue #13,访客模型)。
 
@@ -3418,12 +3455,11 @@ class Scheduler:
         except Exception:  # noqa: BLE001 - 读不到在场名单就当没人,绝不掀翻 tick
             logger.warning("could not read present players", exc_info=True)
             return
-        day = self.world_time().day
         for player_id, info in candidates:
             # 一天一次。招呼是招呼,不是每 tick 都要拍一下肩膀 —— needs 抖动那一课。
-            if self._hailed.get((agent.id, player_id)) == day:
+            # 水位和 `reach_out` 那条路共用一个(见 `claim_hail`)。
+            if self.claim_hail(agent.id, player_id):
                 continue
-            self._hailed[(agent.id, player_id)] = day
             self._record_event({
                 "type": "agent_hail",
                 "who": agent.id,

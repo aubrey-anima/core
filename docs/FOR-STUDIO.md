@@ -87,10 +87,10 @@ start  config  doctor  chat  prompt  map  ontology  contact  run  simulate  even
 | 命令 | 干什么 | 对工作台的意义 |
 |---|---|---|
 | `contract --json` | **报这一版的全部契约数字** | 装完一个 core 先问它,别猜 |
-| `validate` | 校验种子 / 节拍脚本 | 权威校验永远问选中的那个 core(你们已经这么做了) |
+| `validate world` / `validate beats` | 校验世界文件 / 节拍脚本 | 权威校验永远问选中的那个 core(你们已经这么做了)。`validate seed` 还留着当别名,但"种子"这个概念 2.0 就没有了 |
 | `simulate --ticks N --report f.json` | 无头快进 + 落一份摘要 | C3 三日试炼 |
 | `report --json` | 读一个跑过的世界出摘要 | 同上,事后再问一次 |
-| `chat --agent X` | 本地试聊(免 claim) | B3 性格试镜 |
+| `chat --agent X` | 本地试聊(免 claim) | B3 性格试镜。⚠️ **stdout 变干净了**(见下面的 `--verbose` 那条) |
 | `prompt --agent X` | **看她收到的提示词,逐块带来源** | 1.3.0 新增,见 §3 |
 | `map [--json]` | **地图 + 谁在哪 + 谁去了哪儿** | 1.4.0 新增,见 §3.6 —— `--json` 出数据,你们自己渲染 |
 | `ontology [--json] [--check]` | **有哪些种类的东西、身上有哪些量、能对它们做什么**,以及**一件事要她付出什么**(`requires` / `costs` / `consumes` / `duration`)。`--check` 跑出生自检 | 2.0 新增,见 §3.7 —— 能力表**只有这里问得到**,猜不出来;动词现在是**你们声明的**,不是引擎的十个;世界能自己长出新东西(`spawn`) |
@@ -103,6 +103,29 @@ start  config  doctor  chat  prompt  map  ontology  contact  run  simulate  even
 | `doctor` | 体检 | 装完 core 自检 |
 | `play` | 交互式跑 | 人手动玩 |
 | `run` / `start` | 前台宿主 / 引导 | 工作台一般不用 |
+
+### `start` / `chat` / `play` 的 stdout 上不再混引擎日志(新增 `--verbose`)
+
+人在屏幕前等一句台词的那三个命令,现在把 `anima_world` 这棵 logger 的 WARNING 收进
+一个收集器,散场时印一行「这一场里引擎记了 N 条警告;最后一条:…」。`--verbose` 恢复
+原样(照原样打出来,一条不收)。
+
+对你们的意义:**B3 性格试镜那条子进程管线,现在只需要判断"哪一行是她说的"**,不用再
+从 `plan step starts outside the day (1440), dropping` 这类英文日志里挑。要在工作台里
+把引擎日志单独收一栏,加 `--verbose` 并照旧读 stderr。
+
+### 新增 `world.start_time`:作者能定"这个世界从几点开始"
+
+配置键,HH:MM,**引擎默认 `00:00`**(即从前的行为:tick 0 = 午夜)。内置的旧港声明
+`14:30`。写法和别的配置一样 —— 世界文件的 author `config` 段,或 `config set`。
+
+对你们的意义:**新建世界的预览第一屏不再是所有人在睡觉**。作者在工作台里搭好作息表
+之后,该顺手问他一句"这个世界从几点开始"——它和作息表是同一件事,分开填就会撞上
+"我明明排了班,预览里怎么没人动"。
+
+两条要知道的:只在这个前缀**第一次有钟**时生效(`setnx`),给一个跑着的世界改这个键
+不会拨钟,想看效果得建新世界;写错的时刻(`25:00`、`九点`)**当场抛**,不会悄悄退回
+午夜 —— 所以工作台那一侧照旧可以把它当"填错了就报错"的字段来验。
 
 ### `contract --json` 是你们最该依赖的东西
 

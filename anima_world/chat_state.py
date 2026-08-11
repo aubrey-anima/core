@@ -43,6 +43,12 @@ OVERRIDE_KINDS: dict[str, str] = {
     "tone_preference": "口气偏好",
     "forbidden_topics": "不要提的东西",
     "nickname_for_player": "玩家的昵称",
+    # **名字和称呼不是一件事**,所以它单独占一格。`address_form` 是"当面怎么叫他",
+    # 而这一个是"他自己说他叫什么" —— 身份块里那句「他要是告诉了你名字,这一轮之后
+    # 就照那个名字认他」要兑现,得有个地方存。存不下的下场实测过:玩家报了名字、
+    # 她当场叫得出来(那一轮的原文还在上下文里),下一场开局身份块又以"最高优先级
+    # 事实"的口气说「他没有告诉过你他叫什么名字」—— 而她的长期记忆里明明写着。
+    "player_name": "他说他叫什么",
 }
 
 _NOT_IMPLEMENTED = "存储归子类(redis_state.RedisChatStateStore)"

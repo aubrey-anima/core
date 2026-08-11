@@ -200,7 +200,10 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     ),
     "chat.session_summary": (
         "用一句中文概括这次对话的主要内容和情绪基调。只输出摘要，不要解释。",
-        "会话关闭时生成总结用的 prompt",
+        # 只管语气与详略:谁是谁、在哪、不许编造转录里没有的人物地点,由引擎拼在
+        # 这段文字的前后(`chat_session._SUMMARY_FACT_HEADER` / `_SUMMARY_GUARD`)——
+        # 覆盖这个模板改不掉那两半,理由见那边的注释。
+        "会话关闭时生成总结用的 prompt（只定语气与详略）",
     ),
     "chat.world_memory_block": (
         _CHAT_WORLD_MEMORY,

@@ -316,6 +316,11 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "agent.idle_timeout": (30.0, "float", "scheduler", False, "BT idle watchdog threshold (seconds)"),
     "world.minutes_per_tick": (5, "int", "scheduler", False, "World minutes one tick represents (5 → a world day is 288 ticks)"),
     "world.travel_minutes_per_unit": (60, "int", "scheduler", False, "World minutes to cross one canvas unit on foot (the old harbour district is walkable)"),
+    # 世界从几点开始 —— **这是世界作者的意见,不是引擎的**,所以引擎的默认值必须
+    # 等价于从前的行为(00:00 = tick 0),不写它的世界逐位不变。存在的理由是开箱那
+    # 一分钟:tick 0 是午夜,于是新用户装上包看到的第一屏是三个人在各自家里睡觉,
+    # 而"什么时候开门"本来就属于这个世界的作息表,和作息表写在同一份文件里才对。
+    "world.start_time": ("00:00", "str", "scheduler", False, "Time of day (HH:MM) the world clock starts at when a prefix gets its first clock; 00:00 = tick 0"),
     "planner.enabled": (True, "bool", "planner", False, "LLM plans each agent's free time between duties"),
     "planner.timeout": (30.0, "float", "planner", False, "Planner LLM call timeout (seconds)"),
     "judge.timeout": (30.0, "float", "judge", False, "Relationship judge LLM call timeout (seconds)"),

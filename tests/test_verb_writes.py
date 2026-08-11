@@ -58,6 +58,24 @@ def _agents(world: World) -> list[str]:
     return sorted(world.scheduler.agents)
 
 
+def _settle(world: World, agent: str, limit: int = 288) -> None:
+    """等到她手上没有正在赶的路 —— 不然**每一个**动词都会被同一句话挡回来。
+
+    在途时 `act()` 一律回"世界这会儿不接这个动作(她在赶路…)",于是这条测试连
+    "它改没改世界"都还没走到就红了。从前不必等,只是因为所有世界都从午夜起步、跑
+    50 tick 恰好是凌晨没人动;几点开门如今是这个世界作者的意见(`world.start_time`),
+    再靠那个巧合就是让这道闸站在沙子上。
+
+    放在 `_setup_for` 的**开头**:后面 `_bring_together` 要照她此刻站的地方把人凑过来,
+    先等她落地,算出来的 `here` 才不是她刚离开的那个地方。
+    """
+    for _ in range(limit):
+        if agent not in world.scheduler._transit:
+            return
+        world.tick(1)
+    raise AssertionError(f"{agent} 整整一个世界日都在路上,这条测试没法起头")
+
+
 def _bring_together(world: World, mover: str, where: str) -> bool:
     world._tool_runtime.move_agent(mover, where)
     for _ in range(80):
@@ -99,6 +117,19 @@ def _snapshot(world: World, places: tuple[str, ...]) -> dict[str, object]:
 def _setup_for(world: World, verb: str) -> tuple[dict, dict]:
     """让这个动词有意义所需要的现场,返回 (调用参数, act 的 kwargs)。"""
     agent, other = _agents(world)[0], _agents(world)[1]
+    _settle(world, agent)
+    if verb == "eat":
+        # **吃要有得吃。** `eat` 声明它发 `item_consume`,而那一条只在她站的地方
+        # 货架上真有饭时才发得出来 —— 站在自己家里吃是一件世界里没有账的事。
+        # 从前不必挪,只因为所有世界都从午夜起步、跑 50 tick 时她恰好在店里;
+        # 几点开门如今是这个世界作者的意见,那个巧合没了。**问世界哪儿有饭**,
+        # 别写死 "cafe":橱窗改了菜单这条该跟着走,而不是变红。
+        pantry = next(
+            (p for p in world._tool_runtime.point_ids()
+             if world.scheduler.economy_store.cheapest_meal(p)), None
+        )
+        assert pantry, "这个世界没有一处货架上有饭 —— 这条测试验不了 eat"
+        assert _bring_together(world, agent, pantry), "没能把她挪到有饭的地方"
     here = world._tool_runtime.agent_location(agent)
     if verb in ("broadcast", "talk_to"):
         assert _bring_together(world, other, here), "没能把两个人凑到一起"

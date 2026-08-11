@@ -89,6 +89,96 @@ FIRST_PERSON = frozenset({
     "me", "myself", "i", "player",
 })
 
+# ── 自报家门:引擎自己认得,不经分类器 ──────────────────────────────────────
+#
+# 「我叫林越,你叫我小林就行」。这一句**不该**判成 style_adjust —— 它确实是在说话,
+# 判过去的下场是玩家自报家门却收到一句「(记下了:…)」的系统回执,他刚说的话被整个
+# 吞掉(见本模块开头那段不对称)。所以这一层做的事只有一件:**记下来,然后放行**,
+# 这一轮照旧是对话。
+#
+# 不交给分类器还有两条这一处独有的理由:分类器默认不跑(`chat.intent.enabled` 默认
+# 关),而身份块每个世界都在;而且身份块**已经许下了这个承诺** —— 它两支结尾都写着
+# 「他要是告诉了你名字,这一轮之后就照那个名字认他」,而在这之前没有任何一行代码
+# 兑现它。一份自称"最高优先级事实"的提示词许一个引擎不做的诺,是这个仓库最怕的
+# 那种坏法:她当场叫得出来(原文还在上下文里),下一场开局又不认识他了。
+#
+# **认出来的名字不升格成 `display_name`。** 那一个是宿主认证过的身份(纪律 3),
+# 而这里是一次正则猜测;混成一格的话,一次误判就变成她口中"最高优先级"的事实。
+# 它落进 (角色, 玩家) 的 override,身份块照着说「他**告诉过你**他叫 X」—— 出处
+# 是他自己,而不是世界替他担保。
+
+# 先按标点切段再逐段**从头**匹配。切段让「我叫林越,你叫我小林就行」两半各归各的;
+# 锚在段首让「别叫我先生」「我不叫小林」自然落空 —— 否则要靠一串否定前瞻去堵,
+# 而那种堵法漏一个就是把玩家的原话反过来记。
+_INTRO_SEGMENT = re.compile(
+    "[,，。.!！?？;；、：:~～—…\n]+"
+)
+
+# 「叫」后面紧跟着的这几个字一出现,这句话就不是自报家门:「我叫**他**小林」是
+# 我怎么称呼别人,「我叫**了**一杯咖啡」压根是另一个动词义。**在这儿挡,不在名字
+# 那一头挡** —— 捕获到手再去挑,挑剩下的("他小林")一样会被记下来。
+_NOT_INTRO_HEAD = r"(?![了过着起来他她它你您我咱一两个这那什么])"
+
+_INTRO_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("player_name", re.compile(rf"^我(?:就)?(?:叫做|叫作|名叫|叫){_NOT_INTRO_HEAD}(.+)$")),
+    ("player_name", re.compile(r"^我(?:的)?名字(?:就)?(?:是|叫做|叫)(.+)$")),
+    ("player_name", re.compile(r"^my name(?:'s|s| is|:)\s*(.+)$", re.I)),
+    ("address_form", re.compile(
+        rf"^(?:你|您|你们|大家)?(?:可以|能够|能|就|请|都)*叫我{_NOT_INTRO_HEAD}(.+)$"
+    )),
+    ("address_form", re.compile(r"^(?:just\s+)?call me\s+(.+)$", re.I)),
+)
+
+# 名字后面挂着的语气尾巴。「你叫我小林就行」里的"就行"不是名字的一部分。
+_INTRO_TAIL = re.compile(r"(?:就行|就好|就可以|就是|好了|即可|行了|吧|啦|呀|啊|哦|喔|嘛|呢|了)+$")
+_INTRO_QUOTES = "「」『』\"'“”‘’()()《》 \t"
+
+# 匹配上了、但捕获到的不是名字。**空手比记错强**:记错的那个会进身份块、进转录、
+# 进她的长期记忆,而玩家永远不会知道是哪一句让她这么叫他的。
+_NOT_A_NAME = frozenset({
+    "什么", "啥", "谁", "哪个", "名字", "一声", "一下", "过来", "来", "去",
+    "他", "她", "它", "你", "您", "我", "咱", "人", "一个", "这个", "那个",
+    "what", "who", "me", "him", "her", "you",
+})
+# 名字有多长。**汉字那一档卡得比拉丁字母狠得多**,因为它是这一层唯一还剩下的闸:
+# 「我叫苏晚夏做一杯咖啡」结构上和「我叫林越」一模一样,分不开 —— 但没有人叫
+# 「苏晚夏做一杯咖啡」。中文名字连复姓带名到头是四个字,昵称再宽一点。
+_INTRO_MAX_LEN = 16
+_INTRO_MAX_LEN_CJK = 6
+
+
+def _too_long(name: str) -> bool:
+    ascii_only = all(ord(ch) < 128 for ch in name)
+    return len(name) > (_INTRO_MAX_LEN if ascii_only else _INTRO_MAX_LEN_CJK)
+
+
+def read_self_introduction(text: str) -> dict[str, str]:
+    """玩家这句话里有没有自报家门 —— 有就返回 `{override kind: 值}`,没有是空 dict。
+
+    两种 kind,因为**名字和称呼不是一件事**:「我叫林越」给 `player_name`,
+    「你叫我小林就行」给 `address_form`。一句话里两样都有就两样都返回。
+
+    这不是分类,是识别 —— 调用方记下来之后**必须让这一轮继续走对话**。
+    """
+    found: dict[str, str] = {}
+    for raw in _INTRO_SEGMENT.split(str(text or "")):
+        segment = raw.strip()
+        if not segment:
+            continue
+        for kind, pattern in _INTRO_RULES:
+            if kind in found:
+                continue
+            match = pattern.match(segment)
+            if match is None:
+                continue
+            name = _INTRO_TAIL.sub("", match.group(1).strip().strip(_INTRO_QUOTES)).strip()
+            name = name.strip(_INTRO_QUOTES).strip()
+            if not name or _too_long(name) or name.casefold() in _NOT_A_NAME:
+                continue
+            found[kind] = name
+    return found
+
+
 # 玩家亲手做的事**要当面**;玩家开口让她做的事不要。
 #
 # 判据是**施动者是谁**,不是这件事重不重要:「你去睡觉」隔着电话说得出来,而

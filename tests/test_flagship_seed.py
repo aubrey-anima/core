@@ -124,6 +124,33 @@ def test_橱窗里她们真的坐得下来_而且不是谁都肯(flagship):
     )
 
 
+def test_开箱第一屏不是三个人在睡觉(flagship):
+    """**橱窗的第一帧也是展品。**
+
+    tick 0 是午夜,而新世界跑在演示速度上(1 tick/现实秒)—— 于是新用户装上包看到
+    的头一分半钟,是三个角色躺在各自家里。一个世界引擎最没有说服力的一帧。
+
+    旧港因此声明了自己几点开门。挑 14:30 的理由全在这条断言里:三个人的作息表只有
+    10:00–15:00 这一段**同时满足**"都醒着"和"各在各的地方做各的事"(夏 守着咖啡店、
+    遥 在木工坊、柔 在家画画),而挑它的尾巴是因为 15:00 柔 就动身去咖啡店找 夏 ——
+    静止的一屏之后半分钟就有人在走、有两个人凑到一起。
+
+    这条钉的是产物,不是那个数字:哪天有人改了三个人的作息,这里会红,而那正是
+    该有人重新挑一次开门时刻的时刻。
+    """
+    stamp = flagship.world_time()
+    assert (stamp.day, stamp.hour) == (0, 14), "橱窗没有声明自己几点开门"
+
+    flagship.tick(1)                     # 行为树跑一帧,每个人才挑得出自己此刻的活
+    where = {}
+    for agent_id, view in flagship.state()["agents"].items():
+        activity = view["activity"]
+        assert activity["source"] == "duty", f"{agent_id} 开箱那一刻没事可做"
+        assert activity["kind"] != "sleep", f"{agent_id} 开箱那一刻在睡觉"
+        where[agent_id] = view["location"]
+    assert len(set(where.values())) == 3, f"三个人挤在一处,世界看上去只有一个场景:{where}"
+
+
 def test_the_loop_stays_off_in_the_showcase(flagship):
     """连续输出**不**默认开:它把每轮的 LLM 调用乘 2~5 倍,而且不是每个世界都要
     这种节奏。橱窗要摆得满,但不能替用户做一个持续烧钱的决定。"""

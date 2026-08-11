@@ -314,3 +314,31 @@ def test_presence_and_identity_never_contradict(world):
         "身份声明说不在一起,而在场块说在一起 —— 两块用了不同的快照:\n"
         f"presence: {blocks['presence']}\nidentity: {blocks['identity']}"
     )
+
+
+def test_the_place_she_is_walking_to_is_named_in_chinese(world):
+    """进提示词的地名一律是人话,一处都不能漏。
+
+    实测漏的是行程的目的地:她读到「你在建筑工作室，正在去cafe的路上」——
+    同一句话里一个地方用人话、另一个用 id,而她会照着把 `cafe` 念出口。
+    这类错不报错、测试不红,只是出戏。
+    """
+    agent = _an_agent(world)
+    here = world._tool_runtime.agent_location(agent)
+    destination = next(
+        pid for pid in world._tool_runtime.point_ids() if pid != here
+    )
+    world.player_move("p1", here)
+    world.scheduler._transit[agent] = {
+        "from": here, "to": destination,
+        "arrive_at": world.scheduler.clock + 10,
+    }
+
+    blocks = {
+        b["label"]: b["text"]
+        for b in world.debug_prompt(agent, player_id="p1")["blocks"]
+    }
+    presence = blocks["presence"]
+    expected = world._tool_runtime.point_names()[destination]
+    assert destination not in presence, f"她读到的是地点 id:{presence}"
+    assert expected in presence, presence
