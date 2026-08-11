@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Iterable
 
-from anima_world.expressions import ExpressionError
+from anima_world.expressions import ExpressionError, world_dice
 from anima_world.rules import WORLD_PREFIX, Rule
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, clock_names
 
@@ -48,16 +48,25 @@ def evaluate_due(
     action_owners: Callable[[str], list[str]] | None = None,
     emit: Callable[[dict[str, Any]], None] | None = None,
     minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
+    world_id: str = "",
 ) -> dict[str, Any]:
     """把到点的规律跑一遍。返回一份"这一轮干了什么"的小报告。
 
     `last_run` 由调用方持有(内存态):它只决定**要不要现在算**,不影响算出来的
     结果 —— 结果由 `dt` 决定,而 `dt` 来自量自己的 `updated_tick`。所以重启把
     `last_run` 清空是安全的:最多是多算一次,值不会错。
+    ⚠️ 「最多多算一次,值不会错」这句只对**按 `dt` 折算**的规律成立。一条
+    `{"every": {"days": 1}, "set": {"雨天数": "雨天数 + 1"}}` 的常数步长规律,
+    多算一次就真的多走一整天 —— 加载期的 `rules.drift_warnings` 就是点这个的名。
 
     `minutes_per_tick` 只用来把 `now` 折成 `day`/`hour`/`minute`/`minute_of_day`
     (见 `rules.BUILTIN_NAMES`)。**它是每个世界自己的配置**,所以必须由调用方传 ——
     在这儿写死一个默认值等于让"半夜"在两个世界里指不同的时刻。
+
+    `world_id` 只喂给 `rand()`(`expressions.world_dice` 的第一个坐标)。缺省是
+    空串,好让老调用点一个字不改地行为不变 —— **但那样两个世界会摇同一副骰子**
+    (同名规律、同名 owner、同一 tick 下同一个数)。宿主/调度器该把真实的世界名
+    传进来:世界的名字本来就是这个引擎里世界的身份。
     """
     report: dict[str, Any] = {"evaluated": 0, "written": 0, "emitted": 0, "skipped": []}
 
@@ -142,7 +151,8 @@ def evaluate_due(
         for owner in owners:
             try:
                 updates, fired = _apply(
-                    rule, snapshots.get(owner, {}), owner, now, world_stocks, clock
+                    rule, snapshots.get(owner, {}), owner, now, world_stocks, clock,
+                    world_id,
                 )
             except ExpressionError as exc:
                 # 运行期降级:一条算不出来的规律不该掀翻整个 tick(节拍脚本同一条
@@ -181,6 +191,7 @@ def _apply(
     now: int,
     world_stocks: dict[str, float],
     clock: dict[str, int] | None = None,
+    world_id: str = "",
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     """算一个 owner。**只算不写** —— 写入由调用方攒到一轮末尾(双缓冲)。
 
@@ -188,6 +199,11 @@ def _apply(
     """
     if not snapshot:
         return ({}, [])
+
+    # 这一刻、这条规律、这个 owner 的骰子。**一次求值里只有一个数**:条件、`set`、
+    # `emit` 的门槛读到的 `rand()` 全是它 —— 否则同一轮里"下不下雨"能有两个答案。
+    def roll() -> float:
+        return world_dice(world_id, rule.id, owner, now)
 
     values = {key: value for key, (value, _) in snapshot.items()}
     # dt = 这条规律要写的那些量,上一次被写是多久以前。新量按 0 算(刚出生,
@@ -207,31 +223,49 @@ def _apply(
     }
 
     for condition in rule.conditions:
-        if not condition.evaluate(namespace):
+        if not condition.evaluate(namespace, dice=roll):
             return ({}, [])
 
     # 门槛在**算之前**是什么状态 —— 边沿触发要用它做对照。
-    before_flags = [bool(emit.when.evaluate(namespace)) for emit in rule.emits]
+    before_flags = [bool(emit.when.evaluate(namespace, dice=roll)) for emit in rule.emits]
 
-    updates = {key: float(expression.evaluate(namespace)) for key, expression in rule.outputs.items()}
+    updates = {
+        key: float(expression.evaluate(namespace, dice=roll))
+        for key, expression in rule.outputs.items()
+    }
     after_namespace = {**namespace, **updates}
     events: list[dict[str, Any]] = []
     for emit_spec, was_true in zip(rule.emits, before_flags):
-        # **边沿触发**:算之前不满足、算之后满足才发。没有这一条,一棵长满了的树
-        # 会每 12 tick 发一次"我长成了",直到世界末日。
-        if was_true or not emit_spec.when.evaluate(after_namespace):
+        # **边沿触发**:门槛被跨过去那一下才发。没有这一条,一棵长满了的树会每
+        # 12 tick 发一次"我长成了",直到世界末日。
+        #
+        # 哪个方向算数由作者的 `on` 说了算(缺省 `rise` = 从前的行为)。**这里
+        # 一个字节的状态都不留**:两个值都在这一轮的双缓冲快照里,所以重启之后
+        # 既不会补发一件从没发生过的事,也不会因为"上次是什么"丢了而永远沉默。
+        is_true = bool(emit_spec.when.evaluate(after_namespace, dice=roll))
+        if is_true == was_true:
+            continue                      # 没跨越
+        edge = "rise" if is_true else "fall"
+        if not emit_spec.fires_on(edge):
             continue
         events.append({
             "type": emit_spec.type,
             # `who` 在这个库里一直是**角色 id** 的语义。一棵树不是角色,所以
             # 只有 owner 真的是个角色时才填 —— 往里塞 `oak_01` 是个埋着的谎,
             # 任何假设"who 是角色"的读者都会被它骗。owner 一律在 payload 里。
+            # 事件落在**哪儿**同理:这一层不认识地点,`loc` 由消费端从 owner 反查。
             "who": owner.split(":", 1)[1] if owner.startswith("agent:") else None,
             "payload": {
                 "rule": rule.id,
                 "owner": owner,
                 **{key: updates[key] for key in rule.outputs},
                 **emit_spec.payload,
+                # 契约的三个键放在作者的 `payload` **之后**:它们是引擎的回答
+                # (这次是哪个方向、她该多当回事、她记住的那句话),不该被一个
+                # 手滑的同名键盖掉。没声明 importance 的话后两个一个都不出现 ——
+                # 那样的世界事件形状和从前逐位相同。
+                "edge": edge,
+                **emit_spec.memory_fields(),
             },
         })
     return (updates, events)

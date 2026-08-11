@@ -191,6 +191,10 @@ class Quantity:
     visibility: str = HIDDEN
     label: str = ""          # 进提示词时的人话名字;空则用 key
     unit: str = ""
+    # `((0.0, "毛毛雨"), (0.4, "大雨"), …)`:她读到的不是 0.8,是"大雨"。
+    # **可见性是量声明的一部分,分档同理** —— 写在同一处,不必再去
+    # `stock_visibility` 写第二行。空 = 没分档 = 照旧给数字(逐位不变)。
+    bands: tuple[tuple[float, str], ...] = ()
 
     def render_label(self) -> str:
         return self.label or self.key
@@ -1188,7 +1192,7 @@ def _parse_quantity(label: str, name: str, spec: Any) -> tuple[Quantity | None, 
     if not isinstance(spec, dict):
         return (None, [f"{label}.quantities.{name} 必须是数字(默认值)或对象"])
 
-    unknown = set(spec) - {"default", "visible", "visibility", "label", "unit"}
+    unknown = set(spec) - {"default", "visible", "visibility", "label", "unit", "bands"}
     if unknown:
         errors.append(f"{label}.quantities.{name}:不认识的字段 {sorted(unknown)}")
 
@@ -1209,6 +1213,12 @@ def _parse_quantity(label: str, name: str, spec: Any) -> tuple[Quantity | None, 
         )
         visibility = HIDDEN
 
+    # 分档:坏声明当场拒(和量名拼错同一条 —— 放行的样子是她一直在报数字,
+    # 而提示词看上去完全正常)。判断走 perception 那一份,不另写。
+    from anima_world.perception import band_errors, parse_bands
+
+    errors.extend(band_errors(spec.get("bands"), label=f"{label}.quantities.{name}"))
+
     if errors:
         return (None, errors)
     return (
@@ -1218,6 +1228,7 @@ def _parse_quantity(label: str, name: str, spec: Any) -> tuple[Quantity | None, 
             visibility=visibility,
             label=str(spec.get("label") or "").strip(),
             unit=str(spec.get("unit") or "").strip(),
+            bands=parse_bands(spec.get("bands")),
         ),
         errors,
     )

@@ -744,18 +744,33 @@ class RedisVisibilityStore:
         self._places = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:stock_places")
 
     def declare(self, owner_kind: str, key: str, visibility: str,
-                label: str | None = None) -> None:
-        from anima_world.perception import VISIBILITIES
+                label: str | None = None, bands: Any = None) -> None:
+        from anima_world.perception import VISIBILITIES, band_errors
 
         if visibility not in VISIBILITIES:
             raise ValueError(
                 f"不认识的可见档 {visibility!r};只有 {sorted(VISIBILITIES)}"
             )
-        self._rules.put(f"{owner_kind}\x00{key}", {
+        # 分档写错**一个字都不写**:留一份坏声明在库里,下场是她一直报数字而
+        # 日志干净。加载期那道闸(`visibility_band_errors`)在文件那一侧,这里
+        # 守的是同一条判断的另一个入口(`World.declare_visibility`)——
+        # 判断只有一份,不会两边给出不同答案。
+        # 空(`None` / `[]` / `()`)在这一层就是"没分档" —— 调用方交过来的是
+        # 规范化之后的值,而"作者写了一个空数组"那种错在作者层那道闸上判
+        # (`visibility_band_errors`),这里判等于把一个正常的 no-op 变成异常。
+        problems = band_errors(bands, label=f"{owner_kind}.{key}") if bands else []
+        if problems:
+            raise ValueError("bands 声明有问题:\n" + "\n".join(f"- {p}" for p in problems))
+        row: dict[str, Any] = {
             # 字段名照 SQLite 版:`visibility`。种子里那个字段才叫 `visible` ——
             # 两边差一个字,而互验之前谁都发现不了。
             "kind": owner_kind, "key": key, "visibility": visibility, "label": label,
-        })
+        }
+        # 没分档就**没有这个字段**,和"没声明可见性 = 没有行"同一条:留一个
+        # `"bands": null` 只会让"这个量分没分档"多出一种写法。
+        if bands:
+            row["bands"] = [[float(t), str(w)] for t, w in bands]
+        self._rules.put(f"{owner_kind}\x00{key}", row)
 
     def declarations(self) -> list[dict[str, Any]]:
         return sorted(
@@ -767,6 +782,27 @@ class RedisVisibilityStore:
         return {
             (str(r["kind"]), str(r["key"])): str(r["visibility"])
             for r in self._rules.all().values()
+        }
+
+    def labels_map(self) -> dict[tuple[str, str], str]:
+        """量的**人话名字**。`(种类, 量名) → label`,没写 label 的量不在表里。
+
+        ⚠️ 和 `labels()` 是两张表:那个是**东西**的名字(老橡树),这个是**量**的
+        名字(树高)。同一行提示词里各占一个位置,合成一张表就会互相盖。
+        """
+        return {
+            (str(r["kind"]), str(r["key"])): str(r["label"])
+            for r in self._rules.all().values()
+            if r.get("label")
+        }
+
+    def bands_map(self) -> dict[tuple[str, str], list[list[Any]]]:
+        """分档过的量的档表。**只收声明过 `bands` 的行** —— 一个量分没分档,
+        问的就是它在不在这张表里。"""
+        return {
+            (str(r["kind"]), str(r["key"])): r["bands"]
+            for r in self._rules.all().values()
+            if r.get("bands")
         }
 
     def place(self, owner: str, location: str, label: str | None = None) -> None:

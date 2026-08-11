@@ -21,11 +21,53 @@
 **声明本身就是开关。** 没有 `perception.enabled` 这种配置项:一个没声明过任何可见性
 的世界,这一层是空的、不进提示词、不花一个 token。要点亮就去声明,粒度天然比一个
 全局开关细。
+
+## 名字(`label`)与意义(`bands`):她读到的那一行由这两样拼出来
+
+    size 3.2  →(label=树高)→  树高 3.2  →(bands)→  树高 齐人高
+
+**`label` 换的是名字。** 量在存储里叫什么(`size` / `stamina`)是引擎的账;她读到的
+由 `label` 决定 —— "英文世界靠 `label` 机制与英文种子,不靠引擎换语言"这条路整个挂在
+它上面。⚠️ 它曾经**只是存着**:声明里有、`ontology --json` 报得出,而这里渲染时用的
+是原始量名。作者认认真真写了 `{"key": "size", "label": "树高"}`,世界照跑、日志干净,
+她读到的还是 `size 3.2`。
+⚠️ **量的名字和东西的名字是两张表**(`own/here/public_labels` 与 `labels`):
+`老橡树` 是那棵树,`树高` 是它身上那个量,同一行里各占一个位置;合成一张就会互相盖,
+而那只是读着别扭,不报错。反查**按种类做**:树的 `size` 是树高,矿的 `size` 是储量。
+
+**`bands` 换的是值。** 看得见、有名字还不够:她感知到的是 `江水位 6.5` —— 一个
+**引擎的账**,不是一个住在江边的人眼里的世界。把浮点数直接塞进提示词有两个后果,
+都不报错:她把内脏当风景来描述;而 0.8 的雨算大算小全靠 LLM 猜,**两个模型猜出
+两种雨**。
+
+所以可见性声明上可以再挂一份**可选**的 `bands` —— 阈值升序,取最后一个 `<=` 当前值
+的那一档的词:
+
+    {"kind": "world", "key": "雨势", "visible": "public",
+     "bands": [[0, "毛毛雨"], [0.4, "大雨"], [0.75, "瓢泼大雨"]]}
+
+四条边界:
+
+- **不写 `bands` 的量,行为逐位不变。** 和可见性、和本体逐字同构:声明本身就是开关。
+  分档是作者的选择 —— 一个"库存 37 件"的量翻成"还剩不少"是在替他丢掉他要的精度。
+- **第一档向下封口**:低于第一档阈值的值仍归第一档。另一种做法是回落成数字,而那
+  会让同一个量时而是词、时而是数 —— 作者调试时看到的和上线后某个低值时刻看到的
+  不是一回事。**想让下界有自己的词,就把第一档写在下界上**(通常是 0)。
+- **最后一档向上封口**,同理。
+- **渲染是赠品,键与数字是契约**:人话只进她的提示词。`Perception.own/here/public`
+  里的**量名和数原样不动**,`to_dict()` 只**加** `words` / `labels` 两段(宿主要画
+  水位曲线,那根线不该在某次升级之后突然画不出来;而把键换成 label 会让宿主的代码
+  在作者改一个字的那天读到 KeyError)。她**做决定**读的也仍然是真值 —— 行为树的
+  `StockCondition`、能力的 `when`/`requires` 一个字都没改:这两样只影响她怎么说。
+
+坏声明**当场开不了机,一次列全**(`visibility_band_errors`)。跳过一条比报错坏得多:
+世界照跑、日志干净,而她一直在报数字,作者要到三个月后才发现自己写错了一个方括号。
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,7 +98,19 @@ class Perception:
     own: dict[str, float] = field(default_factory=dict)
     here: dict[str, dict[str, float]] = field(default_factory=dict)
     public: dict[str, float] = field(default_factory=dict)
-    labels: dict[str, str] = field(default_factory=dict)
+    # 分档过的量:她读到的那个词。**和上面三档并列,不是替换** —— 数字是给宿主的
+    # 契约,词是给她的。没声明 `bands` 的量在这三个字典里根本不出现。
+    own_words: dict[str, str] = field(default_factory=dict)
+    here_words: dict[str, dict[str, str]] = field(default_factory=dict)
+    public_words: dict[str, str] = field(default_factory=dict)
+    # 量的**人话名字**(作者写过 `label` 的才在里面)。⚠️ 和下面的 `labels` 是
+    # **两张表**:那个是**东西**的名字(老橡树),这两个是**量**的名字(树高)。
+    # 合成一张的话它们互相盖 —— 要么每棵树都叫"树高",要么每个量都叫"老橡树",
+    # 而两种都只是提示词里读着别扭,不报错。
+    own_labels: dict[str, str] = field(default_factory=dict)
+    here_labels: dict[str, dict[str, str]] = field(default_factory=dict)
+    public_labels: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)   # 东西的名字(owner → 老橡树)
     # 本体给的两样:一行人话、她能对它做什么。没有本体的世界这两个是空的。
     glosses: dict[str, str] = field(default_factory=dict)
     verbs: dict[str, list[str]] = field(default_factory=dict)
@@ -69,17 +123,46 @@ class Perception:
         return not (self.own or self.here or self.public)
 
     def to_dict(self) -> dict[str, Any]:
+        """给宿主的那份。**数字原样,档词只是多出来的一段。**
+
+        `words` / `labels` 是**加**上去的(各自 `{"own","here","public"}`,没分档 /
+        没写 label 的量不出现):宿主要自己排版,而把 `public["江水位"]` 从 6.5 换成
+        "上了江岸街"、或者把键从 `江水位` 换成 label,都会让宿主的代码在作者改一个
+        字的那天读到 KeyError 或者画不出那根水位曲线 —— **键与数字是契约,人话是
+        赠品**。
+        """
         return {"own": dict(self.own), "here": {k: dict(v) for k, v in self.here.items()},
-                "public": dict(self.public), "overflow": self.overflow}
+                "public": dict(self.public), "overflow": self.overflow,
+                "words": {
+                    "own": dict(self.own_words),
+                    "here": {k: dict(v) for k, v in self.here_words.items()},
+                    "public": dict(self.public_words),
+                },
+                "labels": {
+                    "own": dict(self.own_labels),
+                    "here": {k: dict(v) for k, v in self.here_labels.items()},
+                    "public": dict(self.public_labels),
+                }}
+
+    def describe_own(self) -> str:
+        """`功力 120、体力 有点累` —— 她自己那一行的正文。"""
+        return _describe(self.own, self.own_words, labels=self.own_labels)
+
+    def describe_public(self) -> str:
+        """`粮价 7、雨势 瓢泼大雨` —— 人人都知道那一行的正文。"""
+        return _describe(self.public, self.public_words, labels=self.public_labels)
 
     def describe_here(self, owner: str) -> str:
-        """`门口那棵老橡树[tree:harbor_oak](树冠遮住半条街):树高 3.2米。可以照料、收取产出`"""
+        """`门口那棵老橡树[tree:harbor_oak](树冠遮住半条街):树高 3.2米。可以照料、收取产出`
+
+        一行里有**两种名字**,各归各的:`老橡树` 是这个东西的名字(`labels`),
+        `树高` 是它身上那个量的名字(`here_labels`)。
+        """
         name = self.labels.get(owner) or owner
         gloss = self.glosses.get(owner)
-        units = self.units.get(owner, {})
-        body = "、".join(
-            f"{key} {_trim(value)}{units.get(key, '')}"
-            for key, value in sorted(self.here.get(owner, {}).items())
+        body = _describe(
+            self.here.get(owner, {}), self.here_words.get(owner, {}),
+            self.units.get(owner, {}), self.here_labels.get(owner, {}),
         )
         verbs = self.verbs.get(owner)
         # id 只在她**真能对它做点什么**时才露出来:那是 `interact` 的参数,不是装饰。
@@ -97,20 +180,174 @@ class Perception:
             return None
         lines: list[str] = []
         if self.own:
-            body = "、".join(f"{key} {_trim(value)}" for key, value in sorted(self.own.items()))
-            lines.append(f"- 你自己:{body}")
+            lines.append(f"- 你自己:{self.describe_own()}")
         for owner in sorted(self.here):
             lines.append(f"- 这里的{self.describe_here(owner)}")
         if self.overflow:
             lines.append(f"- 这里还有 {self.overflow} 样别的东西,你没细看")
         if self.public:
-            body = "、".join(f"{key} {_trim(value)}" for key, value in sorted(self.public.items()))
-            lines.append(f"- 人人都知道:{body}")
+            lines.append(f"- 人人都知道:{self.describe_public()}")
         try:
             return template.format(lines="\n".join(lines))
         except (KeyError, IndexError, ValueError):
             logger.warning("perception 块渲染失败,这轮不带感知")
             return None
+
+
+def _describe(
+    values: dict[str, float], words: dict[str, str], units: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None,
+) -> str:
+    """一档量渲染成提示词里的正文:**`label` 换名字,`bands` 换值。**
+
+        size 3.2   →(label=树高)→   树高 3.2   →(bands)→   树高 齐人高
+
+    两样正交,各占一个位置。让档词顶掉名字的话,`- 这里的老橡树:齐人高` 读起来
+    像那棵树叫齐人高;让名字顶掉档词的话,`bands` 白写。
+
+    没写 `label` 的量出量名本身,没分档的量出数字 —— 两个开关各自独立,都不写
+    就和从前逐位相同。单位跟着**数字**走:`树高 齐屋檐高米` 是引擎自己印上去的
+    噪音,而她会照着念出来。
+
+    **排序按量名(key),不按 label。** 她读到的次序于是不随作者改一个字而变,
+    而次序不确定的提示词是没法 diff 的。
+    """
+    units, labels = units or {}, labels or {}
+    parts: list[str] = []
+    for key in sorted(values):
+        word = words.get(key)
+        name = labels.get(key) or key
+        parts.append(
+            f"{name} {word}" if word else f"{name} {_trim(values[key])}{units.get(key, '')}"
+        )
+    return "、".join(parts)
+
+
+def band_word(bands: Any, value: float) -> str | None:
+    """这个值落在哪一档:**最后一个阈值 `<=` 它的那一档**。没分档就返回 `None`。
+
+    两头都封口:低于第一档阈值的归第一档(见模块头),高于最后一档的归最后一档。
+    """
+    if not bands:
+        return None
+    chosen = bands[0][1]
+    for threshold, word in bands:
+        if value >= threshold:
+            chosen = word
+        else:
+            break            # 阈值升序,后面的更够不着
+    return str(chosen)
+
+
+def parse_bands(raw: Any) -> tuple[tuple[float, str], ...]:
+    """存储/声明里那份 `[[0, "毛毛雨"], …]` 规范成 `((0.0, "毛毛雨"), …)`。
+
+    **只规范,不判对错** —— 判断在 `band_errors`,而且是在写库之前判的。这里再判
+    一遍就是第二份判断,两份迟早给出不同答案。形状不对的当没写(闸在前面)。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[tuple[float, str]] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            return ()
+        threshold, word = entry
+        try:
+            out.append((float(threshold), str(word)))
+        except (TypeError, ValueError):
+            return ()
+    return tuple(out)
+
+
+def band_errors(raw: Any, *, label: str) -> list[str]:
+    """一份 `bands` 声明的毛病,一行一条(空 = 没问题;没写 `bands` 也是空)。
+
+    每一条都对着一种"不拦就静默变成报数字"的写法。作者面向的话一律中文 ——
+    读它的是世界的作者,不是宿主的开发者。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)) or isinstance(raw, str):
+        return [f"{label}.bands 必须是一个数组:[[阈值, 词], …],收到 {type(raw).__name__}"]
+    if len(raw) == 0:
+        return [f"{label}.bands 是空的 —— 不分档就整个别写这一项(写了却不生效,"
+                f"和写错一样查不出来)"]
+
+    errors: list[str] = []
+    previous: float | None = None
+    for index, entry in enumerate(raw):
+        where = f"{label}.bands[{index}]"
+        if isinstance(entry, str) or not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            errors.append(f"{where} 必须是 [阈值, 词] 两项,收到 {entry!r}")
+            continue
+        threshold, word = entry
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) \
+                or not math.isfinite(float(threshold)):
+            # NaN 和任何数比大小都是 False,于是那一档**永远选不中**,而它看上去
+            # 写得好好的 —— 和阈值写成字符串同一类坏法。
+            errors.append(f"{where} 的阈值必须是数字(有限的),收到 {threshold!r}")
+            continue
+        if not isinstance(word, str) or not word.strip():
+            errors.append(
+                f"{where} 的词必须是字符串,收到 {word!r}" if not isinstance(word, str)
+                else f"{where} 的档词不能是空的 —— 她读到的就是这几个字"
+            )
+            continue
+        threshold = float(threshold)
+        if previous is not None and threshold <= previous:
+            # 相等也不行:后一条永远盖住前一条,前一条是死档 —— 作者以为世界里
+            # 有三种雨,其实只有两种。
+            errors.append(
+                f"{where} 的阈值 {threshold:g} 必须严格大于上一档的 {previous:g} —— "
+                f"阈值要**升序**,取的是最后一个 <= 当前值的那一档"
+            )
+        previous = threshold
+    return errors
+
+
+def visibility_band_errors(seed: Any) -> list[str]:
+    """作者层里所有 `bands` 声明的毛病,**一次列全**。
+
+    加载时当场报错的那道闸就是它 —— 修一条重开一次的话,一份写错三处的文件要开机
+    三次,而每次开机都可能在别的表上留下半截东西。
+    """
+    if not isinstance(seed, dict):
+        return []
+    rows = seed.get("stock_visibility")
+    if not isinstance(rows, (list, tuple)):
+        return []
+    errors: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or "bands" not in row:
+            continue
+        name = str(row.get("key") or "").strip()
+        label = f"stock_visibility[{index}]" + (f" ({name})" if name else "")
+        errors.extend(band_errors(row.get("bands"), label=label))
+    return errors
+
+
+def bands_of(
+    rules: dict[tuple[str, str], Any], owner_kind: str, key: str
+) -> tuple[tuple[float, str], ...]:
+    """先精确匹配 `(种类, 量名)`,再通配 `(*, 量名)` —— 和 `visibility_of` 同一条路。"""
+    found = rules.get((owner_kind, key))
+    if found is None:
+        found = rules.get((ANY_KIND, key))
+    return parse_bands(found) if found else ()
+
+
+def label_of(rules: dict[tuple[str, str], str], owner_kind: str, key: str) -> str:
+    """这个量的人话名字;没写过就是空串(调用方回落成量名本身)。
+
+    **反查按种类做,不是全世界一张表** —— 同一个量名在两个种类上是两个东西
+    (树的 `size` 是树高,矿的 `size` 是储量)。一张全局表只留得下一个,而剩下
+    那个会把另一个的名字顶掉:世界照跑、日志干净,只是矿脉报了个树高。
+    (动词的人话反查踩过同一个坑,那里的修法也是这个。)
+    """
+    found = rules.get((owner_kind, key))
+    if found is None:
+        found = rules.get((ANY_KIND, key))
+    return str(found or "")
 
 
 def visibility_of(
@@ -182,11 +419,30 @@ def perceive(
     `ontology` 给的是两样**不改变她看得见什么**的东西:同地那一档的上限(按种类),
     以及每样东西的一行人话与能力动词。没有本体的世界照旧跑,只是列表按
     `default_budget` 封顶、没有人话也没有动词。
+
+    名字与分档同理,而且互相独立:写过 `label` 的量额外带一个人话名字(`*_labels`),
+    声明过 `bands` 的量额外带一个词(`*_words`),**量名与数字照旧原样在**。
+    两样都没写的世界这一半整个不存在,和从前逐位相同。
     """
     rules = visibility.rules_map()
     result = Perception()
     if not rules:
         return result
+    # 鸭子类型再宽一格:老的可见性 store 没有 `bands_map` / `labels_map`,那样的
+    # 世界就是"一个量都没分档、都没起名字",而不是开不了机。
+    bands_rules = getattr(visibility, "bands_map", None)
+    bands_rules = bands_rules() if callable(bands_rules) else {}
+    label_rules = getattr(visibility, "labels_map", None)
+    label_rules = label_rules() if callable(label_rules) else {}
+
+    def word_of(kind: str, key: str, value: float) -> str | None:
+        return band_word(bands_of(bands_rules, kind, key), value) if bands_rules else None
+
+    def name_of(kind: str, key: str) -> str:
+        # 和量名一样的 label 不留 —— 本体那条路上没写 label 的量存的就是量名本身
+        # (`render_label()` 的回落),留着只会让"作者到底起没起过名字"看不出来。
+        name = label_of(label_rules, kind, key) if label_rules else ""
+        return "" if name == key else name
 
     own_owner = f"agent:{agent_id}"
     for key, value in stock_store.of(own_owner).items():
@@ -194,6 +450,12 @@ def perceive(
         if level in (SELF, HERE, PUBLIC):
             # 自己的量:`self` 当然看得见;声明成 here/public 的更宽,也看得见。
             result.own[key] = value
+            word = word_of("agent", key, value)
+            if word:
+                result.own_words[key] = word
+            name = name_of("agent", key)
+            if name:
+                result.own_labels[key] = name
 
     if here:
         # **按种类分别封顶。** 有上限本身不是可选的:这一格里站着一万棵树的话,
@@ -219,8 +481,17 @@ def perceive(
                 if not seen:
                     continue
                 result.here[owner] = seen
+                words = {
+                    key: word for key, value in seen.items()
+                    if (word := word_of(kind, key, value))
+                }
+                if words:
+                    result.here_words[owner] = words
+                names = {key: name for key in seen if (name := name_of(kind, key))}
+                if names:
+                    result.here_labels[owner] = names
                 if label:
-                    result.labels[owner] = label
+                    result.labels[owner] = label   # 东西的名字,不是量的名字
                 if ontology is not None:
                     gloss, verbs = ontology.describe(owner)
                     if gloss:
@@ -235,5 +506,11 @@ def perceive(
     for key, value in stock_store.of(world_owner).items():
         if visibility_of(rules, "world", key) == PUBLIC:
             result.public[key] = value
+            word = word_of("world", key, value)
+            if word:
+                result.public_words[key] = word
+            name = name_of("world", key)
+            if name:
+                result.public_labels[key] = name
 
     return result

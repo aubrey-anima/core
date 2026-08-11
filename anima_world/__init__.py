@@ -1,3 +1,3 @@
-"""赛博世界 v1 — 事件引擎 + 快照投影 + SQLite 持久化"""
+"""anima-world —— 多 agent 共同生活的世界引擎(事件核 + 投影 + Redis/MySQL 持久化)"""
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"

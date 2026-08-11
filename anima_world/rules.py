@@ -13,8 +13,26 @@ needs 的衰减曲线、economy 的价格漂移都是写死在 Python 里的,而
   "for_each": {"kind": "tree"},           // 谁参与
   "when": ["world_season != 3"],          // 可选:条件
   "set": {"size": "min(size + growth_rate * dt, max_size)"},
-  "emit": [{"when": "size >= max_size", "type": "tree_matured"}] }
+  "emit": [{"when": "size >= max_size", "type": "tree_matured",
+            "importance": 0.6,            // 可选:她该多把它当回事(0~1)
+            "text": "门口那棵橡树长满了",  // 可选:她记住的那句话
+            "on": "rise"}] }              // 可选:哪个方向的跨越算数
 ```
+
+`emit` 那三个可选字段各补一个洞,而且**都遵守"声明本身就是开关"**(不写 = 行为
+和从前逐位相同):
+
+- **`importance`**(0~1):不写的话这条事件**只进日志**,没有任何人会记得它 ——
+  线上那个雨季世界的高潮「江水漫堤」真的发生了,而四个角色关于它的记忆是 0 条。
+  写了,消费端(scheduler)才把它变成在场的人的一段记忆。`0` 是作者明说的
+  "这件事不值得记",和不写等价。
+- **`text`**:她记住的**那句话**。没写就回落成 `type` —— `江水漫堤` 也是一句
+  真话,空着不是。反过来,**只写 `text` 不写 `importance` 当场开不了机**:那句话
+  一个人都读不到,而静默无效是这个仓库最怕的坏法。
+- **`on`**:`rise`(默认,不满足→满足)/ `fall`(满足→不满足)/ `both`。
+  没有 `fall` 的话「江水漫堤」一生只有一次机会 —— 汛期年复一年、潮起潮落这类
+  语义根本写不出来(线上那个世界的水位顶死上限 17 个世界日,一声不吭)。
+  **双边沿仍然无状态**:两个值都在这一轮的双缓冲快照里,不存任何"上次是什么"。
 
 设计上定死的五条,每条都有代价换来的理由:
 
@@ -91,13 +109,40 @@ class RuleError(ValueError):
         super().__init__("invalid world rules:\n" + "\n".join(f"- {e}" for e in errors))
 
 
+# 门槛可以往哪个方向跨。缺省 `rise` = 从前的行为,逐位不变。
+EMIT_EDGES = ("rise", "fall", "both")
+
+
 @dataclass(frozen=True)
 class Emit:
-    """门槛事件:算之前不满足、算之后满足 —— 才发。"""
+    """门槛事件:门槛被跨过去那一下才发(哪个方向由 `on` 说了算)。
+
+    `importance` / `text` 是**给消费端的契约**,不是这一层自己用的:量这一层
+    不认识记忆,也不认识地点(`who`/`loc` 由 scheduler 从 owner 反查)。它只负责
+    把作者声明的轻重和那句话原样放进 `payload`,而且**只在作者真的声明过时才放** ——
+    没声明的世界事件形状和从前一模一样。
+    """
 
     when: Expression
     type: str
     payload: dict[str, Any] = field(default_factory=dict)
+    importance: float | None = None
+    text: str = ""
+    on: str = "rise"
+
+    def fires_on(self, edge: str) -> bool:
+        """这次跨越(`rise` / `fall`)算不算数。"""
+        return self.on == "both" or self.on == edge
+
+    def memory_fields(self) -> dict[str, Any]:
+        """要往 payload 里加的那两个键 —— 没声明就是空的。
+
+        `importance` 为 0 也是空的:作者明说"这件事不值得记",那就一个字都别发下去,
+        否则消费端还要再判一次同一件事(判据分两处写,迟早给出两个答案)。
+        """
+        if self.importance is None or self.importance <= 0:
+            return {}
+        return {"importance": float(self.importance), "text": self.text or self.type}
 
 
 @dataclass(frozen=True)
@@ -156,7 +201,54 @@ def parse_rules(entries: Any) -> list[Rule]:
 
     if errors:
         raise RuleError(errors)
+    # **这里不打警告。** 一次开机要解析三遍规律(播种 / 装载 / 本体预检),在这儿
+    # 打就是同一句话说三遍,而说三遍的警告和没说过一样 —— 人会开始略过它。
+    # 点名归**装载**那一处(`__main__._load_world_rules`,每次开机恰好一次)和
+    # `validate`(作者真正会去看的地方);`drift_warnings` 是公开的,就是为这个。
     return rules
+
+
+def drift_warnings(rules: Iterable[Rule]) -> list[str]:
+    """**常数步长的自增规律** —— 算多算少结果就不一样。点名,但不拒绝。
+
+    形状是这样的一条:
+
+        {"every": {"days": 1}, "set": {"雨天数": "雨天数 + 1"}}
+
+    它读了自己写的那个量(自增),而步子是个常数 `1`,和"到底过去了多久"无关。
+    `every` 只是**节流**,`dt` 才是流逝 —— 一条不看 `dt` 的自增规律因此**对求值
+    时机敏感**:多算一次就真的多走一整步。而求值时机不是它自己说了算的(进程重启、
+    节流水位丢失、时钟跳变),于是这个世界的物理法则挂在了部署节奏上。
+
+    线上那个世界正因为这个:调试期滚动重启,每次多烧一整天的雨,60 个世界日里
+    雨天数 56 而应为 ~50,洪水提前两天半 —— 没有任何一处报错,只是这个世界的
+    历法悄悄比它自己的时钟走得快。
+
+    为什么不干脆拒绝:这是**建议**不是错误。一条 `{"季节": "floor(day/90) % 4"}`
+    不读自己、算几遍都是同一个答案;而作者也可能真的想要"每次求值加一"的语义
+    (比如数的就是"这条规律跑过几轮")。所以判据收得很紧 —— **读了自己写的那个量、
+    又没有用 `dt`、而且 `every` 大于 1 tick**,三条都占才点名。误报够多次的警告
+    等于没有警告。
+    """
+    messages: list[str] = []
+    for rule in rules:
+        if rule.interval_ticks <= 1:
+            continue          # 每 tick 都算的话根本没有"多算一次"这回事
+        drifty = sorted(
+            key for key, expression in rule.outputs.items()
+            if key in expression.names and "dt" not in expression.names
+        )
+        if not drifty:
+            continue
+        messages.append(
+            f"规律 {rule.id}:每 {rule.interval_ticks} tick 才算一次,而 "
+            f"set.{'/'.join(drifty)} 是自增式(读了它自己)却没有用 `dt` —— "
+            "常数步长对「多算一次」不免疫:求值时机一变(重启、节流水位丢失、时钟跳变),"
+            "量就平白多加一整份,而这个世界的物理法则从此挂在部署节奏上"
+            "(线上那个世界因此把雨天数多烧了 6 天,洪水提前两天半)。"
+            f"按流逝折算就不会漂:把常数乘上 `dt / {rule.interval_ticks}`"
+        )
+    return messages
 
 
 def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
@@ -177,7 +269,7 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
                 errors.append(f"{label}.set.{name}:{problem}")
                 continue
             try:
-                outputs[name] = compile_expression(source)
+                outputs[name] = compile_expression(source, dice=True)
             except ExpressionError as exc:
                 errors.append(f"{label}.set.{name}:{exc}")
 
@@ -188,7 +280,7 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
     else:
         for position, source in enumerate(raw_when):
             try:
-                conditions.append(compile_expression(source))
+                conditions.append(compile_expression(source, dice=True))
             except ExpressionError as exc:
                 errors.append(f"{label}.when[{position}]:{exc}")
 
@@ -209,9 +301,13 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
             if not isinstance(payload, dict):
                 errors.append(f"{emit_label}:payload 必须是对象")
                 payload = {}
+            importance = _parse_importance(emit_label, spec, errors)
+            text = _parse_memory_text(emit_label, spec, errors)
+            on = _parse_edge(emit_label, spec.get("on"), errors)
             try:
-                emits.append(Emit(when=compile_expression(spec.get("when")),
-                                  type=event_type, payload=dict(payload)))
+                emits.append(Emit(when=compile_expression(spec.get("when"), dice=True),
+                                  type=event_type, payload=dict(payload),
+                                  importance=importance, text=text, on=on))
             except ExpressionError as exc:
                 errors.append(f"{emit_label}.when:{exc}")
 
@@ -227,6 +323,67 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
         conditions=tuple(conditions),
         emits=tuple(emits),
     )
+
+
+def _parse_importance(label: str, spec: dict[str, Any], errors: list[str]) -> float | None:
+    """`importance`:0~1,可选。**不写 = 只进日志**,和从前逐位相同。
+
+    上下界都是闸而不是 clamp:一个写了 `8` 的作者想的是"很重要",而按 1 截断之后
+    他永远不会知道自己写错了刻度 —— 下一条写 `0.8` 的事件会和它一样重。
+    """
+    if "importance" not in spec:
+        return None
+    raw = spec["importance"]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        errors.append(
+            f"{label}:importance 必须是 0~1 的数(她该多把这件事当回事),"
+            f"收到 {type(raw).__name__}"
+        )
+        return None
+    if not 0.0 <= float(raw) <= 1.0:
+        errors.append(f"{label}:importance 必须落在 0~1 之间,收到 {raw}")
+        return None
+    return float(raw)
+
+
+def _parse_memory_text(label: str, spec: dict[str, Any], errors: list[str]) -> str:
+    """`text`:她记住的那句话,可选。**写了它就必须写 importance。**
+
+    只写 `text` 的世界里,那句话一个人都读不到(没有 importance 就不进任何人的
+    记忆)—— 世界照跑、日志干净,而作者以为她记住了。这正是"照跑但给错东西"。
+    """
+    if "text" not in spec:
+        return ""
+    raw = spec["text"]
+    if not isinstance(raw, str):
+        errors.append(
+            f"{label}:text 必须是字符串(她记住的那句话),收到 {type(raw).__name__}"
+        )
+        return ""
+    if not raw.strip():
+        errors.append(f"{label}:text 是空的 —— 不写它会回落成事件类型,写个空串是白写")
+        return ""
+    if "importance" not in spec:
+        errors.append(
+            f"{label}:写了 text 却没写 importance —— 只有声明了 importance 的事件"
+            "才进得了记忆,不然这句话一个人都读不到(只进日志)。"
+            "要她记住就补一个 importance(0~1);只想在日志里留字就写进 payload"
+        )
+    return raw
+
+
+def _parse_edge(label: str, raw: Any, errors: list[str]) -> str:
+    """`on`:哪个方向的跨越算数。缺省 `rise` —— 不写的世界逐位不变。"""
+    if raw is None:
+        return "rise"
+    value = raw.strip() if isinstance(raw, str) else raw
+    if value not in EMIT_EDGES:
+        errors.append(
+            f"{label}:on 只认 \"rise\"(不满足→满足)/ \"fall\"(满足→不满足)/ "
+            f"\"both\",收到 {raw!r}"
+        )
+        return "rise"
+    return value
 
 
 def bad_output_name(name: str) -> str | None:

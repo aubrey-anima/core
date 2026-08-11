@@ -31,11 +31,12 @@ from anima_world.narrative import (
     create_narrative_provider_from_env,
     generate_capability_catalog,
 )
+from anima_world.perception import parse_bands, visibility_band_errors
 from anima_world.planner import Planner, SyncLLM
 from anima_world.projection import project_events
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
-from anima_world.rules import parse_rules
+from anima_world.rules import drift_warnings, parse_rules
 from anima_world.world_seed import WorldSeedError, apply_seed_config
 from anima_world.world_seed import world_seed_errors as _world_seed_errors
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
@@ -620,6 +621,11 @@ def _load_world_file(
             _world_seed_errors(authored, complete=not _world_exists(redis, world_id))
             if authored else []
         )
+        # 分档声明(`bands`)的闸也在这儿,**在动任何一张表之前**:坏声明放行的
+        # 样子是这个仓库最怕的那种 —— 世界照跑、日志干净,而她一直在报数字,
+        # 作者要到三个月后才发现自己写错了一个方括号。一次列全,所以
+        # `validate world` 和这里说的是同一批话(它调的是同一个函数)。
+        errors += visibility_band_errors(authored) if authored else []
         if errors:
             raise WorldSeedError([f"{path}: {e}" for e in errors])
         # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
@@ -1272,6 +1278,12 @@ def build_serve_scheduler(
     scheduler.redis = redis
     scheduler.mysql_conn = mysql_conn
     scheduler.mysql_prefix = mysql_prefix
+    # 降级不许无声(三轴):真模型经常只吐 headline,判定器会照 headline 自己派生
+    # 一份 trust/affection/respect —— 那是回落不是判断,所以要和 planner /
+    # narrative 一样在 `World.state()["runtime"]["subsystems"]` 里看得见。
+    # 判定器建在 scheduler 之前(它不认识存储层),所以这一笔在这儿接。
+    if getattr(relationship_judge, "health", "missing") is None:
+        relationship_judge.health = scheduler.note_subsystem
     # 时钟第一个接上:后面的 load_persisted_events 会拿事件 ts 和它取 max。
     # setnx 只填缺 —— 重开一个世界不许把时钟拨回去。
     #
@@ -1667,11 +1679,37 @@ def _seed_world_rules(rules_store: Any, world_seed: dict[str, Any] | None) -> No
 
 
 def _load_world_rules(rules_store: Any) -> list[Any]:
-    """从 store 读出规律并编译。被人手改坏了也当场报错,不带着坏规律开机。"""
+    """从 store 读出规律并编译。被人手改坏了也当场报错,不带着坏规律开机。
+
+    **常数步长那条 lint 在这里打,而且只在这里打。** 一次开机会解析三遍规律
+    (播种 / 装载 / 本体预检),`parse_rules` 里打就是同一句话说三遍 —— 而说三遍
+    的警告等于没说。装载这一处每次开机恰好走一次,且它拿到的是**这个世界真正
+    在跑的那份**规律(播种那份可能根本没落库)。
+    """
     definitions = rules_store.definitions()
     if not definitions:
         return []
-    return parse_rules(definitions)
+    rules = parse_rules(definitions)
+    for warning in drift_warnings(rules):
+        logger.warning("%s", warning)
+    return rules
+
+
+def _authored_drift_warnings(authored: Any) -> list[str]:
+    """`validate world` 也要报常数步长那条 lint —— **作者会看的是这里**。
+
+    开机那条警告落在服务器日志里,而作者手上只有这个命令。两处共用
+    `rules.drift_warnings` 同一个函数:另写一份判断,迟早出现"validate 说没问题、
+    开机却在报"。规律本身写坏了不归这儿管(`world_seed_errors` 已经列过),
+    所以解析不动就安静退场,不重复报一遍错。
+    """
+    entries = (authored or {}).get("rules") if isinstance(authored, dict) else None
+    if not entries:
+        return []
+    try:
+        return list(drift_warnings(parse_rules(entries)))
+    except Exception:  # noqa: BLE001 - 坏规律的错由 world_seed_errors 负责报
+        return []
 
 
 def _warn_unresolved_rule_names(stock_store: Any, rules: list[Any]) -> None:
@@ -1849,7 +1887,12 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
     declared = visibility_store.rules_map()
     for kind, key, visibility, label in visibility_declarations(ontology):
         if (kind, key) not in declared:
-            visibility_store.declare(kind, key, visibility, label)
+            # 分档写在量声明里(`{"visibility": "here", "bands": [...]}`)——
+            # 可见性是量声明的一部分,分档同理,不必再去 `stock_visibility` 写
+            # 第二行。写了第二行的话它先落库,这里的 `not in declared` 让它赢。
+            quantity = ontology.kinds[kind].quantities.get(key)
+            visibility_store.declare(kind, key, visibility, label,
+                                     bands=quantity.bands if quantity else ())
 
     for entity in ontology.entities.values():
         # `here` 档靠它才成立:没有位置的东西永远不在任何地方,于是"在场可见"
@@ -1883,11 +1926,20 @@ def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> Non
     **声明本身就是这一层的开关** —— 没声明过任何东西的世界,角色感知不到任何量,
     这一层不进提示词、不花 token。坏条目逐条丢弃并点名(可见性写错的后果是
     "她本该知道却不知道",不该拦住启动)。
+
+    ⚠️ **`bands` 是例外:坏分档拦住启动。** 理由不一样 —— 写错一档可见性的后果
+    是"她少知道一件事",而写错 `bands` 的后果是"她一直在报数字",两者都不报错,
+    但后者作者永远不会去查(提示词看上去正常,只是数字没被翻译)。这里再验一遍
+    是**为了不半装**:闸在 `_load_world_file`(第一次写之前),这一遍守的是
+    "世界不是从文件来的"那些入口。判断只有一份(`visibility_band_errors`)。
     """
     if world_seed is None:
         return
     if store.declarations():
         return
+    problems = visibility_band_errors(world_seed)
+    if problems:
+        raise WorldSeedError(problems)
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stock_visibility")):
         kind = str(entry.get("kind") or "").strip()
         key = str(entry.get("key") or "").strip()
@@ -1896,7 +1948,8 @@ def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> Non
             logger.warning("world_seed stock_visibility[%s] 缺 kind 或 key;跳过", index)
             continue
         try:
-            store.declare(kind, key, visibility, entry.get("label"))
+            store.declare(kind, key, visibility, entry.get("label"),
+                          bands=parse_bands(entry.get("bands")))
         except ValueError as exc:
             logger.warning("world_seed stock_visibility[%s] 没生效:%s", index, exc)
 
@@ -2764,6 +2817,12 @@ def run_ontology(args: argparse.Namespace) -> int:
             unit = f" {q['unit']}" if q["unit"] else ""
             print(f"    量   {pad(q['label'], 14)}默认 {q['default']:g}{unit}"
                   f"   她感知得到:{q['visibility']}")
+            if q.get("bands"):
+                # **她读到的是这几个词,不是数字** —— 而"作者把这个量翻成了什么"
+                # 和动词表同一个道理:只有这里问得到。猜一份档词出来的错和猜动词
+                # 一样不报错,只是界面上写着一个世界里不存在的说法。
+                print("         分档 " + " / ".join(
+                    f"{float(t):g}↑ {w}" for t, w in q["bands"]))
         for a in kind["affordances"]:
             gate = ("  仅当 " + " 且 ".join(a["conditions"])) if a["conditions"] else ""
             deed = "改变世界" if a["changes_world"] else "只是看看"
@@ -3755,7 +3814,11 @@ def run_validate(args: argparse.Namespace) -> int:
             return _report_validation("world", args.path, [read_error], [], args.json)
         return _report_validation(
             "world", args.path,
-            world_seed_errors(authored), world_seed_warnings(authored), args.json,
+            # 分档的闸和加载期**同一个函数** —— 另写一份的话,迟早出现
+            # "validate 说没问题,开机还是失败"。
+            world_seed_errors(authored) + visibility_band_errors(authored),
+            world_seed_warnings(authored) + _authored_drift_warnings(authored),
+            args.json,
         )
 
     data, read_error = _load_json_file(args.path)

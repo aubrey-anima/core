@@ -85,6 +85,34 @@ MAX_IDLE_LOOP_DEPTH = 5
 # 所以空串不会和真地点撞车,而它与 `None`(这个进程还没管过她)不是一回事。
 _NOWHERE = ""
 
+# 规律 `emit` 出来的事件变成在场者的记忆时,记在这个 kind 下(witness-memory)。
+# 独立的 kind 而不是复用 `seed`:一条"她亲眼看见江水漫过台阶"和一条创世注入的
+# 背景设定,来路完全不同 —— 混成一个之后,任何按来路筛记忆的地方(反思源、
+# 八卦源、`repair_memory_ticks` 这类维护)都再也分不开它们。
+WITNESS_MEMORY_KIND = "witness"
+
+# 一次判定小到可以当作没发生的门槛。**三轴落地之后,这道闸不能只看 headline** ——
+# 判定器现在会说"这次没多喜欢他,但信了他一点"(sentiment 0.004 / trust 0.15),
+# 而只看 headline 的闸会把**整行连轴一起**丢掉,一声不吭。于是"守约"这类只推
+# 信任的互动在世界里等于没发生过,而日志干净得像什么都没漏。
+RELATION_NOISE_FLOOR = 0.01
+
+
+def _is_noise(delta: float, axes: dict[str, float] | None) -> bool:
+    """headline 和三轴**都**小到可以忽略,这一行才算噪声。"""
+    if abs(delta) >= RELATION_NOISE_FLOOR:
+        return False
+    return not any(abs(value) >= RELATION_NOISE_FLOOR for value in (axes or {}).values())
+
+# 规律的节流水位在 `:meta` 里的行名(`redis_state.meta_rows`)。
+#
+# **为什么不另开一个 `:rule_marks` 键**:水位是这个世界的元数据,和 `:meta` 里
+# 已经住着的 `autonomy_stats`(同样是"上一轮是什么时候"的水位)是同一类东西;
+# 而新开一个 Redis 键是**跨仓库存储契约的变更**,镜像端要跟着对齐。为一份
+# 每条规律一个整数的水位付那个代价不值。行的形状:
+# `{"marks": {规律 id: tick}, "updated_tick": 写下这一行时的世界时钟}`。
+RULE_MARKS_ROW = "rule_marks"
+
 
 class BrainLike(Protocol):
     """Brain-compatible interface for the scheduler."""
@@ -250,9 +278,24 @@ class Scheduler:
         # 手里这份实例表是哪个版本的(见 `_sync_entities`)。别的进程种下的树,
         # 这个进程也得看得见 —— 实例可以运行期长出来,而种类是冻的。
         self._entities_rev: int = 0
-        # 规律上次算是什么时候 —— 只决定"要不要现在算",不影响结果(结果由 dt 定),
-        # 所以是内存态:重启清空最多多算一次,值不会错。
+        # 规律上次算是什么时候。**落库**(`:meta` 的 `rule_marks` 行),不是内存态。
+        #
+        # 它曾经是内存态,理由写在 `stocks.evaluate_due` 的 docstring 上:"只决定
+        # 要不要现在算,不影响结果 —— 结果由 dt 定,重启清空最多多算一次,值不会错"。
+        # **那句话只对 dt 化的表达式成立。** 一条常数步长的规律(`雨天数 + 1`、
+        # `江水位 + 雨势*0.9`)每多算一次就真的多走一步,而"多算一次"的次数由**运维
+        # 重启了几次**决定 —— 世界的物理法则从此挂在部署节奏上。
+        #
+        # 线上那个雨季世界就是这么坏的:调试期滚动重启,每次重启多烧一整天的雨,
+        # 实测雨天数 56 而按时钟应为 ~50;洪水本该第 3.2 天、实际发生在第 1 天,
+        # 此后水位顶死 clamp 上限 17 个世界日 —— 唯一的叙事高潮烧在了没人看的第一天,
+        # 而**日志一条错都没有**。
+        #
+        # 水位只对 `every > 1` 的规律有意义(每 tick 都算的规律没有节流可丢),
+        # 所以落库的也只有那些 —— 见 `_persist_rule_marks`。
         self._rule_last_run: dict[str, int] = {}
+        self._rule_marks_loaded: bool = False       # 这个进程 hydrate 过了吗
+        self._rule_marks_saved: dict[str, int] = {} # 我们相信 Redis 里躺着的那份
         self._rule_stats: dict[str, Any] = {
             "evaluated": 0, "written": 0, "emitted": 0, "skipped": 0, "last_error": None,
         }
@@ -3280,6 +3323,7 @@ class Scheduler:
             return
         from anima_world.stocks import evaluate_due
 
+        self._hydrate_rule_marks()
         try:
             report = evaluate_due(
                 self.stock_store,
@@ -3287,18 +3331,243 @@ class Scheduler:
                 self.clock,
                 last_run=self._rule_last_run,
                 action_owners=self._agents_doing,
-                emit=self._record_and_deliver,
+                emit=self._emit_rule_event,
                 minutes_per_tick=self._minutes_per_tick(),
+                # `rand()` 的第一个坐标(`expressions.world_dice`)。缺省是空串,
+                # 而那意味着**两个世界摇同一副骰子** —— 同名规律、同名 owner、
+                # 同一 tick 下同一个数。世界的名字本来就是这里世界的身份。
+                world_id=self.world_id or "",
             )
         except Exception:  # noqa: BLE001 - 规律引擎自己挂了也不许掀翻 tick
             logger.warning("world-rules evaluation failed", exc_info=True)
             return
+        finally:
+            # 水位先落库,再统计。**放在 finally 里**:一条规律算炸了不该让这一轮
+            # 已经跑过的那几条把水位丢掉 —— 丢掉的下场正是这个函数要修的那个
+            # (下次开机多烧一轮)。
+            self._persist_rule_marks()
         self._rule_stats["evaluated"] += report["evaluated"]
         self._rule_stats["written"] += report["written"]
         self._rule_stats["emitted"] += report["emitted"]
         if report["skipped"]:
             self._rule_stats["skipped"] += len(report["skipped"])
             self._rule_stats["last_error"] = report["skipped"][-1]
+
+    # ── 规律的节流水位:落库(world-rules) ─────────────────────────────────
+
+    def _hydrate_rule_marks(self) -> None:
+        """从 `:meta` 把水位捞回来。**一个进程一次**(锁内,由 tick 线程调用)。
+
+        冷启动语义有两半,两半都不许出事:
+
+        - **老世界没有这一行**(升级路径)—— 当作空水位,每条规律在开机后第一次
+          求值时跑一次。那就是今天的行为,一次,不是"把停机期间的账补烧一遍":
+          补烧才是把这个 bug 反着犯一遍。
+        - **水位比世界时钟还新** —— 世界被导进一个新前缀、或时钟被人挪过。留着它
+          会让这几条规律一直等到时钟追上来,而那是一段**没人看得见的静默**
+          (日志干净、规律不算)。所以当作没有水位,并且说一句。
+        """
+        if self._rule_marks_loaded:
+            return
+        self._rule_marks_loaded = True          # 读失败也不再试:重试只会每 tick 打一次 Redis
+        store = self.meta_store
+        if store is None:
+            return
+        try:
+            row = store.get(RULE_MARKS_ROW)
+        except Exception:  # noqa: BLE001 - 读不到水位不该拦住世界开机
+            logger.warning("规律水位读不出来,这次开机按「没有水位」算", exc_info=True)
+            return
+        marks = row.get("marks") if isinstance(row, dict) else None
+        if not isinstance(marks, dict):
+            return
+
+        now = int(self.clock)
+        hydrated: dict[str, int] = {}
+        ahead: list[str] = []
+        for rule_id, value in marks.items():
+            try:
+                tick = int(value)
+            except (TypeError, ValueError):
+                continue
+            if tick > now:
+                ahead.append(str(rule_id))
+                continue
+            hydrated[str(rule_id)] = tick
+        if ahead:
+            logger.warning(
+                "规律 %s 的水位(%s)比世界时钟还新(钟在 %d)—— 当作没有水位;"
+                "留着它,这几条规律会一直等到时钟追上来,而那段静默日志上一个字都没有",
+                "、".join(sorted(ahead)), RULE_MARKS_ROW, now,
+            )
+        # **只填缺,不覆盖** —— 和创世/重连同一条纪律。这个进程自己跑出来的水位
+        # 是**现在**,库里那份是这个进程开机之前的**过去**。
+        for rule_id, tick in hydrated.items():
+            self._rule_last_run.setdefault(rule_id, tick)
+        self._rule_marks_saved = dict(hydrated)
+
+    def _persist_rule_marks(self) -> None:
+        """水位写回 `:meta`。**只在真变了的时候写。**
+
+        两道节制,都是为了不让这条修法变成"每 tick 一次 Redis 写":
+
+        - **只落 `every > 1` 的规律**。每 tick 都算的规律没有节流可丢 —— 给它记
+          水位,记的是一件不影响任何判断的事,代价却是每 tick 一次写。
+        - **落的是全量,比的也是全量**:一轮里没有任何一条节流规律到点,这里就是
+          一次字典比较,不碰 Redis。
+        """
+        store = self.meta_store
+        if store is None:
+            return
+        desired = {
+            rule.id: int(self._rule_last_run[rule.id])
+            for rule in self.world_rules
+            if getattr(rule, "interval_ticks", 1) > 1 and rule.id in self._rule_last_run
+        }
+        if desired == self._rule_marks_saved:
+            return
+        try:
+            store.put(RULE_MARKS_ROW, {"marks": desired, "updated_tick": int(self.clock)})
+        except Exception:  # noqa: BLE001 - 写不回去不该掀翻 tick,但绝不无声
+            logger.warning(
+                "规律水位写不回 %s —— 这个世界下次开机会把到点的规律多算一轮",
+                RULE_MARKS_ROW, exc_info=True,
+            )
+            return
+        self._rule_marks_saved = desired
+
+    # ── 事件发生了,得有人经历它(witness-memory) ─────────────────────────
+
+    def _emit_rule_event(self, event: dict[str, Any]) -> None:
+        """规律 `emit` 出来的一条门槛事件:**先记进世界的历史,再变成在场者的记忆。**
+
+        顺序是承重的:事件是**事实**,记忆是从事实里长出来的**经历**,所以事实的
+        seq 必须在前。反过来的话,她"记得"的那件事在日志里还没发生。
+        """
+        self._record_and_deliver(event)
+        try:
+            self._witness_rule_event(event)
+        except Exception:  # noqa: BLE001 - 记忆这一半塌了不许掀翻 tick(和规律引擎同一条)
+            logger.warning("规律事件 %r 的见证者算不出来", event.get("type"), exc_info=True)
+
+    def _witness_rule_event(self, event: dict[str, Any]) -> None:
+        """一条 `emit` 事件 → 在场者的记忆(witness-memory)。
+
+        **补的是这个引擎里一条真实的裂缝**:世界的历史和角色的经历此前是两个不相交
+        的集合。线上那个雨季世界的高潮「江水漫堤」发生了,事件在日志里躺着,而四个
+        角色关于它的记忆是 **0 条** —— 江晚当时就站在堤上,水从她脚边漫过第二级台阶,
+        她永远不会记得这件事,也永远不会在深夜档里提起它。作者知道这个洞:他在节拍
+        脚本里用 `broadcast_memory` + 逐人手写 `memory` 手工搭这座桥。**这座桥该是
+        引擎的。**
+
+        三条:
+
+        - **声明本身就是开关**(和 perception / ontology 逐字同构):作者不写
+          `importance`,这一层整个缺席,行为与从前逐位相同。世界的量每天有几十万次
+          变化,默认让每一次门槛跨越都变成全员的记忆,等于用世界的物理法则把她的
+          记忆冲刷干净。
+        - **谁在场按位置算,不按"谁订阅了"**:`owner == "world"` 是整个世界的事
+          (名册里所有人);挂在某样东西身上的事,只有此刻和它同处一地的人看得见。
+          位置查不到 = **没有见证者**,不是"所有人" —— 猜成所有人的话,一棵不知道
+          在哪的树倒了,全世界都记得。
+        - **走 `memory_seed` 这条现成的路**,不另造第二条写记忆的路:它是重放安全的
+          (`MemoryStore.rebuild` 有行就一动不动),`_apply_memory_trigger` 的实时
+          分支与 `_rebuild_memories` 的重建分支从那里往后逐字对称。
+        """
+        if self.memory_store is None:
+            return
+        payload = event.get("payload") or {}
+        if "importance" not in payload:
+            return                      # 作者没声明 → 这一层缺席
+        try:
+            importance = float(payload["importance"])
+        except (TypeError, ValueError):
+            logger.warning(
+                "规律 %s 的 importance 不是个数(%r)—— 这件事没有人会记得",
+                payload.get("rule"), payload.get("importance"),
+            )
+            return
+        if importance <= 0:
+            return
+        importance = min(1.0, importance)
+
+        owner = str(payload.get("owner") or "").strip()
+        witnesses = self._rule_event_witnesses(owner)
+        if not witnesses:
+            # 不是错,只是这会儿没人在旁边(半夜的江堤)。但**说一句** —— 一个作者
+            # 写了 importance 却一条记忆都没落地的世界,沉默地长得和没写一样。
+            logger.info(
+                "规律 %s 发的 %r 没有见证者(owner=%r)—— 这一刻没人在场,没有记忆落地",
+                payload.get("rule"), event.get("type"), owner,
+            )
+            return
+
+        # 她记住的是那句话;作者没写就退回事件的名字 —— 一个叫得出名字的东西,
+        # 比一条空记忆强。
+        summary = str(payload.get("text") or "").strip() or str(event.get("type") or "")
+        for agent_id in witnesses:
+            seed = memory_seed_event(
+                agent_id,
+                {"kind": WITNESS_MEMORY_KIND, "summary": summary, "importance": importance},
+            )
+            # 来路留在事件上(不进记忆行):日后要问"这条记忆是哪条规律种的",
+            # 日志里答得出来。
+            seed["payload"]["rule"] = payload.get("rule")
+            seed["payload"]["source_type"] = event.get("type")
+            self._record_and_deliver(seed)
+
+    def _rule_event_witnesses(self, owner: str) -> list[str]:
+        """这件事发生的时候,谁在场。
+
+        三种 owner 三条路,分开是因为"她在哪"和"它在哪"根本不是一张表:角色的位置
+        在黑板上(`_agent_locations`),东西的位置在 `stock_places` 里。
+        """
+        from anima_world.stocks import WORLD_OWNER
+
+        if not owner or owner == WORLD_OWNER:
+            # 整个世界的事:名册里所有人。**在路上的人也算** —— 江水漫堤不会因为
+            # 她正走在半道上就绕开她。
+            return list(self.agents)
+
+        locs = self._agent_locations()
+        if owner.startswith("agent:"):
+            subject = owner.split(":", 1)[1]
+            # 这件事就发生在她身上,所以**她一定在场**,哪怕此刻走在路上
+            # (`_agent_locations` 里在途 = 不在任何地方,那条规矩管的是旁观者)。
+            seen = [subject] if subject in self.agents else []
+            here = locs.get(subject)
+            if here:
+                seen += [aid for aid, loc in locs.items() if loc == here and aid != subject]
+            return seen
+
+        place = self._entity_place(owner)
+        if not place:
+            return []
+        return [aid for aid, loc in locs.items() if loc == place]
+
+    def _entity_place(self, owner: str) -> str | None:
+        """一样东西此刻在哪。`stock_places` 是权威,本体的声明是兜底。
+
+        两处而不是一处,是因为**东西可以在运行期被挪**(`visibility_store.place`),
+        而本体里那个 `location` 是它出生时写下的。只读声明的话,一棵被搬走的树
+        会一直在原来那个地方被人"看见"。
+        """
+        store = self.visibility_store
+        if store is not None:
+            try:
+                place = store.place_of(owner)
+            except Exception:  # noqa: BLE001 - 读不到位置 = 没有见证者,不是掀翻 tick
+                logger.warning("查不到 %r 在哪", owner, exc_info=True)
+                place = None
+            if place:
+                return str(place)
+        ontology = self.ontology
+        if ontology is not None:
+            entity = getattr(ontology, "entities", {}).get(owner)
+            location = getattr(entity, "location", None)
+            if location:
+                return str(location)
+        return None
 
     def _agents_doing(self, action_kind: str) -> list[str]:
         """此刻正在做某个动作的角色,按 `agent:<id>` 返回 —— 供 `for_each.action` 用。
@@ -3581,13 +3850,14 @@ class Scheduler:
                 (a_id, b_id, result.delta_a_to_b * factor, result.axes_a_to_b),
                 (b_id, a_id, result.delta_b_to_a * factor, result.axes_b_to_a),
             ):
-                if abs(delta) < 0.01:
+                scaled_axes = {k: v * factor for k, v in axes.items()} if axes else {}
+                if _is_noise(delta, scaled_axes):
                     continue  # damped-to-noise or a no-op delta — event-log/SSE noise
                 payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id,
                            "delta": delta,
                            "as_name": names[as_id], "target_name": names[target_id]}
-                if axes:  # relations-v5: finer axes ride the same event, same damping
-                    payload["axes"] = {k: v * factor for k, v in axes.items()}
+                if scaled_axes:  # relations-v5: finer axes ride the same event, same damping
+                    payload["axes"] = scaled_axes
                 self._record_and_deliver({
                     "type": "state_change",
                     "who": as_id,
@@ -3682,13 +3952,14 @@ class Scheduler:
                 (agent_id, player_id, result.delta_a_to_b * factor, result.axes_a_to_b),
                 (player_id, agent_id, result.delta_b_to_a * factor, result.axes_b_to_a),
             ):
-                if abs(delta) < 0.01:
+                scaled_axes = {k: v * factor for k, v in axes.items()} if axes else {}
+                if _is_noise(delta, scaled_axes):
                     continue
                 payload = {"kind": "sentiment_delta", "as": as_id, "target": target_id,
                            "delta": delta,
                            "as_name": names[as_id], "target_name": names[target_id]}
-                if axes:
-                    payload["axes"] = {k: v * factor for k, v in axes.items()}
+                if scaled_axes:
+                    payload["axes"] = scaled_axes
                 self._record_and_deliver({
                     "type": "state_change",
                     "who": as_id,

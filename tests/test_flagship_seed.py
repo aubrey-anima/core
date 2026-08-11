@@ -340,3 +340,66 @@ def test_橱窗里想起你这条链是接通的(flagship):
     # hook 真的挂在时钟上(而不是"开关点亮了但没人读它")。
     assert flagship.scheduler._contact_hook is not None
     assert flagship.scheduler._contact_interval > 0
+
+
+def test_橱窗里的事件是有人经历过的():
+    """规律 emit 出来的事件躺在日志里没人记得,是这一轮修的病本身。
+
+    橱窗里必须有一条**写了 `importance` 和那句话**的门槛事件 —— 否则新用户
+    开箱看到的仍是"世界的历史和角色的经历是两个不相交的集合"。
+    """
+    rules = [r["body"] for r in _bundled_rows() if r.get("type") == "rule"]
+    told = [
+        emit for rule in rules for emit in (rule.get("emit") or [])
+        if emit.get("importance") and emit.get("text")
+    ]
+    assert told, "橱窗里没有一件她记得住的世界大事"
+
+
+def test_橱窗里的世界会下不一样的雨():
+    """`rand()` 是"可重放的意外"。橱窗不用它的话,新用户看到的世界里没有偶然性 ——
+    每一天都可以被预言,而可预言的生活里长不出值得讲述的事。
+    """
+    rules = [r["body"] for r in _bundled_rows() if r.get("type") == "rule"]
+    assert any(
+        "rand()" in source
+        for rule in rules for source in (rule.get("set") or {}).values()
+    ), "橱窗里一颗骰子都没有"
+
+
+def test_橱窗里的门槛事件有涨也有退():
+    """只有 `rise` 的世界里,汛期一生只有一次机会(线上那个世界水位顶死 17 天)。"""
+    rules = [r["body"] for r in _bundled_rows() if r.get("type") == "rule"]
+    edges = {
+        emit.get("on", "rise")
+        for rule in rules for emit in (rule.get("emit") or [])
+    }
+    assert {"rise", "fall"} <= edges, f"橱窗只演了单边沿:{edges}"
+
+
+def test_橱窗里的量说人话():
+    """她该说"瓢泼大雨",不该说 `雨势 0.8` —— 把模拟层的浮点数塞进她的提示词,
+    等于让她把内脏当风景来描述。可见性那一路和量声明那一路各要有一处。
+    """
+    rows = _bundled_rows()
+    on_visibility = [
+        r["body"] for r in rows
+        if r.get("type") == "visibility" and r["body"].get("bands")
+    ]
+    on_kinds = [
+        quantity
+        for r in rows if r.get("type") == "kind"
+        for quantity in (r["body"].get("quantities") or {}).values()
+        if isinstance(quantity, dict) and quantity.get("bands")
+    ]
+    assert on_visibility, "世界量一个分档都没有"
+    assert on_kinds, "种类的量一个分档都没有"
+
+
+def _bundled_rows() -> list[dict]:
+    """橱窗那份文件的作者层逐行 —— 它是纯文本进仓库的,可以直接读。"""
+    text = resources.files("anima_world").joinpath("demo.cyberworld").read_text("utf-8")
+    return [
+        row for row in (json.loads(line) for line in text.splitlines() if line.strip())
+        if row.get("kind") == "author"
+    ]

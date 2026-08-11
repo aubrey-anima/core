@@ -2317,16 +2317,22 @@ class World:
         store.place(owner, location, label)
 
     def declare_visibility(self, owner_kind: str, key: str, visibility: str,
-                           label: str | None = None) -> None:
+                           label: str | None = None, bands: Any = None) -> None:
         """声明某类量角色感知得到哪一档:`self` / `here` / `public` / `hidden`。
 
         **没声明就是感知不到**(默认 `hidden`)—— 反过来的错不可挽回:一个"暗中的
         恨意"的量若默认公开,角色下一句就说出来了。声明本身就是这一层的开关。
+
+        `bands` 是**可选**的一份 `[[阈值, 词], …]`(阈值升序):她读到的是
+        `雨势 瓢泼大雨` 而不是 `雨势 0.8` —— 0.8 的雨算大算小,不给档词就得靠
+        LLM 猜,而两个模型猜出两种雨。取**最后一个 `<=` 当前值**的那一档,两头
+        封口。**不写就是不分档,行为逐位不变**;写错(不升序 / 空词 / 形状不对)
+        **当场拒**。数字仍然原样进 `perception()`,分档只影响她怎么说。
         """
         store = self.scheduler.visibility_store
         if store is None:
             raise ValueError("world-rules needs a persistent world")
-        store.declare(owner_kind, key, visibility, label)
+        store.declare(owner_kind, key, visibility, label, bands=bands)
 
     def visibility_rules(self) -> list[dict[str, Any]]:
         store = self.scheduler.visibility_store
@@ -2378,6 +2384,9 @@ class World:
                     {
                         "key": q.key, "default": q.default, "visibility": q.visibility,
                         "label": q.render_label(), "unit": q.unit,
+                        # 分档过的量:她读到的是词,而界面上要显示"作者把这个量
+                        # 翻成了什么"只有这里问得到。没分档就是空的。
+                        "bands": [[t, w] for t, w in q.bands],
                     }
                     for q in kind.quantities.values()
                 ],
@@ -2751,19 +2760,19 @@ class World:
         # 发生:她做决定时看不见世界的任何量,而那正是模拟层和角色层脱节的地方。
         perceived = self._perceive(agent_id, here)
         if perceived is not None and not perceived.is_empty():
-            if perceived.own:
-                notes.append("你自己:" + "、".join(
-                    f"{key} {value:g}" for key, value in sorted(perceived.own.items())))
-            # 和聊天那条路共用 `describe_here` —— 自主决定这一路要是另写一遍拼装,
+            # 三行都走 `Perception` 自己的渲染 —— 自主决定这一路要是另写一遍拼装,
             # 她做决定时看到的世界就和她说话时看到的不是同一个,而两边都能跑、
             # 都不报错。观察窗不许撒谎,这一条同样适用于她自己的决定上下文。
+            # (分档就是这么发现的:`{value:g}` 那两行会绕开档词,于是她说"外面
+            # 瓢泼大雨",转头按 0.8 做决定。)
+            if perceived.own:
+                notes.append(f"你自己:{perceived.describe_own()}")
             for owner in sorted(perceived.here):
                 notes.append(f"这里的{perceived.describe_here(owner)}")
             if perceived.overflow:
                 notes.append(f"这里还有 {perceived.overflow} 样别的东西,你没细看")
             if perceived.public:
-                notes.append("人人都知道:" + "、".join(
-                    f"{key} {value:g}" for key, value in sorted(perceived.public.items())))
+                notes.append(f"人人都知道:{perceived.describe_public()}")
         return autonomy.AutonomyContext(
             agent_id=agent_id,
             name=agent.name or agent_id,

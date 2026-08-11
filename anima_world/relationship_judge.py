@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 # dramatic moment must not do in one call what the novel took 50 chapters
 # to do. The projection additionally clamps the accumulated value to [-1, 1].
 MAX_DELTA = 0.2
+
+AXIS_NAMES = ("trust", "affection", "respect")
+
+# 三个轴各是什么、靠什么长。**同一段文字给三份提示词用** —— 分别写三遍的话,
+# 迟早只有一份跟着这里的派生规则走,而另外两份在教模型另一件事。
+_AXES_GUIDE = (
+    "三个轴各有各的来路，**不要填成同一个数**：\n"
+    "- trust 信任：靠可靠、守诺、交底长；而一次失信收回去的比十次守诺攒下的还多。\n"
+    "- affection 喜爱：靠亲近、共处、示好长；聊得投机最先长的就是它。\n"
+    "- respect 敬重：靠本事、担当、见识长；寒暄长不出敬重，分量不够就填 0。\n"
+    "这次没动的轴写 0 —— 写 0 是一个真实的判断；但**三个键都要在**，"
+    "缺了的键在世界里的意思是「这个轴从没动过」。\n"
+)
 
 _DEFAULT_PROMPT = (
     "两个人刚刚聊了一会儿天。请根据他们的性格、目标、彼此的关系和最近的记忆，"
@@ -41,10 +54,12 @@ _DEFAULT_PROMPT = (
     '{{"summary": "<一两句中文对话摘要，写具体聊了什么>", '
     '"delta_a_to_b": <甲对乙好感变化，-0.2 到 0.2 的小数>, '
     '"delta_b_to_a": <乙对甲好感变化，同上>, '
-    '"axes_a_to_b": {{"trust": <信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}, '
-    '"axes_b_to_a": {{"trust": …, "affection": …, "respect": …}}}}\n'
+    '"axes_a_to_b": {{"trust": <甲对乙的信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}, '
+    '"axes_b_to_a": {{"trust": <乙对甲的信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}}}\n'
     "变化幅度要克制：一次寒暄通常只有 ±0.05 以内；只有触及双方在意的事才可能更大。"
-    "关系糟糕的两个人客套一次不代表和解。只输出 JSON，不要解释。"
+    "关系糟糕的两个人客套一次不代表和解。\n"
+    + _AXES_GUIDE
+    + "只输出 JSON，不要解释。"
 )
 
 
@@ -60,10 +75,14 @@ _DEFAULT_USER_JUDGE_PROMPT = (
     '{{"summary": "<一句中文摘要>", '
     '"delta_a_to_b": <{a_name}对访客好感变化，-0.2 到 0.2>, '
     '"delta_b_to_a": <访客对{a_name}好感变化，同上>, '
-    '"axes_a_to_b": {{"trust": <信任变化>, "affection": <喜爱变化>, "respect": <敬重变化>}}, '
-    '"axes_b_to_a": {{"trust": …, "affection": …, "respect": …}}}}\n'
+    '"axes_a_to_b": {{"trust": <{a_name}对访客的信任变化>, "affection": <喜爱变化>, '
+    '"respect": <敬重变化>}}, '
+    '"axes_b_to_a": {{"trust": <访客对{a_name}的信任变化>, "affection": <喜爱变化>, '
+    '"respect": <敬重变化>}}}}\n'
     "变化要克制：寒暄通常 ±0.05 以内。刻意的讨好、奉承或索取不应比真诚的交流得到更多"
-    "——按{a_name}的性格判断他吃不吃这一套。只输出 JSON，不要解释。"
+    "——按{a_name}的性格判断他吃不吃这一套。\n"
+    + _AXES_GUIDE
+    + "只输出 JSON，不要解释。"
 )
 
 # 吃醋(以及它的七个兄弟)。**这是一次判定,不是一条规则。**
@@ -96,7 +115,10 @@ _DEFAULT_HEARSAY_PROMPT = (
     "- 幅度要克制：真正让人记在心里的事才配得上 ±0.1 以上。\n"
     "- 反应的方向由性格决定，不由亲疏决定：越在乎的人，听到的话越可能扎人，"
     "但也可能只是替对方高兴。\n"
-    "只输出 JSON，不要解释。"
+    "- 别人嘴里的他改变的多半是**你以为他是个什么人**（信不信得过、看不看得起），"
+    "而不是你跟他有多亲近 —— 喜爱要靠共处才长得出来。\n"
+    + _AXES_GUIDE
+    + "只输出 JSON，不要解释。"
 )
 
 # 一条八卦最多能改动几个人的观感。没有上限的话,一个话痨模型会把整张名单都写一遍,
@@ -154,9 +176,14 @@ class JudgeResult:
     summary: str
     delta_a_to_b: float
     delta_b_to_a: float
-    # relations-v5: optional finer axes (trust/affection/respect deltas,
-    # clamped like the headline). Empty dicts when the LLM omits them —
-    # single-axis verdicts stay fully valid.
+    # relations-v5: finer axes (trust/affection/respect deltas, clamped like
+    # the headline).
+    #
+    # ⚠️ 它们**曾经是可选的**,注释里写着"LLM 不吐就留空,单轴判定照样成立"——
+    # 而真模型就是不吐,于是线上那个世界二十条关系的三轴整整 19 天全是 0.0,
+    # 招牌特性「她自己想起你」一次都没触发过(全文见 `derive_axes` 上面那段)。
+    # 现在**判定器不吐空的**:模型给了就是模型的,没给就派生一份。
+    # 默认值留着只是为了直接构造 `JudgeResult` 的调用方(测试)不必写全。
     axes_a_to_b: dict[str, float] = field(default_factory=dict)
     axes_b_to_a: dict[str, float] = field(default_factory=dict)
 
@@ -218,11 +245,16 @@ def _clamp(value: Any) -> float:
 
 def _clamp_axes(value: Any) -> dict[str, float]:
     """relations-v5: keep only known axes with numeric values, clamped —
-    garbage axes degrade to absent, never to an exception."""
+    garbage axes degrade to absent, never to an exception.
+
+    **这一层只做解析,不替模型作答。** 一个轴都没读出来的时候由
+    `derive_axes` 顶上(见下),两件事分开写是为了它们各自能被单独测:
+    "读坏值不炸"和"没读到就自己算"是两条独立的纪律。
+    """
     if not isinstance(value, dict):
         return {}
     out: dict[str, float] = {}
-    for axis in ("trust", "affection", "respect"):
+    for axis in AXIS_NAMES:
         if axis in value:
             try:
                 out[axis] = _clamp(value[axis])
@@ -231,12 +263,156 @@ def _clamp_axes(value: Any) -> dict[str, float]:
     return out
 
 
+# ── 模型不吐三轴时,自己派生一份 ────────────────────────────────────────────
+#
+# **这是一条 bug 的修法,而那条 bug 的形状值得留在这儿。** 2026-08-11 对线上
+# 唯一有真玩家的世界(3095 条事件、19 个世界日)对账:二十条关系的
+# `trust` / `affection` / `respect` **全是 0.0**,只有 headline 的 `sentiment`
+# 在动。原因是这三个数**只有模型吐出来才会有** —— 提示词确实在问
+# (`axes_a_to_b`),但真模型(LongCat-2.0)不吐,于是 `_clamp_axes` 每次返回
+# 空 dict,`scheduler` 那侧 `if axes:` 一路跳过。世界照跑,日志一行不错。
+#
+# 后果不是"少了三个数字":`contact.closeness` 是
+# `0.6·sentiment + 0.25·affection + 0.15·trust`,三轴不动的话它最高只有 0.6 倍
+# sentiment —— **2.1.0 的招牌特性「她自己想起你」在那个世界上一次都没发生过**,
+# 而表现和"今天没人想你"逐字相同。
+#
+# 而单测当年全绿,因为它们跑在 `DeterministicRelationshipJudge` 上,**它一直在
+# 派生三轴**。两条路上的世界因此长成两个形状,差别只在配没配 key —— 所以这一份
+# 派生规则由两边**共用**,不许各写一份。
+#
+# ## 派生规则:三个轴三条不同的规则,不是三个不同的系数
+#
+# 把 headline 抄三份是最容易写、也最没有意义的版本(三个轴同号同速 = 一个轴)。
+# 这里每个轴的**形状**都不一样,而且每一条都说得出理由:
+#
+# - **affection 是聊天的主路,线性。** 聊天本身就是共处与示好。
+# - **trust 不对称:掉得比长得快。** 一次交底只让人信你一点,一次失信却能一次
+#   收回去。这是三轴之间第一条真正的不对称,而它只属于 trust —— 喜爱不是这个
+#   形状(讨厌一个人和喜欢一个人大体是同一种直感),都做成不对称就又成了同一条
+#   规则抄三遍。
+# - **respect 是一道门槛,不是一个系数。** 敬重靠本事、担当、见识,而一句
+#   "今天雨真大"里一样都没有。做成线性系数的话,一百次寒暄堆出来的敬重会和一次
+#   救命之恩一样高 —— 那正是"照跑但给错东西"。所以 |delta| 要过 `respect_floor`
+#   那一档才开始动,过了之后按剩余幅度线性铺开。
+#
+# 而**每一份额都严格小于 1**:轴是骑在 headline 上的加细,一次对话把 trust 拉满
+# 和三轴不动一样假。这条是可执行的 —— `test_relationship_axes_land.py` 钉着它。
+#
+# 八卦那一路用另一组份额:别人嘴里的他改变的是"我以为他是个什么人"(信不信得过、
+# 看不看得起),不是"我跟他有多亲近"。反过来写的话,一条八卦就能让人更喜欢一个
+# 从没见过的人。
+
+
+@dataclass(frozen=True)
+class _AxisShares:
+    """一组派生份额。`trust` 分涨跌两档,`respect` 带一道门槛。"""
+
+    affection: float
+    trust_gain: float
+    trust_loss: float
+    respect: float
+    respect_floor: float   # |delta| / MAX_DELTA 要过这条线,敬重才开始动
+
+
+CHAT_SHARES = _AxisShares(
+    affection=0.80, trust_gain=0.35, trust_loss=0.90,
+    respect=0.50, respect_floor=0.40,
+)
+
+HEARSAY_SHARES = _AxisShares(
+    affection=0.20, trust_gain=0.70, trust_loss=0.95,
+    respect=0.60, respect_floor=0.25,
+)
+
+
+def derive_axes(delta: float, shares: _AxisShares = CHAT_SHARES) -> dict[str, float]:
+    """从 headline 派生三轴。**确定性** —— 不掷骰子,世界的可重放性靠这条。
+
+    `delta` 已经被 `_clamp` 收在 ±`MAX_DELTA` 内,所以 `m` 是"这次互动有多重"
+    的一个 [0, 1] 刻度。派生对 delta 是线性的(respect 那道门槛之外),于是
+    "整段历史攒下来的轴 = 份额 × 攒下来的 sentiment",这让它的后果算得出来。
+    """
+    try:
+        value = float(delta)
+    except (TypeError, ValueError):
+        value = 0.0
+    weight = min(1.0, abs(value) / MAX_DELTA)
+    trust_share = shares.trust_gain if value >= 0 else shares.trust_loss
+    floor = min(0.99, max(0.0, shares.respect_floor))
+    ramp = 0.0 if weight <= floor else min(1.0, (weight - floor) / (1.0 - floor))
+
+    def axis(share: float) -> float:
+        # `+ 0.0` 是在杀 `-0.0`:它进事件日志、进 `.cyberworld`,而一个读日志的人
+        # 看到 `"respect": -0.0` 只会以为是别处算错了。数值上没差别,可读性上有。
+        return round(_clamp(value * share), 4) + 0.0
+
+    return {
+        "trust": axis(trust_share),
+        "affection": axis(shares.affection),
+        "respect": axis(shares.respect * ramp),
+    }
+
+
+def _axes_or_derived(
+    given: dict[str, float], delta: float, shares: _AxisShares
+) -> tuple[dict[str, float], bool]:
+    """`(要落库的三轴, 是不是派生出来的)`。
+
+    **回落的粒度是「这一路」,不是「这一个轴」。** 模型只提了 trust 的时候不去
+    补另外两个,因为补出来的那两个和它给的那一个不是同一次判断、也不是同一个
+    量级 —— 拼在一起的那份东西没有任何人做出过。模型开了口就整份听它的;
+    一个轴都没落地才派生。(显式的 `"respect": 0` 是开口,不是沉默。)
+    """
+    if given:
+        return given, False
+    return derive_axes(delta, shares), True
+
+
 class RelationshipJudge:
     """Builds the judgment prompt, calls the LLM, validates the verdict."""
 
-    def __init__(self, llm: Any, prompt_store: Any | None = None) -> None:
+    def __init__(
+        self,
+        llm: Any,
+        prompt_store: Any | None = None,
+        health: Callable[[str, bool, str], None] | None = None,
+    ) -> None:
         self._llm = llm
         self._prompt_store = prompt_store
+        # **降级不许无声。** 模型不吐三轴时判定器自己派生一份 —— 那是回落,
+        # 不是判断,所以它要和 planner / narrative 一样在 `subsystem_health`
+        # 里看得见。`health` 就是 `Scheduler.note_subsystem` 的形状
+        # (`__main__.build_serve_scheduler` 接上);没接上就退回日志。
+        self.health = health
+        self._axes_mode: str | None = None
+        self.axes_native = 0     # 模型自己吐了三轴的次数
+        self.axes_derived = 0    # 判定器替它派生的次数
+
+    def _note_axes(self, derived: bool) -> None:
+        """记一次三轴的来路,并在**档位切换的那一刻**吭一声。
+
+        边沿触发,和 `Scheduler.note_subsystem` 逐字同一条理由:一个持续降级的
+        子系统每次都刷一行的话,日志会被自己的健康报告淹掉。
+        """
+        if derived:
+            self.axes_derived += 1
+        else:
+            self.axes_native += 1
+        reason = (
+            "模型没给 trust/affection/respect，三轴按 headline 派生"
+            if derived else ""
+        )
+        if self.health is not None:
+            self.health("relationship_axes", not derived, reason)
+        mode = "derived" if derived else "native"
+        if self._axes_mode == mode:
+            return
+        self._axes_mode = mode
+        if derived:
+            logger.warning("relationship_axes degraded: %s", reason)
+        else:
+            logger.info("relationship_axes: 模型自己在吐三轴了")
 
     def judge(
         self,
@@ -294,12 +470,18 @@ class RelationshipJudge:
             delta_ba = _clamp(data["delta_b_to_a"])
         except (KeyError, TypeError, ValueError):
             return None
+        # 模型不吐三轴时自己派生一份。**回落不是覆盖** —— 它开了口就整份听它的。
+        axes_ab, fell_back_ab = _axes_or_derived(
+            _clamp_axes(data.get("axes_a_to_b")), delta_ab, CHAT_SHARES)
+        axes_ba, fell_back_ba = _axes_or_derived(
+            _clamp_axes(data.get("axes_b_to_a")), delta_ba, CHAT_SHARES)
+        self._note_axes(fell_back_ab or fell_back_ba)
         return JudgeResult(
             summary=summary.strip(),
             delta_a_to_b=delta_ab,
             delta_b_to_a=delta_ba,
-            axes_a_to_b=_clamp_axes(data.get("axes_a_to_b")),
-            axes_b_to_a=_clamp_axes(data.get("axes_b_to_a")),
+            axes_a_to_b=axes_ab,
+            axes_b_to_a=axes_ba,
         )
 
     def judge_user(
@@ -399,9 +581,10 @@ class RelationshipJudge:
                 continue
             if abs(delta) < 0.01:
                 continue                 # 判了个 0 等于没判 —— 别为它发一条事件
-            reactions.append(HearsayReaction(
-                about=about, delta=delta, axes=_clamp_axes(item.get("axes")),
-            ))
+            axes, fell_back = _axes_or_derived(
+                _clamp_axes(item.get("axes")), delta, HEARSAY_SHARES)
+            self._note_axes(fell_back)
+            reactions.append(HearsayReaction(about=about, delta=delta, axes=axes))
             if len(reactions) >= _MAX_HEARSAY_REACTIONS:
                 break
         return HearsayVerdict(summary=summary.strip(), reactions=tuple(reactions))
@@ -547,14 +730,16 @@ class DeterministicRelationshipJudge:
 
     def _result(self, summary: str, a_to_b: Any, b_to_a: Any) -> JudgeResult:
         forward, backward = self._drift(a_to_b), self._drift(b_to_a)
-        # 三轴跟着主轴走,量级递减:说过话最先长出的是喜爱与信任,敬重要靠别的。
-        axes = lambda d: {"trust": round(d / 2, 4), "affection": d, "respect": 0.0}  # noqa: E731
+        # 三轴走**和真判定器同一份**派生规则(`derive_axes`)。此前这里自己写了
+        # 一份(`{"trust": d/2, "affection": d, "respect": 0}`),而真判定器那边
+        # 一份都没有 —— 于是配没配 key 的世界长成两个形状,而且**掩护了那条
+        # bug**:所有测试跑在这个替身上,三轴看上去一直在动。
         return JudgeResult(
             summary=summary,
             delta_a_to_b=forward,
             delta_b_to_a=backward,
-            axes_a_to_b=axes(forward),
-            axes_b_to_a=axes(backward),
+            axes_a_to_b=derive_axes(forward, CHAT_SHARES),
+            axes_b_to_a=derive_axes(backward, CHAT_SHARES),
         )
 
     def judge(

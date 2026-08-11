@@ -30,7 +30,15 @@ def test_judge_parses_and_clamps_axes():
     result = judge.judge({}, {}, {}, [], [], "cafe")
     assert result is not None
     assert result.axes_a_to_b == {"trust": 0.2, "affection": 0.02}, "轴必须裁剪到 ±0.2 且丢弃未知轴"
-    assert result.axes_b_to_a == {}, "垃圾轴降级为无,不炸"
+    # ⚠️ **这一句改过契约。** 它原本钉的是"垃圾轴降级为无,不炸",而"降级为无"
+    # 正是那条 bug 的机制本身:真模型不吐 axes → 空 dict → `scheduler` 那侧
+    # `if axes:` 跳过 → 线上二十条关系的三轴 19 天全是 0.0(全文见
+    # `relationship_judge.derive_axes` 上面那段,以及 `test_relationship_axes_land.py`)。
+    # 解析层照旧拒收坏值 —— 变的是**一个轴都没落地时判定器自己派生一份**。
+    assert set(result.axes_b_to_a) == {"trust", "affection", "respect"}, (
+        "读不懂模型给的轴,正是最该回落的时候 —— 空 dict 在下游等于「这个轴没动过」"
+    )
+    assert result.axes_b_to_a["affection"] > 0
 
 
 def test_projection_folds_axes_and_stays_backward_compatible():
