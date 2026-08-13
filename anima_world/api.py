@@ -2437,9 +2437,13 @@ class World:
         名字与称呼分成两格之后,"他还没说过名字"才是一件她说得出口的事。
 
         **宿主这一轮没给,回落到世界自己记着的那一格** —— 这不是上面禁的那件事。
-        `players[pid]["name"]` 只有一个写点(`_chat_prelude`),写进去的只有宿主亲口
-        传过的 `display_name`;出处仍然是宿主,纪律 3 没有松。松掉的是"世界明明记得
-        却装作不知道":宿主第一轮传了「林越」,第二轮没传,她当场又不认识他了。
+        `players[pid]["name"]` 的写点只有两个(`_chat_prelude` 与 `player_move`),
+        两个都只写宿主亲口传过的 `display_name`;出处仍然是宿主,纪律 3 没有松。
+        松掉的是"世界明明记得却装作不知道":宿主第一轮传了「林越」,第二轮没传,
+        她当场又不认识他了。
+
+        (`player_move` 是后加的第二个写点,加它的理由是**名字不该等他开口** ——
+        见那条 docstring。两个写点都过这个函数正是它们不会分叉的原因。)
         (玩家**自己说**「我叫林越」是另一格 —— `player_name` override,由
         `chat_service.told_name` 读,身份块对这两种出处说的是两句不同的话。)
 
@@ -4866,8 +4870,21 @@ class World:
         page = self.history(since_seq=since_seq, limit=limit, kind="agent_broadcast")
         return page["events"]
 
-    def player_move(self, player_id: str, location: str, *, role: str = "") -> None:
-        """玩家移动到某个 point 地点。未知地点抛 KeyError。"""
+    def player_move(
+        self, player_id: str, location: str, *, role: str = "",
+        display_name: str | None = None,
+    ) -> None:
+        """玩家移动到某个 point 地点。未知地点抛 KeyError。
+
+        **名字走这条路,不必等他开口。** 此前 `players[pid]["name"]` 只有
+        `_chat_prelude` 一个写点,于是一个落了脚还没说话的玩家在世界眼里没有
+        名字 —— 而宿主在这一步手上就有它(网站入会表单填的就是它)。后果是
+        看得见的:照 `state()["players"]` 渲染的界面上他叫「路人」,同屋的另一个
+        玩家看到的是一个身份而不是人名,一直到他说出第一句话为止。
+
+        **和聊天那条路共用 `_interlocutor_for`** —— 名字与称呼怎么落、空着怎么
+        回落,两条路各拼一遍就会分叉,而分叉的那一天没有任何地方会报错。
+        """
         location = location.strip()
         if not location:
             raise ValueError("location is required")
@@ -4875,9 +4892,16 @@ class World:
             row = self.scheduler.location_store.get(location)
             if row is None or row.get("kind", "point") != "point":
                 raise KeyError(f"没有 {location} 这个地方")
-        # 更新而不是整条替换:`display_name` 是 `chat()` 记进来的,而 CLI 每聊一轮
-        # 都先调一次 player_move —— 整条替换会把名字冲掉,于是检索又退回不透明 id。
-        self._touch_player(player_id, role=role, location=location)
+        # 更新而不是整条替换:CLI 每聊一轮都先调一次 player_move,而它手上常常
+        # 没有名字 —— 整条替换会把名字冲掉,于是检索又退回不透明 id。
+        who = self._interlocutor_for(player_id, display_name, role)
+        self._touch_player(
+            player_id,
+            name=who["display_name"],     # 宿主报过的名字,没报就是空
+            display_name=who["address"],  # 给人和模型看的称呼,永不是 id
+            role=who["role"],
+            location=location,
+        )
         self.presence_store.clear_transit(player_id)  # 宿主把他放到哪就是哪,行程作废
 
     def player_location(self, player_id: str) -> str:
@@ -5281,8 +5305,13 @@ class World:
         身份**整段丢掉**,于是身份块里那句「（身份：刚搬来的人）」就此消失 ——
         **占位身份的过滤器反过来把这次损坏藏住了**,线上照跑、日志一行不错。
         """
-        if not str(fields.get("role") or "").strip():
-            fields.pop("role", None)
+        # **空 = "这一路不知道",不是"他改叫空字符串了"** —— `name` 和 `role` 同一
+        # 条,理由也同一条:有些入口手上根本没有这一格(点一下"走"、世界重启后的
+        # 复位),而写下去就是把世界记着的那个冲掉。落在这儿而不是各个入口里:
+        # 这是所有玩家入口的**唯一窄口**,挨个加等于给未来的第 N 个入口留一个洞。
+        for blank_means_unknown in ("role", "name", "display_name"):
+            if not str(fields.get(blank_means_unknown) or "").strip():
+                fields.pop(blank_means_unknown, None)
         # 建行时那一格是**空的**,不是 `"player"` —— 建行的常常正是那些手上没有身份
         # 的路(点一下"走"),而播一个字面量等于替它们答了"他叫 player"。它还有个
         # 更实的后果:那一格一旦有值,聊天那条路从前的 `setdefault` 就永远不生效。

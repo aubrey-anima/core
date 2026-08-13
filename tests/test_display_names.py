@@ -135,3 +135,61 @@ def test_敲门事件带着她的名字(open_world):
         assert payload.get("agent_name"), f"敲门的人没有名字:{payload!r}"
         assert payload["agent_name"] == scheduler.agent_display_name(payload["agent_id"])
         assert payload.get("location_name"), f"敲门的地点是键名:{payload!r}"
+
+
+# ── 3. 同一类的第三个口子:他还没开口,所以他没有名字 ──────────────────────
+
+
+def test_落脚就能带上名字(open_world):
+    """玩家在门口填了名字,而世界要等他**开口**才知道 —— 名字只跟着 `chat()` 走。
+
+    线上真的是这样:同一个世界里聊过的那个玩家行里有 `name`/`display_name`,
+    落了脚没说过话的那个只有 `role`。于是在他说第一句话之前,任何照
+    `state()["players"]` 渲染的界面上他都叫「路人」,同屋的另一个玩家看到的
+    也是一个角色名而不是人名。
+
+    宿主在 `player_move` 这一步手里就有名字(网站的入会表单填的就是它),
+    没有任何理由要求他先说话。
+    """
+    world = open_world()
+    world.player_move("p1", "cafe", role="新来的房客", display_name="林小满")
+
+    row = world.players["p1"]
+    assert row.get("name") == "林小满", f"落脚时给了名字,世界没记下:{row!r}"
+    assert row.get("display_name") == "林小满", (
+        f"称呼那一格还是空的 —— 名册照它渲染,玩家仍然显示成 id:{row!r}"
+    )
+    # 网站真正读的那扇门。引擎记住了而这里没有,等于修了个看不见的地方。
+    assert world.state()["players"]["p1"]["display_name"] == "林小满"
+
+
+def test_后来那次不带名字不许把名字冲掉(open_world):
+    """`player_move` 有别的调用方**手上没有名字**(点一下"走"、世界重启后的复位)。
+
+    那些路传的是空 —— 空必须当"这一路不知道",不是"他改叫空字符串了"。
+    和 `role` 那一格逐字同构(`_touch_player` 的第一句),而它是被同一个坑
+    逼出来的:第一轮认得他,从第二轮起永远不认识,日志一行不错。
+    """
+    world = open_world()
+    world.player_move("p1", "cafe", role="新来的房客", display_name="林小满")
+    world.player_move("p1", "workshop")          # 宿主复位,手上没有名字
+
+    row = world.players["p1"]
+    assert row.get("name") == "林小满", f"没带名字的那一次把名字冲掉了:{row!r}"
+    assert row.get("display_name") == "林小满", f"称呼也被冲掉了:{row!r}"
+    assert row.get("role") == "新来的房客", f"身份也被冲掉了:{row!r}"
+
+
+def test_没名字的玩家至少有个人话称呼(open_world):
+    """一格名字都没有时,名册上写的该是他的身份,不是那串 uuid。
+
+    `_interlocutor_for` 早就替聊天那条路解决了这件事(`address_for(role)`),
+    落脚这条路走同一份 —— 各拼一遍就会分叉。
+    """
+    world = open_world()
+    world.player_move("p1", "cafe", role="赶路的")
+
+    row = world.state()["players"]["p1"]
+    assert not row.get("name"), f"他没报过名字,这一格必须是空的:{row!r}"
+    assert row["display_name"] != "p1", f"名册上印的是 id:{row!r}"
+    assert "赶路的" in row["display_name"], f"没有名字时该退回身份:{row!r}"

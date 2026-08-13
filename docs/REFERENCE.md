@@ -2349,7 +2349,7 @@ from anima_world.api import World
 | `world.record_chat_turn(agent_id, player_id, messages, *, meta=None)` | 把完成回合(恰好 user→assistant 两条)记入世界并关闭:摘要 + 一个 conversation 事件 + 关系判定。返回会话 id。失败即异常,重试由调用方决定。`meta` 把 `chat()` 那轮的观测量落到消息行上(intent 落用户那行,stance / tool_calls 落她那行) |
 | `world.conversations(agent_id)` / `world.conversation_messages(conversation_id)` | 会话列表 / 消息 |
 | `world.close_conversation(conversation_id)` | 手动关会话(摘要+事件+判定) |
-| `world.player_move(player_id, location)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError |
+| `world.player_move(player_id, location, *, role="", display_name=None)` | 玩家移动;目标必须是 `point` 地点,否则 KeyError。**名字从这里就能进来,不必等他开口**:`players[pid]["name"]` 此前只有聊天那一个写点,于是一个落了脚还没说过话的玩家在 `state()["players"]` 里只有 `role` —— 界面上他叫「路人」,同屋的另一个玩家看到的是身份不是人名。`role` / `display_name` **空 = 这一路不知道,不覆盖世界记着的那一格**(点一下"走"、世界重启后的复位都手上没有名字);两格与聊天那条路共用 `_interlocutor_for`,没名字时称呼退回身份而不是 id |
 | `world.player_action(player_id, action, details=None)` | 玩家动作,落一条 `player_action` 事件 |
 | `world.player_doing(player_id)` | **他此刻在做的那件事**(`"walk"` / `"interact"` / `"chat"`,什么也没做就是 `""`)。世界的规律里 `for_each: {"action": …}` 读的就是它 —— 她那半边来自行为树写下的 `_current_action`,而**人没有行为树**,少了这一半的话 `{"action": …}` 那半边规律里从来没有过一个人:线上 21 个角色的「随和」「手艺」「嗓子」每 tick 都在动,而每个玩家的这三个量停在他进世界那一 tick 的默认值上,日志干净、面板照画。反过来 `{"not_action": …}`(所有角色减去正在做这件事的)**算得到他**,所以本该互补的两半对人是单边的:他只吃得到往下拖的那一条。⚠️ **派生,不存储**:三个来源都是当下的真状态(占着他的长过程 `:engaged`、在不在路上、上一次开口离现在多久),所以没有第二份真相要维护 —— 存一份"他上次说他在做什么"的话,一个关掉浏览器的人会在世界里永远地走下去。优先级是**约束由强到弱**:占用 > 赶路 > 说话,和四类拒绝的排法同一条 |
 | `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条。**只在你在场时成立** —— 敲门是"她已经在你面前开口了" |
