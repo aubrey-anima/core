@@ -33,14 +33,15 @@ def _events(world, kind: str) -> list[dict]:
 def test_player_menu_is_the_same_registry(world):
     """人那份清单和她那份出自同一个注册表 —— 不是手抄的第二份。"""
     ids = {row["id"] for row in world.player_tools()}
-    # 门槛是"在世界里真发生了什么":walk 真在途,broadcast 真进别人的记忆。
-    assert ids == {"walk", "broadcast"}
+    # 门槛是"在世界里真发生了什么":walk 真在途,broadcast 真进别人的记忆,
+    # interact 真扣他的体力(`test_player_affordance.py` 守这条)。
+    assert ids == {"walk", "broadcast", "interact"}
     # 这两条**刻意**不给人:对人没有意义 / 人本来就是主动方
     assert "wait_for_user" not in ids
     assert "reach_out" not in ids
     # 这些的玩家侧只落一行日志、不投递给任何角色的感知 —— 在补上玩家侧的账
     # (需求带/钱包/物品)之前不开,否则菜单上那句"付钱是副作用"就是假话
-    for empty in ("work", "eat", "sleep", "wander", "seek_company", "talk_to", "interact"):
+    for empty in ("work", "eat", "sleep", "wander", "seek_company", "talk_to"):
         assert empty not in ids
     for row in world.player_tools():
         assert row["params_schema"] == tools_mod.get(row["id"]).params_schema
@@ -48,7 +49,7 @@ def test_player_menu_is_the_same_registry(world):
 
 def test_tool_off_the_player_surface_is_refused(world):
     """不在 PLAYER 面上的能力一律拒绝,**不静默降级**。"""
-    for off_surface in ("wait_for_user", "eat", "work", "talk_to", "interact"):
+    for off_surface in ("wait_for_user", "eat", "work", "talk_to"):
         with pytest.raises(tools_mod.ToolCallError):
             world.player_tool(PLAYER, off_surface)
     with pytest.raises(tools_mod.ToolCallError):

@@ -66,10 +66,17 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from anima_world.expressions import Expression, ExpressionError, compile_expression
-from anima_world.perception import HIDDEN, VISIBILITIES
+from anima_world.expressions import (
+    Expression,
+    ExpressionError,
+    compile_expression,
+    lower_bounds,
+    reachable_ceiling,
+    rewrite_source,
+)
+from anima_world.perception import HIDDEN, VISIBILITIES, band_word
 from anima_world.rules import BUILTIN_NAMES, WORLD_PREFIX, bad_output_name
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, clock_names
 
@@ -628,6 +635,85 @@ def parse_kinds(entries: Any) -> dict[str, Kind]:
             quantities=actor_quantities if kind_id == "agent" else {},
         )
     return kinds
+
+
+def unreachable_requirements(
+    kinds: Mapping[str, Kind], rules: Iterable[Any] = (),
+) -> list[str]:
+    """**永远开不了的那道门** —— 门槛比这个量在这个世界里够得到的最高点还高。
+
+    线上真有一条:`poster.撕下来` 要 `me_主动 >= 1.2`,而「主动」的默认值是 1.0,
+    整个世界里唯一写它的表达式是 `max(me_主动 - 0.02, 0)` —— **只减不增**。那个
+    按钮从这个世界开机第一秒起就永远不会亮,而玩家看得见它、点得到它、每次收到的
+    都是「你的主动不够」。他会一直试。
+
+    这比拼错量名更坏。拼错至少还有一道闸(当场开不了机),而这个连一句话都没有:
+    世界照跑、日志干净、按钮排版正常。它是这个仓库最怕的那一类 ——「照跑但给错
+    东西」的玩家版,而且**预防不了的失败教不会他任何东西**(`perform_affordance`
+    那条纪律的原话,只是那儿说的是她)。
+
+    为什么是**警告不是拒绝**:这个量可能被引擎之外的东西写(宿主直接调
+    `stock_set`、节拍脚本、创作台的一次编辑),而那些这一层看不见。判据因此收得
+    很紧,和 `rules.drift_warnings` 同一条纪律 —— `reachable_ceiling` 认不出的
+    写法一律算「不知道」,不知道就不报。误报够多次的警告等于没有警告。
+
+    只管 `me_*`:`have_*` 是随身物品(想买就买得到,没有"够不着"这回事),
+    别的名字 `requires` 本来就不让读。
+    """
+    actor = kinds.get("agent")
+    if actor is None:
+        return []
+
+    # 谁写得动她身上的量:所有种类的所有能力(`costs` 与 `set`)+ 所有规律的 `set`。
+    # **少数一处就会多报一条**,而多报的那条指着一个其实开得了的门 —— 这道 lint
+    # 的可信度全押在这张清单是全的。
+    #
+    # ⚠️ **两边读自己的写法不一样**:能力里是 `me_主动`(她身上的量,和对象的量要
+    # 分得开),规律里是光名字 `主动`(那一层的 owner 就是她)。搞混的下场不是报错,
+    # 是 `reachable_ceiling` 在语法树上找不到那个名字、答一个 `inf`,于是**每一条
+    # 靠规律涨回来的量都被算成够不到** —— 而这道 lint 只会因此漏报吗?不会:
+    # `max(嗓子 - …, 0)` 那种会连底也算成 inf,而 `min(主动 + …, 2)` 那种照样得 2,
+    # 于是同一个量在两条规律下给出两个互相矛盾的上界。所以名字跟着来源走。
+    writers: list[tuple[str, str, Expression]] = []
+    for kind in kinds.values():
+        for affordance in kind.affordances.values():
+            for table in (affordance.costs, affordance.outputs):
+                for quantity, expression in table.items():
+                    writers.append((quantity, ME_PREFIX + quantity, expression))
+    for rule in rules:
+        for quantity, expression in (getattr(rule, "outputs", None) or {}).items():
+            writers.append((quantity, quantity, expression))
+
+    ceilings: dict[str, float] = {}
+    written: set[str] = {quantity for quantity, _, _ in writers}
+    for name, quantity in actor.quantities.items():
+        ceiling = quantity.default
+        for target, reads_as, expression in writers:
+            if target == name:
+                ceiling = max(ceiling, reachable_ceiling(expression, reads_as, quantity.default))
+        ceilings[name] = ceiling
+
+    messages: list[str] = []
+    for kind in sorted(kinds.values(), key=lambda k: k.id):
+        for verb, affordance in sorted(kind.affordances.items()):
+            for expression in affordance.requires:
+                for name, need in lower_bounds(expression).items():
+                    if not name.startswith(ME_PREFIX):
+                        continue
+                    bare = name[len(ME_PREFIX):]
+                    if bare not in ceilings or need <= ceilings[bare]:
+                        continue
+                    messages.append(
+                        f"{kind.id}.{verb}.requires:`{expression}` 要「{bare}」至少 "
+                        f"{need:g},而这个世界里它最高只到 {ceilings[bare]:g}"
+                        f"(默认 {actor.quantities[bare].default:g},"
+                        + ("写它的每一处都抬不高它" if bare in written else "没有任何一处写它")
+                        + ")—— **这道门永远开不了**。玩家看得见这个按钮、点得到、"
+                        "每次都被同一句话挡回来,而他做什么都不可能够。"
+                        f"要么把门槛降到 {ceilings[bare]:g} 以内,"
+                        f"要么给「{bare}」一条涨上去的路。"
+                    )
+    return messages
 
 
 def _inheritance_order(raw: Mapping[str, Any], parents: Mapping[str, str]) -> list[str]:
@@ -1552,6 +1638,137 @@ def visibility_declarations(ontology: Ontology) -> list[tuple[str, str, str, str
     return out
 
 
+# 日历(`rules.BUILTIN_NAMES`)在拒绝语里的说法。它们比几个前缀更容易漏,因为
+# **不带前缀** —— 看上去就像作者自己写的量。而作者恰恰不可能声明一个叫 `hour` 的量
+# (`parse_kinds` 当场拒,理由见 `rules.BUILTIN_NAMES` 上方),所以这六个名字永远是
+# 引擎的,翻译不会撞上世界里的谁。
+#
+# `minute` 写成和 `minute_of_day` 平行的一句:光一个「分」在「钟点 == 8 且 分 >= 30」
+# 里读得出是分钟,单独出现时会被读成分数。
+_BUILTIN_SPOKEN = {
+    "day": "第几天",
+    "hour": "钟点",
+    "minute": "一小时里的第几分钟",
+    "minute_of_day": "一天里的第几分钟",
+    "now": "世界的第几 tick",
+    "dt": "这一步过去了多久",
+}
+
+# 阈值落在**档中间**时,`>=` / `<=` 要松一格。
+#
+# 档词说的是**这一档的起点**,不是那个数。阈值正好压在边界上时两者是同一件事,
+# `>=` 原样留着(「发条 >= 满的」读得通);落在档中间时不是 —— 线上现场是
+# 「你的手上的活儿 >= 生手」印在一个屏幕上正写着「手上的活儿 生手」的人眼前,
+# 一句自相矛盾的话:他明明就在这一档里,却被告知要够到这一档。该说的是
+# 「> 生手」—— 要的是比这一档更往上。
+#
+# `>` / `<` 不用动:拒绝时当前值本来就在阈值的另一头,「雾气 > 透亮」正好读成
+# "要比你现在多"。`==` / `!=` 也不动 —— 它们本来就不该配一个有损的词,而作者
+# 拿一个分过档的量写等号,该修的是那条声明。
+_LOOSER = {">=": ">", "<=": "<"}
+
+
+def speak_expression(
+    expression: Expression,
+    item_name: Callable[[str], str] | None = None,
+    quantity_label: Callable[[str, str], str] | None = None,
+    quantity_bands: Callable[[str, str], Any] | None = None,
+) -> str:
+    """把一条表达式的原文改写成**世界里的词**,给拒绝语用。
+
+    `me_` / `world_` / `have_` 是**引擎的命名空间标记**,不是这个世界里的名字:
+    作者声明的量叫「主动」,`me_` 只是"读她身上那份"的意思。而这句话最后印在玩家
+    屏幕上(`player_options` 的 `refusal`),还会当 `ToolResult.error` 递给角色 ——
+    线上现场是「你现在做不了这件事:`me_主动 >= 1.2` 不成立」,一个玩家从中读不出
+    任何可做的事,而角色会把 `me_` 念出来。和 `place_name` 修掉的「她在一个叫 cart
+    的地方见过人」、和 `consumes` 那句里的 `notepad` 是同一类:引擎的词汇漏进了
+    世界的话。
+
+    `quantity_label(scope, key)` 是同一件事的第三块:**量的内部键也不是这个世界里
+    的名字。** 线上现场是玩家菜单上写着「土 正好」,点下去被拒绝成「「土湿 > 0.55」
+    不成立」—— 同一个量、同一屏、两个名字,而屏幕上根本没有「土湿」这个词,他会去
+    找一样不存在的东西。`scope` 是 `""`(对象自己的量)/ `"me"` / `"world"`,查不到
+    就退回键本身。这条和 `readouts` 是同一条纪律的两半:一个量该被念成什么,全世界
+    只能有一个答案。
+
+    `quantity_bands(scope, key)` 是**同一条规矩的另一半**:「`label` 换名字、
+    `bands` 换值」。分过档的量,玩家在屏幕上**永远**读不到它的数字(`readout_text`
+    的规矩就是这样),于是拒绝语里的阈值对他是一串纯噪音 —— 线上现场是同一屏上
+    写着「土 正好」而按钮底下写着「土 > 0.55」,他没有任何办法把两者比一比。
+    阈值是那个量的一个**值**,所以它按同一份档表、同一个 `band_word` 念成档词:
+    「土 > 正好」。**没分档的量照旧留数字**(「你的体力 >= 40」)—— 那个数他在
+    菜单上读得到,留着才教得会他还差多少。
+
+    档词是**有损**的,而这是作者的分辨率在说话,不是引擎在骗人:一档里的两个不同
+    阈值念出来一模一样。要让拒绝语分得更细,作者该做的是**把档的边界划在阈值上** ——
+    和玩家读到的分辨率对齐,而不是让引擎漏一个数字出去。
+
+    有损带来一处**必须跟着松一格**的地方(`_LOOSER`):档词说的是这一档的**起点**,
+    所以阈值落在档中间时,`>=` / `<=` 会印出一句自相矛盾的话 —— 「你的手上的活儿
+    >= 生手」摆在一个屏幕上正写着「手上的活儿 生手」的人眼前。那时念作「> 生手」。
+    阈值压在边界上时两者说的是同一件事,原样留着。
+
+    **除此之外只改名字和阈值,不改算术。** `and` / `or` / `not` 照旧:它们在世界里
+    没有另一个说法。算式里的数(`土 > 湿度 * 2` 里的 `2`)也照旧 —— 它不是那个量的
+    一个值,念成档词就是胡说。
+
+    **按语法树上的位置改,不按正则**(`rewrite_source`):正则的写法会咬自己刚
+    写下的字(`土湿` 换成「土」之后,轮到名字 `土` 那一遍再换一次),也会改掉
+    字符串字面量里恰好写着量名的地方。
+    """
+    if not expression.names:
+        return expression.source
+
+    def labelled(scope: str, key: str) -> str:
+        return (quantity_label(scope, key) if quantity_label else "") or key
+
+    def scoped(name: str) -> tuple[str, str] | None:
+        """名字拆成(作用域, 量名)。**不是这个世界里的量**就返回 None ——
+        `have_*` 数的是东西的个数、日历是引擎的,两样都没有档表。"""
+        if name.startswith(ME_PREFIX):
+            return ("me", name[len(ME_PREFIX):])
+        if name.startswith(WORLD_PREFIX):
+            return ("world", name[len(WORLD_PREFIX):])
+        if name.startswith(HAVE_PREFIX) or name in _BUILTIN_SPOKEN:
+            return None
+        return ("", name)
+
+    def spoken(name: str) -> str | None:
+        if name.startswith(ME_PREFIX):
+            return f"你的{labelled('me', name[len(ME_PREFIX):])}"
+        if name.startswith(WORLD_PREFIX):
+            return f"世界的{labelled('world', name[len(WORLD_PREFIX):])}"
+        if name.startswith(HAVE_PREFIX):
+            item_id = name[len(HAVE_PREFIX):]
+            called = (item_name(item_id) if item_name else "") or item_id
+            # 这里**有意不套「」**,虽然名字同样是作者写的。整条表达式在外面已经
+            # 被 `「…」不成立` 围过一次,再套一层就是 `「你带着的「伞」 >= 1」`;
+            # 而这一处的下一个字永远是运算符(`>=` / `and`),边界本来就断得开。
+            # 该套的是 `consumes` 那句 —— 它是散文,右边紧跟着一个「不」字。
+            return f"你带着的{called}"
+        if name in _BUILTIN_SPOKEN:
+            return _BUILTIN_SPOKEN[name]
+        said = labelled("", name)
+        return said if said != name else None
+
+    def threshold(name: str, value: float, op: str) -> tuple[str, str] | None:
+        if quantity_bands is None:
+            return None
+        pair = scoped(name)
+        if pair is None:
+            return None
+        table = quantity_bands(*pair)
+        word = band_word(table, value)
+        if not word:
+            return None
+        # 阈值正好落在档的边界上时,档词和那个数说的是同一件事,`>=` 原样留着。
+        # 落在档中间时不是 —— 见 `_LOOSER` 上面那段。
+        edges = {float(edge) for edge, _ in table}
+        return (word, op if value in edges else _LOOSER.get(op, op))
+
+    return rewrite_source(expression, spoken, threshold)
+
+
 @dataclass(frozen=True)
 class AffordanceOutcome:
     """一次能力调用算出来的结果。**只算不写** —— 写由调用方落库。
@@ -1573,6 +1790,9 @@ class AffordanceOutcome:
     verb: str
     updates: dict[str, float] = field(default_factory=dict)
     me_updates: dict[str, float] = field(default_factory=dict)
+    # 她身上那几个量**动之前**是多少(只留 `me_updates` 里出现过的那些)。
+    # 留着它是为了 `me_deltas` —— 见那条属性。
+    me_before: dict[str, float] = field(default_factory=dict)
     # 花掉的东西(item_id → 几个)。**不由这里落库** —— 库存只有事件日志一个来源,
     # 调用方照着发 `item_consume`。这里给的是"该扣什么",不是"扣好了"。
     consumed: dict[str, int] = field(default_factory=dict)
@@ -1583,6 +1803,23 @@ class AffordanceOutcome:
     def ok(self) -> bool:
         return not self.refusal
 
+    @property
+    def me_deltas(self) -> dict[str, float]:
+        """她身上那几个量**变了多少**(新值 − 旧值,带符号)。
+
+        `costs` 里写的表达式算出来的是**新值**(和 `set` 一样,`me_体力 - 4` → 96),
+        所以 `me_updates` 是"她现在剩多少",不是"她花了多少"。两者差得远:一次擦窗
+        `me_updates` 报 96,而她其实只花了 4。
+
+        差额必须**单独记下来**,不能让读日志的人自己去减:她身上的量不只被能力
+        改,规律和需求带也在改 —— 拿前后两条 `entity_interaction` 相减,减出来的
+        是这两次之间发生的**一切**,不是这一次的代价。
+        """
+        return {
+            key: value - self.me_before.get(key, 0.0)
+            for key, value in self.me_updates.items()
+        }
+
 
 def apply_affordance(
     affordance: Affordance,
@@ -1591,6 +1828,9 @@ def apply_affordance(
     world_values: Mapping[str, float] | None = None,
     me_values: Mapping[str, float] | None = None,
     held: Mapping[str, int] | None = None,
+    item_name: Callable[[str], str] | None = None,
+    quantity_label: Callable[[str, str], str] | None = None,
+    quantity_bands: Callable[[str, str], Any] | None = None,
     now: int = 0,
     minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
 ) -> AffordanceOutcome:
@@ -1607,6 +1847,18 @@ def apply_affordance(
     `held` 是她随身带着的东西(item_id → 几个),进 `have_*`。**没传就是空的**:
     一个没接经济层的调用方于是让每一道 `have_*` 的门都关着 —— 这是对的那一边,
     反过来默认"她什么都有"会让声明形同虚设。
+
+    `item_name` 把 id 翻成人话,**只在真要拒绝的时候问**(顺利那一路一次都不查)。
+    不给就退回 id —— 一样东西的名字本来就可以是它的 id("引用即存在"那条路)。
+    这一句是给人读的:「你手上的 notepad 不够」印在一个全中文世界的玩家屏幕上,
+    而且它还会当 `ToolResult.error` 递回给她,于是角色把 `notepad` 念出来。
+    三条拒绝语共用它:`consumes` 那句、以及 `requires` / `conditions` 两句里
+    `have_*` 的翻译(见 `speak_expression`)。
+
+    `quantity_label` 同理,翻的是**量**的内部键 —— 玩家菜单上那个量叫「土」,拒绝
+    句里不该叫它 `土湿`。也只在真要拒绝的时候问,理由见 `speak_expression`。
+    `quantity_bands` 是它的另一半:分过档的量,阈值也念成档词 —— 玩家在屏幕上
+    永远读不到那个数字,留着它等于在拒绝语里印一串他没法比对的噪音。
     """
     holdings = {str(k): int(v) for k, v in (held or {}).items()}
     namespace: dict[str, Any] = {
@@ -1640,7 +1892,9 @@ def apply_affordance(
         if not able:
             return AffordanceOutcome(
                 verb=affordance.verb,
-                refusal=f"你现在做不了这件事:`{requirement}` 不成立",
+                refusal="你现在做不了这件事:"
+                        f"「{speak_expression(requirement, item_name, quantity_label, quantity_bands)}」"
+                        f"不成立",
                 reason="incapable",
             )
     # 花掉一样东西**自带**一道"你得有"的门,不必作者再写一遍 `have_x >= n`:
@@ -1650,9 +1904,13 @@ def apply_affordance(
     for item_id, quantity in sorted(affordance.consumes.items()):
         on_hand = holdings.get(item_id, 0)
         if on_hand < quantity:
+            called = (item_name(item_id) if item_name else "") or item_id
             return AffordanceOutcome(
                 verb=affordance.verb,
-                refusal=f"你手上的 {item_id} 不够:要 {quantity} 个,你有 {on_hand} 个",
+                # 名字是作者写的,划得出边界才读得断 —— 见 `Scheduler._named`。
+                # 空格也断得开,但同一屏上两种划法本身就是一种噪音,而且作者写得出
+                # 带空格的名字(「a cup of tea」),那时空格什么都断不开。
+                refusal=f"你手上的「{called}」不够:要 {quantity} 个,你有 {on_hand} 个",
                 reason="incapable",
             )
     for condition in affordance.conditions:
@@ -1663,7 +1921,9 @@ def apply_affordance(
         if not satisfied:
             return AffordanceOutcome(
                 verb=affordance.verb,
-                refusal=f"这会儿不行:`{condition}` 不成立",
+                refusal="这会儿不行:"
+                        f"「{speak_expression(condition, item_name, quantity_label, quantity_bands)}」"
+                        f"不成立",
                 reason="conditions",
             )
     try:
@@ -1683,6 +1943,11 @@ def apply_affordance(
         verb=affordance.verb,
         updates=updates,
         me_updates=me_updates,
+        # 动之前是多少。读的是**同一份**旧值(双缓冲那一份),所以差额算出来
+        # 恰好是这一次的代价,不掺别的。
+        me_before={
+            key: float((me_values or {}).get(key, 0.0)) for key in me_updates
+        },
         consumed=dict(affordance.consumes),
     )
 

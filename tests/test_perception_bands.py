@@ -309,6 +309,42 @@ def test_the_band_table_is_askable_from_the_cli(tmp_path):
     assert quantity["bands"] == [[0, "刚出土的苗"], [3, "齐屋檐高"]]
 
 
+def test_量表印的是键名_因为底下那几行能力用的就是键名(tmp_path):
+    """一张表自己跟自己对不上,读的人只会得出一个错的结论。
+
+    `agent` 的量表里写着「手上的活儿」(那是 label),而紧跟着的能力行写的是
+    「她得 me_手艺 >= 1.0」—— 于是读这份表的人(线上那份晚潮世界,以及我)得出的
+    结论是"手艺 这个量没声明过,这五条能力永远做不成"。它声明得好好的,只是作者
+    给它起了个别的说法。
+
+    隔壁那几行**早就做对了**:动词放开之后 id 和人话可以不一样,所以能力行印的是
+    `verb(label)`,注释里写着理由 —— "作者调的是 id,她读到的是人话,而排错时要
+    对得上的正是这两者"。量这一行漏了同一手,而"这个量到底叫什么"只有这里问得到。
+    """
+    from _worldfile import open_world_at, run_cli
+
+    labeled = {"id": "agent", "quantities": {
+        "手艺": {"default": 1.0, "visibility": "here", "label": "手上的活儿"},
+    }}
+    bench = {
+        "id": "bench",
+        "quantities": {"漆": {"default": 0.3, "visibility": "here"}},
+        "affordances": {"刷漆": {"requires": ["me_手艺 >= 1.0"],
+                                 "set": {"漆": "min(漆 + 0.5, 1)"}}},
+    }
+    path = write_seed_file(tmp_path / "w.cyberworld", _seed(
+        kinds=[labeled, bench],
+        entities=[{"id": "bench:riverside", "name": "长椅", "location": "riverside"}],
+    ))
+    with open_world_at(tmp_path / "w.db", world_file=path):
+        pass
+
+    out = run_cli("ontology", "--world-id", "w").stdout
+    assert "me_手艺" in out, "夹具前提没成立:能力行本来就印键名"
+    assert "手艺(手上的活儿)" in out, \
+        f"量表只印了人话,而底下的能力认的是键名 —— 两行对不上:\n{out}"
+
+
 def test_validating_a_file_reports_bad_bands_without_building_a_world(tmp_path):
     """创作台经 CLI 委托校验 —— `validate world` 得报同一批错,不建世界。"""
     from _worldfile import run_cli

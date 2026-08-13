@@ -19,6 +19,13 @@ MINUTES_PER_DAY = 24 * 60
 
 DEFAULT_MINUTES_PER_TICK = 5
 
+# 一个 tick 值多少**真实**秒(`scheduler.tick_rate` 就是它的倒数)。和上面那个不是
+# 同一件事:上面是**世界时间**每 tick 走多少分钟,这里是墙钟。默认值下两者恰好同速
+# (5 分钟世界时间 = 300 真实秒),所以拿错了那一个在开发机和整套测试上一路是对的 ——
+# `_ToolRuntime.ticks_for_minutes` 就这么错过一次,而线上那个 tick 调快了的世界里,
+# 她说的「等我五分钟」于是变成了等我五秒。
+DEFAULT_SECONDS_PER_TICK = 300
+
 # **事件的 `ts` 只有一种时基:世界时钟(从 0 开始的 tick 数)。** 这条界线留着,
 # 是因为 2.0 之前不是这样:`chat_session.close_conversation` 给 `conversation`
 # 事件盖的是墙钟(`time.time()`),于是世界的历史里混进了 1.78e9 那个量级的 ts。

@@ -187,3 +187,38 @@ def test_decay_uses_no_sql_math_functions(store):
     rows = {m["summary"]: m["strength"] for m in store.query(agent_id="夏")}
     assert rows["锚点不衰减"] == 1.0
     assert rows["很久以前的事"] < rows["刚发生的事"] < 1.0, "闲置越久掉得越多"
+
+
+def test_她自己的记忆里不许出现她的_id_和英文状态():
+    """线上读提示词读出来的:她最近记得的三件事里有一件是
+    「guo 的状态从 sleeping 变为 working」—— 自己的 id、两个英文词,
+    而这条摘要既进她的提示词、也会被八卦原样转述出去。
+    """
+    from anima_world.memory_triggers import TriggerEngine
+    from anima_world.types import AgentState, Projection
+
+    proj = Projection(agents={"guo": AgentState(
+        spec={"name": "郭大夫"}, state={"status": "sleeping"})})
+    got = TriggerEngine()._on_agent_state(
+        {"seq": 7, "who": "guo",
+         "payload": {"kind": "agent_state", "state": {"status": "working"}}},
+        proj, 100,
+    )
+    assert got is not None
+    assert got.summary == "我开始干活了"
+    assert "guo" not in got.summary and "working" not in got.summary
+
+
+def test_引擎不认识的状态原样留着_不替作者编一个词():
+    """作者的节拍写得出引擎没见过的状态。认不出来就照写 —— 编一个中文词
+    等于替作者说话,而他改了那个词也不会知道引擎在替他说什么。"""
+    from anima_world.memory_triggers import TriggerEngine
+    from anima_world.types import AgentState, Projection
+
+    proj = Projection(agents={"du": AgentState(state={"status": "working"})})
+    got = TriggerEngine()._on_agent_state(
+        {"seq": 8, "who": "du",
+         "payload": {"kind": "agent_state", "state": {"status": "守夜"}}},
+        proj, 100,
+    )
+    assert got is not None and got.summary == "我守夜了"

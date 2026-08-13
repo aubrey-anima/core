@@ -25,12 +25,11 @@ import logging
 from typing import Any, Callable, Iterable
 
 from anima_world.expressions import ExpressionError, world_dice
-from anima_world.rules import WORLD_PREFIX, Rule
+from anima_world.rules import WORLD_OWNER, WORLD_PREFIX, Rule
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, clock_names
 
 logger = logging.getLogger(__name__)
 
-WORLD_OWNER = "world"
 AGENT_KIND = "agent"   # `not_action` 的候选池:这个引擎里只有角色"在做一件事"
 
 

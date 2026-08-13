@@ -78,22 +78,41 @@ def test_chat_does_not_advance_the_world_clock(tmp_path):
         assert world.scheduler.clock == before
 
 
-def test_命令行上你只有一个身份():
+def test_命令行上你只有一个身份(tmp_path):
     """`play` 从前默认 `p1`,`chat` / `prompt` 默认 `cli`。
 
     于是玩完 `play` 再照 `--help` 去 `prompt` 看她收到什么,看到的是**另一个人**:
     名字、关系、玩家教过的规则全记在 `p1` 头上,而调试视图问的是一个从没说过话的
     `cli`。它不报错,只是空着 —— "调试视图撒谎比没有调试视图更坏"的一种,而且这
     一次撒的谎是"她根本不认识你"。
+
+    ⚠️ **这条从前钉在 parser 的默认值上,而那一层钉不住它要的东西。** `chat`/`play`
+    会 `player_move` 把 `cli` 挪进世界、当场变成真人;`prompt` 是「看,但不碰」,
+    永远不会 —— 三个默认值一模一样,而 `prompt` 那个必然是世界不认得的幽灵,身份/
+    在场/关系三块因此整个换一套算法(见 `test_debug_prompt.py` 末尾那一组)。所以
+    `prompt` 的默认值现在**有意**是 `None`,而这句话搬到了它真正成立的那一层:
+    **玩过之后再去看,看到的还是同一个人。**
     """
+    import json
+
     from anima_world.__main__ import DEFAULT_PLAYER_ID, _build_parser
 
     parser = _build_parser()
-    defaults = {
-        cmd: parser.parse_args([cmd] + extra).player_id
-        for cmd, extra in (("chat", []), ("play", []), ("prompt", ["--agent", "夏"]))
-    }
-    assert set(defaults.values()) == {DEFAULT_PLAYER_ID}, defaults
+    assert parser.parse_args(["chat"]).player_id == DEFAULT_PLAYER_ID
+    assert parser.parse_args(["play"]).player_id == DEFAULT_PLAYER_ID
+    assert parser.parse_args(["prompt", "--agent", "夏"]).player_id is None, (
+        "prompt 不该跟着默认成 cli —— 它不写玩家状态,那个 id 在这条命令上永远是幽灵"
+    )
+
+    # 真路径:先以默认身份聊一句(`cli` 由此被挪进世界),再不带 --player-id 去看。
+    db = _a_world(tmp_path)
+    said = _chat(db, "--agent", "夏", "--name", "阿檀", stdin="在吗\n\n")
+    assert said.returncode == 0, said.stderr
+    seen = run_cli("prompt", "--world-id", "w", "--agent", "夏", "--json")
+    assert seen.returncode == 0, seen.stderr
+    asker = json.loads(seen.stdout)["asker"]
+    assert asker["player_id"] == DEFAULT_PLAYER_ID, f"看到的是另一个人:{asker}"
+    assert asker["known"], f"玩过一轮之后世界还是不认得他:{asker}"
 
 
 def test_the_header_names_the_place_in_chinese(tmp_path):

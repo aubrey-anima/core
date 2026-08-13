@@ -34,11 +34,13 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator, Sequence
+from typing import Any, AsyncIterator, Iterator, Sequence, TypeVar
 
 from anima_world import autonomy
 from anima_world import contact
+from anima_world import perception as perception_mod
 from anima_world import together
 from anima_world import tools as tools_mod
 from anima_world.actions import ActionDescriptor
@@ -48,8 +50,14 @@ from anima_world.beats import coerce_goals
 from anima_world.chat_session import ChatSessionManager
 from anima_world.chat_state import ChatStateStore
 from anima_world.chat_store import ChatStore
+from anima_world.character_card import (
+    billing_of,
+    card_errors,
+    card_warnings,
+    normalize_card,
+)
 from anima_world.config_store import coerce_to_declared_type, mask_secret
-from anima_world.intent import FIRST_PERSON, Director, read_self_introduction
+from anima_world.intent import FIRST_PERSON, Director, places_menu, read_self_introduction
 from anima_world.llm_client import (
     create_background_llm_client_from_config,
     create_llm_client_from_config,
@@ -57,11 +65,16 @@ from anima_world.llm_client import (
 )
 from anima_world.locations import DEFAULT_POINTS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
+from anima_world.redis_state import RedisPlayerPresence
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
 from anima_world.types import AgentState, Projection
-from anima_world.world_time import DEFAULT_MINUTES_PER_TICK
+from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, DEFAULT_SECONDS_PER_TICK
 
 logger = logging.getLogger(__name__)
+
+# 聊天两条路产出的东西不同型(`chat` 是文本块,`chat_burst` 是步骤 dict),
+# 而 `_noting_chat_health` 对两条都一视同仁 —— 它只管转发和记账。
+_T = TypeVar("_T")
 
 # The idle reaper scans for stale conversations this often (wall seconds).
 _REAP_INTERVAL = 30.0
@@ -85,10 +98,153 @@ _ACTIVITY_LABELS = {
 }
 
 
+class _PlayerRow(MutableMapping):
+    """一个在场玩家的那一行 —— **写穿到 Redis**。
+
+    存在的理由是"只加不改":`World.players` 是公开属性,宿主与一堆测试早就在写
+    `players[pid]["display_name"] = …` / `.setdefault(...)` / `.pop("location")`。
+    把底座换成 Redis 之后,那些写法必须逐字还成立,否则搬家就是一次破坏性变更。
+    读走快照(一次 `HGETALL`),写立刻落键。
+    """
+
+    __slots__ = ("_store", "_pid", "_snap")
+
+    def __init__(self, store: RedisPlayerPresence, player_id: str,
+                 snapshot: dict[str, Any]) -> None:
+        self._store = store
+        self._pid = player_id
+        self._snap = dict(snapshot)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._snap[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._snap[key] = value
+        self._store.update(self._pid, {key: value})
+
+    def __delitem__(self, key: str) -> None:
+        del self._snap[key]
+        self._store.drop_field(self._pid, key)
+
+    def __iter__(self):
+        return iter(self._snap)
+
+    def __len__(self) -> int:
+        return len(self._snap)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:   # type: ignore[override]
+        fields = dict(*args, **kwargs)
+        if not fields:
+            return
+        self._snap.update(fields)
+        self._store.update(self._pid, fields)
+
+    def __repr__(self) -> str:
+        return f"_PlayerRow({self._pid!r}, {self._snap!r})"
+
+
+class _PlayerRoster(MutableMapping):
+    """在场名册。`World.players` 就是它。
+
+    **过期只有一条规则:那个人的键还在不在**(Redis 自己的 TTL)。此前
+    `_present_roster` 另外按 `last_seen` 过滤过一遍 —— 两套规则迟早给出不同答案,
+    而两边都不报错。
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: RedisPlayerPresence) -> None:
+        self._store = store
+
+    def __getitem__(self, player_id: str) -> _PlayerRow:
+        row = self._store.get(player_id)
+        if row is None:
+            raise KeyError(player_id)
+        return _PlayerRow(self._store, player_id, row)
+
+    def __setitem__(self, player_id: str, row: Any) -> None:
+        self._store.create(player_id, dict(row))
+        self._store.update(player_id, dict(row))
+
+    def __delitem__(self, player_id: str) -> None:
+        if player_id not in self._store:
+            raise KeyError(player_id)
+        self._store.forget(player_id)
+
+    def __iter__(self):
+        return iter(self._store.ids())
+
+    def __len__(self) -> int:
+        return len(self._store.ids())
+
+    def __contains__(self, player_id: object) -> bool:
+        return isinstance(player_id, str) and player_id in self._store
+
+    def __repr__(self) -> str:
+        return f"_PlayerRoster({sorted(self._store.ids())!r})"
+
+
+class _PlayerTransit(MutableMapping):
+    """在路上的玩家。住在在场那一行里的一个字段上,所以和在场同生共死。"""
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: RedisPlayerPresence) -> None:
+        self._store = store
+
+    def __getitem__(self, player_id: str) -> dict[str, Any]:
+        trip = self._store.get_transit(player_id)
+        if trip is None:
+            raise KeyError(player_id)
+        return trip
+
+    def __setitem__(self, player_id: str, trip: dict[str, Any]) -> None:
+        self._store.set_transit(player_id, dict(trip))
+
+    def __delitem__(self, player_id: str) -> None:
+        if self._store.get_transit(player_id) is None:
+            raise KeyError(player_id)
+        self._store.clear_transit(player_id)
+
+    def __iter__(self):
+        return iter(self._store.transit_ids())
+
+    def __len__(self) -> int:
+        return len(self._store.transit_ids())
+
+    def __contains__(self, player_id: object) -> bool:
+        return (
+            isinstance(player_id, str)
+            and self._store.get_transit(player_id) is not None
+        )
+
+    def __repr__(self) -> str:
+        return f"_PlayerTransit({sorted(self._store.transit_ids())!r})"
+
+
 def _resolve_tick_rate(fallback: float, config_store: Any | None) -> float:
     if config_store is None:
         return fallback
     return config_store.get("scheduler.tick_rate", default=fallback)
+
+
+def _transit_view(scheduler: Any, trip: Mapping[str, Any]) -> dict[str, Any]:
+    """一趟没走完的路,写给宿主的那几栏:从哪、去哪、还有多少**世界分钟**。
+
+    她和他各有一份在途(`scheduler._transit` / `World._player_transit`),而快照那扇门
+    要把两份都报出去。**换算只准有这一处** —— 两边各算一遍的话,迟早一处忘了
+    `world.minutes_per_tick` 不是 1,于是同一段路在角色那栏是 15 分钟、在玩家那栏
+    是 3 分钟,而两栏都不报错。
+    """
+    mpt = DEFAULT_MINUTES_PER_TICK
+    if scheduler.config_store is not None:
+        mpt = scheduler.config_store.get("world.minutes_per_tick", default=mpt)
+    remaining = max(0, int(trip["arrive_at"]) - int(scheduler.clock))
+    return {
+        "from": trip["from"],
+        "to": trip["to"],
+        "eta_minutes": remaining * int(mpt),
+    }
 
 
 class _WorldView:
@@ -218,15 +374,7 @@ class _WorldView:
             "params": dict(action.params) if action else {},
         }
         if trip is not None:
-            mpt = DEFAULT_MINUTES_PER_TICK
-            if self.scheduler.config_store is not None:
-                mpt = self.scheduler.config_store.get("world.minutes_per_tick", default=mpt)
-            remaining = max(0, int(trip["arrive_at"]) - self.scheduler.clock)
-            activity["transit"] = {
-                "from": trip["from"],
-                "to": trip["to"],
-                "eta_minutes": remaining * int(mpt),
-            }
+            activity["transit"] = _transit_view(self.scheduler, trip)
 
         # 她手上要花时间的事。**和 `transit` 并列不是巧合** —— 两者是同一种东西:
         # 一段她已经起了头、还没走完的时间。少了这一格,一个埋头做了十个月椅子的人
@@ -259,8 +407,19 @@ class _WorldView:
                 }
         return activity
 
-    def _snapshot_locked(self, recent_events: list[dict[str, Any]]) -> dict[str, Any]:
-        agents = {}
+    def identity_rows_locked(self) -> dict[str, dict[str, Any]]:
+        """每个人的**身份那几栏**:名字 / 此刻在哪 / 状态 / 在不在场 / 作者写的卡。
+
+        **`state()` 和 `roster()` 共用这一份。** 位置那条规矩是有讲究的(在场读活
+        黑板 —— 在途时只有黑板是真的;离场读投影),抄第二遍就是抄错第二遍:两扇门
+        会对"她在哪"给出两个答案,而宿主读哪一扇全凭运气。名册那个洞
+        (`mai：`)本身就是"没有一条读得回来的路"造成的,再多造一条平行的路只是
+        把同一个病换个位置犯。
+
+        `card` 从投影的 spec 里读(创世那条 `agent_join` 事件写进去的)——
+        **不上黑板**:`tagline` 是写给玩家的广告词,进了黑板她就会照着念。
+        """
+        rows: dict[str, dict[str, Any]] = {}
         for aid, a in self.projection.agents.items():
             brain = self.scheduler.agents.get(aid)
             # 在场角色的位置读活黑板(在途时黑板才是真的),离场的读投影。
@@ -270,22 +429,37 @@ class _WorldView:
                 if brain is not None
                 else a.location
             )
-            agents[aid] = {
+            rows[aid] = {
                 "name": brain.agent.name if brain else a.spec.get("name", aid),
                 "location": location,
                 "state": dict(a.state),
-                "activity": self._agent_activity(aid),
                 "away": brain is None,
+                "card": normalize_card(a.spec.get("card"))
+                if isinstance(a.spec, dict) else None,
             }
         for aid, brain in self.scheduler.agents.items():
-            if aid not in agents:
-                agents[aid] = {
+            if aid not in rows:
+                rows[aid] = {
                     "name": aid,
                     "location": brain.agent.location or "",
                     "state": {},
-                    "activity": self._agent_activity(aid),
                     "away": False,
+                    "card": None,
                 }
+        return rows
+
+    def _snapshot_locked(self, recent_events: list[dict[str, Any]]) -> dict[str, Any]:
+        agents = {}
+        for aid, row in self.identity_rows_locked().items():
+            # `card` 有意不进 `state()`:那扇门是"世界此刻的样子",而卡是写给
+            # 玩家看的元数据,它的门是 `roster()`。
+            agents[aid] = {
+                "name": row["name"],
+                "location": row["location"],
+                "state": row["state"],
+                "activity": self._agent_activity(aid),
+                "away": row["away"],
+            }
 
         loc_store = getattr(self.scheduler, "location_store", None)
         locations: list[dict[str, Any]] = []
@@ -486,6 +660,13 @@ class AgentUnavailable(RuntimeError):
 # 挡住的是手上的活 —— 没人能在半路上把觉睡了、把活干了。
 _PLAYER_TRANSIT_OK = frozenset({"chat"})
 
+# 引擎回执的备忘录最多留几句 —— 见 `World._remember_receipt`。
+_RECEIPT_MEMO_MAX = 256
+
+# 邀请判定带进提示词的转录轮数。取最后几条就够:判定器要知道的是"他俩这会儿
+# 在说话、说到哪儿了",不是整场会话 —— 整场会话由记忆那条路负责,而提示词有上限。
+_INVITE_TALK_TURNS = 6
+
 # 一次能力调用被拒,分两种:**世界说不行**(下面这些)和**这次调用讲不通**
 # (`unknown_entity` / `unknown_verb` / `no_ontology` / `error`)。只有后者才是
 # `ToolCallError`。
@@ -527,12 +708,32 @@ class _ToolRuntime:
         return int(time.time())
 
     def ticks_for_minutes(self, minutes: float) -> int:
-        """墙钟分钟 → 世界 tick 数。演示速度与实时速度下都成立。"""
-        mpt = DEFAULT_MINUTES_PER_TICK
-        config_store = self._world.scheduler.config_store
-        if config_store is not None:
-            mpt = config_store.get("world.minutes_per_tick", default=mpt)
-        return max(1, int(round(float(minutes) / max(1, int(mpt)))))
+        """**墙钟**分钟 → 世界 tick 数。
+
+        换算走 `scheduler.tick_rate`(每真实秒几个 tick),**不走**
+        `world.minutes_per_tick` —— 后者是世界时间每 tick 走多少分钟,和真实时间
+        没有固定比例。两者只在引擎默认值下恰好相等(1 tick = 5 分钟世界时间,
+        也正好 5 分钟真实时间),所以拿错了那一个在开发机和整套测试上一路是对的。
+
+        线上那个 `tick_rate=0.2` 的世界里,「等我五分钟」按 `minutes_per_tick`
+        折出来是 1 tick = **5 秒**:调度器五秒后就把那条回访兑现了,顺手
+        `clear_quiet` 撤掉配对的那次静音 —— 她话音未落自己回来敲门,而玩家那一侧
+        既没看见「她在忙」,也没等到那五分钟。
+
+        为什么必须是墙钟:这个数唯一的用处是给 `delay_reply` 排那次回访,而回访和
+        `set_quiet` 是**同一个承诺的两半**;`chat_state` 那侧早就写死了静音走墙钟
+        (玩家的五分钟是真的五分钟)。两半用两个时钟,就是这个 bug 本身。
+        """
+        rate = _resolve_tick_rate(
+            1.0 / DEFAULT_SECONDS_PER_TICK, self._world.scheduler.config_store
+        )
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            rate = 1.0 / DEFAULT_SECONDS_PER_TICK
+        if rate <= 0:
+            rate = 1.0 / DEFAULT_SECONDS_PER_TICK
+        return max(1, int(round(float(minutes) * 60.0 * rate)))
 
     def config(self, key: str, default: Any = None) -> Any:
         config_store = self._world.scheduler.config_store
@@ -739,13 +940,19 @@ class _ToolRuntime:
     # 同一条)。这一层问完,把点过头的名单交进 `perform_affordance`,那里再把
     # 世界那一段的闸重查一遍(`joint_gate`)—— 决定与执行之间世界还在跑。
 
-    def _resolve_party(self, agent_id: str, raw: Sequence[str]) -> tuple[list[str], str]:
+    def _resolve_party(
+        self, raw: Sequence[str], *, player_id: str = "",
+    ) -> tuple[list[str], str]:
         """玩家和模型嘴里的名字 → 世界里的 id。返回 `(名单, 认不出的那个)`。
 
         三种写法都要认得:角色 id、角色名字、以及**玩家**(`player:<id>`、
         玩家的显示名、或者一句「我」)。认不出来当场说,别静默丢掉一个人 ——
         丢掉之后人数就对不上 `participants.min`,而报出来的会是"人不够",
         于是真正的原因("我不认识白霜")永远说不出口。
+
+        **「我」说的是这一轮的那个人**(`player_id`),不是名册里排第一的那个。
+        从前是后者 —— 一个人的房间里两者恰好相同,所以一直没错过;而一屋子两个
+        玩家时,点头的和被拉进来的会是两个人,回执上却只有一个名字。
         """
         names = self.agent_names()
         by_name = {str(v).strip(): k for k, v in names.items()}
@@ -767,9 +974,12 @@ class _ToolRuntime:
             if who in by_name:
                 out.append(by_name[who])
                 continue
+            if who in FIRST_PERSON and player_id:
+                out.append(f"player:{player_id}")
+                continue
             matched = next(
                 (f"player:{pid}" for pid, name in players.items()
-                 if who in (pid, name) or who in FIRST_PERSON),
+                 if who in (pid, name)),
                 "",
             )
             if matched:
@@ -779,7 +989,7 @@ class _ToolRuntime:
         return (list(dict.fromkeys(out)), "")
 
     def _consent(
-        self, agent_id: str, target: str, verb: str, party: Sequence[str],
+        self, actor_id: str, target: str, verb: str, party: Sequence[str],
         *, player_id: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """挨个问过去。返回 `(答应了的, 没答应的)`,两边都是 `Consent.to_dict()`。
@@ -787,6 +997,9 @@ class _ToolRuntime:
         **两段,次序是有意的**:先世界(`joint_gate` + 静音 + 玩家在不在跟前),
         再性格。一句笼统的"她没答应"会让玩家以为被拒绝的是这个人,而真正的原因
         可能只是他在赶路 —— 那种误解在世界里是**改不回来**的。
+
+        **邀请人也可能是玩家。** 判定器读到的那个名字要照他的显示名写 ——
+        给一个 `player:9f2c…` 过去,她收到的邀请是一个 uuid 发来的。
         """
         scheduler = self._world.scheduler
         judge = scheduler.relationship_judge
@@ -795,14 +1008,14 @@ class _ToolRuntime:
             "social.joint.min_willingness", together.DEFAULT_MIN_WILLINGNESS))
         stock_key = str(self._world.config_get(
             "social.joint.consent_stock", together.DEFAULT_CONSENT_STOCK) or "").strip()
-        inviter = self.agent_names().get(agent_id, agent_id)
+        inviter = self._display(actor_id)
         verb_label, target_name = self._affordance_display(target, verb)
 
         accepted: list[dict[str, Any]] = []
         refused: list[dict[str, Any]] = []
         for who in party:
             invitee = self._invitee(
-                agent_id, target, verb, who,
+                actor_id, target, verb, who,
                 player_id=player_id, stock_key=stock_key,
             )
             if invitee.gate:
@@ -831,10 +1044,13 @@ class _ToolRuntime:
                         ),
                         relation={"a_to_b": together.closeness(invitee.relation)},
                         memories=list(invitee.memories),
-                        location=self.agent_location(who),
+                        # 人话,不是键名:判定器写出来的话进她的记忆,而
+                        # `agent_location` 的契约是 id(公开 API,不动它)。
+                        location=scheduler.place_name(self.agent_location(who)),
+                        recent_talk=invitee.recent_talk,
                     )
                 except Exception:  # noqa: BLE001 - 判定器挂了不该掀翻这次调用
-                    logger.warning("邀请判定失败 %s ← %s", who, agent_id, exc_info=True)
+                    logger.warning("邀请判定失败 %s ← %s", who, actor_id, exc_info=True)
                     verdict = None
             # **降级不许无声。** 没有判定器(或者它这次没给出可用的回包)就退回
             # 关系与作者声明的量 —— 那仍然是一个真实的判断(理由见 together.py),
@@ -859,6 +1075,12 @@ class _ToolRuntime:
             return self.player_name(who.split(":", 1)[1])
         return self.agent_names().get(who, who)
 
+    def _named(self, who: str) -> str:
+        """同一个名字,**紧贴着下一个字**印时的样子 —— 见
+        `Scheduler._named`,那儿写全了理由。这一份的名字还多一个来路:
+        玩家的昵称是**用户**填的,而用户填得出「老陈的猫」。"""
+        return f"「{self._display(who)}」"
+
     def _affordance_display(self, target: str, verb: str) -> tuple[str, str]:
         """动词与东西的**人话**。判定器、回执、她的提示词读到的必须是同一个词 ——
         给一个 `tend` 过去,判定器判的是一件她根本没听说过的事。"""
@@ -873,7 +1095,7 @@ class _ToolRuntime:
         )
 
     def _invitee(
-        self, agent_id: str, target: str, verb: str, who: str,
+        self, actor_id: str, target: str, verb: str, who: str,
         *, player_id: str, stock_key: str,
     ) -> together.Invitee:
         """把判断一个人要用到的东西收齐。**闸在这里合流**:调度器那几条
@@ -887,12 +1109,12 @@ class _ToolRuntime:
                 # 一次调用只替**一个**玩家说话。替别人点头等于把他的意志也取消掉,
                 # 而那正是这一层要挡的东西 —— 只是换成了玩家。
                 gate = "player_not_you"
-            elif not self.face_to_face(agent_id, pid):
+            elif not self.face_to_face(actor_id, pid):
                 gate = "player_not_here"
             return together.Invitee(
                 id=who, name=self.player_name(pid), is_player=True, gate=gate,
             )
-        gate = scheduler.joint_gate(agent_id, target, verb, who)
+        gate = scheduler.joint_gate(actor_id, target, verb, who)
         if not gate and player_id and self._world.chat_state is not None:
             if self._world.chat_state.quiet_until(who, player_id) is not None:
                 # 他刚把这个玩家静音 —— 这一层再把他拉进来,等于引擎撤销他的选择。
@@ -911,15 +1133,24 @@ class _ToolRuntime:
                     agreeableness = float(raw)
                 except (TypeError, ValueError):
                     agreeableness = 1.0
+        inviter_name = self._display(actor_id)
         memories: tuple[str, ...] = ()
         if scheduler.memory_store is not None:
             try:
-                memories = tuple(
-                    str(m.get("summary") or "")
-                    for m in scheduler.memory_store.query(agent_id=who)[:3]
-                )
+                store = scheduler.memory_store
+                if hasattr(store, "retrieve"):
+                    # **按相关性召回,不是按新鲜度。** 判定器要判的是「他跟这个
+                    # 邀请人熟不熟」,而挑最近三条给出来的常常是关于**另外一个人**
+                    # 的事 —— 于是模型读着三段与邀请人无关的记忆,得出"不认识"。
+                    # 和聊天那侧 `world_context` 同一条路:拿对方的**名字**当 query。
+                    rows = store.retrieve(
+                        who, now_tick=scheduler.clock, query=inviter_name, k=3)
+                else:
+                    rows = store.query(agent_id=who)[:3]
+                memories = tuple(str(m.get("summary") or "") for m in rows)
             except Exception:  # noqa: BLE001 - 读不到记忆不该挡住一次邀请
                 logger.debug("读 %s 的记忆失败", who, exc_info=True)
+        recent_talk = self._recent_talk(who, actor_id, player_id=player_id)
         stance = ""
         # stance 关着的世界这一格是 1.0(`together.STANCE_FACTORS["neutral"]`),
         # 所以**行为逐位不变** —— 和 contact 那一层逐字同一条。
@@ -935,13 +1166,56 @@ class _ToolRuntime:
         return together.Invitee(
             id=who, name=self.agent_names().get(who, who),
             gate=gate,
-            relation=scheduler._memory_projection.relations.get((who, agent_id)),
+            # 邀请人是玩家时关系挂在**裸 pid** 上(`Scheduler._relation_id`
+            # 那一课:库存带前缀、关系不带)。带着前缀查的话永远查不到,于是
+            # 一个跟他熟得不能再熟的人被当成生人来判,而且一声不吭。
+            relation=scheduler._memory_projection.relations.get(
+                (who, scheduler._relation_id(actor_id))),
             agreeableness=agreeableness, stance=stance,
             personality=personality, memories=memories,
+            recent_talk=recent_talk,
         )
 
+    def _recent_talk(
+        self, who: str, actor_id: str, *, player_id: str,
+    ) -> tuple[str, ...]:
+        """他和邀请人**这会儿正说着的话**,渲染成 `名字：内容` 的几行。
+
+        ⚠️ **邀请正发生在会话中间,而记忆是会话关闭那一刻才落的。** 只给记忆的话,
+        判定器判的是一个「我压根不记得跟这个人说过话」的处境 —— 而他们刚聊了两轮,
+        玩家眼里的样子是"我跟她聊得好好的,一叫她就说不熟"。世界照跑,日志一行不错。
+
+        只在**邀请人就是这场会话的那个玩家**时取:NPC 之间没有转录可读,而另一个
+        玩家的会话不是这一次邀请的上下文。
+        """
+        if not player_id or not actor_id.startswith("player:"):
+            return ()
+        if actor_id.split(":", 1)[1] != player_id:
+            return ()
+        store = getattr(self._world, "chat_store", None)
+        if store is None:
+            return ()
+        try:
+            active = store.active_conversation(who, player_id=player_id)
+            if active is None:
+                return ()
+            rows = store.recent_messages(int(active["id"]), _INVITE_TALK_TURNS)
+        except Exception:  # noqa: BLE001 - 读不到转录不该挡住一次邀请
+            logger.debug("读 %s 与 %s 的转录失败", who, player_id, exc_info=True)
+            return ()
+        inviter_name = self.player_name(player_id)
+        agent_name = self.agent_names().get(who, who)
+        out: list[str] = []
+        for row in rows:
+            content = str(row.get("content") or "").strip()
+            if not content:
+                continue
+            speaker = inviter_name if row.get("role") == "user" else agent_name
+            out.append(f"{speaker}：{content}")
+        return tuple(out)
+
     def interact_with(
-        self, agent_id: str, target: str, verb: str,
+        self, actor_id: str, target: str, verb: str,
         participants: Sequence[str] | None = None, player_id: str = "",
     ) -> dict[str, Any]:
         """对一样东西做一件事 —— 把本体声明的能力真的兑现在世界的量上。
@@ -962,6 +1236,12 @@ class _ToolRuntime:
         `participants` 是**一起做这件事的人**(名字或 id 都认;`player:<id>` 或者
         一句「我」指玩家)。同意在这一层问完(**锁外**,因为读人设的判定要打网络),
         点过头的名单才交进调度器 —— 那里再把世界那一段重查一遍。
+
+        **施动者可以是玩家**(`player:<id>`,由 `ToolContext.world_actor_id` 拼)。
+        这一整条从闸到扣账没有一处按"是不是角色"分支:窗她擦得了我也擦得了,
+        擦完一样掉体力。给玩家关着的那阵子,同一个世界里是两套物理 —— 而她那套
+        才是真的。`player_id` 是另一回事:它说的是这一轮跟她说话的人是谁,
+        一次角色调用照样带着它。
         """
         scheduler = self._world.scheduler
         party_raw = list(participants or ())
@@ -976,16 +1256,19 @@ class _ToolRuntime:
             )
             if bad_shape:
                 raise tools_mod.ToolCallError(refusal)
-            party, unknown = self._resolve_party(agent_id, party_raw)
+            party, unknown = self._resolve_party(party_raw, player_id=player_id)
             if unknown:
                 raise tools_mod.ToolCallError(
                     f"我不认识{unknown} —— 这个世界里现在只有"
                     f"{'、'.join(self.agent_names().values())}"
                 )
-            if agent_id in party:
-                raise tools_mod.ToolCallError("她不能跟自己一起做一件事")
+            if actor_id in party:
+                # 回执的口气跟着施动者走(`_display_name`:玩家印「你」)——
+                # 玩家点一次"跟我一起",收到一句"她不能跟自己……",说的是别人。
+                raise tools_mod.ToolCallError(
+                    f"{scheduler._named(actor_id)}不能跟自己一起做一件事")
             accepted, refused = self._consent(
-                agent_id, target, verb, party, player_id=player_id
+                actor_id, target, verb, party, player_id=player_id
             )
             consents = [*accepted, *refused]
             if refused:
@@ -995,15 +1278,17 @@ class _ToolRuntime:
                 name = self._display(str(who.get("who") or ""))
                 gate = together.GATE_LABELS.get(str(who.get("reason") or ""))
                 if gate is not None:
-                    # 世界那一段:回执是「名字 + 一句状态」。
-                    refusal = f"{name}{gate}"
+                    # 世界那一段:回执是「名字 + 一句状态」。名字划边界(中文
+                    # 不分词,而它是数据);冒号那一支不用划,冒号已经断开了。
+                    refusal = f"{self._named(str(who.get('who') or ''))}{gate}"
                 else:
                     # 她自己那一句 —— **原话进引号**。混在陈述句里的话,"白霜不想
                     # 凑在一起"读起来像引擎的判词,而那句话是她说的。
                     note = str(who.get("note") or "").strip()
                     refusal = (
                         f"{name}:「{note}」" if note
-                        else f"{name}{together.DECLINE_LABEL}"
+                        else f"{self._named(str(who.get('who') or ''))}"
+                             f"{together.DECLINE_LABEL}"
                     )
                 return {
                     "ok": False, "target": target, "verb": verb,
@@ -1012,7 +1297,7 @@ class _ToolRuntime:
                 }
             party = [str(c["who"]) for c in accepted]
         with scheduler._lock:
-            outcome = scheduler.perform_affordance(agent_id, target, verb, party)
+            outcome = scheduler.perform_affordance(actor_id, target, verb, party)
             if outcome.get("ok"):
                 self._world._view._fan_out()
                 scheduler.checkpoint()  # 交互即检查点(RLock,可重入)
@@ -1127,6 +1412,10 @@ class World:
         )
         self._tool_runtime = _ToolRuntime(self)
         self._director = Director(self._tool_runtime)
+        # 引擎最近自己说过的那几句回执(插入序 = 先进先出)。落转录时摘掉它们,
+        # 见 `_strip_receipt`;闸装在 `chat_store.content_filter` 上。
+        self._chat_receipts: dict[str, bool] = {}
+        self.chat_store.content_filter = self._strip_receipt
         scheduler.chat_state = self.chat_state
         config_store = scheduler.config_store
         chat_llm = (
@@ -1159,6 +1448,9 @@ class World:
             judge_hook=lambda info: scheduler.submit_user_chat_judgment(**info),
             meta_provider=self.chat_state.conversation_meta,
             place_name=self._location_display_name,
+            # 名册是她名字的**唯一**出处 —— 顺手抄一份到 `participants` 上就成了
+            # 两份真相(玩家那一头必须抄,因为世界不从别处认识他;她不必)。
+            agent_name=lambda aid: self._tool_runtime.agent_names().get(aid, aid),
         )
         # autonomy:(角色, 世界日) -> 今天主动过几次。**内存态是对的** ——
         # 上限是"别把玩家的收件箱刷满",不是需要审计的账,重启即清可以接受。
@@ -1178,26 +1470,48 @@ class World:
             "checked": 0, "fired": 0, "blocked": 0, "composed": 0,
             "compose_failed": 0, "last": None,
         }
-        # 在场玩家(刻意内存态:重启即新访;持久的部分——会话/记忆/关系——在 db 里)
-        self.players: dict[str, dict[str, Any]] = {}
-        self.player_ttl_seconds: float = _PLAYER_TTL_SECONDS
+        # 在场玩家。**3.2.0 之前这是一个进程内的普通 dict,注释里写着"刻意内存态"** ——
+        # 那个"刻意"在单进程宿主里成立,在容器里不成立:一次重启把名册清空,
+        # `player_location()` 返回空串,于是每一场对话静默退回"手机私聊"的措辞,
+        # 而人就坐在她对面。没有异常、日志干净 —— 照跑,但给错东西。
+        # 按分家判据它本来就该落 Redis:并发在场的人**有界**,而 `_present_roster`
+        # **直接进她的决定上下文**。两条都指向 Redis。
+        self.presence_store = RedisPlayerPresence(
+            self.scheduler.redis, self.scheduler.world_id or "", _PLAYER_TTL_SECONDS
+        )
+        # 公开属性照旧叫 `players`,照旧是个 mapping(只加不改):底下换成写穿到
+        # Redis 的视图,`players["p1"]["display_name"] = …` 这类写法一个字不用改。
+        self.players: _PlayerRoster = _PlayerRoster(self.presence_store)
         # 玩家的行程。**人走路和她走路一样要花时间** —— 同一份 `_travel_minutes`,
         # 同一条 `travel` 事件。和角色那份(`scheduler._transit`)分开放,因为落地
         # 的方式不同:她由 tick 循环 `_land_arrivals` 放下,人是**读的时候结算**
         # (下面 `player_location`)—— 玩家没有 tick 循环替他跑,而"到点了却没人
         # 把他放下"会让他永远停在路上。惰性结算是这个引擎里的现成套路:
         # `quiet_until` / `refused_topics` 也是读到就顺手清过期的。
-        self._player_transit: dict[str, dict[str, Any]] = {}
+        # 它和在场同住一个 hash(`__transit__` 字段):两个键就有两条过期规则,
+        # 而"人走了、他的行程还在"会让 `player_in_transit` 说谎。
+        self._player_transit: _PlayerTransit = _PlayerTransit(self.presence_store)
+        # 他上一次开口是哪一 tick —— `player_doing` 的第三个来源(见那条 docstring)。
+        # 只在 `_chat_prelude` 里写一处,过期靠比大小,所以没有要清的账。
+        self._player_chat_tick: dict[str, int] = {}
         # 让世界看得见在场的玩家(issue #13,访客模型)。scheduler 不认识 World,
-        # 只认识这个回调;回调按 TTL 过滤,所以角色不会去敲断线三小时的人的门。
-        self.scheduler._present_players = lambda: {
-            pid: self.players[pid] for pid in self.who_is_present()
-        }
+        # 只认识这个回调;在场以键还在不在为准,所以角色不会去敲断线三小时的人的门。
+        self.scheduler._present_players = self._present_roster
+        # 以及**他此刻在做什么** —— 规律层的 `action` 选择器读它(见 `player_doing`)。
+        self.scheduler._players_doing = self._players_doing_now
 
-        # 开机补完:会话只在 record_chat_turn 一次调用内开与关,且运行中的
-        # 世界独占 db,所以此刻还 open 的行只能是上次崩溃的遗留。消息早已
-        # 逐条落盘,补上总结与那一个 conversation 事件即可 —— 崩溃从
-        # "丢总结"降级为"总结晚到"。
+        # 开机补完:会话只在 record_chat_turn 一次调用内开与关,所以此刻还 open
+        # 的行**要么**是上次崩溃的遗留(补上总结与那一个 conversation 事件即可,
+        # 崩溃从"丢总结"降级为"总结晚到"),**要么**是别的进程此刻正说着的话。
+        # ⚠️ 这两件事此前不分:注释写的是"运行中的世界独占 db",而那句话随
+        # world.db 一起过期了 —— 2.0 之后很多进程可以同时开同一个世界,于是
+        # `map` / `prompt` / 运维脚本这些**只读的门**每开一次,就把玩家正说到
+        # 一半的会话掐掉一次,还顺手在一个马上要退出的进程里发起关系判定:
+        # 会话关了、总结有了、判定永远落不了地。玩家看到的是"她突然不记得刚才
+        # 那段了",而全程零报错。**收尾归接得住它的进程**:关一次会话要调一次
+        # LLM 生成总结、要把判定交给线程池,一个转身就退出的进程两样都做不到。
+        # 读戳必须在盖戳之前 —— 盖完再读读到的是我自己。
+        runner = self.scheduler.another_runner()
         # 盖一个"这个世界正被我跑着"的戳。CLAUDE.md 的第一条不变量此前没有任何
         # 标记去支撑 —— 谁也看不出一个 db 正被人跑着,而第二个写它的进程会让两边
         # 立刻分叉。是提示不是锁:进程崩掉标记就陈旧,拿陈旧标记拒绝操作,等于在
@@ -1206,12 +1520,17 @@ class World:
         self._install_autonomy()   # 定时轮次挂到时钟上(开关关着时 hook 自己会退出)
         self._install_contact()    # "她想起你"挂到时钟上(同上)
 
-        try:
-            orphans = self._bridge.run(self.session_manager.reap_orphans())
-            if orphans:
-                logger.info("closed %d orphaned conversation(s) from a previous run", len(orphans))
-        except Exception:  # noqa: BLE001 - recovery must never block open
-            logger.warning("orphan conversation recovery failed", exc_info=True)
+        if runner is not None:
+            logger.info(
+                "%s 正跑着这个世界,开着的会话交给它收尾", runner,
+            )
+        else:
+            try:
+                orphans = self._bridge.run(self.session_manager.reap_orphans())
+                if orphans:
+                    logger.info("closed %d orphaned conversation(s) from a previous run", len(orphans))
+            except Exception:  # noqa: BLE001 - recovery must never block open
+                logger.warning("orphan conversation recovery failed", exc_info=True)
 
     # ── 生命周期 ────────────────────────────────────────────────────────────
 
@@ -1464,9 +1783,23 @@ class World:
 
     def state(self) -> dict[str, Any]:
         """完整世界快照(角色/活动/地图/关系/叙事/runtime 诊断),
-        `runtime.llm.degraded_reason` 常驻点名 Mock 降级的原因。"""
+        `runtime.llm.degraded_reason` 常驻点名 Mock 降级的原因。
+
+        **先补课再快照。** 关系、余额、随身物品、角色卡全是投影折出来的,而别的
+        进程可能刚写过一条(维护容器改了张卡、另一个宿主收了笔钱)。跑着的世界会
+        在下一次追加事件时自己追上(`_fold_gap_before`),但**只读门不该指望世界
+        正好在动** —— 一个暂停的 / 空闲的世界一条事件都不发,那份快照就永远停在
+        这个进程开机那一刻,而它看上去完全正常。
+        """
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
         state = self._view.snapshot()
-        state["players"] = {pid: dict(p) for pid, p in self.players.items()}
+        # **走名册那条路,不要直接誊在场那几行。** 原样誊出来的话,一个正在赶路的人
+        # 报的是他的**出发地**,而且一格标记都没有 —— 于是界面把他画在铁匠巷,同一秒
+        # `player_options` 正拿一句「你在路上 —— 到了地方就能动手了」把他能干的事全挡
+        # 了,一块屏幕的两半互相打脸。名册那条路顺带**先把到站的人放下**,只读门自己
+        # 补课(和上面那句 `catch_up_projection` 同一条纪律:暂停的世界不会自愈)。
+        state["players"] = self._present_roster()
         state["simulation"] = {
             "paused": self._paused,
             "tick_rate": _resolve_tick_rate(1.0, self.scheduler.config_store),
@@ -1476,6 +1809,209 @@ class World:
             if need_values:
                 agent_state["needs"] = need_values
         return state
+
+    def roster(self) -> dict[str, Any]:
+        """**这个世界里有谁** —— 名字、一句话、立绘、主次、此刻在哪。玩家那一侧的读出口。
+
+        由来是一次真人试玩:线上那个世界 21 个角色,4 个是作者写了几周的主角、
+        17 个是背景 NPC,而玩家的通讯录里这 21 个人长得一模一样。作者写得进、
+        校验放行、世界跑得动、包也导得出 —— **就是到不了玩家眼前,而全程零报错**。
+        顺带补上一个已经在线上咬人的洞:**显示名此前没有读出口**(`map --json`
+        的地点有 `name`,人只有 id),于是网站旁白里印的是 `mai:`、`yu:`。
+
+        返回 `{"agents": [ … ]}`,每行**九栏固定**(线格式已冻,运维台
+        `world_server.py` 的 `_ROSTER_FIELDS` 照它写):
+
+            agent_id / name / tagline / portrait / billing /
+            location / location_name / state / away
+
+        外加第十栏 `card`:作者写的那张卡的**原样**(没写就是 `None`)。它存在是因为
+        引擎**不理解**这几格,只原样带过去 —— 创作台已经预告了第四样(声线、主题色、
+        CV),而只摊平引擎认得的三格等于在这道门上把它们悄悄扔了。
+
+        三条要知道的:
+
+        - **`billing` 缺省 `supporting`,不是 `lead`。** 猜错方向的代价不对称:
+          把主角说成配角只是排版难看,把还没出场的人说成主角是**剧透**。
+        - **`hidden` 的人照出。** 引擎是"这个世界里有谁"的权威,它得说得出;
+          筛掉是宿主那一层的事(运维台的壳已经在 `/internal/v1/roster` 上做了,
+          理由是泄露的边界在进程上、不在浏览器里)。
+        - **顺序跟世界自己的名册走**(事件日志的顺序),不按字母重排 —— 重排的话
+          同一个世界在两处会给出两种出场顺序。
+
+        名字取不到就**原样给 id**:编一个出来的话,界面上写的是一个这个世界里
+        不存在的人。地名同理(`location_name` 查不到就回落地点 id)。
+
+        **先补课再读。** 卡住在投影里(`agent_join` / `persona_update` 折出来的),
+        而写它的 `set_card` 常常来自另一个进程 —— 线上那一幕正是这样:维护容器写完
+        四张卡、回执写着 `changed=True`,长驻世界里的玩家看到的还是 `card: null`。
+        `state()` 那条注释写了为什么只读门自己得补,不能指望世界正好在动。
+        """
+        loc_names: dict[str, str] = {}
+        loc_store = getattr(self.scheduler, "location_store", None)
+        if loc_store is not None:
+            try:
+                for row in loc_store.all():
+                    loc_names[str(row.get("id") or "")] = str(row.get("name") or "")
+            except Exception:  # noqa: BLE001 - 没有地图不该让名册整个读不出来
+                loc_names = {}
+
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            rows = self._view.identity_rows_locked()
+
+        agents: list[dict[str, Any]] = []
+        for agent_id, row in rows.items():
+            card = row.get("card") or {}
+            location = str(row.get("location") or "")
+            agents.append({
+                "agent_id": agent_id,
+                "name": str(row.get("name") or "").strip() or agent_id,
+                "tagline": str(card.get("tagline") or ""),
+                "portrait": str(card.get("portrait") or ""),
+                "billing": billing_of(card),
+                "location": location,
+                "location_name": loc_names.get(location) or location,
+                "state": dict(row.get("state") or {}),
+                "away": bool(row.get("away")),
+                "card": row.get("card"),
+            })
+        return {"agents": agents}
+
+    def set_card(
+        self,
+        agent_id: str,
+        card: dict[str, Any] | None = None,
+        *,
+        clear: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """改**一个已经在这个世界里的人**的角色卡。`roster()` 的写那一侧。
+
+        存在的理由,和 `roster()` 是同一个故事的下半截:卡只在 `agent_join` 的
+        `payload.spec` 上,而一个已经在册的角色**永远不会再 join** —— 作者层合并
+        (`--world-file`)只给 `newcomers` 发 join,语义又是"只填缺不覆盖"。于是
+        角色卡那一整轮改造**对唯一一个有真人的世界等于没做**:线上那 20 个角色
+        (4 个是作者写了几周的主角)一张卡都装不进去,而作者写得进、校验放行、
+        测试全绿、包也导得出。**照跑但给错东西**,全程零报错。
+
+        四条判断,写在这里而不是散在 CLI 上:
+
+        **一、这是一次明示的编辑,所以它覆盖。** 和作者层合并的"只填缺不覆盖"
+        (`_join_authored_additions` / `__main__._join_spec`)**有意相反**,两边的
+        docstring 互相点名。理由是两条路问的不是同一件事:那一条手里捏着一份**文件**
+        (缺省还是内置橱窗),拿它去覆盖等于把这个世界跑出来的现在倒带回创世那一刻;
+        这一条是一个人敲了一行命令指名道姓地说"这个人是主角",让它只填缺的话,
+        一个已经写着 `supporting` 的角色**永远**改不成 `lead`。⚠️ **别把其中一条
+        "修"成另一条** —— 它们语义相反是对的。
+
+        **二、部分更新合并进现有的卡,不是替换整张卡。** 只给 `tagline` 不许把作者
+        写了几周的 `billing` 和立绘顺手抹掉;而"抹掉"在这条路上不会报错,只会让那个
+        人下一次刷新时从通讯录第一屏掉下去。要抹掉**某一格**就把它给成空串。
+        引擎不认识的键(创作台预告的声线 / 主题色 / CV)照旧原样带过去。
+
+        **三、`clear` 是单独一格,不是"把 billing 设回 supporting"。**
+        "作者说他是背景"和"作者什么也没说"是两件事(`_join_spec` 与
+        `normalize_card` 的 docstring 为同一个区别写过) —— 前者是一句声明,
+        后者是收回声明。给了 `clear` 就不许再给值:两句互相矛盾的话,引擎挑哪句
+        都是猜。
+
+        **四、合并后逐字相同就一个字都不写。** 事件溯源里追加一条毫无差别的
+        `persona_update` 只是给历史添噪音,而历史是这个世界唯一的真相 —— 噪音进去
+        了就再也分不出"这一天作者真的改了主意"。
+
+        校验用的是 `character_card` **那一份**判断(`card_errors`),在写之前,
+        对**合并后**的卡跑一遍:另写一套的下场是同一张卡在装载期和这条路上得到
+        两个答案。坏卡抛 `ValueError`(一次列全),不认识的人抛 `KeyError`
+        **并把这个世界里有谁说出来** —— 编一个空结果出去的话,运维的人会以为改
+        成功了,而那正是这一整轮要修的病。两种拒绝都**一个字都不写**。
+
+        走的是 `persona_update` 那条现成的路(和 `repair_agent_goals` 同一形状),
+        **不就地改历史**:创世那条 `agent_join` 说的仍然是创世那天的话,投影把新的
+        那一条叠上去。**卡不上黑板** —— `tagline` 是写给玩家看的广告词,上了黑板
+        她就会照着念。
+
+        返回一份回执:`{agent_id, name, before, after, changed, cleared,
+        dry_run, warnings}`。`dry_run=True` 一个字节都不写。
+        """
+        agent_id = str(agent_id or "").strip()
+        if not agent_id:
+            raise ValueError("agent_id is required")
+        if clear and card:
+            raise ValueError(
+                "--clear 和 --billing/--tagline/--portrait 不能一起给:"
+                "一句是「删掉这张卡」,一句是「这张卡写成这样」——引擎挑哪句都是猜"
+            )
+        if not clear and not card:
+            raise ValueError(
+                "什么都没给 —— --billing / --tagline / --portrait / --clear 至少给一个。"
+                "一次什么也没改的「成功」读起来和改成功了一模一样"
+            )
+        if card is not None and not isinstance(card, dict):
+            raise ValueError(f"card 必须是一个对象,收到 {type(card).__name__}")
+
+        with self._guard():
+            # 别的进程可能刚给同一个人写过一张卡 —— 不先折进来的话,这次合并的
+            # 底稿是一份过期的现在,而结果会安静地把对方那一次覆盖掉。
+            self.scheduler.catch_up_projection()
+            with self.scheduler._lock:
+                rows = self._view.identity_rows_locked()
+            row = rows.get(agent_id)
+            if row is None:
+                # **把这个世界里有谁说出来。** 抄错一个 id 最常见的原因是名字记岔了,
+                # 而一句「没有这个人」不足以让人自己找回来。
+                known = "、".join(list(rows)[:20]) or "(一个人都没有)"
+                more = "…" if len(rows) > 20 else ""
+                raise KeyError(
+                    f"这个世界里没有叫 {agent_id!r} 的角色。有的是:{known}{more}"
+                )
+
+            before = normalize_card(row.get("card"))
+            if clear:
+                after = None
+            else:
+                merged = dict(before or {})
+                merged.update(card or {})
+                after = normalize_card(merged)
+                # 校验**合并后**的那张卡,而且在写之前 —— 半张合法的卡落库之后,
+                # 作者看到的是一个「改成功了」的回执和一个开不了机的世界。
+                problems = card_errors(after, label=f"{agent_id} 的卡")
+                if problems:
+                    raise ValueError("\n".join(problems))
+
+            receipt: dict[str, Any] = {
+                "agent_id": agent_id,
+                "name": str(row.get("name") or "").strip() or agent_id,
+                "before": before,
+                "after": after,
+                "changed": after != before,
+                "cleared": bool(clear),
+                "dry_run": bool(dry_run),
+                "warnings": card_warnings(after, label=f"{agent_id} 的卡"),
+            }
+            if not receipt["changed"] or dry_run:
+                return receipt
+
+            with self.scheduler._lock:
+                # `spec` 里**只写 card 这一格**:`persona_update` 是 `spec.update(…)`,
+                # 顺手带上 name/personality 等于拿此刻的黑板去覆盖作者写的人设。
+                # 清掉时写 `None` 而不是省略这一格 —— dict.update 没有「删键」,
+                # 而读的那一侧 `normalize_card(None)` 本来就读作「没有卡」。
+                #
+                # **进事件的是另一份拷贝。** `_apply_state_change` 会把这一格原样
+                # `update` 进投影,于是事件的 payload 和投影共用同一个 dict;回执
+                # 再共用第三次的话,调用方顺手改一下回执就**就地改写了历史在内存
+                # 里的样子**(`projection.py` 为这个洞警告过)。
+                self._record_and_fan({
+                    "type": "state_change",
+                    "who": agent_id,
+                    "payload": {
+                        "kind": "persona_update",
+                        "spec": {"card": dict(after) if after else None},
+                    },
+                })
+            self.scheduler.checkpoint()
+        return receipt
 
     def world_time(self) -> Any:
         return self.scheduler.world_time()
@@ -1748,7 +2284,7 @@ class World:
         *,
         player_id: str,
         display_name: str | None = None,
-        role: str = "player",
+        role: str = "",   # 空 = 这一路不知道他是谁;字面量 "player" 会当身份写进世界
         meta: dict[str, Any] | None = None,
     ) -> Iterator[str]:
         """代玩家和角色聊一轮,流式产出回复文本块。
@@ -1775,7 +2311,7 @@ class World:
         *,
         player_id: str,
         display_name: str | None = None,
-        role: str = "player",
+        role: str = "",   # 空 = 这一路不知道他是谁;字面量 "player" 会当身份写进世界
         meta: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
         """`chat()` 的原生 async 版本 —— 直接跑在宿主自己的事件循环上。
@@ -1826,8 +2362,19 @@ class World:
             player_id,
             name=interlocutor["display_name"],      # 他报过的名字,没报就是空
             display_name=interlocutor["address"],   # 给人和模型看的称呼,永不是 id
+            # 身份和名字走同一条:宿主这一轮说了就记下,没说就不动世界记着的那个。
+            # 从前这里是紧跟其后的一句 `players[pid].setdefault("role", role)`,而
+            # `_touch_player` 建行时**总会**播一个 `role` —— 于是那个 key 永远在,
+            # `setdefault` 永远是空操作:**聊天这条路一次都没写进过身份**,而它读起来
+            # 像写了。后果不是少写一次,是修不回来:一个先走路、后聊天的玩家(走路
+            # 那条路手上没有身份)行里躺着占位的 `player`,此后聊多少轮都改不掉它,
+            # 而 `chat_service` 把 `player` 当占位身份整段丢掉 —— 他在这个世界里
+            # 从此没有身份,一行日志都不会说。
+            role=interlocutor["role"],
         )
-        self.players[player_id].setdefault("role", role)
+        # 他开口了 —— `player_doing` 据此说他这会儿在说话(见那条 docstring)。
+        # 落在静音闸**后面**:被拒之门外的那一句不算他在跟谁聊天。
+        self._player_chat_tick[player_id] = int(self.scheduler.clock)
         # 玩家在哪,决定角色是"看见你"还是"收到你的消息":`chat_service.respond`
         # 按这个字段在面对面/手机私聊两段身份声明里选一段。这里曾经不传,于是
         # 面对面那一支经门面永远不可达 —— CLI 明明先把你走到她跟前(player_move),
@@ -1972,15 +2519,42 @@ class World:
                 outcome["reason"] = "style_adjust 少了 kind/value,按对话处理"
                 return outcome
             self.chat_state.set_override(agent_id, player_id, kind, value)
-            outcome["handled"] = True
-            # 轻确认,不 in-character:这一句是"规则已记下",不是她在说话。
-            outcome["text"] = f"（记下了:{OVERRIDE_KINDS[kind]} —— {value}。）"
             outcome["detail"] = {"kind": kind, "value": value}
+            # **规则记下了,但绝不顶掉她的话** —— 和正下方"指挥她本人"那条逐字同构。
+            # 从前这里是 `handled=True` + 一句「（记下了:… —— …。）」,于是玩家开口
+            # 教一条规则,换回来的是一张收条、她一个字都没说。而 `intent.py` 的
+            # docstring 早就写明了这两种错的代价不对等:「该 dialogue 判成 narrative,
+            # 你正说的话被吞掉,只回一句系统确认。后者更贵」—— 这条正是那个更贵的。
+            # 线上现场更难看:灯塔湾那个世界的法律是"一律用英语回答",玩家用中文求
+            # 「用中文回答我」,收条说「记下了」,两轮之后她照旧用英语并当面说明自己
+            # 不打算照办 —— **收条替世界许了一个世界不会兑现的诺**。规则该不该压过
+            # 世界的设定由她那一轮自己权衡(两样都在她的提示词里),不由一张收条替她答。
+            outcome["handled"] = False
+            outcome["grounding"] = (
+                "【刚刚发生的事｜按这个事实说话】"
+                f"对方刚刚教了你一条对话规则:{OVERRIDE_KINDS[kind]} —— {value}。"
+                "这条**已经记下了**,往后每一轮都会摆在你眼前。"
+            )
             return outcome
         if verdict.intent == "narrative_direction":
             directed = self._director.direct(
                 agent_id=agent_id, params=verdict.params or {}, player_id=player_id,
             )
+            if directed.underspecified:
+                # 分类器没把自己的字段填全 —— 这一句回执说的是**我**没读懂,不是
+                # 世界不答应,而玩家根本不知道有个分类器。和正上方 style_adjust
+                # 少了 kind/value 那一手逐字同构:记一行日志,按对话处理。
+                logger.info(
+                    "导演指令少了参数(action=%s reason=%s)—— 这一轮退回按对话处理 agent=%s",
+                    directed.detail.get("action") or "?",
+                    directed.detail.get("reason") or "?",
+                    agent_id,
+                )
+                outcome["intent"] = "dialogue"
+                outcome["reason"] = (
+                    f"导演指令的参数不全({directed.detail.get('reason')}),按对话处理"
+                )
+                return outcome
             outcome["detail"] = dict(directed.detail)
             outcome["ok"] = directed.ok
             if not directed.self_directed:
@@ -2056,10 +2630,14 @@ class World:
             agent_id, player_id, prelude["user_text"], messages, sink
         )
         if handled is not None:
-            # style / narrative 走完了自己那条路:回一句确认,不再 in-character
-            # 生成。narrative 的后果已经在世界里(她下一次读 world_context 会真的
-            # 看到那个人在场),不是提示词里的一句想象。
+            # 指挥**别人**那条路走完了自己那一程:回一句确认,不再 in-character 生成。
+            # 后果已经在世界里(她下一次读 world_context 会真的看到那个人在场),
+            # 不是提示词里的一句想象。
             if handled:
+                # 这一句是**引擎的记账,不是她的台词** —— 不记下来的话它会原样落进
+                # 转录、进摘要、进她的长期记忆,和 `_strip_receipt` 里写的那场事故
+                # 逐字同构。下面那条路早就登记了,这条一直是同一道闸上的一个洞。
+                self._remember_receipt(handled)
                 yield handled
             return
         # 指挥她本人:指令已经在世界里兑现了,这一轮照常由她自己开口 —— 只是她读到的
@@ -2070,19 +2648,58 @@ class World:
             extra_system.append(grounding)
         receipt = str(sink.get("intent_receipt") or "")
         if receipt:
+            self._remember_receipt(receipt)
             yield receipt + "\n"
         topic_block = self.chat_service.refused_topic_block(agent_id, prelude["user_text"])
         if topic_block:
             extra_system.append(topic_block)
-        async for token in self.chat_service.respond(
+        async for token in self._noting_chat_health(self.chat_service.respond(
             agent_id,
             messages[-20:],
             interlocutor_id=player_id,
             interlocutor=prelude["interlocutor"],
             meta=sink,
             extra_system=extra_system,
-        ):
+        )):
             yield token
+
+    async def _noting_chat_health(
+        self, stream: AsyncIterator[_T]
+    ) -> AsyncIterator[_T]:
+        """把这一轮聊天成没成记进健康表 —— **记完照旧往外抛**。
+
+        逮到这条的是一次真试玩:线上灯塔湾的主模型(本机 ollama)没起来,于是每一次
+        开口都在 `httpx.ConnectError` 上断掉。而那个世界的 `World.state()` 报的是
+
+            llm: {"mock": false, "degraded_reason": null}   subsystems: {}
+
+        —— 「一切正常」。`_llm_degraded_reason` 答的其实是**配没配**这个问题
+        (它只在 Mock 那一支算),而字段名叫 `degraded_reason`、放在三支里都有,
+        运维台和宿主界面都当健康读。配好了却打不通的端点因此**报满分**,
+        而它一句话都答不出来:照跑、报成功、日志一行不错。
+
+        健康的家本来就在 `subsystems`(「`llm.degraded_reason` 说的是"现在";
+        这里说的是"一路上怎么样"」),planner / narrative / relationship_judge 三个
+        早就在里面,聊天一直缺席 —— 因为聊天子系统有意和事件核解耦,而
+        `note_subsystem` 在 scheduler 上。所以记在这一层:`ChatService` 照旧不认识
+        scheduler,而这条路是**所有**玩家聊天的必经之地。
+
+        **不吞**:吞掉就得替她编一句道歉,那句会原样落进转录、进摘要、进她的长期
+        记忆(`_strip_receipt` 里那场事故)。宿主接得住这个异常,引擎接不住 ——
+        它不知道这个世界的玩家该看到什么。
+
+        分不清"模型不通"和"引擎有 bug"是有意的:`respond()` 自己已经把世界读、
+        stance 写、分类器都兜住了(各带一句 docstring),漏到这儿的**几乎只有那次
+        LLM 往返**;而 reason 里记的是真实的异常类型与消息,所以万一真漏出个引擎
+        bug,健康表上写的仍然是那个 bug 的名字,不是一句猜出来的"模型不通"。
+        """
+        try:
+            async for token in stream:
+                yield token
+        except Exception as exc:  # noqa: BLE001 - 记一笔再原样抛出去
+            self.scheduler.note_subsystem("chat", False, f"{type(exc).__name__}: {exc}")
+            raise
+        self.scheduler.note_subsystem("chat", True)
 
     def chat_burst(
         self,
@@ -2091,7 +2708,7 @@ class World:
         *,
         player_id: str,
         display_name: str | None = None,
-        role: str = "player",
+        role: str = "",   # 空 = 这一路不知道他是谁;字面量 "player" 会当身份写进世界
         interrupt_check: Any | None = None,
     ) -> Iterator[dict[str, Any]]:
         """连着说到她自己想停(issue #17)。产出结构化的步骤,不是一整段文本。
@@ -2118,7 +2735,7 @@ class World:
         *,
         player_id: str,
         display_name: str | None = None,
-        role: str = "player",
+        role: str = "",   # 空 = 这一路不知道他是谁;字面量 "player" 会当身份写进世界
         interrupt_check: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """`chat_burst()` 的原生 async 版本。"""
@@ -2167,18 +2784,22 @@ class World:
             extra_system.append(grounding)
         receipt = str(sink.get("intent_receipt") or "")
         if receipt:
+            self._remember_receipt(receipt)
             yield {"kind": "message", "text": receipt, "meta": dict(sink)}
         topic_block = self.chat_service.refused_topic_block(agent_id, prelude["user_text"])
         if topic_block:
             extra_system.append(topic_block)
-        async for step in self.chat_service.autonomous_loop(
+        # 连续输出这条路上同一道闸(`_noting_chat_health` 的 docstring):两条路各写
+        # 一遍才是常态错法,而只钉一条的话,点亮 `chat.loop.enabled` 的世界模型一挂,
+        # 健康表上照旧一片空白。
+        async for step in self._noting_chat_health(self.chat_service.autonomous_loop(
             agent_id,
             messages[-20:],
             interlocutor_id=player_id,
             interlocutor=prelude["interlocutor"],
             extra_system=extra_system,
             interrupt_check=interrupt_check,
-        ):
+        )):
             yield step
 
     def _location_display_name(self, location_id: str) -> str:
@@ -2192,6 +2813,40 @@ class World:
     def chat_reply(self, *args: Any, **kwargs: Any) -> str:
         """chat() 的非流式便捷版,直接返回整段回复。"""
         return "".join(self.chat(*args, **kwargs))
+
+    def _remember_receipt(self, receipt: str) -> None:
+        """记下这一轮**引擎自己说的那句**,好在落转录时把它摘掉(见 `_strip_receipt`)。
+
+        有界:最多留 `_RECEIPT_MEMO_MAX` 句,先进先出 —— 玩家数不封顶,而这是纯内存
+        的账。**不按 (她, 他) 索引**:落库那一层手上只有 `conversation_id`,再去反查
+        是谁跟谁说话等于每条消息多一次 IO,而回执本身就是一句一模一样都难的长句。
+        """
+        memo = self._chat_receipts
+        memo.pop(receipt, None)          # 重发同一句就挪到队尾,别占两格
+        memo[receipt] = True
+        while len(memo) > _RECEIPT_MEMO_MAX:
+            memo.pop(next(iter(memo)))
+
+    def _strip_receipt(self, role: str, content: str) -> str:
+        """把引擎的回执从**她说的话**里摘出去。落转录前的最后一道。
+
+        `chat()` 把「(没有 哈尔滨 这个地方……)」这类回执塞在她的回复前面,而宿主
+        原样把整段流当成"她这一轮说的话"交回来 —— 于是那句话作为**她的台词**落进
+        转录。线上现场:林迟那条消息的第一行是「(咖啡车的雨棚不能被「站」;它能被
+        一起躲会儿雨、端详、补一补)」,下一轮它跟着转录进了邀请判定的提示词、进了
+        会话摘要、再进她的长期记忆 —— 他还真照着演了一句「我刚被人纠正过,雨棚不能
+        「站」」。**世界的记账不是她的台词。**
+
+        摘的是**引擎自己刚发出去的那几句原文**,不猜形状:凭"括号开头"去删等于把
+        她自己写的动作块也删掉。没记过那句就原样落库(跨进程的宿主、或者压根不经
+        `chat()` 的调用方)—— 退回今天的行为,不会删错东西。
+        """
+        if role != "assistant" or not content:
+            return content
+        for receipt in self._chat_receipts:
+            if content.startswith(receipt):
+                return content[len(receipt):].lstrip()
+        return content
 
     def record_chat_turn(
         self,
@@ -2564,12 +3219,22 @@ class World:
         1. **它不会撒谎。** 块从 `ChatService.prompt_blocks` 来 —— 和真聊天**同一个
            函数**。调试视图另写一遍拼装,迟早和真提示词分叉,那时你会照着它去改一个
            不存在的问题。
+           ⚠️ **同一个函数还不够 —— 喂给它的人也得是真的。** `player_id` 指的人不在
+           这个世界里时(默认值、id 抄错了),`self.players.get()` 交回一个空 dict,
+           于是这一份提示词照拼不误,而**身份/在场/关系三块全是拿一个陌生人算的**:
+           她被告知对方没报过名字、不在她跟前、这是手机私聊,连真玩家都被列进"同场
+           角色,不是正在和你说话的人"。它渲染得完美、字数像模像样,只是没有哪一轮
+           真的长这样 —— 那正是这条 docstring 第 1 点要防的事,只是从另一扇门进来的。
+           所以 `asker` 是**返回值的一部分**:这一份是拿谁算的、那个人世界认不认得。
+           **绝不悄悄换一个真玩家顶上** —— 换了就是第二种撒谎。
         2. **它解释缺席**(`absent`)。少一块几乎总比多一块难查:世界照跑、她照说话,
            只是从来没提过那棵树。所以"哪块没出现、为什么"和"哪块出现了"一样是答案。
+           缺席理由同样要连着 `asker` 读:陌生人身上「还没有关系行」是真话,而它
+           解释的是一个不存在的人。
         3. **它不留副作用。** 不写 `players.last_seen`、不触发意图分类、不进 LLM、
            静音中的角色也照样交出提示词(而 `chat()` 会当场拒)。看,但不碰。
 
-        返回 `{"blocks": [{"label","chars","text"}], "order", "absent",
+        返回 `{"blocks": [{"label","chars","text"}], "order", "absent", "asker",
         "system", "system_chars", "history"}`。
         """
         if agent_id not in self.scheduler.agents:
@@ -2598,6 +3263,15 @@ class World:
             ],
             "order": [block.label for block in blocks],
             "absent": self._absent_prompt_blocks(agent_id, player_id, blocks),
+            "asker": {
+                "player_id": player_id,
+                # 判据是**这个世界认不认得他**,不是"他有没有位置":没位置的真玩家
+                # 只是没落脚,而世界压根不认得的那个人会让上面三块整个换一套算法。
+                "known": player_id in self.players,
+                "display_name": str(interlocutor.get("display_name") or ""),
+                "location": where,
+                "location_name": str(interlocutor.get("location_name") or ""),
+            },
             "system": system,
             "system_chars": len(system),
             "history": turns[-20:],
@@ -2759,6 +3433,12 @@ class World:
         # 她**感知到**的世界的量也进决定 —— 否则"矿富了所以我去挖"这种事永远不会
         # 发生:她做决定时看不见世界的任何量,而那正是模拟层和角色层脱节的地方。
         perceived = self._perceive(agent_id, here)
+        targets: list[str] = []
+        if perceived is not None:
+            # 她这儿**能被做点什么**的东西。判据取 `verbs` 而不是"在不在这儿" ——
+            # 和 `describe_here` 露不露 id 是同一条:只能看不能碰的东西进不了
+            # `interact` 的参数,摆上菜单只会诱她去调一个必然被拒的调用。
+            targets = sorted(owner for owner in perceived.here if perceived.verbs.get(owner))
         if perceived is not None and not perceived.is_empty():
             # 三行都走 `Perception` 自己的渲染 —— 自主决定这一路要是另写一遍拼装,
             # 她做决定时看到的世界就和她说话时看到的不是同一个,而两边都能跑、
@@ -2784,6 +3464,7 @@ class World:
             activity=label,
             present=present,
             notes=notes,
+            targets=targets,
         )
 
     async def _autonomy_round(self, contexts: list[Any], day: int) -> None:
@@ -2798,16 +3479,42 @@ class World:
             # 那两行 —— 只在成功时发布,等于这条链坏得最厉害的时候最看不见。
             self._publish_autonomy_stats()
 
+    @staticmethod
+    def _autonomy_menu(ctx: Any) -> list[Any]:
+        """这一轮摆给她的菜单 —— **去掉这会儿不可能成的那几样。**
+
+        菜单原先是整轮算一次的常量,于是提示词刚说完「这会儿你身边没有别人」,
+        下面还照样摆着 `reach_out`。线上量出来的样子:63 次问、0 次动作、5 次失败,
+        五次全是「她身边没有人」。摆一个必然被拒的选项不只是浪费一次调用 ——
+        她挑了、被拒了、而这次失败教不会她任何事(她当时**没有别的选择**)。
+
+        两道闸都是声明出来的,这里不认识任何一个能力的名字:多一个自主能力时,
+        它自己说它要什么,而不是回来改这个函数。
+        """
+        return [
+            spec
+            for spec in tools_mod.tools_for(ctx.agent_id, surface=tools_mod.AUTONOMY)
+            if not (spec.requires_colocation and not ctx.present)
+            and not (spec.requires_target_entity and not ctx.targets)
+        ]
+
     async def _autonomy_round_body(self, contexts: list[Any], day: int) -> None:
-        specs = tools_mod.tools_for("*", surface=tools_mod.AUTONOMY)
-        menu = "\n".join(spec.prompt_line() for spec in specs)
-        allowed = [spec.id for spec in specs]
         template = (
             self.scheduler.prompt_store.get("autonomy.decide", default=autonomy.DEFAULT_DECIDE_PROMPT)
             if self.scheduler.prompt_store is not None
             else autonomy.DEFAULT_DECIDE_PROMPT
         )
         for ctx in contexts:
+            specs = self._autonomy_menu(ctx)
+            if not specs:
+                # 菜单空了 = 这一轮她怎么选都做不成。问她等于白花一次 LLM,
+                # 而且退回额度 —— 上限是"主动几次",被问都算不上。
+                self._autonomy_done[(ctx.agent_id, day)] = max(
+                    0, self._autonomy_done.get((ctx.agent_id, day), 1) - 1
+                )
+                continue
+            menu = "\n".join(spec.prompt_line() for spec in specs)
+            allowed = [spec.id for spec in specs]
             self._autonomy_stats["asked"] += 1
             try:
                 messages = autonomy.build_messages(template, ctx, menu)
@@ -3298,6 +4005,8 @@ class World:
                     "components": decision.components(),
                     "explain": decision.explain(),
                     "location": item["location"],
+                    # 地点也是 id —— 「她在 cart 想起了你」和「bai 想起了你」同一种病。
+                    "location_name": self.scheduler.place_name(item["location"] or ""),
                     "day": item["day"],
                     "at": f"{item['hour']:02d}:{item['minute']:02d}",
                 },
@@ -3322,20 +4031,69 @@ class World:
         成立**。合成一个的话,宿主没法把"她来打招呼"和"她想联系你"显示成两件
         事 —— 而对玩家来说那是完全不同的两件事。
 
-        不给 `player_id` 就是全部(运维/调试用)。返回按 seq 升序;拿最后一条的
-        `seq` 当下次的 `since_seq` 就是增量拉取,和 `inbox()` 同一个用法。
+        不给 `player_id` 就是全部(运维/调试用)。返回按 seq 升序。
+
+        ⚠️ **要增量拉取请用 `contact_requests_page()`。** 拿这一条的最后一条 `seq`
+        当下次的 `since_seq` 在热闹的世界里会**饿死**:一整窗都是别人的事件时你拿到
+        空 list,没有"最后一条",游标一步都推不动,而他自己那条永远排在窗外。
 
         ⚠️ **引擎不负责送达。** 推送、红点、消息列表归宿主那一层 —— 这里给的是
         一条有据可查的世界事件,`payload.reasons` 里每条由头都带着它的出处。
         """
-        page = self.history(since_seq=since_seq, limit=limit, kind="agent_wants_contact")
-        events = page["events"]
-        if player_id is None:
-            return events
-        return [
-            event for event in events
-            if (event.get("payload") or {}).get("player_id") == player_id
-        ]
+        return self.contact_requests_page(
+            player_id, since_seq=since_seq, limit=limit
+        )["events"]
+
+    def contact_requests_page(
+        self, player_id: str | None = None, *, since_seq: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        """`contact_requests()` 的**带游标**版本 —— 增量拉取用这一条。
+
+        `{"events", "next_seq", "cursor", "scanned", "total"}`。
+
+        **为什么是姊妹方法而不是给老方法加个关键字。** 返回类型随参数值变化的函数
+        读起来是猜谜:调用点上看不出手里是 list 还是 dict,而两者都是真值。
+        "只加不改"用加一个门就满足了,不必让老门变形。
+
+        **`cursor` 永远是 int,而且和"这一页有没有他的事"无关** —— 它是这一窗
+        **扫过的**最后一条的 seq(一条都没扫到就是传进来的 `since_seq`)。这正是
+        修掉饿死的那一格:空页也推得动游标。`scanned` 是这一窗扫了多少条(过滤前),
+        宿主照它就能看出"我在替别人翻页"。`next_seq` 仍是"后面还有没有",和
+        `history()` 逐字同义。
+
+        于是宿主一次调用拿全:不用为了推游标再查一次库(运维台此前正是这么绕的 ——
+        空页时再 `history(kind=)` 一次,多一次全表扫,而且每个宿主都得重新发明)。
+        """
+        return self._filtered_page(
+            kind="agent_wants_contact", player_id=player_id,
+            since_seq=since_seq, limit=limit,
+        )
+
+    def _filtered_page(
+        self, *, kind: str, player_id: str | None, since_seq: int, limit: int
+    ) -> dict[str, Any]:
+        """"按 kind 取一页、按 player_id 过滤、把游标交出去"。
+
+        **两扇门共用这一份**(`contact_requests_page` / `inbox_page`):各写一遍的话
+        它们迟早在"空页时游标怎么算"上分叉,而那正是这个洞本身。
+        """
+        page = self.history(since_seq=since_seq, limit=limit, kind=kind)
+        scanned = page["events"]
+        events = scanned
+        if player_id is not None:
+            events = [
+                e for e in scanned
+                if (e.get("payload") or {}).get("player_id") == player_id
+            ]
+        return {
+            "events": events,
+            "next_seq": page["next_seq"],
+            # 扫过的最后一条 —— **不是过滤后的最后一条**。一条都没扫到就原样退回
+            # 传进来的水位(而不是 0):倒退的游标会让宿主把已经拉过的段再拉一遍。
+            "cursor": int(scanned[-1]["seq"]) if scanned else int(since_seq),
+            "scanned": len(scanned),
+            "total": page["total"],
+        }
 
     def contact_stats(self) -> dict[str, Any]:
         """"她想起你"这条链跑没跑、发没发(contact)。
@@ -3348,6 +4106,229 @@ class World:
         ⚠️ **本次运行内的计数,不是历史**(冷却与次数才落库)。
         """
         return dict(self._contact_stats)
+
+    # ── 一段关系的人话 ─────────────────────────────────────────────────────
+
+    def relationship_summary(self, agent_id: str, other_id: str) -> dict[str, Any]:
+        """**她这会儿把这个人当什么** —— 一句话、一个档、和一条出处。
+
+        `state()["relations"]` 给的是四个 -1~1 的浮点数。宿主只有两条路,而两条
+        都是坏的:显示出来 = 把一段关系变成一根进度条,而**刷分是恋爱陪伴产品最
+        不该长出来的东西**;不显示,玩家聊了两个小时不知道有没有发生过任何事 ——
+        而世界里其实发生了。
+
+        所以这一层是**加**出来的:数字一个字不动(还在 `axes` 里,宿主要画什么是
+        宿主的事),再给一句人话、一个粗档、和**上一次改变它的是哪一件事**。
+
+        最后那半句是这一层的分量所在。一句"你们更亲近了"如果说不出出处,和一根
+        进度条没有区别 —— 玩家学不到"我做了什么让它变的"。所以 `last_change` 带着
+        那条事件的 `seq` / `tick` / `delta`,以及(玩家对话判出来的那种)是哪一场
+        对话、那场讲了什么。**查不到就明说查不到**(`conversation_id: None`,
+        `summary: ""`),不编。
+
+        档走 `memory_triggers.band()` / `BAND_NAMES` —— 和引擎自己认的是**同一个
+        函数**。另写一份阈值表的下场是同一段关系在两个地方显示成两档。
+
+        返回 `{agent_id, other_id, agent_name, other_name, exists, met, band,
+        band_name, summary, axes:{sentiment,trust,affection,respect},
+        last_change}`。`exists` 是 False 时四个轴都是 0.0 —— 那是**没有来往**,
+        不是敌意(报成"交恶"的话,一个刚进来的新玩家开局就被讨厌)。
+
+        **`met` 和 `exists` 是两件事,别合并**:`met` 是"这两个人说过话",
+        `exists` 是"判定落地了"。判定跑在对话关闭时,所以
+        `met=True, exists=False` 是一个真实且常见的中间态 —— 玩家刚聊完那一屏
+        看到的就是它。合并的下场见 `relationship_summaries()`。
+        """
+        return self._relationship_row(agent_id, other_id)
+
+    def _relationship_row(
+        self, agent_id: str, other_id: str,
+        contact_names: dict[str, str] | None = None,
+        met: bool | None = None,
+    ) -> dict[str, Any]:
+        """一行。`contact_names` 是**一整份名单那条路上传下来的名字表** ——
+        逐行去问联系态等于对同一个 hash 做 N 次 HGETALL。`met` 同理:一整份名单
+        那条路上一次算完,`None` 就自己去问这一对。"""
+        from anima_world.memory_triggers import BAND_NAMES, band as _band
+
+        agent_id, other_id = str(agent_id or ""), str(other_id or "")
+        rel = self.scheduler._memory_projection.relations.get((agent_id, other_id))
+        if met is None:
+            met = self._has_contact(agent_id, other_id)
+        met = bool(met) or rel is not None
+        last = dict(rel.last_change) if (rel is not None and rel.last_change) else None
+        axes = {
+            "sentiment": rel.sentiment if rel else 0.0,
+            "trust": rel.trust if rel else 0.0,
+            "affection": rel.affection if rel else 0.0,
+            "respect": rel.respect if rel else 0.0,
+        }
+        index = _band(axes["sentiment"])
+        agent_name = self._party_name(agent_id, (last or {}).get("as_name", ""), contact_names)
+        other_name = self._party_name(other_id, (last or {}).get("target_name", ""), contact_names)
+        if last is not None:  # 名字是给这一层用的,不往回泄进出处那一格
+            last.pop("as_name", None)
+            last.pop("target_name", None)
+        return {
+            "agent_id": agent_id,
+            "other_id": other_id,
+            "agent_name": agent_name,
+            "other_name": other_name,
+            "exists": rel is not None,
+            "met": met,
+            # **没结算的一对不落在档表上。** 四个轴全是 0.0 时 `_band` 给的是
+            # 「不远不近」——于是同一行一边说 `exists: False`,一边递出一个档名,而
+            # 宿主照着 `band_name` 渲染正是这一格的用途:一个刚进门的新玩家开局
+            # 就被每个角色贴上一个档名。空白不是一个档位,它是**还没有值**,所以这儿
+            # 给 `None` / `""` 而不是挑一个看上去中性的档。同一条纪律的另一个
+            # 落点在 `relationship_judge._closeness_phrase`(0 不念作形同陌路)——
+            # 那一处是让**模型**读的,这一处是让**宿主**读的,两边都不能替
+            # "还没有来往"编一个值出来。
+            "band": index if rel is not None else None,
+            "band_name": BAND_NAMES[index] if rel is not None else "",
+            "summary": self._relationship_sentence(
+                agent_name, other_name, index, rel is not None, last,
+                r_type=(rel.r_type if rel else ""), met=met,
+            ),
+            "axes": axes,
+            "last_change": last,
+        }
+
+    def relationship_summaries(
+        self, *, agent_id: str = "", other_id: str = ""
+    ) -> list[dict[str, Any]]:
+        """一整份名单 —— "她们几个都怎么看我" / "他跟谁都是什么关系"。
+
+        一次一个地问等于让宿主自己攒,而攒的那一步它得先知道有哪些对 —— 那份名单
+        只有引擎有。两个过滤都不给就是全世界的每一对(运维/调试用)。
+
+        每一行的形状和 `relationship_summary()` 逐字相同,按 sentiment 从高到低。
+
+        ⚠️ **名单不只是"已判定的那些对"。** 关系判定跑在**对话关闭**的时候(默认
+        静默 600 秒才算关),而玩家聊完就去点关系那一屏。只列已折叠的对,三种状态
+        就压成了两种:
+
+            从没来往过    → 没这一行   ← 对
+            结算过        → 有一行     ← 对
+            来往过没结算  → 没这一行   ← **错,和"从没来往过"长得一模一样**
+
+        他刚跟她聊完一整场,那一屏是空的,于是他学到的是"聊天没有用" —— 而这是
+        恋爱陪伴产品里最要紧的一屏。所以联系态里说过话的那些对也进名单,带着
+        `met=True, exists=False`,由 `summary` 诚实地说"还没落定"。
+        **提前判不是修法**:判定要花一次 LLM 调用,而一场没关的对话本来就还没讲完。
+        """
+        names, contacted = self._contact_snapshot()
+        folded = list(self.scheduler._memory_projection.relations)
+        seen = set(folded)
+        pairs = folded + [p for p in contacted if p not in seen]
+        rows = [
+            self._relationship_row(a, b, names, met=(a, b) in contacted)
+            for a, b in pairs
+            if (not agent_id or a == agent_id) and (not other_id or b == other_id)
+        ]
+        # 次序按 agent_id 断:没结算的那几行 sentiment 全是 0.0,只按分数排的话
+        # 同一个世界每次刷新给出的顺序都不一样 —— 名单跳来跳去和排错了一样难查。
+        rows.sort(key=lambda r: (-r["axes"]["sentiment"], r["agent_id"]))
+        return rows
+
+    def _has_contact(self, agent_id: str, player_id: str) -> bool:
+        """这一对说过话没有 —— 一整份名单那条路走 `_contact_snapshot()`。"""
+        store = getattr(self.scheduler, "contact_store", None)
+        if store is None:
+            return False
+        row = store.get(agent_id, player_id)
+        return isinstance(row, dict) and row.get("last_contact_tick") is not None
+
+    def _contact_snapshot(self) -> tuple[dict[str, str], dict[tuple[str, str], int]]:
+        """联系态读一遍,取两样:`player_id → 名字`,以及**说过话的每一对**。
+
+        **一个人在这张表上有好几行**(跟他来往过的每个角色一行),而人是会改名的 ——
+        所以挑的是**最近一次来往**那行上的名字。从前折叠用 `setdefault`,底下是
+        `HGETALL`:线上于是出现同一个玩家在「江晚怎么看你」那行叫 player-5688afd1、
+        在别处叫刘俊康,而哪个露面全看这次的哈希顺序。带 uuid 的人话和一个浮点数
+        一样不能给人看 —— 这条本来就写在 `_party_name` 的 docstring 里。
+
+        判据是 **`last_contact_tick` 在不在**,不是"这一行存不存在":`note_fired`
+        (她想起他了)也在这张表上写行,而那种行没有 `player_name` —— 拿它当
+        "说过话"会让一串 uuid 出现在玩家的关系屏上,正是上一段修掉的那个病。
+        """
+        store = getattr(self.scheduler, "contact_store", None)
+        if store is None:
+            return {}, {}
+        # 同一 tick 的两行按 agent_id 断,只为**同一个世界每次给同一个答案**:
+        # 一个随读取顺序变的名字和一个错的名字一样难查。
+        rows = sorted(
+            store.all(),
+            key=lambda row: (int(row.get("last_contact_tick") or 0),
+                             str(row.get("agent_id") or "")),
+        )
+        names: dict[str, str] = {}
+        contacted: dict[tuple[str, str], int] = {}
+        for row in rows:
+            aid, pid = row.get("agent_id"), row.get("player_id")
+            name, tick = row.get("player_name"), row.get("last_contact_tick")
+            if pid and name:
+                names[str(pid)] = str(name)
+            if aid and pid and tick is not None:
+                contacted[(str(aid), str(pid))] = int(tick)
+        return names, contacted
+
+    def _party_name(self, party_id: str, recorded: str = "",
+                    contact_names: dict[str, str] | None = None) -> str:
+        """一段关系的一头叫什么。**带 uuid 的人话和一个浮点数一样不能给人看。**
+
+        名册 → 在场玩家/联系态 → 事件上抄下来的那个名字 → id。事件那一格排在
+        后面是有意的:它是**那时候**的名字,而人是会改名的。
+        """
+        scheduler = self.scheduler
+        if party_id in getattr(scheduler, "agents", {}):
+            return scheduler.agent_display_name(party_id)
+        if contact_names is not None:
+            live = str((self.players.get(party_id) or {}).get("display_name") or "").strip()
+            name = live or contact_names.get(party_id, "")
+        else:
+            name = self._departed_player_name(party_id)
+        if name and name != party_id:
+            return name
+        return str(recorded or "").strip() or party_id
+
+    # 每档一句,主语是她。**档变了话没变的话,这一层等于把同一句话印给每一段
+    # 关系** —— 而那和一根进度条的区别只剩下它不显示数字。
+    _BAND_SENTENCES = (
+        "{a}把{b}当仇人",
+        "{a}对{b}存着芥蒂",
+        "{a}和{b}还谈不上什么交情",
+        "{a}把{b}当认识的人",
+        "{a}拿{b}当亲近的人",
+        "{a}把{b}当最要紧的那几个人之一",
+    )
+
+    def _relationship_sentence(
+        self, agent_name: str, other_name: str, index: int,
+        exists: bool, last: dict[str, Any] | None, *, r_type: str = "",
+        met: bool = False,
+    ) -> str:
+        """人话本身。**一个字的数字都不出现。**"""
+        if not exists:
+            if met:
+                # 不写"刚":判定可能几十个世界日都没跑过,而"刚"是个时间断言。
+                return f"{agent_name}和{other_name}说过话了 —— 这一趟来往还没在她心里落定。"
+            return f"{agent_name}还不认识{other_name} —— 两个人之间还没有来往。"
+        sentence = self._BAND_SENTENCES[index].format(a=agent_name, b=other_name)
+        # 作者/判定器给的关系名(「一起长大的邻居」)比引擎的六个档具体得多,
+        # 有就带上;`acquaintance` 是 `Relation` 的默认值,不是谁说过的话。
+        label = str(r_type or "").strip()
+        if label and label != "acquaintance":
+            sentence += f"(「{label}」)"
+        if not last:
+            return sentence + "。"
+        moved = {"up": "更近了一步", "down": "又远了一点"}.get(str(last.get("direction")))
+        if moved is None:
+            return sentence + "。"
+        tail = f";上一次两个人的来往让它{moved}"
+        if last.get("summary"):
+            tail += f" —— 那回是「{last['summary']}」"
+        return sentence + tail + "。"
 
     _world_lock: Any = None
     _durability_warning: str | None = None
@@ -3570,9 +4551,15 @@ class World:
                 "surfaces": list(spec.surfaces),
                 # 它把世界改在哪儿 —— 外面的进程不该靠猜
                 "writes": list(spec.writes),
+                # 这几项**不在 `act()` 那条调用栈上落地**(判定/叙事跑在别的线程上)。
+                # 只说"改哪儿"不说"什么时候",宿主会在返回的那一瞬间去查,
+                # 然后随机地读到一个还没变的世界 —— 而且不报错。
+                "writes_late": list(spec.writes_late),
                 # 它要不要玩家真的在她跟前。界面上这一格决定按钮什么时候可点 ——
                 # 点下去才发现的话,那是一次没有任何人预告过的失败。
                 "requires_colocation": spec.requires_colocation,
+                # 同一件事的另一半:手边得有一样能动的东西。
+                "requires_target_entity": spec.requires_target_entity,
             }
             for spec in specs
         ]
@@ -3600,23 +4587,23 @@ class World:
         "face_to_face": [角色 id]}], "unplaced"}`。`unplaced` 是**没有位置的玩家数**:
         它大于 0 而 `enforced` 为真,就是那道闸正在拒绝一批谁也帮不了的调用。
 
-        ⚠️ **玩家的位置是进程内的**(`World.players` 是刻意的内存态),而这一条要
-        当体检用 —— 所以名单从**落库的那份**(`contact` 表,她记下过"他上次出现")
-        补齐,位置从这个进程手上读。两者分开报,而且分得开:
+        ⚠️ **3.2.0 之前玩家的位置是进程内的**,这一段曾经写着"多进程 + 开这道闸的
+        部署要先把位置搬进共享存储"。**现在搬完了**(`RedisPlayerPresence`):位置与
+        在场落 `anima:{world_id}:player:{pid}`,带 TTL,重启与换进程都还在。
+        `location_source` 因此是 `"redis"` —— 那一格从前是**警告**(闸依赖的东西活不过
+        一次重启),现在只是元数据。
 
-        - `seen_before` 为真、`known` 为假 = **这个世界跟他打过交道,而这个进程
-          手上没有他的位置**。CLI 里这几乎一定就是全部 —— 一个新开的进程当然不知道
-          任何人在哪。
-        - 于是它同时暴露了一件必须知道的事:`presence.enforce_colocation` 依赖的是
-          **进程内**的位置。多进程宿主里 A 进程调了 `player_move`,B 进程照样认为
-          他不在场。多进程 + 开这道闸的部署要先把位置搬进共享存储 —— 这条写在
-          REFERENCE §2.9.9,不该由踩到的人自己发现。
+        名单仍然从**落库的那份**(`contact` 表,她记下过"他上次出现")补齐,因为
+        在场是带 TTL 的,而"这个世界跟他打过交道"没有 TTL。两者分开报,而且分得开:
+
+        - `seen_before` 为真、`known` 为假 = **这个世界跟他打过交道,而他这会儿
+          不在场**(走了,或者 TTL 过了)。
         """
         runtime = self._tool_runtime
         agents = {aid: runtime.agent_location(aid) for aid in self.scheduler.agents}
         present = set(self.who_is_present())
-        # 落库的那份名单:她记下过"他上次出现"的每一个人。**光看内存那份会撒谎** ——
-        # 一个新开的进程手上一个玩家都没有,而 CLI 恰恰永远是新开的进程。
+        # 落库的那份名单:她记下过"他上次出现"的每一个人。在场那份带 TTL,只回答
+        # "此刻谁在";打过交道的人不会因为下线就从体检里消失。
         seen: dict[str, str] = {}
         store = getattr(self.scheduler, "contact_store", None)
         if store is not None:
@@ -3653,9 +4640,9 @@ class World:
             })
         return {
             "enforced": bool(self.config_get("presence.enforce_colocation", False)),
-            # 这一格是**警告,不是元数据**:那道闸依赖的东西活不过一次重启,
-            # 也跨不过第二个进程。
-            "location_source": "process-memory",
+            # 3.2.0 起真的落库了。这一格留着是因为镜像端在读它 —— 换值比删格好:
+            # 删了对面读到缺键,而缺键在 JS 里是 undefined,不报错。
+            "location_source": "redis",
             "agents": agents,
             "players": rows,
             "unplaced": sum(1 for row in rows if not row["known"]),
@@ -3879,7 +4866,7 @@ class World:
         page = self.history(since_seq=since_seq, limit=limit, kind="agent_broadcast")
         return page["events"]
 
-    def player_move(self, player_id: str, location: str, *, role: str = "player") -> None:
+    def player_move(self, player_id: str, location: str, *, role: str = "") -> None:
         """玩家移动到某个 point 地点。未知地点抛 KeyError。"""
         location = location.strip()
         if not location:
@@ -3891,7 +4878,7 @@ class World:
         # 更新而不是整条替换:`display_name` 是 `chat()` 记进来的,而 CLI 每聊一轮
         # 都先调一次 player_move —— 整条替换会把名字冲掉,于是检索又退回不透明 id。
         self._touch_player(player_id, role=role, location=location)
-        self._player_transit.pop(player_id, None)  # 宿主把他放到哪就是哪,行程作废
+        self.presence_store.clear_transit(player_id)  # 宿主把他放到哪就是哪,行程作废
 
     def player_location(self, player_id: str) -> str:
         """玩家这会儿在哪。**在路上就还算在出发地**,到点了当场落地。
@@ -3903,9 +4890,9 @@ class World:
         没调过 `player_move` / `player_walk` 就是空串 = 不在场,引擎不猜
         (和 `face_to_face` 同一条规矩)。
         """
-        trip = self._player_transit.get(player_id)
+        trip = self.presence_store.get_transit(player_id)
         if trip is not None and int(self.scheduler.clock) >= int(trip["arrive_at"]):
-            self._player_transit.pop(player_id, None)
+            self.presence_store.clear_transit(player_id)
             self._touch_player(player_id, location=trip["to"])
             with self.scheduler._lock:
                 self._record_and_fan({
@@ -3918,14 +4905,31 @@ class World:
                         "player_id": player_id,
                     },
                 })
-        return str((self.players.get(player_id) or {}).get("location") or "")
+        return str((self.presence_store.get(player_id) or {}).get("location") or "")
 
     def player_in_transit(self, player_id: str) -> bool:
         """他还在路上吗。先结算一次 —— 否则一个已经到了的人会被报成还在赶路。"""
         self.player_location(player_id)
         return player_id in self._player_transit
 
-    def player_walk(self, player_id: str, location: str, *, role: str = "player") -> dict[str, Any]:
+    def _player_here(self, player_id: str) -> str:
+        """他此刻**站在**哪 —— 在路上就是空串,不是"还在出发地"。
+
+        和 `player_location()` 分工:那一条答的是"他属于哪儿"(`player_walk` 拿它
+        算路费、`_present_roster` 拿它排版,两处都**要**在途仍算出发地);这一条
+        答的是"他这会儿够得着什么"。`Scheduler._where_is` 是同一个答案的角色那一半,
+        它的注释早就把这条写死了 —— 「两处各写一遍的话,迟早一处认为在路上还算在
+        原地」。
+
+        而那件事真的发生了:能力那条路问的是 `_where_is`(在途 = 不在),买卖两条
+        路问的是 `player_location`(在途 = 还在店里),于是同一个人在同一时刻,
+        一扇门说他不在,另一扇门把货卖给了他 —— 他起步之后可以原地刷完全镇的货架,
+        而"走过去"那段路费正是这个世界让他掂量的东西。所以玩家这半边的答案也只准
+        有这一句,新开的门问它,别在门上再写一遍。
+        """
+        return "" if self.player_in_transit(player_id) else self.player_location(player_id)
+
+    def player_walk(self, player_id: str, location: str, *, role: str = "") -> dict[str, Any]:
         """人走过去 —— **和她走同一段路花一样的时间**。
 
         `player_move` 留着不动:那是宿主"把他放在这儿"(进世界、换场景),瞬时;
@@ -3946,13 +4950,13 @@ class World:
         origin = self.player_location(player_id)
         if not origin or origin == location:
             self._touch_player(player_id, role=role, location=location)
-            self._player_transit.pop(player_id, None)
+            self.presence_store.clear_transit(player_id)
             return {"in_transit": False, "location": location}
         minutes = self.scheduler._travel_minutes(origin, location)
         if minutes is None or minutes <= 0:
             # 量不出来的两点(没有地图)照旧瞬移 —— 与 `_start_journey` 同一条退路
             self._touch_player(player_id, role=role, location=location)
-            self._player_transit.pop(player_id, None)
+            self.presence_store.clear_transit(player_id)
             return {"in_transit": False, "location": location}
         mpt = max(1, int(self.scheduler._minutes_per_tick()))
         ticks = max(1, int(-(-minutes // mpt)))  # ceil,不引入 math 依赖
@@ -3978,19 +4982,77 @@ class World:
             "minutes": round(float(minutes), 1), "from": origin, "to": location,
         }
 
-    def player_tools(self) -> list[dict[str, Any]]:
+    def player_tools(self, player_id: str = "") -> list[dict[str, Any]]:
         """人在网页上点得动的那些。**和她那份出自同一个注册表** —— 宿主照这个
-        画按钮,不用自己维护一份会和引擎分叉的清单。"""
-        return [
-            {
+        画按钮,不用自己维护一份会和引擎分叉的清单。
+
+        两个前置条件都报出来:`requires_colocation` 是"得跟人在一块儿",
+        `requires_target_entity` 是"这儿得有样能动的东西"。少报一条,宿主就会
+        在一个空屋子里画一个点下去必然失败的按钮 —— 而失败的原因写在引擎里,
+        它那侧看不见。
+
+        **说明文字走 `player_description`**(声明里没写就回落 `description`)。
+        同一份声明有两个读者:她和一个人。写给她的那一半会指路指到「你此刻感觉到
+        的」那个提示词块上,而玩家那一侧根本没有那个东西 —— 于是那句话对一个人
+        等于没说。
+
+        给了 `player_id`,`interact` 的 `target` / `verb` 两个参数上会**多出一栏
+        `options`**(`{"value","label","available","reason","refusal",…}`),
+        来自 `player_options()`。不给的时候**一个字都不变** —— 老调用方照旧,
+        而那份也确实没有"此时此地"可言。
+        """
+        options: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        if str(player_id or "").strip():
+            options["interact"] = self._interact_options(player_id)
+        rows: list[dict[str, Any]] = []
+        for spec in tools_mod.tools_for("*", tools_mod.PLAYER):
+            schema = spec.params_schema
+            extra = options.get(spec.id)
+            if extra:
+                schema = {
+                    name: ({**meta, "options": extra[name]}
+                           if name in extra and isinstance(meta, dict) else meta)
+                    for name, meta in schema.items()
+                }
+            rows.append({
                 "id": spec.id,
                 "kind": spec.kind,
-                "description": spec.description,
-                "params_schema": spec.params_schema,
+                "description": spec.player_description or spec.description,
+                "params_schema": schema,
                 "requires_colocation": spec.requires_colocation,
-            }
-            for spec in tools_mod.tools_for("*", tools_mod.PLAYER)
-        ]
+                "requires_target_entity": spec.requires_target_entity,
+            })
+        return rows
+
+    def _interact_options(self, player_id: str) -> dict[str, list[dict[str, Any]]]:
+        """`interact` 那两个参数的选项。**摊平自 `player_options()`**,不另算一遍。
+
+        `verb` 那一栏按动词去重(同一个动词可能挂在这儿的好几样东西上),每条带
+        `targets` 说清它对哪几样东西成立 —— 少了这一格,宿主会把一个只对窗成立的
+        动词画在一棵树的旁边。
+        """
+        menu = self.player_options(player_id)
+        targets: list[dict[str, Any]] = []
+        verbs: dict[str, dict[str, Any]] = {}
+        for row in menu["targets"]:
+            usable = [v for v in row["verbs"] if v["available"]]
+            targets.append({
+                "value": row["id"], "label": row["name"], "gloss": row["gloss"],
+                "available": bool(usable),
+                "verbs": [v["verb"] for v in row["verbs"]],
+            })
+            for verb in row["verbs"]:
+                slot = verbs.setdefault(verb["verb"], {
+                    "value": verb["verb"], "label": verb["label"],
+                    "available": False, "reason": verb["reason"],
+                    "refusal": verb["refusal"], "targets": [],
+                    **({"participants": verb["participants"]}
+                       if "participants" in verb else {}),
+                })
+                slot["targets"].append(row["id"])
+                if verb["available"]:
+                    slot.update(available=True, reason="", refusal="")
+        return {"target": targets, "verb": list(verbs.values())}
 
     def player_tool(
         self, player_id: str, tool_id: str,
@@ -4028,8 +5090,134 @@ class World:
         NPC 会走去找一个断线三小时的人,并把一场没有人在的对话写进事件日志。
 
         他造成的**后果**(记忆、关系、图谱边、账本)留在世界里 —— 走的只是在场。
+        永久告别是另一件事,见 `forget_player`。
         """
-        self.players.pop(player_id, None)
+        self.presence_store.forget(player_id)
+
+    def forget_player(
+        self, player_id: str, *, reason: str = "", dry_run: bool = False
+    ) -> dict[str, Any]:
+        """**这个人离开了这个世界。** 和 `player_leave`(只是下线)不是一回事。
+
+        为什么需要它:线上跑了几周的世界里躺着一批早就注销的试玩账号 —— 而她们
+        和其中几个"有关系"。那些关系**占着她的联系配额和社交需求**:她会想起一个
+        永远不会再出现的人,而这一层每天能想起的人数是有上限的,占掉的那一格是从
+        别人那里挪走的。
+
+        **为什么这是一条事件而不是一次删除。** 关系不是一张表,是
+        `state_change/sentiment_delta` 折出来的投影;联系态、姿态、静音是世界自己
+        写的演化态。**手改一行演化态 = 伪造历史 = 投影和日志对不上,而且没有任何
+        地方会报错** —— 而这里更具体:直接删掉投影里那一行,下一次重放(换个进程、
+        重启一次、`catch_up_projection` 一次)会原样把它折回来,世界照跑、日志干净,
+        "她还惦记着一个不存在的人"这件事一天之内自己长回来。所以做法是往日志里
+        **追加一条事实**(`player_departed`),折叠端认它,于是"对账即重放"仍然成立。
+
+        **它不改历史。** 事件、记忆、转录、账本一个字不动 —— 她记得这个人来过。
+        走的是**朝前看**的那一半:关系、联系冷却、姿态、静音、回头找你的约、在场。
+
+        **关系有两份记法,两份都要走。** 投影里的 `relations` 是可变的数值,
+        `player_departed` 一折就没了;关系图上的 `edges` 是"这两人是朋友"这个
+        **事实**,住在自己的表里,而且**只增不减**(`add` 是 INSERT OR IGNORE)。
+        折叠端碰不到它 —— 于是告别之后那条 `friendship` 原样挂着,`compute_cliques`
+        照着它把一个已经清干净的幽灵算进她的小团体,`World.cliques()` 报得出一个
+        不存在的人,没有任何一处会报错。这里显式 `drop()`(那个原语本来就是为撤销
+        存在的,关系反转时一直在用),而这么做是安全的:边只在事件**当场落库**那条
+        路上写(`_apply_memory_trigger` → `_on_relation_shift`),重放不重建它,
+        所以撤掉就是撤掉,不会隔一次重启自己长回来。
+
+        返回一份回执(`{player_id, reason, relations, edges, contact, chat_state,
+        dry_run, seq}`)。`dry_run=True` 只数不写。幂等:第二次调返回全 0。
+        """
+        player_id = str(player_id or "").strip()
+        if not player_id:
+            raise ValueError("player_id is required")
+
+        scheduler = self.scheduler
+        # 先补上别的进程写的 —— 不补的话预览数出来的关系条数和真跑那次对不上,
+        # 而"先看一眼"正是这个参数存在的全部理由。
+        scheduler.catch_up_projection()
+        relations = sum(1 for key in scheduler._memory_projection.relations if player_id in key)
+        graph = getattr(scheduler, "knowledge_graph", None)
+        # **按整个节点比,别按子串。** `aubrey` 是 `aubrey-player` 的子串 ——
+        # 子串匹配会把另一个人的边一起撤掉,而两个人的名字长得像是常态。
+        node = f"agent:{player_id}"
+        edge_rows: list[dict[str, Any]] = []
+        if graph is not None:
+            edge_rows = [
+                row for row in graph.query()
+                if row.get("subject") == node or row.get("object") == node
+            ]
+        contact_store = getattr(scheduler, "contact_store", None)
+        contact_rows = 0
+        if contact_store is not None:
+            contact_rows = sum(
+                1 for row in contact_store.all() if row.get("player_id") == player_id
+            )
+        chat_state = getattr(scheduler, "chat_state_store", None) or getattr(
+            self, "chat_state", None
+        )
+
+        receipt: dict[str, Any] = {
+            "player_id": player_id,
+            "reason": reason,
+            "relations": relations,
+            "edges": len(edge_rows),
+            "contact": contact_rows,
+            "chat_state": 0,
+            "dry_run": bool(dry_run),
+            "seq": None,
+        }
+        if dry_run:
+            # 数一遍 chat_state 也要不写 —— 而那一层没有"只数"的原语,所以这里
+            # 给的是 None(说不出来就别猜一个数字出来)。
+            receipt["chat_state"] = None
+            return receipt
+
+        with self._guard():
+            scheduler.catch_up_projection()
+            # **先记事实,再清演化态。** 反过来的话,清到一半崩掉就留下一个
+            # 没有任何解释的世界 —— 而"为什么变成这样"必须在日志里查得到。
+            event = scheduler._record_and_deliver({
+                "type": "player_departed",
+                "who": None,
+                "payload": {
+                    "player_id": player_id,
+                    "player_name": self._departed_player_name(player_id),
+                    "reason": reason,
+                },
+            })
+            receipt["seq"] = (event or {}).get("seq")
+            if graph is not None:
+                # 拿锁之后重数一遍 —— 上面那次是给 dry_run 用的,而两次之间
+                # 别的进程可能又立了一条边。
+                dropped = 0
+                for row in graph.query():
+                    if row.get("subject") == node or row.get("object") == node:
+                        if graph.drop(row["subject"], row["predicate"], row["object"]):
+                            dropped += 1
+                receipt["edges"] = dropped
+            if contact_store is not None:
+                receipt["contact"] = contact_store.forget_player(player_id)
+            if chat_state is not None:
+                try:
+                    receipt["chat_state"] = chat_state.forget_player(player_id)
+                except NotImplementedError:
+                    receipt["chat_state"] = None
+            self.presence_store.forget(player_id)   # 在场与行程同住一行,一起走
+        return receipt
+
+    def _departed_player_name(self, player_id: str) -> str:
+        """他叫什么 —— 在场名册没了就问联系态那一层(它就是为这个记的名字)。"""
+        info = self.players.get(player_id) or {}
+        name = str(info.get("display_name") or "").strip()
+        if name:
+            return name
+        store = getattr(self.scheduler, "contact_store", None)
+        if store is not None:
+            for row in store.all():
+                if row.get("player_id") == player_id and row.get("player_name"):
+                    return str(row["player_name"])
+        return player_id
 
     def inbox(self, player_id: str, *, since_seq: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         """有谁来找过你 —— 角色主动搭话的收件箱(issue #13)。
@@ -4038,32 +5226,223 @@ class World:
         回话,世界里什么也没发生;真正的对话仍然由 `World.chat` 发起,走原来那条完整
         的链。这条边界是有意的 —— 否则你会看到"她来找过我",转头问她却毫无印象。
 
-        返回按 seq 升序;拿最后一条的 `seq` 当下次的 `since_seq` 就是增量拉取。
+        返回按 seq 升序。
+
+        ⚠️ **要增量拉取请用 `inbox_page()`。** 拿这一条的最后一条 `seq` 当下次的
+        `since_seq` 在热闹的世界里会**饿死**:一整窗都是别人的敲门时你拿到空 list,
+        没有"最后一条",游标一步都推不动,而他自己那条「她想你了」永远排在窗外。
         """
-        page = self.history(since_seq=since_seq, limit=limit, kind="agent_hail")
-        return [
-            event for event in page["events"]
-            if (event.get("payload") or {}).get("player_id") == player_id
-        ]
+        return self.inbox_page(player_id, since_seq=since_seq, limit=limit)["events"]
+
+    def inbox_page(
+        self, player_id: str | None, *, since_seq: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        """`inbox()` 的**带游标**版本 —— 增量拉取用这一条。
+
+        `{"events", "next_seq", "cursor", "scanned", "total"}`,每一格的语义与
+        `contact_requests_page()` 逐字相同(两扇门共用 `_filtered_page`)。
+        `player_id` 给 `None` 就是不过滤(运维/调试用)。
+        """
+        return self._filtered_page(
+            kind="agent_hail", player_id=player_id,
+            since_seq=since_seq, limit=limit,
+        )
+
+    @property
+    def player_ttl_seconds(self) -> float:
+        """一个玩家多久没动静就当他走了(墙钟秒)。**这就是 Redis 键上的 TTL。**
+
+        不要求宿主维护心跳(那会把契约面弄脏),任何一次交互都算"我还在"。
+        改它会当场重挂在场者的过期时间 —— 否则调小了对已经在场的人无效。
+        """
+        return self.presence_store.ttl_seconds
+
+    @player_ttl_seconds.setter
+    def player_ttl_seconds(self, value: float) -> None:
+        self.presence_store.ttl_seconds = float(value)
 
     def who_is_present(self) -> list[str]:
         """此刻真的在场的玩家 id(已过 TTL 的当作走了)。
 
-        `player_ttl_seconds` 是那道兜底闸:不要求宿主维护心跳(那会把契约面弄脏),
-        任何一次交互都算"我还在"。宿主没有显式 `player_leave` 也不会留下永久幽灵。
+        **判据只有一条:他那个键还在不在。** 过期由 Redis 自己做,这里不扫表、
+        不比 `last_seen` —— 两套过期规则迟早给出不同答案,而两边都不报错。
         """
-        cutoff = time.time() - self.player_ttl_seconds
-        return sorted(
-            pid for pid, info in self.players.items()
-            if float(info.get("last_seen", 0.0)) >= cutoff
-        )
+        return self.presence_store.ids()
 
     def _touch_player(self, player_id: str, **fields: Any) -> dict[str, Any]:
-        """记一次"这个玩家还在",顺便更新几个字段。所有玩家入口都过这里。"""
-        info = self.players.setdefault(player_id, {"role": "player", "location": None})
-        info.update(fields)
-        info["last_seen"] = time.time()
-        return info
+        """记一次"这个玩家还在",顺便更新几个字段。所有玩家入口都过这里。
+
+        **`role=""` 是"这一路不知道他是谁",不是"他叫 player"** —— 和读那一侧的
+        `_interlocutor_for` 逐字同构(`str(role or known.get("role") or "")`),
+        只是这里是写。从前几个入口的默认值都是字面量 `"player"` 并且无条件写下去,
+        于是"我知道他的身份是 player"和"我这条路上压根拿不到身份"变成同一件事:
+        玩家在门口填的「刚搬来的人」,走一步就被 `player_do_action` 的 walk 分支
+        (它没有 role 可传)冲成 `player`。而 `chat_service` 会把 `player` 当占位
+        身份**整段丢掉**,于是身份块里那句「（身份：刚搬来的人）」就此消失 ——
+        **占位身份的过滤器反过来把这次损坏藏住了**,线上照跑、日志一行不错。
+        """
+        if not str(fields.get("role") or "").strip():
+            fields.pop("role", None)
+        # 建行时那一格是**空的**,不是 `"player"` —— 建行的常常正是那些手上没有身份
+        # 的路(点一下"走"),而播一个字面量等于替它们答了"他叫 player"。它还有个
+        # 更实的后果:那一格一旦有值,聊天那条路从前的 `setdefault` 就永远不生效。
+        fresh = self.presence_store.create(
+            player_id, {"role": "", "location": None}
+        )
+        if fresh:
+            # 他身上声明过的量在这儿落地 —— 和角色走同一份(`register` 那条路),
+            # 只填缺不覆盖。这里是玩家侧唯一的窄口,和 `register` 的地位一样。
+            # 少了这一步,`requires: ["me_体力 >= 4"]` 对他恒不成立:世界里每一件
+            # 要力气的事他都做不了,而回执只说"你做不了",一个字不提原因。
+            self.scheduler.seed_actor_quantities(f"player:{player_id}")
+            self._grant_player_allowance(player_id)
+        self.presence_store.update(
+            player_id, {**fields, "last_seen": time.time()}
+        )
+        return self.players[player_id]
+
+    def _grant_player_allowance(self, player_id: str) -> None:
+        """他兜里的第一笔钱 —— 一辈子一次。
+
+        落成账本上一笔 `payment`,和别的钱走同一条路(账本是投影,对账 = 重放)。
+        **窄口只有一个**:补在"每次露面"上等于把余额补满,而补满了的钱包不构成
+        代价 —— 他永远不必掂量买哪一样,于是货架又成了摆设,只是换了个方向。
+
+        ⚠️ **那个"一次"记在账本上,不记在"在场"上。** 从前的判据是
+        `presence_store.create` 报的 `fresh`,而 3.2.0 把在场从进程内存搬进了带
+        TTL 的 Redis 键 —— 于是那句话的含义悄悄从"他这辈子头一回露面"变成了
+        "他这一刻钟里头一回露面":挂机十五分钟再回来就是又一笔,没有上限,而
+        账本、日志、屏幕上没有一处会说它不对。线上真的这样(晚潮的
+        `dogfood-2e7fbb4` 领了四次 60 块)。所以判据换成
+        `Projection.allowances` —— 那是全量重放折出来的,过不了期。
+
+        **要先补课再问**:别的进程刚发过的那一笔,不折过来就看不见,而这一层
+        正是多进程共用一个世界的地方。
+
+        给不出钱不该掀翻一次露面(没接经济层的世界、没有事件日志的世界):
+        这是一份见面礼,不是一道闸。
+        """
+        from anima_world import economy
+
+        store = self.scheduler.config_store
+        if store is None or self.scheduler.event_log is None:
+            return
+        try:
+            amount = float(store.get("economy.player_allowance", default=0.0) or 0.0)
+        except (TypeError, ValueError):
+            return
+        if amount <= 0:
+            return
+        holder = f"player:{player_id}"
+        self.scheduler.catch_up_projection()
+        if holder in self.scheduler._memory_projection.allowances:
+            return
+        self._record_and_fan({
+            "type": "payment", "who": holder,
+            "payload": {"from": economy.TOWN, "to": holder,
+                        "amount": amount, "reason": "allowance"},
+        })
+
+    def _present_roster(self) -> dict[str, dict[str, Any]]:
+        """在场玩家名册 —— 世界那一侧问"人在哪"时读的就是这一份。
+
+        **先把到站的人放下。** 玩家没有 `_land_arrivals` 替他落地(`player_location`
+        是读到才算),而这份名册回答的正是"他这会儿在哪":不结算的话,一个早就到了
+        的人在世界眼里还站在出发地,一直站到他下次自己开口。
+
+        `in_transit` 单列一栏而不是把位置抹成空串:调用方要分得开"他在路上"和
+        "世界不知道他在哪"—— 拒绝那句话里说的就是这个差别。
+
+        在路上时**还带一格 `transit`**(去哪、还有多少世界分钟),和角色那一半的
+        `activity.transit` 同形同源(`_transit_view`)。只给布尔的话,界面说得出
+        「在路上」却说不出去哪、还有多久 —— 而时间是第三种代价,只有看得见才咬得
+        住人;何况这两半本来就该长一样,`state()` 会把它们并排摆出去。
+        """
+        roster: dict[str, dict[str, Any]] = {}
+        for pid in self.who_is_present():
+            location = self.player_location(pid)   # 到站就落地,顺带补 location_join
+            trip = self._player_transit.get(pid)
+            row = {
+                **(self.presence_store.get(pid) or {}),
+                "location": location,
+                "in_transit": trip is not None,
+            }
+            if trip is not None:
+                row["transit"] = _transit_view(self.scheduler, trip)
+            roster[pid] = row
+        return roster
+
+    # 一个世界日里"一小时"是多少 tick —— `player_doing` 的说话窗口(见那条 docstring)。
+    _CHAT_IS_STILL_ON_MINUTES = 60
+
+    # 空菜单的那三个原因,写给人看的那一份(`player_options` 的 `blocked_text`)。
+    # **每加一个枚举就得在这儿加一句**,`test_每一个挡住的理由都配了一句话` 对着
+    # 这张表逐格点名 —— 忘了配话的那天没有任何一处会报错,只有玩家屏幕上多出一个
+    # 英文标识符。每一句都要说得出**他下一步该干什么**:「你做不了」教不会他任何事。
+    _BLOCKED_WORDS = {
+        "unknown_player_location": "你还没落个脚 —— 先挑个地方站过去,才谈得上做什么",
+        "in_transit": "你在路上 —— 到了地方就能动手了",
+        "no_ontology": "这个世界还没摆出什么摸得着的东西 —— 先找个人说说话吧",
+    }
+
+    # 货架为什么空,写给人看的那一份(`player_shop` 的 `note`)。和上面那张表
+    # 同一条纪律:**每加一个枚举就得在这儿加一句**,`test_货架空着的每个理由都配了
+    # 一句话` 逐格点名。三个理由长得一模一样(`shelf: []`),而玩家的下一步完全不同。
+    _SHOP_WORDS = {
+        "unknown_player_location": "你还没落个脚 —— 先挑个地方站过去,才看得到人家卖什么",
+        "in_transit": "你还在路上 —— 到了再看",
+        "no_shop_here": "这儿没有卖东西的 —— 换个地方逛逛",
+    }
+
+    def player_doing(self, player_id: str) -> str:
+        """他此刻在做的那件事(`walk` / `interact` / `chat`),什么也没做就是 `""`。
+
+        **这是"人也是世界里的人"的最后一格。** 她身上的量由行为树驱动:
+        `scheduler._current_action` 记着她此刻在做什么,世界的规律里
+        `{"action": "chat"}` 这类选择器读的就是它。而人没有行为树 —— 于是这张表里
+        **从来没有过一个人**,`{"action": …}` 那半边规律对他整个缺席:线上那个世界
+        21 个角色的「随和」「手艺」「嗓子」每 tick 都在动,而每一个玩家的这三个量
+        停在他进世界那一 tick 的默认值上,一动不动。日志干净、面板照画 ——
+        照跑,但给错东西。反过来 `{"not_action": …}` 却算得到他(它是"所有角色"减去
+        "正在做这件事的"),所以本该互补的两半对人是**单边**的:他只吃得到往下拖的
+        那一条,吃不到往上走的那一条。
+
+        **派生,不存储。** 三个来源都是真的、当下的状态,所以没有第二份真相要维护、
+        也没有会过期的账:占着他的那件长过程(`:engaged`)、他在不在路上、以及他
+        上一次开口离现在多久。存一份"他上次说他在做什么"的话,一个关掉浏览器的人
+        会在世界里永远地走下去。
+
+        优先级是**约束由强到弱**:占用 > 赶路 > 说话 —— 和拒绝那三类的排法同一条。
+        赶路时他仍然说得上话(`_PLAYER_TRANSIT_OK`),但那会儿他主要在赶路,
+        不是坐下来聊天。
+        """
+        pid = str(player_id or "").strip()
+        if not pid:
+            return ""
+        prefix = self.scheduler.PLAYER_PREFIX
+        if self.scheduler._occupying(f"{prefix}{pid}") is not None:
+            return "interact"
+        if self.player_in_transit(pid):
+            return "walk"
+        spoke = self._player_chat_tick.get(pid)
+        if spoke is None:
+            return ""
+        minutes = max(1, int(self.scheduler._minutes_per_tick()))
+        window = max(1, round(self._CHAT_IS_STILL_ON_MINUTES / minutes))
+        return "chat" if int(self.scheduler.clock) - int(spoke) <= window else ""
+
+    def _players_doing_now(self) -> dict[str, str]:
+        """在场的人此刻各自在做什么 —— scheduler 每 tick 问一次的那份。
+
+        只报做着事的人:空串在 `_agents_doing` 那侧没有意义,而一个"什么也没做"
+        的条目会让 `not_action` 那半边多绕一次。
+        """
+        doing: dict[str, str] = {}
+        for pid in self.who_is_present():
+            kind = self.player_doing(pid)
+            if kind:
+                doing[pid] = kind
+        return doing
 
     def player_action(
         self,
@@ -4071,7 +5450,7 @@ class World:
         action: str,
         details: dict[str, Any] | None = None,
         *,
-        role: str = "player",
+        role: str = "",
     ) -> None:
         """玩家动作,落一条 player_action 事件。"""
         action = action.strip()
@@ -4083,7 +5462,9 @@ class World:
                 "type": "player_action",
                 "who": f"player:{player_id}",
                 "player_id": player_id,
-                "role": role,
+                # 这一路没给身份就写世界记着的那个,别把事件里的 role 记成空 ——
+                # 事件是不可改的历史,写空了以后谁都补不回来。
+                "role": role or str(player.get("role") or ""),
                 "loc": player.get("location"),
                 "action": action,
                 "details": dict(details or {}),
@@ -4148,34 +5529,75 @@ class World:
             self.scheduler.checkpoint()  # 交互即检查点
         return self.balance(holder)
 
+    @staticmethod
+    def _money(amount: float) -> str:
+        return f"¥{amount:.2f}".rstrip("0").rstrip(".")
+
+    def _too_poor(self, wallet: float, price: float) -> str:
+        """钱不够那句话。**说得出还差多少** —— 「买不起」教不会他任何事,
+        「还差 ¥0.85」他知道自己要先去挣或者先去卖点什么。
+
+        灰按钮上印的那句和真按下去被拒的那句**共用这一个函数**:另写一遍的话,
+        两句迟早分叉,而分叉的方向必然是屏幕上那句更好看。
+        """
+        return (f"你带的钱不够:要{self._money(price)},"
+                f"你有{self._money(wallet)} —— 还差{self._money(price - wallet)}")
+
     def player_buy(self, player_id: str, location_id: str, item_id: str) -> dict[str, Any]:
-        """玩家买货:钱包扣款、货架减一,payment + item_transfer 事件入账本。"""
+        """玩家买货:钱包扣款、货架减一,payment + item_transfer 事件入账本。
+
+        **人得站在那儿。** 和能力调用上那道 `absent` 闸是同一条:一次交易是
+        一个人、一个地方、一个瞬间。放开的话玩家在渡口就能刷光全镇的货架,
+        而"走过去"本身是这个世界里的一段代价。拒绝**两头都说** —— 只说
+        "它在铁匠巷"会读成一句谎,真正的原因可能是世界压根不知道他在哪。
+
+        ⚠️ **玩家读得到的拒绝,不许坐 `KeyError` 这班车。** `KeyError.__str__` 是
+        `repr(args[0])` —— 全 Python 独此一家。世界壳照规矩 `str(exc)` 原样传、
+        一个字没改,而玩家屏幕上出现的是 `'小念咖啡车没有一杯拿铁了'`,**带着
+        一对单引号**;线上真的这样。所以这条路上只有两种车:走不通
+        (`LookupError` —— 你不在这儿 / 这儿没有 / 世界还不认识你)与钱不够
+        (`ValueError`),两种的下一步不一样,而两种都说人话。
+        """
         from anima_world import economy
 
         if self.scheduler.event_log is None:
             raise ValueError("economy needs a persistent world")
         player = self.players.get(player_id)
         if player is None:
-            raise KeyError(f"player {player_id} not present")
+            raise LookupError("世界还不认识你 —— 先在一个地方落个脚")
         store = self.scheduler.economy_store
         if store is None:
             raise ValueError("economy needs a persistent world")
+        if self.player_in_transit(player_id):
+            raise LookupError("你还在路上 —— 等走到了再买")
+        here = self._player_here(player_id)
+        if not here:
+            raise LookupError("世界还不知道你在哪 —— 先走到卖它的地方去")
+        if here != location_id:
+            raise LookupError(
+                f"你不在「{self._location_display_name(location_id)}」 —— "
+                f"你在「{self._location_display_name(here)}」"
+            )
         with self.scheduler._lock:
             shelf = next(
                 (r for r in store.shelves()
                  if r["location_id"] == location_id and r["item_id"] == item_id),
                 None,
             )
+            sold_out = (
+                f"「{self._location_display_name(location_id)}」没有"
+                f"「{self.scheduler.item_name_of(item_id) or item_id}」了"
+            )
             if shelf is None or int(shelf.get("quantity") or 0) <= 0:
-                raise KeyError(f"{location_id} 没有 {item_id} 的货")
+                raise LookupError(sold_out)
             price = float(shelf["price"])
             holder = f"player:{player_id}"
             # 门禁读账本,不读内存 —— 那两个数此前会分叉(见 player_topup)。
             wallet = float(self.scheduler._memory_projection.balances.get(holder, 0.0))
             if wallet < price:
-                raise ValueError(f"钱包不够:{wallet} < {price}")
+                raise ValueError(self._too_poor(wallet, price))
             if not store.take_stock(location_id, item_id):
-                raise KeyError(f"{location_id} 没有 {item_id} 的货")
+                raise LookupError(sold_out)
             self.scheduler._shop_sales[(location_id, item_id)] = (
                 self.scheduler._shop_sales.get((location_id, item_id), 0) + 1
             )
@@ -4191,6 +5613,88 @@ class World:
             })
             self.scheduler.checkpoint()  # 交互即检查点
         return {"item_id": item_id, "price": price, "wallet": self.balance(holder)}
+
+    def player_shop(self, player_id: str) -> dict[str, Any]:
+        """他脚下这地儿卖什么、他有多少钱、他带着什么 —— **一屏**。
+
+        `shop()` / `balance()` / `inventory()` 三个门早就都在,而上一轮真人试玩里
+        整套经济仍然对玩家隐形:世界壳一条也没接。三个门拼一屏这件事每个宿主都要
+        做一遍,而做漏的样子是安静的 —— 拼不出"这个按钮为什么是灰的",宿主就干脆
+        不画按钮。所以拼装归引擎(和 `player_options` 同一个理由、同一个形状)。
+
+        每一行的判据和 `player_options` **逐字同构**:`available` + 分得开的
+        `reason` + 一句引擎已经写成人话的 `refusal`。两类拒绝一个都不许合并 ——
+        `broke` 是"再去挣点"、`sold_out` 是"改天再来",而合成一句"现在不能",
+        玩家会挨样点过去,每一样都告诉他同一句废话。
+
+        名字一律人话:`item_id` / `location_id` 印给玩家是这个仓库反复修的那类
+        bug(引擎的词汇漏进他读到的那句话)。id 照旧带着 —— 那是他点下去要回传的
+        东西,不是给他看的。
+
+        世界不知道他在哪就没有货架(`location: ""`),不是一个空店铺:那两件事
+        玩家的下一步完全不同。**在路上也没有货架** —— 位置从 `_player_here` 问,
+        不从 `player_location`(后者在途仍答出发地);从前这一屏会一边写着
+        `in_transit: true`、一边把他刚走开的那家店的货**整架摆出来还标着可买**,
+        一屏之内自相矛盾,而 `player_buy` 那头真的卖给他。
+
+        **空货架为什么空,由引擎说成人话**(`empty` 枚举 + `note`),和
+        `player_options` 的 `blocked` / `blocked_text` 逐字同构。三件事在数据上
+        长得一模一样(`shelf: []`),而玩家的下一步完全不同:在路上要等、没落脚
+        要先站过去、这儿本来就不卖东西要换个地方。从前这三句归宿主自己拼 ——
+        拼漏的那个宿主给玩家的就是一块什么也没写的空板子,而**世界照跑、日志干净**。
+        """
+        self._touch_player(player_id)
+        holder = f"player:{player_id}"
+        in_transit = self.player_in_transit(player_id)   # 顺带结算到达
+        here = self._player_here(player_id)
+        wallet = self.balance(holder)
+        store = self.scheduler.economy_store
+
+        shelf: list[dict[str, Any]] = []
+        for row in (self.shop(here) if here else []):
+            price, quantity = float(row["price"]), int(row["quantity"])
+            if quantity <= 0:
+                reason, refusal = "sold_out", "卖完了,改天再来"
+            elif wallet < price:
+                reason, refusal = "broke", self._too_poor(wallet, price)
+            else:
+                reason, refusal = "", ""
+            shelf.append({
+                **row,
+                "name": row.get("name") or row["item_id"],
+                "available": not reason,
+                "reason": reason,
+                "refusal": refusal,
+            })
+
+        names: dict[str, str] = {}
+        if store is not None:
+            names = {str(r["id"]): str(r.get("name") or r["id"]) for r in store.items()}
+        carrying = [
+            {"item_id": item_id, "name": names.get(item_id, item_id), "quantity": int(qty)}
+            for item_id, qty in sorted(self.inventory(holder).items())
+            if int(qty) > 0
+        ]
+        if shelf:
+            empty = ""
+        elif in_transit:
+            empty = "in_transit"
+        elif not here:
+            empty = "unknown_player_location"
+        else:
+            empty = "no_shop_here"
+        return {
+            "location": here,
+            "location_name": self._location_display_name(here) if here else "",
+            # 「他在路上」和「世界不知道他在哪」分得开 —— 两边 `location` 都是空的,
+            # 而前者是"再等等",后者是"你还没走过路"。
+            "in_transit": in_transit,
+            "balance": wallet,
+            "shelf": shelf,
+            "carrying": carrying,
+            "empty": empty,
+            "note": self._SHOP_WORDS.get(empty, ""),
+        }
 
     # ── 配置与提示词 ────────────────────────────────────────────────────────
 
@@ -4282,12 +5786,40 @@ class World:
             )
         return name
 
+    def _players_here(self, location: str, *, exclude: str = "") -> list[str]:
+        """和这个地方同处一室的**别的玩家**该怎么称呼。
+
+        在场块的 `others` 从前只从 `scheduler.agents` 里拼,于是一个三个人的房间
+        在她眼里只有一个人。这不是少了行装饰:她会当着另外两位的面说只该对你说的
+        话,而世界里明明写着他们在场 —— 照跑,给错东西。
+
+        两条边界:
+        - **排除正在跟她说话的那一位**。身份块已经单独讲过他(「X 和你都在……,
+          因此这是面对面交谈」),再进 `others` 就会被补上一句"他只是同场角色,
+          不是正在和你说话的人",同一段提示词里自相矛盾。
+        - **在途不算在场**,和角色那半同一条规矩(`_agent_locations` 跳 `_transit`)。
+
+        没报过名字的用 `访客`,不是他的 id —— 她读到什么就说什么(`_place_name`
+        那一课),把一个 uuid 放进提示词就是让她把 uuid 念出口。
+        """
+        out: list[str] = []
+        for pid, info in self._present_roster().items():
+            if pid == exclude or info.get("in_transit"):
+                continue
+            if str(info.get("location") or "") != location:
+                continue
+            out.append(str(info.get("display_name") or chat_service_mod.DEFAULT_ADDRESS))
+        return out
+
     def world_context(self, agent_id: str, interlocutor_id: str) -> dict[str, Any]:
         """chat-grounding:锁内一次快照角色的 lived state(只读,无 LLM 无 IO)。"""
         from anima_world.memory_triggers import BAND_NAMES, band
 
         scheduler = self.scheduler
         config_store = scheduler.config_store
+        # 在场玩家的行程先结算 —— **在快照之前**,因为结算会补发 `location_join`,
+        # 而下面那一段说好了是只读的(`_present_roster` 的长注释)。
+        self._present_roster()
         with scheduler._lock:
             brain = scheduler.agents.get(agent_id)
             if brain is None:
@@ -4342,14 +5874,39 @@ class World:
                 for aid, loc in scheduler._agent_locations().items()
                 if loc == loc_id and aid != agent_id
             ]
+            others += self._players_here(loc_id, exclude=interlocutor_id)
+            # **她去得了哪儿,得由世界告诉她。** `walk` 的 `location` 是必填,而在这
+            # 之前整份提示词里没有一处列过这个世界有哪些地方 —— 她于是只能编一个
+            # (线上现场:「回声后面有个小阁楼」,而世界里没有这个地方),然后整件事
+            # 退回散文,连一次被拒绝的记录都不留。给了必填参数却不给取值范围,是这一轮
+            # 反复撞见的那条缝的又一处。
+            #
+            # ⚠️ 这个洞被**引擎自带的那份 world.setting** 盖了很久:它手写着"街区只有
+            # 三个地方——咖啡店(cafe)、建筑工作室(workshop)、以及一间用来画画的家
+            # (home)",于是演示世界和整套测试都读得到清单。作者一换掉 setting(真世界
+            # 都会换)清单就没了。而那句手写的话本身也是一颗雷:谁给这个世界加第四个
+            # 地点,它就当场变成一句谎,且不报错。
+            #
+            # 名字够了,不带 id:`walk` / `walk_away` 现在都收人话(`resolve_location`)。
+            # 这一行按世界的规模封顶,不随时间涨 —— 和有界性那条对得上。走
+            # `point_names()` 而不是自己遍历地图:她读到的清单和工具认的那份必须是
+            # 同一份,各写一遍就迟早只有一半跟着代码走(#20 那条判据的另一面)。
+            names = self._tool_runtime.point_names()
+            places = places_menu(names, with_ids=False) if names else ""
             ctx["presence"] = {
                 "day": now.day, "hh": f"{now.hour:02d}", "mm": f"{now.minute:02d}",
                 "location_id": loc_id, "location": loc_name, "activity": label,
                 "others": "、".join(others),
+                "places": places,
                 # 在途不算在场。黑板的 `loc` 要落地才改写,途中读出来仍是出发地
                 # —— `_agent_locations()` 跳过 `_transit` 就是在补这个洞,只比
                 # 地点的话,一个正在赶路的人会被判成和你面对面。
                 "in_transit": agent_id in scheduler._transit,
+                # 她最近一次走完的那段路是从哪儿出发的(没走过就是空)。**这一层只
+                # 给事实,"要不要说出来"归 chat_service** —— 它那边才知道对方此刻
+                # 在哪,而这句话只有在"他还站在你刚离开的那个地方"时才成立。
+                "came_from": str(
+                    (scheduler._last_arrival.get(agent_id) or {}).get("from") or ""),
             }
             rel = scheduler._memory_projection.relations.get((agent_id, interlocutor_id))
             if rel is not None:
@@ -4392,6 +5949,195 @@ class World:
         """
         perceived = self._perceive(agent_id, self._tool_runtime.agent_location(agent_id))
         return {} if perceived is None else perceived.to_dict()
+
+    def player_perception(self, player_id: str) -> dict[str, Any]:
+        """人此刻感知到什么 —— **和她那份走的是同一个函数、同一套声明**。
+
+        这是 `interact` 开给玩家之后的另一半:给了动词却不给"这儿有什么、它能被
+        怎么做",宿主只能自己拿 `entities()` 和 `kinds()` 去拼一份能力表 ——
+        而拼错了不报错,按钮点下去才发现世界不认(`ontology --check` 那一课)。
+        `verbs` 里那几个词就是 `player_tool("interact", …)` 的 `verb` 收的东西。
+
+        他身上的量也照同一份可见性声明来:`self` 只有他自己看得见、`here` 同屋的
+        人都看得见 —— 玩家不是第二套可见性,是同一套里的另一个人。
+
+        在路上 = 不在任何地方(`_player_here`),于是 `here` 那一档什么也照不见,
+        `self` 那一档照旧 —— 赶路的人仍然知道自己累不累,但看不见他已经走开的
+        那间屋里有什么。
+        """
+        perceived = self._perceive(
+            f"{Scheduler.PLAYER_PREFIX}{player_id}", self._player_here(player_id)
+        )
+        return {} if perceived is None else perceived.to_dict()
+
+    def player_options(self, player_id: str) -> dict[str, Any]:
+        """**这个人此时此地点得动什么** —— 一份可以直接渲染成按钮的菜单。
+
+        `player_perception()` 答的是"这儿有什么、它能被怎么做";这一条再往前走
+        一步,答"**这会儿点得动吗、点不动是为什么**"。缺了后半句,宿主只能把每个
+        动词都画成一个按钮,让人一个个点过去试 —— 而每一次失败的原因都写在引擎里。
+
+        三条,每条都对着一种"能跑但给错东西":
+
+        1. **不新造第二套真相。** 这儿有什么走 `player_perception`(所以可见性、
+           budget、`overflow` 一条都不绕过),能被怎么做走 `Ontology`,成不成走
+           `Scheduler.perform_affordance(dry_run=True)` —— **和真点下去那一次是
+           同一个函数**。另写一份"看上去差不多"的判定,下场是菜单说得动、点下去
+           世界不认,两边都不报错。
+        2. **四类拒绝一个都不合并**(`reason` 逐字来自那条真路):`conditions`
+           该等一会儿、`incapable` 该先去补足、`busy` 该等手上这件做完、剩下那摞
+           是讲不通的调用。合成一句"现在不能",一个累坏了的人会挨扇窗点过去。
+        3. **一个字节都不写**。它每一帧都要被渲染一次。
+        4. **代价说在按下去之前**(`cost`)。四类拒绝管的是"点不动的时候为什么",
+           而一个把人锁住一小时的按钮**是点得动的** —— 它和一个瞬间完成的按钮
+           长得一模一样,玩家点完才在下一次拒绝里知道自己被占住了。
+
+        5. **量也要翻。** 这一屏上其余每一个名字都翻过了(东西的 `name`、那行
+           `gloss`、动词的 `label`、拒绝、代价),只有 `quantities` 把内部键和裸
+           数字原样递出去 —— 而宿主没有别的东西可印,于是屏上写着「今日短语
+           phrase_age 3」,作者明明写了 `label` 和 `unit`。`bands` 更要紧:她读到
+           「雨势 瓢泼大雨」而玩家读到 `雨势 0.82`,同一个世界的同一个量,两个人
+           看见两种东西。措辞走 `perception.readouts` —— **和她那行提示词同一个
+           函数**,各写一遍必然分叉而且不报错。
+
+        形状:`{"player_id", "location", "location_name", "blocked", "overflow",
+        "own": {"quantities", "readouts"},
+        "targets": [{"id","name","gloss","kind","quantities","readouts",
+        "verbs":[{"verb","label","available","reason","refusal","cost",
+        "participants","candidates"}]}]}`,
+        `readouts` 每行是 `{"key","label","value","word","unit","text"}` ——
+        **`quantities` 那份键与数字仍是契约,`readouts` 是加上去的**(宿主要自己
+        排版就拿分开的几格,不想排版就印 `text`)。
+
+        `blocked` 是**空菜单的原因**,不是一句沉默:`unknown_player_location`
+        (宿主没调过 `player_move` —— 玩家做什么都改不了)、`in_transit`
+        (他在路上)、`no_ontology`(这个世界没声明过东西)。空表加一句沉默读起来
+        像"这儿什么也没有",而那是三件完全不同的事(和 `presence` 那条同一课)。
+        **`blocked_text` 是同一件事写给人看的那一份**,和每个动词那对
+        `reason`(枚举)+ `refusal`(人话)逐字同构 —— 理由也是同一条:这句话没有
+        主人的话,每个宿主自己译一遍,而译漏的那个会把 `in_transit` 四个字母原样
+        印在玩家脸上。线上真的这样,还是在两块并排的面板上:货架那块自己写了
+        「你还在路上 —— 到了再看」,能力那块印的是 `in_transit`。
+        """
+        pid = str(player_id or "").strip()
+        blank: dict[str, Any] = {
+            "player_id": pid, "location": "", "location_name": "",
+            "blocked": "", "blocked_text": "", "overflow": 0, "targets": [],
+            # 三条 `blocked` 的早退路径也带上这一格:形状随情况变的话,宿主要么
+            # 每处写一遍 `?.`,要么在"他还在路上"那一帧崩掉。
+            "own": {"quantities": {}, "readouts": []},
+        }
+
+        def blocked(reason: str) -> dict[str, Any]:
+            blank["blocked"] = reason
+            blank["blocked_text"] = self._BLOCKED_WORDS[reason]
+            return blank
+
+        if not pid:
+            return blocked("unknown_player_location")
+        if self.player_in_transit(pid):
+            # 在途不是"还在出发地":算成出发地的话,他一边在路上一边擦着咖啡店
+            # 的窗 —— 和 `perform_affordance` 的 `_where_is` 同一条。
+            return blocked("in_transit")
+        here = self._player_here(pid)
+        if not here:
+            return blocked("unknown_player_location")
+        blank["location"] = here
+        blank["location_name"] = self.scheduler.place_name(here) or here
+
+        ontology = self.scheduler.ontology
+        if ontology is None:
+            return blocked("no_ontology")
+
+        seen = self.player_perception(pid)
+        blank["overflow"] = int(seen.get("overflow") or 0)
+        actor = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        # 一起做事的候选人:这儿站着的角色。**说不出"跟谁"的话,那个按钮点下去
+        # 必然失败**,而失败的原因(得有人一起)本来在声明里写着。
+        candidates = [
+            {"id": aid, "name": self.scheduler.agent_display_name(aid)}
+            for aid in sorted(self.scheduler.agents)
+            if self.scheduler._where_is(aid) == here
+        ]
+
+        targets: list[dict[str, Any]] = []
+        for owner, values in sorted((seen.get("here") or {}).items()):
+            entity = ontology.entities.get(owner)
+            if entity is None:
+                continue   # 角色、货架之类不是"能被做点什么"的东西
+            kind = ontology.kinds.get(entity.kind)
+            if kind is None or not kind.affordances:
+                continue
+            rows: list[dict[str, Any]] = []
+            for affordance in kind.affordances.values():
+                out = self.scheduler.perform_affordance(
+                    actor, owner, affordance.verb, dry_run=True
+                )
+                row: dict[str, Any] = {
+                    "verb": affordance.verb,
+                    "label": affordance.label or affordance.verb,
+                    "available": bool(out.get("ok")),
+                    "reason": "" if out.get("ok") else str(out.get("reason") or ""),
+                    "refusal": "" if out.get("ok") else str(out.get("refusal") or ""),
+                    "cost": self._affordance_cost(affordance),
+                }
+                if affordance.participants is not None:
+                    row["participants"] = {
+                        "min": affordance.participants.minimum,
+                        "max": affordance.participants.maximum,
+                    }
+                    row["candidates"] = list(candidates)
+                rows.append(row)
+            targets.append({
+                "id": owner,
+                "name": (seen.get("names") or {}).get(owner) or entity.name or owner,
+                "gloss": (seen.get("glosses") or {}).get(owner, ""),
+                "kind": entity.kind,
+                "quantities": dict(values),
+                "readouts": perception_mod.readouts(
+                    values,
+                    ((seen.get("words") or {}).get("here") or {}).get(owner, {}),
+                    (seen.get("units") or {}).get(owner, {}),
+                    ((seen.get("labels") or {}).get("here") or {}).get(owner, {}),
+                ),
+                "verbs": rows,
+            })
+        blank["targets"] = targets
+        own_values = dict(seen.get("own") or {})
+        blank["own"] = {
+            "quantities": own_values,
+            "readouts": perception_mod.readouts(
+                own_values,
+                (seen.get("words") or {}).get("own") or {},
+                seen.get("own_units") or {},
+                (seen.get("labels") or {}).get("own") or {},
+            ),
+        }
+        return blank
+
+    def _affordance_cost(self, affordance: Any) -> str:
+        """**按下去之前**要知道的那句话:这件事要花多久、期间还能不能干别的。
+        一下子就完的事回空串。
+
+        试玩现场:玩家点了「重描一遍」,按钮亮着、点下去成了,接下来一小时的世界
+        时间里他点什么都只得到「你手上还有一件事没做完」。那句拒绝本身没错(第四类
+        `busy`),错的是**它来晚了** —— 一个把人锁住一小时的按钮,在按下去之前和一个
+        瞬间完成的按钮长得一模一样。`duration` 那一格自己的注释里已经写着同一条理由:
+        付了十个月再被拒掉,她没有任何办法预防,而预防不了的代价教不会任何人任何事。
+
+        **只说时间。** 量和材料的代价不写在这儿,因为它们已经有一条更好的路:
+        不够的时候 `incapable` 会当场点名差什么;而时间不一样 —— 时间**总是**够,
+        于是永远不会有人拦住他。
+
+        写在引擎是因为 `duration` / `occupies` 住在本体声明里,而宿主从来看不见
+        本体。措辞归引擎、宿主原样显示,和四类拒绝那条同一条纪律。
+        """
+        span = self.scheduler.human_span(int(getattr(affordance, "duration", 0) or 0))
+        if not span:
+            return ""
+        if getattr(affordance, "occupies", True):
+            return f"要花 {span},这期间做不了别的"
+        return f"要花 {span}"
 
 
 def _intent_step(meta: dict[str, Any]) -> dict[str, Any]:

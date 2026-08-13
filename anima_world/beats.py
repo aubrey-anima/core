@@ -296,6 +296,12 @@ def _validate_agent_bundle(bundle: Any, label: str) -> list[str]:
                     errors.append(f"{mem_label}: needs a string 'summary'")
                 else:
                     errors.extend(_validate_memory_fields(mem, mem_label))
+    # 角色卡走**和作者层同一份判断**(`character_card.card_errors`):中途入场的人
+    # 一样要出现在玩家的通讯录里,而两份判断迟早给出不同答案。
+    if "card" in bundle:
+        from anima_world.character_card import card_errors
+
+        errors.extend(card_errors(bundle.get("card"), label=f"{label}.agent"))
     return errors
 
 

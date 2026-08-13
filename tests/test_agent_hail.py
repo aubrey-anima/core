@@ -95,7 +95,7 @@ def test_nobody_knocks_on_a_player_who_went_quiet(tmp_path):
     with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
         world.tick(1)
         world.player_move("p1", _where_is(world, "柔"))
-        world.players["p1"]["last_seen"] -= world.player_ttl_seconds + 1
+        world.presence_store.expire_now("p1")
 
         world.tick(A_DAY * 2)
         assert world.inbox("p1") == []

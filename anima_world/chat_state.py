@@ -170,6 +170,17 @@ class ChatStateStore:
         """删一条规则,返回是否真的删了。存储归子类。"""
         raise NotImplementedError(_NOT_IMPLEMENTED)
 
+    # ── 一个人离开了这个世界 ────────────────────────────────────────────────
+
+    def forget_player(self, player_id: str) -> int:
+        """这个玩家走了 —— 清掉这几张表里**朝前看**的行,返回清了几行。
+
+        `World.forget_player` 那条路上的一环。这一层只清"她还准备对他做什么"
+        (stance / 静音 / 回头找你 / 他教过的规则);历史(转录、消息行上的
+        观测量)一个字不改 —— 那是他真的说过的话。存储归子类。
+        """
+        raise NotImplementedError(_NOT_IMPLEMENTED)
+
     # ── 一轮的观测量:转发给转录存储 ────────────────────────────────────────
     #
     # 这两个碰的是转录(`messages`),不是这一层的当前值。SQL 住在转录的主人那儿

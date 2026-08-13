@@ -232,21 +232,34 @@ class LocationStore:
         (子类实现里要调用 `self._validate(loc_id, merged)` 保住这些约束)。"""
         raise NotImplementedError("存储归子类(redis_state.RedisLocationStore)")
 
-    def seed_defaults(self, entries: list[dict[str, Any]]) -> None:
+    def seed_defaults(self, entries: list[dict[str, Any]], *,
+                      merge: bool = False) -> list[str]:
         """Insert `entries` only when the store is empty — populated rows are
         user data and must never be clobbered by re-seeding. Parents are
         seeded before their children so hierarchy validation can see them.
 
         只依赖 `all` / `upsert`,所以任何后端接上原语就能用;子类想换判空
-        姿势(如 Redis 版)可以覆盖,但语义必须保持"空才播"。"""
+        姿势(如 Redis 版)可以覆盖,但语义必须保持"空才播"。
+
+        `merge=True` 把粒度从**整张表**降到**每个地点**:已有的 id 一个字都不动,
+        文件里多出来的补进去。**默认必须是 False**,而且只有"作者指名了
+        `--world-file`"那一条路才准传 True —— 没给文件时引擎手里是内置橱窗,
+        它每次开机都在手上,逐项合并等于把橱窗的地图塞进别人的世界(世界照跑、
+        日志干净)。返回真的写下去的那些 id。"""
         with self._lock:
-            if self.all():
-                return
+            have = {str(row.get("id")) for row in self.all()}
+            if have and not merge:
+                return []
+            written: list[str] = []
             for e in _parents_first(entries):
+                if merge and str(e["id"]) in have:
+                    continue
                 self.upsert(
                     e["id"],
                     **{f: e[f] for f in _LOCATION_FIELDS if f in e},
                 )
+                written.append(str(e["id"]))
+            return written
 
 
 def _parents_first(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -287,19 +300,51 @@ class BTStore:
         存储归子类。"""
         raise NotImplementedError("存储归子类(redis_state.RedisBTStore)")
 
-    def set_action(self, node_id: str, kind: str, params: dict[str, Any] | None = None) -> None:
-        """Upsert one action binding. 存储归子类。"""
+    def set_action(
+        self,
+        node_id: str,
+        kind: str,
+        params: dict[str, Any] | None = None,
+        *,
+        tree: str | None = None,
+    ) -> None:
+        """Upsert one action binding. 存储归子类。
+
+        `tree=None` 是**共享**绑定(`go_to_*` / `chat_with_*` / 需求动作):它们
+        没有人称,谁都能去那儿、谁都能找他说话。给了 `tree` 就是**这个人自己的**
+        绑定,只有他查得到。
+        """
         raise NotImplementedError("存储归子类(redis_state.RedisBTStore)")
 
-    def action_table(self) -> ActionTable:
-        """Build a live `ActionTable` from the rows (lookup fallback stays
-        `idle_wander`, as in `ActionTable.lookup`)."""
-        return ActionTable(
-            {
-                r["node_id"]: ActionDescriptor(r["kind"], r["params"])
-                for r in self.actions()
-            }
-        )
+    def action_table(self, tree: str | None = None) -> ActionTable:
+        """Build a live `ActionTable` for one agent's tree(fallback 仍是
+        `idle_wander`,见 `ActionTable.lookup`)。
+
+        **两层**:没有人称的共享绑定打底,这个 tree 自己的绑定盖在上面。
+
+        分层是被一次重名逼出来的:`bt_nodes` 一直按 `(tree, node_id)` 存,而动作表
+        原先是**全世界一张**。于是两个人只要给自己班表上的某件事起了同一个名字
+        (「回铺子」「收摊」「去码头」—— 一个世界里这本来就是好几个人都会做的事),
+        后播种的那个人就把先播的那条整行改写掉。坏法是最难发现的那种:树建得起来、
+        动作查得到、日志一行不错,只是**人走错了门**。
+        """
+        shared: dict[str, ActionDescriptor] = {}
+        mine: dict[str, ActionDescriptor] = {}
+        for r in self.actions():
+            owner = r.get("tree") or None
+            if owner is None:
+                shared[r["node_id"]] = ActionDescriptor(r["kind"], r["params"])
+            elif tree is not None and owner == tree:
+                mine[r["node_id"]] = ActionDescriptor(r["kind"], r["params"])
+        return ActionTable({**shared, **mine})
+
+    def shared_action_ids(self) -> set[str]:
+        """没有人称的那些绑定的 node_id。
+
+        播种时的"这行有没有"一律问它,别问 `actions()` —— 那份现在还装着别人
+        名下的行,拿它判会把"张三有一个叫 X 的班"读成"X 已经播过了"。
+        """
+        return {r["node_id"] for r in self.actions() if not r.get("tree")}
 
     # ── tree structure ──────────────────────────────────────────────────────
 
@@ -397,25 +442,36 @@ class BTStore:
 
     # ── seeding ─────────────────────────────────────────────────────────────
 
-    def seed_defaults(self, agent_ids: list[str], location_ids: list[str]) -> None:
+    def seed_defaults(self, agent_ids: list[str], location_ids: list[str], *,
+                      merge: bool = False) -> None:
         """Seed the action table from the live roster (`go_to_<loc>` per
         location, `chat_with_<agent>` per agent — no hardcoded ghosts) plus
         the fixed kinds, and the 'default' tree (root selector → idle_wander,
         byte-for-byte the old `default_bt()` behavior). Empty-store-only,
-        same contract as `LocationStore.seed_defaults`."""
+        same contract as `LocationStore.seed_defaults`.
+
+        `merge=True`(作者指名的那份世界文件加了角色/地点时)只补**缺的那几行**,
+        已有的绑定一个字都不动。少了这一条,新来的人没有 `chat_with_他`、新开的
+        地方没有 `go_to_那儿` —— `ActionTable.lookup` 查不到就回落 idle_wander,
+        树成功、世界不动、日志干净。"""
         with self._lock:
             # 走 `self.actions()` 而不是直读存储:这个方法要能在任何后端的子类上
             # 照跑(`redis_state.RedisBTStore`)。基类里留一处直读,子类就得把整个
             # 方法重写一遍 —— 而重写的那份迟早和这份不一样。
-            if not self.actions():
-                for loc in location_ids:
-                    self.set_action(f"go_to_{loc}", "walk", {"location": loc})
-                for aid in agent_ids:
-                    self.set_action(f"chat_with_{aid}", "chat", {"target": aid})
-                self.set_action("do_work", "work", {"location": "workshop"})
-                self.set_action("go_sleep", "sleep", {})
-                self.set_action("idle_wander", "idle_wander", {})
-                self.set_action("idle_social", "idle_social", {})
+            existing = self.shared_action_ids()
+            if not existing or merge:
+                bindings = [(f"go_to_{loc}", "walk", {"location": loc}) for loc in location_ids]
+                bindings += [(f"chat_with_{aid}", "chat", {"target": aid}) for aid in agent_ids]
+                bindings += [
+                    ("do_work", "work", {"location": "workshop"}),
+                    ("go_sleep", "sleep", {}),
+                    ("idle_wander", "idle_wander", {}),
+                    ("idle_social", "idle_social", {}),
+                ]
+                for node_id, kind, params in bindings:
+                    if node_id in existing:
+                        continue      # 只增不改:手改过的绑定是用户数据
+                    self.set_action(node_id, kind, params)
             if not self._tree_rows("default"):
                 self.add_node("default", "root", "selector", parent=None, sort=0)
                 self.add_node("default", "idle_wander", "action", parent="root", sort=0)
@@ -464,7 +520,8 @@ class BTStore:
                         spec = node.get("action")
                         if spec is not None:
                             self.set_action(
-                                node_id, str(spec["kind"]), dict(spec.get("params") or {})
+                                node_id, str(spec["kind"]), dict(spec.get("params") or {}),
+                                tree=agent_id,
                             )
                     planted += 1
                 except (KeyError, TypeError, ValueError) as exc:
@@ -472,7 +529,9 @@ class BTStore:
                         "agent %r 的 behavior_tree[%d] 写坏了(%s)—— 跳过这个节点",
                         agent_id, index, exc,
                     )
-            known = {row["node_id"] for row in self.actions()}
+            known = self.shared_action_ids() | {
+                row["node_id"] for row in self.actions() if row.get("tree") == agent_id
+            }
             for node_id in leaves:
                 if node_id not in known:
                     logger.warning(
@@ -544,7 +603,8 @@ class BTStore:
                     )
                 self.add_node(agent_id, f"{name}_do", "action", parent=name, sort=2)
                 # The leaf's node_id is what Brain looks up in the action table.
-                self.set_action(f"{name}_do", kind, duty.get("params") or {})
+                # 按人存:两个人都写「回铺子」时,后播的那个不许改写先播的那条。
+                self.set_action(f"{name}_do", kind, duty.get("params") or {}, tree=agent_id)
                 sort += 1
             # Free time: the planner's leaf sits BELOW every duty and ABOVE the
             # idle fallback. Selector order is the whole arbitration rule — a

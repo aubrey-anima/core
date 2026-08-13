@@ -233,16 +233,22 @@ def test_she_cannot_reach_out_to_someone_present_but_elsewhere(tmp_path):
 
     修这条之前 `reach_out` 只查全局在场名单,于是在工作室的角色能"主动去找"一个
     正在咖啡店的玩家 —— 隔着半个地图打招呼,而这个能力的整个意义就是"她走过来"。
+
+    现在这里有两道,**两道都要钉**:菜单不摆(她跟前没人时那一行根本不出现),
+    动词自己照旧拒绝。只钉前一道等于把这条闸挪进了提示词,而 `World.act()` 是别的
+    进程改这个世界的门 —— 它绕开菜单。
     """
-    world, _ = _world(tmp_path, '〔tool:reach_out {"player_id": "p1", "text": "喂"}〕')
+    world, llm = _world(tmp_path, "无")
     with world:
         elsewhere = next(loc for loc in ("home", "cafe", "workshop") if loc != _where(world, "夏"))
         world.player_move("p1", elsewhere)   # p1 在场,但不在夏这儿
 
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["failed"])
+        _settle(world, lambda: llm.prompts)
+        assert "reach_out" not in llm.prompts[0], "她跟前一个人都没有,菜单还摆着去找人搭话"
 
-        assert world.autonomy_stats()["failed"] >= 1
+        refused = world.act("夏", "reach_out", {"player_id": "p1", "text": "喂"})
+        assert refused["ok"] is False, refused
         assert world.inbox("p1") == []
 
 
@@ -301,6 +307,47 @@ def test_a_chat_only_capability_is_not_offered_in_a_timed_round(tmp_path):
         assert "reach_out" in menu and "broadcast" in menu
         for chat_only in ("walk_away", "end_conversation", "delay_reply", "wait_for_user"):
             assert chat_only not in menu, f"{chat_only} 在定时轮次里没有意义"
+
+
+def test_the_menu_drops_what_cannot_possibly_succeed_this_round(tmp_path):
+    """提示词刚说完「这会儿你身边没有别人」,菜单不该还摆着「去找一个在场的人」。
+
+    线上量出来的:一轮真世界 63 次问、0 次动作、5 次失败,五次全是同一句
+    `reach_out 没成 —— 这会儿她身边没有人`。摆一个必然被拒的选项不只是浪费一次
+    调用 —— 她挑了、被拒了,而这次失败**教不会她任何事**:她当时没有别的选择。
+    """
+    world, llm = _world(tmp_path, "无")
+    with world:
+        world.tick(1)   # 一个玩家都没坐下
+        _settle(world, lambda: llm.prompts)
+
+        menu = llm.prompts[0]
+        assert "这会儿你身边没有别人" in menu, "前提没成立:这一轮她跟前是有人的"
+        assert "reach_out" not in menu, "找不到人的时候还摆着「去找人」"
+        assert "broadcast" in menu, "把整张菜单都滤没了 —— 当众说一句不要求跟前有人"
+
+
+def test_she_can_act_on_the_world_and_not_only_on_people(tmp_path):
+    """自主菜单原先只有四样社交能力,三样要跟前有人 —— 于是一个有 116 条规律、
+    76 个实体的世界里,她自己决定时能做的事**和世界里能做的事是两张不相交的表**。
+
+    判据照旧是"她的选择在世界里兑现":世界的量真的变了,不是日志里多一行。
+    """
+    world, _ = _world(tmp_path, '〔tool:interact {"target": "tree:harbor_oak", "verb": "tend"}〕')
+    with world:
+        world.set_stocks("agent:夏", {"体力": 100, "手艺": 1.0})
+        world._record_and_fan({
+            "type": "item_transfer", "who": "夏",
+            "payload": {"from": "__town__", "to": "夏", "item_id": "garden_shears", "qty": 1},
+        })
+        world.tick(1)
+        before = world.stock("tree:harbor_oak", "树高")
+
+        world.tick(1)
+        _settle(world, lambda: world.autonomy_stats()["acted"])
+
+        assert world.autonomy_stats()["acted"] == 1, world.autonomy_stats()
+        assert world.stock("tree:harbor_oak", "树高") > before, "她照料了那棵树,而树一点没长"
 
 
 def test_a_capability_she_picked_that_is_not_on_this_surface_is_refused(tmp_path):

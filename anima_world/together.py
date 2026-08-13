@@ -177,6 +177,10 @@ class Invitee:
     stance: str = ""                # 他上一轮对发起人的关系性意图
     personality: str = ""
     memories: tuple[str, ...] = ()
+    # 他和发起人**这会儿还在说的话**。和 `memories` 是两件事:记忆是会话关闭
+    # 那一刻才落的,而邀请正发生在会话中间 —— 只给记忆的话,判定器判的是一个
+    # 「我不认识这个人」的处境,而他们刚聊了两轮。
+    recent_talk: tuple[str, ...] = ()
 
 
 @dataclass
@@ -375,12 +379,22 @@ def pair_deltas(
 def describe_invitation(
     *, inviter: str, verb_label: str, target_name: str, others: Sequence[str] = ()
 ) -> str:
-    """「苏晚夏叫你一起在门口那棵老橡树下小坐」。
+    """「苏晚夏指着门口那棵老橡树,叫你一起照料」。
 
     **动词用人话那一份**(`Affordance.label`):她读到的、玩家听到的、判定器收到
     的必须是同一个词。给一个 `tend` 过去,判定器判的是一件她根本没听说过的事。
+
+    ⚠️ **「一起」这个前缀会撞。** 共做的能力,作者起名时本来就爱写「一起听一段」
+    「一起躲会儿雨」(晚潮那个世界 15 个共做动词里 3 个如此),再套一层就成了
+    「阿布叫你**一起一起**听一段」—— 判定器和玩家读到的是同一句结巴话。
+
+    ⚠️ **东西的名字不能直接焊在动词后面。** 作者写的 label 是一句完整的话
+    (「树下坐会儿」「听完一面」),后面接一个名词就成了「叫你一起树下坐会儿
+    江堤上的老樟树」—— 语法上讲不通,而判定器只会照着这句读不通的话去判她答不
+    答应。所以东西先出场(「指着…」),动词留在句尾:两种 label 都读得通。
     """
     company = ""
     if others:
         company = f"(还有{'、'.join(others)})"
-    return f"{inviter}叫你一起{verb_label}{target_name}{company}"
+    lead = "" if verb_label.startswith("一起") else "一起"
+    return f"{inviter}指着{target_name},叫你{lead}{verb_label}{company}"

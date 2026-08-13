@@ -59,6 +59,8 @@ DEFAULT_CLASSIFIER_PROMPT = (
     " object 填东西的 id,verb 填做什么;还有别人就填 with(名字的数组)。\n"
     "    和 interact 的区别只有一条:**玩家自己在不在里面**。"
     "「你去雕那座冰雕」是 interact,「我们一起雕」是 together\n"
+    "    **「带我去X」「陪我去X」也是 together** —— 这时 place 填那个地方,"
+    "别判成 go:go 是他一个人走,而玩家要的是两个人一起过去\n"
     "  - give:玩家把一样东西给他 —— **object 填东西的名字**\n"
     "  - act:以上都不是的时候才用,让他做一件别的事,detail 必填\n"
     "  - **被指挥的人就是正在跟玩家说话的那个人,也照样判 narrative_direction**"
@@ -346,15 +348,60 @@ def resolve_place(raw: str, points: dict[str, str]) -> tuple[str | None, list[st
     return None, []
 
 
-def places_menu(points: dict[str, str]) -> str:
-    """给玩家看的那份"有的是哪些地方"。"""
+def places_menu(points: dict[str, str], *, with_ids: bool = True) -> str:
+    """列一份"有的是哪些地方"。
+
+    `with_ids` 分的是**读者**,不是排版。给模型看的那份必须带 id —— `walk` 只收 id
+    (`point_ids()`),不给它就等于让它接着猜。给玩家看的那份不该带:他打的是人话,
+    而人话在 `resolve_place` 的第一层就命中了。
+
+    线上读到的那一行是这样的:玩家说了句「你去哈尔滨吧」,她那一轮的开头是
+
+        (没有 哈尔滨 这个地方;有的是 铁匠巷(alley)、剃头铺(barber)、江渡浴室
+        (bathhouse)、……、念姐的小院(yard)。)
+
+    二十个拉丁字母的 id 铺在一个中文世界的第一行,而它们一个字都没告诉他这个世界的事
+    (#18 那条判据);更坏的是它们**看着像要他照着打的东西**。同一个函数的成功回执
+    `({name}往{place_name}去了。)` 从来只说人话 —— 一进一出两种写法,错的是失败那半。
+
+    重名的那几个照旧带 id:`小院、小院;说准一点` 是一句没法照着做的回执,而"说得出
+    该怎么办"正是回执存在的理由。只给重名的带,所以一个重名不会把整份清单打回原形。
+    """
+    names = {str(pid): str(name or pid) for pid, name in points.items()}
+    if with_ids:
+        return "、".join(
+            f"{name}({pid})" if name != pid else pid
+            for pid, name in sorted(names.items())
+        )
+    duplicated = {
+        name for name in names.values()
+        if list(names.values()).count(name) > 1
+    }
     return "、".join(
-        f"{name}({pid})" if name and name != pid else str(pid)
-        for pid, name in sorted(points.items())
+        f"{name}({pid})" if name != pid and name in duplicated else name
+        for pid, name in sorted(names.items())
     )
 
 
 # ── director:narrative_direction 的兑现 ────────────────────────────────────
+
+# 拒绝的意思是「**我**没读懂你的话」,不是「世界里没有这回事」。
+#
+# 分界线是一句可以当场问出口的话:**这句回执告诉玩家的是这个世界的事吗?**
+# 留下的那些都是:「世界里没有哈尔滨」「你在这头他在那头,这件事得当面」
+# 「他手上没有那样东西」「果子还没熟」—— 每一句都教给玩家一点世界的规矩。
+# 这几个一句都不是:它们说的是分类器**没把自己的字段填全**,而玩家根本不知道
+# 有个分类器。线上抓到的现场:玩家问「我想去看看你说的那个地方,能带我去吗」,
+# 分类器判成 `together` 却把 `object` 留空(`detail` 里倒是写着"带玩家去潮汐里
+# 3号"),于是她那一轮的**第一行**是 `(一起做什么?说具体一点 —— 得有个东西。)`
+# —— 引擎越过她,当面责怪玩家没说清楚,而玩家那句话再清楚不过;紧接着她的散文
+# 回答好得很,还真答应了下楼。那句回执是纯多出来的噪音。
+#
+# 退回对话这条路**上面两个分支就在用**:`style_adjust` 少了 kind/value 时正是
+# 记一行日志、按对话处理、玩家什么也不会看见。导演这条漏了同一手。
+UNDERSPECIFIED_REASONS = frozenset({
+    "empty_object", "empty_detail", "empty_place", "unknown_player",
+})
 
 
 @dataclass
@@ -376,6 +423,15 @@ class DirectorOutcome:
     detail: dict[str, Any] = field(default_factory=dict)
     self_directed: bool = False
     grounding: str = ""
+
+    @property
+    def underspecified(self) -> bool:
+        """这次拒绝是"我没读懂",不是"世界不答应" —— 见 `UNDERSPECIFIED_REASONS`。
+
+        这几条都在任何一次世界写之前返回,所以退回对话是**干净**的:没有半件
+        已经落地的事需要回滚。
+        """
+        return not self.ok and self.detail.get("reason") in UNDERSPECIFIED_REASONS
 
 
 class Director:
@@ -441,11 +497,23 @@ class Director:
     def _go(self, resolved: str, name: str, raw_place: str) -> DirectorOutcome:
         """把一个人送到一个**玩家指定**的地方。"""
         points = self._points()
+        if not raw_place.strip():
+            # 玩家一个地名都没说 —— 那就没有"世界里没有它"这回事可报。此前这里落到
+            # 下面那句上,拼出来的是 `(没有 你说的那个地方 这个地方;有的是 …)`:
+            # 一句话本身就不通,而它还把二十个地名铺在她开口之前。线上的现场是
+            # 「带我去个安静点的地方吧,我想跟你说会儿话」—— 分类器判了 `go` 却把
+            # 提示词里写着**必填**的 place 留空,于是引擎越过她责怪玩家没说地方,
+            # 而玩家问的本来就是"你挑一个"。和 empty_object 是同一件事,漏在这儿。
+            return DirectorOutcome(
+                ok=False,
+                text="",
+                detail={"target": resolved, "reason": "empty_place", "place": raw_place},
+            )
         where, candidates = resolve_place(raw_place, points)
         if where is None:
             if candidates:
-                readable = "、".join(
-                    f"{points.get(pid) or pid}({pid})" for pid in candidates
+                readable = places_menu(
+                    {pid: points.get(pid) or pid for pid in candidates}, with_ids=False
                 )
                 return DirectorOutcome(
                     ok=False,
@@ -456,7 +524,7 @@ class Director:
             return DirectorOutcome(
                 ok=False,
                 text=f"(没有 {raw_place or '你说的那个地方'} 这个地方;"
-                     f"有的是 {places_menu(points)}。)",
+                     f"有的是 {places_menu(points, with_ids=False)}。)",
                 detail={"target": resolved, "reason": "unknown_place", "place": raw_place},
             )
         place_name = points.get(where) or where
@@ -754,7 +822,27 @@ class Director:
         (她动手,他看着),这一条是"我们一起雕"(两个人都在,两个人都付代价,
         而且**她可以不答应**)。走的仍然是 `interact_with` 那条统一路径,只是
         多带一份名单 —— 另写一份"玩家版本的一起做事"迟早和她自己发起的那份分叉。
+
+        **「带我去某个地方」也是一起做的一件事**,而且是玩家最先想得到的那一件 ——
+        见 `_go_together`。
         """
+        place = str(params.get("place") or params.get("location") or "").strip()
+        if place:
+            # 分类器早就把它填进 `place` 了(线上原话「带我去江堤走走」判出来的是
+            # `{"action":"together","place":"江堤","object":"江堤","verb":"走走"}`),
+            # 而这一层从前只认 `object`:拿「江堤」去**实体**表里查,查出四样东西
+            # (长椅、路灯、斜坡阶、老樟树),于是她开口之前先有一句
+            # 「江堤 对得上好几样东西……说准一点」。他要的是一个**地方**,
+            # 而这个世界里正好有一个叫江堤的地方。
+            points = self._points()
+            where, _ = resolve_place(place, points)
+            if where is not None and (
+                not obj or resolve_place(obj, self._entities())[0] is None
+            ):
+                # `object` 也指得着一样东西时不抢:「我们去江堤那棵老樟树下坐会儿」
+                # 说的是那棵树,而能力那条路上有作者声明的效果、代价与她的同意,
+                # 比"走过去"具体得多。
+                return self._go_together(resolved, name, where, points, player_id)
         if not obj:
             return DirectorOutcome(
                 ok=False, text="(一起做什么?说具体一点 —— 得有个东西。)",
@@ -809,6 +897,67 @@ class Director:
             ok=True, text=f"(你和{name}一起做了这件事。)",
             detail={"target": resolved, "action": "together", "object": obj,
                     "verb": verb, **outcome},
+        )
+
+    def _go_together(
+        self, resolved: str, name: str, where: str,
+        points: dict[str, str], player_id: str | None,
+    ) -> DirectorOutcome:
+        """「带我去江堤走走」—— 她起程,**而他真的跟着一起走**。
+
+        这是玩家最先想得到的那一件"一起做的事",而在这之前世界里没有任何动词兑现
+        得了它:`walk` 只挪她一个人。线上两次现场都是同一个样子 —— 她答应得好好的
+        (「行，走吧。潮汐里三号不远，过两条巷子就到」「走吧，从这儿过去十来分钟，
+        你跟紧点」),然后**她一个人走了**,玩家还站在原地;要么就是她压根没动,
+        两轮之后散文里的人已经在三楼掏钥匙,而世界里她还在唱片店。issue #15
+        那句话("说'我走了'也没真走")漏在了"带上我"这一格。
+
+        三条:
+
+        - **两个人是分别走的两段路。** 她走她那条(`move_agent`,和排班走的是同一条
+          路:发 travel、花时间、在途不可打断),他走他那条(`player_walk`)。
+          瞬移一个、走路一个,才是把"一起"两个字写成谎。
+        - **他走不了就整件事不算数**(他自己正在赶别的路)。只挪她一个的话,回执
+          写着"带你去",而世界里是她走了、他留下 —— 比不做更坏。所以**先问他那半**:
+          她那半只会因为参数不合法而失败,而那两样在上面已经查过了。
+        - **必须同处一地,而且这一条不挂在 `presence.enforce_colocation` 上。**
+          那个开关默认关,理由是引擎侧收紧会当场打断线上世界 —— 而这条路是新的,
+          没有旧行为可打断;隔着半个镇子说"带我去"本来就不成立,兑现它等于让她
+          在两条街外把他领走。那时候该她说的是"你先过来"。
+        """
+        place_name = points.get(where) or where
+        if not player_id:
+            return DirectorOutcome(
+                ok=False, text="(不知道你是谁,带不上你。)",
+                detail={"target": resolved, "action": "go_together", "place": where,
+                        "reason": "unknown_player"},
+            )
+        if not self._runtime.face_to_face(resolved, player_id):
+            return DirectorOutcome(
+                ok=False, text=f"(你们不在一块儿,{name}带不上你 ——"
+                               f"让他先过来,或者你自己走过去。)",
+                detail={"target": resolved, "action": "go_together", "place": where,
+                        "reason": "not_colocated"},
+            )
+        if self._runtime.agent_location(resolved) == where:
+            # 已经在那儿了 —— 这不是失败,只是没有路可走。**别发一次假的行程**:
+            # 回执说"往江堤去了"而谁也没动,是这一层最不该有的那种话。
+            return DirectorOutcome(
+                ok=False, text=f"(你们已经在{place_name}了。)",
+                detail={"target": resolved, "action": "go_together", "place": where,
+                        "reason": "already_there"},
+            )
+        if not self._runtime.player_do_action(player_id, "walk", {"location": where}):
+            return DirectorOutcome(
+                ok=False, text="(你这会儿在赶别的路,跟不过去。)",
+                detail={"target": resolved, "action": "go_together", "place": where,
+                        "reason": "player_busy"},
+            )
+        moved = self._runtime.move_agent(resolved, where)
+        return DirectorOutcome(
+            ok=True, text=f"({name}带着你往{place_name}去了。)",
+            detail={"target": resolved, "action": "go_together", "place": where,
+                    "place_name": place_name, "took": True, **moved},
         )
 
     def _give(

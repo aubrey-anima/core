@@ -120,11 +120,17 @@ def test_world_reopens_from_the_event_log(tmp_path):
 
 
 def test_subscribe_receives_events(world):
+    """**别只看第一批。** 一个玩家第一次露面时世界里会发生不止一件事(见面礼那笔
+    `payment` 就排在他这一下动作前面),而订阅者收到的是一批一批的事件流,不是
+    一句问答。只认第一批的话,世界往那个瞬间多加一件事就把这条测试变红 ——
+    而红的原因和它守的东西毫无关系。"""
     q = world.subscribe()
     try:
         world.player_action("p1", "跺脚")
-        batch = q.get(timeout=2)
-        assert any(ev.get("type") == "player_action" for ev in batch["events"])
+        seen: list[str] = []
+        while "player_action" not in seen:
+            batch = q.get(timeout=2)         # 空了就是 Empty,测试当场红
+            seen += [ev.get("type") for ev in batch["events"]]
     finally:
         world.unsubscribe(q)
 

@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -56,6 +57,8 @@ _DEFAULT_PROMPT = (
     "只安排今天以内的事：start_min 最大 1439（23:59）。"
     "空闲时段的末端写作 24:00，那是这一天的收尾，不是可以起头的时刻；"
     "过了午夜的事留给明天那份计划。\n"
+    "清单上写成「名字(id)」的，params 里填括号里那个 id；"
+    "note 里写名字，那是给人读的。\n"
     "只输出 JSON 数组，不要解释。动作和参数必须来自上面的清单。"
 )
 # 上界为什么要写出来:`_format_windows` 把一天的末端印成 `24:00`（作为**结束**
@@ -172,8 +175,12 @@ def validate_steps(raw: Any, space: dict[str, dict[str, list[str]]]) -> tuple[Pl
         if kind not in space:
             logger.warning("plan step names an unknown action %r, dropping", kind)
             continue
+        # `start` 也收:线上 867 步里 9 步这么写,而少一条的代价曾是整份计划
+        # ——`bai` 三步全写 `start`,于是她一整天没有计划。字段叫什么只是形状,
+        # 闸(在不在今天以内、参数在不在清单上)一个字没动。
+        raw_start = item["start_min"] if "start_min" in item else item.get("start")
         try:
-            start = int(item["start_min"])
+            start = int(raw_start)
         except (KeyError, TypeError, ValueError):
             logger.warning("plan step has no usable start_min, dropping: %r", item)
             continue
@@ -187,22 +194,86 @@ def validate_steps(raw: Any, space: dict[str, dict[str, list[str]]]) -> tuple[Pl
             continue
         allowed = space[kind]
         bad = False
+        resolved: dict[str, Any] = {}
         for key, choices in allowed.items():
-            value = params.get(key)
-            if value not in choices:
+            value, written_as = _pick(item, params, key, choices, len(allowed) == 1)
+            if value is None:
                 logger.warning(
                     "plan step %r names %s=%r, which is not in the world, dropping",
-                    kind, key, value,
+                    kind, key, params.get(key),
                 )
                 bad = True
                 break
+            if written_as != key:
+                logger.info("plan step %r wrote %s as %r; taking it", kind, key, written_as)
+            resolved[key] = value
         if bad:
             continue
         params = {k: v for k, v in params.items() if k in allowed}
+        params.update(resolved)
         steps.append(PlanStep(start, kind, params, str(item.get("note") or "")))
 
     steps.sort(key=lambda s: s.start_min)
     return tuple(steps)
+
+
+def _pick(
+    item: dict[str, Any], params: dict[str, Any], key: str,
+    choices: list[str], sole: bool,
+) -> tuple[str | None, str]:
+    """这一步说的那个地方 / 那个人,不管她把它写在了哪一格。
+
+    `start` / `start_min` 那条的续:**字段在哪一层、叫什么,只是形状**。线上她真的
+    写过这四种,四种说的都是同一件事,而只认第一种的话后三种整步被扔掉 ——
+    扔掉一步的代价是她那个钟点安静地没事做,而玩家看到的是一个站着不动的人:
+
+        {"kind": "walk", "params": {"location": "studio"}}   # 我印给她的那种
+        {"kind": "walk", "location": "studio", "params": {}}  # 提到了外面一层
+        {"kind": "walk", "target":   "studio"}                # 连 params 都没有
+        {"kind": "walk", "params": {"target": "studio"}}      # 层对了,换了个名字
+
+    **闸一个字没动**:值照旧要 `_unlabel` 得出这个清单里的一个 id,所以她编一个
+    「哈尔滨」出来仍旧当场丢掉。放宽的只是「她把答案放在哪儿」。
+    ⚠️ **换名字那一种只在这个动作**只有一格**参数时才认**(`sole`):两格的时候
+    「哪个值该填哪一格」没有答案,而这一层猜错了不报错 —— 猜出来的计划和她说的
+    是两件事,她照着走一天,没有任何一处会发现。
+    """
+    for where, source in (("params", params), ("top", item)):
+        value = _unlabel(source.get(key), choices)
+        if value is not None:
+            return value, key if where == "params" else f"{key}(外面一层)"
+    if sole:
+        for name, raw in params.items():
+            value = _unlabel(raw, choices)
+            if value is not None:
+                return value, name
+        for name, raw in item.items():
+            if name in ("kind", "note", "params"):
+                continue
+            value = _unlabel(raw, choices)
+            if value is not None:
+                return value, f"{name}(外面一层)"
+    return None, key
+
+
+_LABELLED = re.compile(r"^.*\(([^()]+)\)$")
+
+
+def _unlabel(value: Any, choices: list[str]) -> str | None:
+    """把「江堤(levee)」收回成 `levee`;不在清单上的一律 `None`。
+
+    **这不是把闸放松了。** 闸的判据从头到尾还是"这个 id 在不在我给她的清单里" ——
+    收的只是**我自己刚印给她的那个写法**。菜单改成「名字(id)」之后模型照抄整串是
+    常态,而丢掉一条的代价是她傍晚那几步安静地没了(`start_min` 上界那条同一个教训:
+    没告诉过她范围就把她的回答扔掉,而没有人会去看那行日志)。
+    """
+    if isinstance(value, str):
+        if value in choices:
+            return value
+        match = _LABELLED.match(value.strip())
+        if match and match.group(1).strip() in choices:
+            return match.group(1).strip()
+    return None
 
 
 def _extract_json(text: str) -> Any:
@@ -223,23 +294,53 @@ def _extract_json(text: str) -> Any:
 
 
 def _format_windows(windows: list[tuple[int, int]]) -> str:
+    """`- 10:00 到 11:30（start_min 填 600 到 689）`
+
+    括号里那半句是**桥**。上半句印钟点、下半句要分钟数,而两半之间没有桥的下场
+    线上量到了:`yu` 的末窗印作 `23:30 到 24:00`,她写回 `start_min: 2330` ——
+    就是我印给她的那四个数字去掉冒号。三步全被判成"今天以外"丢掉,她傍晚安静地
+    空了,只在日志里留一行没人会看的 "starts outside the day"。
+    和动作清单那条(`_format_space`)同一个教训:**我用一种写法印给她,却按另一种
+    写法验她的回答**。
+    """
     def hhmm(m: int) -> str:
         return f"{m // 60:02d}:{m % 60:02d}"
 
     if not windows:
         return "（今天没有空闲时间）"
-    return "\n".join(f"- {hhmm(s)} 到 {hhmm(e)}" for s, e in windows)
+    return "\n".join(
+        f"- {hhmm(s)} 到 {hhmm(e)}（start_min 填 {s} 到 {e - 1}）" for s, e in windows
+    )
 
 
-def _format_space(space: dict[str, dict[str, list[str]]]) -> str:
+def _format_space(
+    space: dict[str, dict[str, list[str]]], names: dict[str, str] | None = None
+) -> str:
+    """这份清单是**给她读的**,所以和处境块说同一种话:「江堤(levee)」。
+
+    ⚠️ 光把处境块翻成人话是**半个修法**,而半个修法比不修更难看:上面写着
+    「江晚在江堤闲着」,下面的菜单只给 `wan` / `levee` —— 两半之间没有任何桥,
+    她得自己猜哪个 id 是江堤。线上抓到的样子是她把 id 当人话用了:计划的
+    `note` 里写着「早点到studio等她」。
+    `space` 本身仍然只装 id —— 它是 `validate_steps` 那道闸的判据,不是文案。
+    """
+    names = names or {}
     lines = []
     for kind, params in space.items():
         if params:
-            detail = "，".join(f"{k} 可选：{'/'.join(v)}" for k, v in params.items())
+            detail = "，".join(
+                f"{k} 可选：{'/'.join(_labelled(v, names) for v in values)}"
+                for k, values in params.items()
+            )
             lines.append(f"- {kind}（{detail}）")
         else:
             lines.append(f"- {kind}")
     return "\n".join(lines)
+
+
+def _labelled(value: str, names: dict[str, str]) -> str:
+    name = names.get(value)
+    return f"{name}({value})" if name and name != value else value
 
 
 class SyncLLM:
@@ -249,6 +350,17 @@ class SyncLLM:
     each call spins one up. Blocking here is fine and in fact the point: this
     thread exists precisely so the tick thread never waits on an LLM. The
     timeout is read live from config, like every other M5 setting.
+
+    **同一个门也会从宿主那侧被推开。** `judge_invite` 这类判定跟着一次玩家请求
+    走,而宿主的请求处理器是 `async def` —— 那条线程上已经有一个跑着的循环,
+    `asyncio.run` 在那里是 `RuntimeError`。所以有循环时借一条线程跑,不抛:
+    抛出去的下场不是报错,是**安静地降级**(上游一律 `except Exception` 兜住,
+    理由是一个死掉的 LLM 不该停住世界),于是模型那一路从来没被走到过,
+    而健康位上写着"多半是没配 key"。
+
+    和 `_BridgeLoop` 那条纪律不冲突:那一条管的是**复用连接池的聊天热路径**,
+    而这个门本来就每调一次开一条新循环(判定线程上也是这样) —— 借线程只是让
+    宿主那侧走上和引擎自己一样的那条路,不多出一类循环。
     """
 
     def __init__(
@@ -274,7 +386,14 @@ class SyncLLM:
         async def _run() -> str:
             return await asyncio.wait_for(self._client.complete(messages), timeout=float(timeout))
 
-        return asyncio.run(_run())
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_run())
+        # 这条线程上已经有循环了(宿主的 `async def` 处理器)。协程要在**跑得动它的
+        # 那条线程上**创建并 await,所以整个 `asyncio.run` 一起挪过去。
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="anima-sync-llm") as pool:
+            return pool.submit(lambda: asyncio.run(_run())).result()
 
 
 class Planner:
@@ -310,13 +429,36 @@ class Planner:
         # 待着",让一个身无分文的人去买东西,让两个人各自计划去找对方。
         self._situation_provider = situation_provider
 
-    def make_plan(self, agent_id: str, day: int) -> Plan | None:
-        """Ask the LLM for a day of free time. `None` on any failure — the
-        caller leaves the agent planless and the tree falls back to idle."""
+    def plan_inputs(self, agent_id: str) -> tuple[list[tuple[int, int]], dict[str, dict[str, list[str]]]]:
+        """今天有什么可排:空窗 + 动作空间。两个都非空才谈得上规划。
+
+        单拿出来是为了让调用方分得开**两件长得一模一样的事**:「她今天没有自由
+        时间」和「规划失败了」。前者连 LLM 都不会调,也永远不该记成子系统降级 ——
+        `note_subsystem` 存在的全部理由就是让"planner 挂了三天的世界"和"角色确实
+        无所事事的世界"在健康表上长得不一样,而它自己曾经把这一对混成一个:
+        线上晚潮 21 个角色里 17 个日程排满,于是 planner 常驻 `ok 0 / degraded 1071`,
+        真挂了也没人看得出来。
+        """
         space = action_space(
             self._bt_store, self._location_store, self._agent_ids(), agent_id
         )
-        windows = free_windows(self._duty_windows(agent_id))
+        return free_windows(self._duty_windows(agent_id)), space
+
+    def make_plan(
+        self,
+        agent_id: str,
+        day: int,
+        windows: list[tuple[int, int]] | None = None,
+        space: dict[str, dict[str, list[str]]] | None = None,
+    ) -> Plan | None:
+        """Ask the LLM for a day of free time. `None` on any failure — the
+        caller leaves the agent planless and the tree falls back to idle.
+
+        `windows`/`space` 已经算过就传进来,别再算一遍 —— 两处各算一次就是两份
+        判断,迟早给出不同答案。
+        """
+        if windows is None or space is None:
+            windows, space = self.plan_inputs(agent_id)
         if not windows or not space:
             return None
 
@@ -367,6 +509,25 @@ class Planner:
             return ""
         return "你此刻的处境：\n" + "\n".join(lines) + "\n\n"
 
+    def _space_names(self) -> dict[str, str]:
+        """id → 人话,给菜单排版用。规划永远不该死于一次世界读,所以每一半各自兜底。"""
+        names: dict[str, str] = {}
+        try:
+            for row in self._location_store.all():
+                pid, name = str(row.get("id") or ""), row.get("name")
+                if pid and name:
+                    names[pid] = str(name)
+        except Exception:  # noqa: BLE001
+            logger.debug("planner could not read place names", exc_info=True)
+        try:
+            for other in self._agent_ids():
+                persona = self._persona_provider(other) or {}
+                if persona.get("name"):
+                    names[other] = str(persona["name"])
+        except Exception:  # noqa: BLE001
+            logger.debug("planner could not read agent names", exc_info=True)
+        return names
+
     def _build_messages(
         self,
         agent_id: str,
@@ -392,7 +553,7 @@ class Planner:
             "personality": persona.get("personality") or "",
             "day": day,
             "free_windows": _format_windows(windows),
-            "action_space": _format_space(space),
+            "action_space": _format_space(space, self._space_names()),
             "memories": self._memory_block(agent_id),
             "goals": goals_block,
             "situation": self._situation_block(agent_id),

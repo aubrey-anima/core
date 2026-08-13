@@ -62,6 +62,7 @@ class ChatSessionManager:
         judge_hook: JudgeHook | None = None,
         meta_provider: Callable[[int], dict[str, Any]] | None = None,
         place_name: Callable[[str], str] | None = None,
+        agent_name: Callable[[str], str] | None = None,
     ) -> None:
         self._store = store
         self._llm = llm
@@ -79,6 +80,10 @@ class ChatSessionManager:
         # 漏进去的 `cafe` 不是印错一次:她从此会把这个英文 id 当成地名说出口。
         # 接不上的世界照旧用 id —— 那仍然比空着强(空着正是模型自己补一个的地方)。
         self._place_name = place_name
+        # 角色 id → 人话名,同一条理由的另一半。地点那一半早就接上了,她自己这一半
+        # 没有:转录行上只有 `agent_id`,于是摘要写的是「店主 wan 表示唱机转但不稳」,
+        # 而这条摘要进她的长期记忆、进下一场的记忆块、还被八卦原样转述。
+        self._agent_name = agent_name
 
     async def close_conversation(self, conversation_id: int) -> bool:
         """Close a conversation. Returns True iff a `conversation` event was emitted."""
@@ -148,6 +153,12 @@ class ChatSessionManager:
                     "transcript": [
                         {"role": m["role"], "content": m["content"]} for m in messages
                     ],
+                    # **出处跟着判定一起走。** 判定落地成一条 `sentiment_delta`,
+                    # 而那条事件此前只带着一个 delta —— 于是"是哪一场对话让它变的"
+                    # 在日志里查不回来。这两样在这儿都在手上,不传等于让下游
+                    # 去猜(而它猜的办法只能是按时间就近认一条,认错了不报错)。
+                    "conversation_id": conversation_id,
+                    "conversation_summary": summary,
                 })
             except Exception:  # noqa: BLE001 - a judge failure must never block a close
                 logger.warning("judge_hook failed for conversation %s", conversation_id, exc_info=True)
@@ -183,8 +194,7 @@ class ChatSessionManager:
                 closed.append(int(conv["id"]))
         return closed
 
-    @staticmethod
-    def _speaker_labels(conv: dict[str, Any]) -> tuple[str, str]:
+    def _speaker_labels(self, conv: dict[str, Any]) -> tuple[str, str]:
         """(她叫什么, 对方叫什么) —— **只认转录行上真有的字段,不猜**。
 
         名字优先取 `participants` 上的(`chat()` 那条路把玩家的显示名记了进来)。
@@ -194,8 +204,23 @@ class ChatSessionManager:
         `p1` / `player-3f9a2c` 会被她当成这个人的名字说出口 —— 线上 `night-tide`
         就是这么让玩家改名叫「旅人」的。**编一个泛称比漏一个 id 强**,因为「访客」
         一望而知是泛称,而 `p1` 看上去像个名字。
+
+        ⚠️ **而她自己那一头,这条纪律上面写着、下面没做**:兜底直接是 `agent_id`,
+        于是线上摘要里躺着「店主 wan 表示唱机转但不稳」「yun 因江堤上没有树荫……」,
+        八卦再把它转述出去。最离谱的一条是她读完之后自己写下的:
+        「隐约对那个 'wan' 有点好奇」—— 她对一个字符串产生了好奇。名册查得到就用
+        名册(和地点那一半同一个做法),查不到才退泛称「她」。
         """
-        agent_label = str(conv.get("agent_id") or "").strip() or "她"
+        agent_id = str(conv.get("agent_id") or "").strip()
+        agent_label = ""
+        if agent_id and self._agent_name is not None:
+            try:
+                agent_label = str(self._agent_name(agent_id) or "").strip()
+            except Exception:  # noqa: BLE001 - 查不到名字不该让一场会话关不掉
+                logger.warning("摘要里的角色 %s 翻不成人话", agent_id, exc_info=True)
+        if agent_label == agent_id:
+            agent_label = ""   # 名册没这个人时回落的就是 id 本身
+        agent_label = agent_label or "她"
         player_label = ""
         for participant in conv.get("participants") or []:
             kind = participant.get("kind")

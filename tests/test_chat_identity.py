@@ -134,6 +134,75 @@ def test_玩家教过的叫法不许被身份块当场否掉(world):
     assert "别把「小林」说成是他的本名" in text
 
 
+def test_走一步不许把门口填的身份冲掉(world):
+    """真人试玩逮到的,两个世界上各复现一次(阿檀「刚搬来的人」、阿远「旅人」)。
+
+    玩家在门口填了身份,走一步就变回 `player` —— 因为 `player_walk` 的 `role`
+    默认值是**字面量** `"player"` 并且无条件写下去,而走路那条路(`player_do_action`
+    的 walk 分支、`player_tool`)压根没有 role 可传。于是"我知道他的身份是 player"
+    和"我这条路上拿不到身份"变成了同一件事。
+
+    **而这次损坏被占位身份的过滤器藏住了**:`chat_service` 把 `player` 当占位身份
+    整段丢掉,于是身份块里那句「（身份：…）」只是安静地消失 —— 线上照跑、日志一行
+    不错,只有当面读她的提示词才看得出来。所以这里两头都验:世界里存的那一行、
+    以及她真读到的那段字。
+
+    修法在**唯一那道窄口** `_touch_player`:`role=""` 是"这一路不知道他是谁",
+    只填缺不覆盖 —— 和读那一侧的 `_interlocutor_for` 逐字同构。挨个给下游入口
+    补参数是治不好的,下一个新入口照样会漏。
+    """
+    world.player_move("p1", "cafe", role="旅人")
+    assert "（身份：旅人）" in _identity(world, player_id="p1", display_name="刘俊康")
+
+    # 走路那条真路:玩家点的是工具,工具手上没有 role
+    assert world._tool_runtime.player_do_action("p1", "walk", {"location": "workshop"})
+    assert (world.presence_store.get("p1") or {}).get("role") == "旅人"
+    assert "（身份：旅人）" in _identity(world, player_id="p1", display_name="刘俊康")
+
+    # 同一条纪律在另外两个入口上:`player_tool` 连 role 这个形参都没有,
+    # `player_action` 落的是**不可改的历史**,写空了以后谁都补不回来
+    world.player_tool("p1", "walk", {"location": "home"})
+    world.player_action("p1", "idle_wander", {})
+    assert (world.presence_store.get("p1") or {}).get("role") == "旅人"
+    walked = [e for e in world.events() if e["type"] == "player_action"]
+    assert walked and walked[-1]["role"] == "旅人", walked[-1]
+
+
+def test_聊天这条路要真的写得进身份(world):
+    """同一个 bug 的第三条路,而且它**活过了**上面那条的修法。
+
+    走路那条路修好之后还剩两处字面量 `"player"`:建行时播的那一格,和四个聊天
+    入口的 `role` 默认值。合起来的下场是这样 ——
+
+    1. 玩家先点了一下"走"(那条路手上没有身份)→ 建行,行里躺着 `"player"`;
+    2. 他再开口聊天,宿主这一轮**给了**身份 → 从前这里是
+       `players[pid].setdefault("role", role)`,而那一格永远有值,于是这句
+       **永远是空操作**:聊天这条路一次都没写进过身份,而它读起来像写了;
+    3. `chat_service` 把 `player` 当占位身份整段丢掉 —— 他在这个世界里从此
+       没有身份,聊多少轮都改不回来,一行日志都不会说。
+
+    反过来那一半同样要钉:`chat()` 的 `role` 默认值从前是字面量 `"player"`,
+    而 `_interlocutor_for` 里 `role or known["role"]` 让非空的它**压过**世界
+    记着的那个 —— 修完写这一侧之后,一个不传 role 的宿主会亲手把玩家在门口
+    填的身份冲成 `player`。**是这次修复自己会打开的洞**,所以两头一起验。
+    """
+    # 1) 建行的常常正是没有身份的那条路 —— 那一格该是空的,不是一个假身份
+    world.player_tool("p1", "walk", {"location": "workshop"})
+    assert (world.presence_store.get("p1") or {}).get("role") == ""
+
+    # 2) 宿主开口时给了身份 —— 聊天这条路必须真的写进去
+    agent = _agent(world)
+    world.chat_reply(agent, [{"role": "user", "content": "在吗"}],
+                     player_id="p1", role="旅人")
+    assert (world.presence_store.get("p1") or {}).get("role") == "旅人"
+    assert "（身份：旅人）" in _identity(world, player_id="p1", display_name="刘俊康")
+
+    # 3) 下一轮宿主没给 —— 只填缺不覆盖,不许拿默认值把它冲掉
+    world.chat_reply(agent, [{"role": "user", "content": "还在吗"}], player_id="p1")
+    assert (world.presence_store.get("p1") or {}).get("role") == "旅人"
+    assert "（身份：旅人）" in _identity(world, player_id="p1", display_name="刘俊康")
+
+
 def test_点名要的昵称压过称呼形式(world):
     """两条规则都在时,`nickname_for_player` 赢 —— 昵称是他点名要的那一个,
     `address_form` 更像口气偏好(「别那么客气」)。"""

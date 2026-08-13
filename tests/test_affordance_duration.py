@@ -281,7 +281,7 @@ def test_代价只记一遍(tmp_path, open_world):
     world.scheduler.perform_affordance("甲", "bench:a", "打磨")
     world.tick(3)
     charged = [e for e in world.events()
-               if e.get("payload", {}).get("cost")]
+               if e.get("payload", {}).get("me_delta")]
     assert len(charged) == 1 and charged[0]["type"] == "entity_engage"
 
 
@@ -400,3 +400,53 @@ def test_不占用她的长过程不要求她守在原地(tmp_path, open_world):
     world.tick(3)
     assert world.stocks("bench:a")["成色"] == 2.0
     assert not [e for e in world.events() if e["type"] == "entity_disengage"]
+
+
+# ── 那句话是给玩家读的 ────────────────────────────────────────────────────────
+
+
+def test_忙着那句话说的是名字不是id(tmp_path, open_world):
+    """线上现场:「你手上还有一件事没做完:喂 cat:bai —— 还要 3 个 tick」。
+
+    `cat:bai` 是引擎内部的门牌号,玩家从没见过它 —— 他看见的那只猫叫「白手套」。
+    印 id 是这一层反复修掉的那类 bug(货架那一屏刚修过),而拒绝这条路上它还开着:
+    能力表、条件、材料三处都已经查名字,只有第四类 `busy` 是照着 `held["target"]`
+    直接拼的。
+    """
+    world = _slow_world(tmp_path, open_world)
+    world.scheduler.perform_affordance("甲", "bench:a", "打磨")
+    said = world.scheduler.perform_affordance("甲", "bench:a", "擦")["refusal"]
+    assert "那条长凳" in said, f"要说人看得懂的名字:{said!r}"
+    assert "bench:a" not in said, f"门牌号漏给玩家了:{said!r}"
+
+
+def test_忙着那句话把动词和东西的边界划出来(tmp_path, open_world):
+    """动词是作者写的,名字也是作者写的,两串中文直接拼上就没有边界了。
+
+    线上现场:「你手上还有一件事没做完:重描一遍咖啡车上贴的节目单」—— 读的人
+    断不出这是「重描一遍 / 咖啡车上贴的节目单」还是别的切法。用「」不用反引号:
+    反引号是 markdown,到了玩家屏幕上就是两个撇号。
+    """
+    world = _slow_world(tmp_path, open_world)
+    world.scheduler.perform_affordance("甲", "bench:a", "打磨")
+    said = world.scheduler.perform_affordance("甲", "bench:a", "擦")["refusal"]
+    assert "「那条长凳」" in said, f"名字要括起来,不然和动词糊成一串:{said!r}"
+    assert "`" not in said, f"markdown 到玩家眼前就是两个撇号:{said!r}"
+
+
+def test_忙着那句话说的是世界时间不是tick(tmp_path, open_world):
+    """`tick` 是引擎的词。玩家问的是"还要多久",而"3 个 tick"回答不了那个问题 ——
+    他要么去查文档,要么放弃。世界自己有答案:`world.minutes_per_tick`。
+    """
+    world = _slow_world(tmp_path, open_world)      # duration=3,默认 5 分钟一 tick
+    world.scheduler.perform_affordance("甲", "bench:a", "打磨")
+    said = world.scheduler.perform_affordance("甲", "bench:a", "擦")["refusal"]
+    assert "tick" not in said, f"引擎的词漏给玩家了:{said!r}"
+    assert "15 分钟" in said, f"3 个 tick × 5 分钟 = 一刻钟:{said!r}"
+
+
+def test_同一件事起两次头那句话也说人话(tmp_path, open_world):
+    world = _slow_world(tmp_path, open_world, occupies=False, name="twice")
+    world.scheduler.perform_affordance("甲", "bench:a", "打磨")
+    said = world.scheduler.perform_affordance("甲", "bench:a", "打磨")["refusal"]
+    assert "tick" not in said and "15 分钟" in said, said

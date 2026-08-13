@@ -164,3 +164,54 @@ def test_a_seed_without_a_behavior_tree_still_uses_duties(tmp_path):
     with _seed_world(tmp_path, seed) as world:
         rows = world.scheduler.bt_store._tree_rows("夏")
         assert any("开店" in r["node_id"] for r in rows), [r["node_id"] for r in rows]
+
+
+def test_two_agents_may_name_a_duty_the_same_thing(tmp_path):
+    """两个人各有一个「回铺子」,各回各的铺子。
+
+    动作表原先是**全世界一张**(`set_action(node_id, …)`),而 `bt_nodes` 一直是
+    **按人**存的(`(tree, node_id)`)。于是两个人只要给自己的班表起了同一个名字,
+    后播种的那个人就把先播的那条**整行改写**掉 —— 理发的老八和补鞋的老铁都写
+    「回铺子」,老铁从此走进理发店。
+
+    这不是罕见的写法:一个世界里"回铺子/收摊/去码头"本来就是好几个人都会做的事,
+    重名是作者层的常态而不是错误。而它的坏法是这个仓库最怕的那一种 —— 树建得起来、
+    动作查得到、日志一行不错,只是**人去错了地方**,要到有人盯着某个 NPC 看一整天
+    才发现。线上那个世界已经有三个人共用「睡」,一直没出事只是因为三条的内容恰好
+    一模一样。
+    """
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        store = world.scheduler.bt_store
+        for aid, where in (("tie", "alley"), ("ba", "barber")):
+            store.seed_duties(aid, [{
+                "name": "回铺子", "start": "18:00", "end": "19:00",
+                "kind": "walk", "params": {"location": where},
+            }])
+
+        for aid, where in (("tie", "alley"), ("ba", "barber")):
+            got = store.action_table(aid).lookup("回铺子_do")
+            assert got.params.get("location") == where, (
+                f"{aid} 的「回铺子」被别人改写成了 {got.params.get('location')!r} —— "
+                "世界照跑,只是他走错了门"
+            )
+
+
+def test_a_shared_binding_still_reaches_everyone(tmp_path):
+    """按人分开之后,`go_to_*` / `chat_with_*` 这些**全局**绑定不许跟着分家。
+
+    它们是"谁都能去那儿、谁都能找他说话",播的时候没有人称。分家分过头的话
+    每个人的表里都查不到它们,`ActionTable.lookup` 回落 idle_wander ——
+    同样是树成功、世界不动、日志干净。
+    """
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        store = world.scheduler.bt_store
+        store.set_action("go_to_pier", "walk", {"location": "pier"})
+        store.seed_duties("tie", [{
+            "name": "回铺子", "start": "18:00", "end": "19:00",
+            "kind": "walk", "params": {"location": "alley"},
+        }])
+        for aid in ("tie", "ba", "谁都行"):
+            got = store.action_table(aid).lookup("go_to_pier")
+            assert got.kind == "walk" and got.params.get("location") == "pier", (
+                f"{aid} 查不到全局绑定 go_to_pier,回落成了 {got.kind}"
+            )

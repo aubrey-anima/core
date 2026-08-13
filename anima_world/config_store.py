@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from anima_world import together
+from anima_world.world_time import DEFAULT_SECONDS_PER_TICK
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +312,7 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "llm.model": ("gpt-4o-mini", "str", "llm", False, "LLM model name"),
     "llm.timeout": (30.0, "float", "llm", False, "LLM request timeout (seconds)"),
     "llm.max_retries": (2, "int", "llm", False, "LLM SDK max retries"),
-    "scheduler.tick_rate": (1 / 300, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),
+    "scheduler.tick_rate": (1 / DEFAULT_SECONDS_PER_TICK, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),
     "scheduler.max_agents": (100, "int", "scheduler", False, "Roster cap, a performance guardrail; 0 = unlimited. The operator's number, not the authoring tool's"),
     "agent.idle_timeout": (30.0, "float", "scheduler", False, "BT idle watchdog threshold (seconds)"),
     "world.minutes_per_tick": (5, "int", "scheduler", False, "World minutes one tick represents (5 → a world day is 288 ticks)"),
@@ -366,6 +367,12 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
     "economy.enabled": (False, "bool", "economy", False, "Items, money, shops and price drift"),
     "economy.daily_wage": (20.0, "float", "economy", False, "Per-agent daily wage from the town treasury"),
+    # 玩家第一次出现在这个世界里时兜里有多少。**默认 0 = 这个世界不给**,声明本身
+    # 就是开关(和 perception / ontology 同一条)。它不是 `player_topup` 的替身:
+    # 那一个是**宿主**的门(充值,谁付的钱谁知道),这一个是**世界的作者**在说
+    # "在我这儿,一个刚来的人身上带着这些"。挂不上玩家点得到的地方 —— 玩家自己
+    # 印钱的世界里,价格不再是代价。
+    "economy.player_allowance": (0.0, "float", "economy", False, "What a player finds in his pocket the first time he shows up; 0 = this world gives nothing"),
     # 一个**世界自己声明的**量,把她的心气儿往下拖(熬夜攒的睡眠债是标准用法)。
     # 空 = 关,和 perception / ontology 同一条:声明本身就是开关。引擎不认识
     # 「睡眠债」,只认识"作者指着她身上的哪个量" —— 量怎么攒怎么还由规律写。

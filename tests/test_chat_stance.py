@@ -10,6 +10,8 @@ dogfooding 里 200+ 条聊天暴露的病:她的**关系性意图完全平坦** 
 """
 from __future__ import annotations
 
+import re
+
 from _worldfile import open_world_at
 
 import pytest
@@ -59,6 +61,33 @@ def _say(world: World, text: str, meta: dict | None = None) -> str:
         "夏", [{"role": "user", "content": text}],
         player_id="p1", display_name="阿檀", meta=meta,
     )
+
+
+def test_动作块的名字顶掉代词_而不是摞在它前面(tmp_path):
+    """线上转录里逐字躺着 `（老陈他转身往灶台走……）` —— 而模型写的是
+    `（他转身往灶台走……）`,那个名字是引擎加的。
+
+    冠名本身要留着(多人在场时 `（顿了顿。）` 不说是谁顿了顿),错的是**加法**:
+    一律往前摞,于是主语变成"名字+代词",没有人这么写中文。量下来是模型写的
+    动作块的 10%(线上 108 块里 11 块),一局玩下来撞得到好几次。
+    """
+    world, _ = _world(
+        tmp_path,
+        "（她把杯子推回去。）你自己看着办。\n\n（顿了顿。）\n\n（他们都笑了。）",
+        stance=False,
+    )
+    with world:
+        name = world.scheduler.agent_display_name("夏")
+        reply = _say(world, "帮我个忙")
+
+        assert f"（{name}把杯子推回去。）" in reply, \
+            f"代词该被名字顶掉,而不是摞出「{name}她」:{reply!r}"
+        assert not re.search(rf"{re.escape(name)}[他她它](?!们)", reply), \
+            f"名字后面还跟着代词:{reply!r}"
+        # 没有主语的那块照旧冠名 —— 这一层存在的理由就是它。
+        assert f"（{name}顿了顿。）" in reply, f"没主语的块没冠上名:{reply!r}"
+        # 「他们」不是她一个人,而「名字+他们」在中文里正好是"某人一伙",照旧摞。
+        assert f"（{name}他们都笑了。）" in reply, f"复数那块被误顶了:{reply!r}"
 
 
 def test_a_declared_stance_lands_in_the_world_and_never_in_the_reply(tmp_path):

@@ -22,8 +22,16 @@ CLAUDE.md 有一条硬不变量:
    而不是"它不改世界"
 2. **声明的地方必须真的变** —— 这是全部意义
 3. **不给动词写第二份判断** —— 这里只观察世界的前后差,不去检查动词内部做了什么
+
+第四条是这条测试自己教出来的:**"改在哪儿"要连着"什么时候"一起说**。`talk_to` 的
+记忆是关系判定的产物,而判定按硬不变量跑在判定线程池上,`act()` 返回时它还没落 ——
+于是这里"量前后差"的那一瞬间**四分之一的时候量早了**,红在一个和它要验的东西无关的
+地方。落点分两种(`ToolSpec.writes_late`),量法也就分两种:当场落的量这一瞬间,
+稍后落的等它落。**"稍后"不是"可以不落"** —— 等不到照样红。
 """
 from __future__ import annotations
+
+import time
 
 from _worldfile import open_world_at
 
@@ -223,11 +231,43 @@ def test_a_verb_really_changes_what_it_declared(world, verb):
     assert result["ok"] is True, f"这一下没成,验不了它改没改:{result.get('error')}"
     after = _snapshot(world, spec.writes)
 
-    unchanged = [place for place in spec.writes if after.get(place) == before.get(place)]
+    # **当场落的那几处,量的就是这一瞬间。** 声明成 `writes_late` 的不在这一批里:
+    # 它们由别的线程稍后写(`talk_to` 的记忆是关系判定的产物,而判定按硬不变量
+    # 永不跑在 tick 线程上)。此前这里把两种落点混着量,于是这条测试**四分之一
+    # 概率红在一个和它要验的东西无关的地方** —— 拿一个同步的瞬间去量一件异步的事,
+    # 红不红取决于这一回线程池抢没抢赢。
+    now = [place for place in spec.writes if place not in spec.writes_late]
+    unchanged = [place for place in now if after.get(place) == before.get(place)]
     assert not unchanged, (
         f"{verb} 声明了写 {list(spec.writes)},但 {unchanged} 一点没变 —— "
         f"声明了却没兑现。前:{before} 后:{after}"
     )
+
+    # **稍后落的照等不误。** 等不到一样红 —— `writes_late` 是"晚一点",不是
+    # "可以不落"。超时只是保险丝(和 `test_relationship_axes_land._await` 同一条
+    # 路数):这不是放宽断言,断言仍然是"它必须变",放宽的只是"什么时候量"。
+    if spec.writes_late:
+        late = _await_change(world, spec.writes_late, before)
+        never = [place for place in spec.writes_late if late.get(place) == before.get(place)]
+        assert not never, (
+            f"{verb} 声明了稍后写 {list(spec.writes_late)},等满 {_LATE_TIMEOUT} 秒 "
+            f"{never} 还是一点没变 —— 声明了却没兑现。前:{before} 后:{late}"
+        )
+
+
+_LATE_TIMEOUT = 10.0
+
+
+def _await_change(world: World, places: tuple[str, ...], before: dict) -> dict:
+    """等到这几处都变了(或者等满保险丝)。返回最后一次看见的样子。"""
+    deadline = time.monotonic() + _LATE_TIMEOUT
+    while True:
+        seen = _snapshot(world, places)
+        if all(seen.get(place) != before.get(place) for place in places):
+            return seen
+        if time.monotonic() >= deadline:
+            return seen
+        time.sleep(0.01)
 
 
 def test_the_declarations_are_visible_from_outside(world):
@@ -237,3 +277,8 @@ def test_the_declarations_are_visible_from_outside(world):
     for verb, entry in entries.items():
         assert "writes" in entry, f"{verb} 的目录条目没带 writes"
         assert list(entry["writes"]) == list(tools_mod.get(verb).writes)
+        # **"什么时候落"和"落在哪儿"一样要看得见。** 只给 `writes` 的话,宿主会在
+        # 调用返回的那一瞬间去查,然后随机读到一个还没变的世界 —— 这条测试自己
+        # 就是这么红了四分之一次的。
+        assert "writes_late" in entry, f"{verb} 的目录条目没带 writes_late"
+        assert list(entry["writes_late"]) == list(tools_mod.get(verb).writes_late)

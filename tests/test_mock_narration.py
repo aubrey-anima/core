@@ -131,6 +131,64 @@ def test_the_first_screen_speaks_the_worlds_language(tmp_path):
             assert phrase not in line, f"英文模板又回来了:{line!r}"
 
 
+def test_第一屏写的是名字和地名_不是键名(tmp_path):
+    """线上 `night-tide` 的世界动态里,玩家逐字读到的是:
+
+        chi在studio忙着，雨声盖过了别的动静
+        nian冒着雨往yard去
+
+    `chi` 是林迟,`studio` 是晚潮电台,`yard` 是念姐的小院 —— 三个键名,一个名字
+    都没有。而这是**玩家读到的正文**,不是日志:模板 `{agent}` / `{location}` /
+    `{target}` 一直是拿 id 去填的。
+
+    ⚠️ 上面那条"不许英文"的测试盯不住它,而且**盯不住是有意的**:它的注释里写着
+    「地点 id 本来就是英文(`走去了cafe` 完全正常)」—— 当时把这一条当成了正常。
+    """
+    from _worldfile import redis_for
+
+    db = tmp_path / "w.db"
+    redis_for(db)
+    result = run_cli("simulate", "--world-id", "w", "--ticks", "300", "--llm", "mock")
+    assert result.returncode == 0, result.stderr
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        lines = [entry["text"] for entry in world.state()["narrative_log"]]
+        agent_ids = set(world.scheduler.agents)
+        place_ids = {str(row["id"]) for row in world.scheduler.location_store.all()}
+    assert lines, "跑 300 tick 总该有叙事"
+    # 名字里可能**包含** id(`夏` 之于 `苏晚夏`),所以按词问:一个键名要么被别的
+    # 汉字裹着(那是名字的一部分),要么光秃秃地站在那儿(那才是漏出来的 id)。
+    named = "".join(
+        world.scheduler.agent_display_name(a) for a in agent_ids
+    )
+    for line in lines:
+        for pid in place_ids:
+            assert pid not in line, f"叙事里漏了地点键名 {pid!r}:{line!r}"
+        for aid in agent_ids:
+            if aid in named:
+                continue   # 这个 id 是某个名字的一部分,分不开就不问
+            assert aid not in line, f"叙事里漏了角色键名 {aid!r}:{line!r}"
+
+
+def test_叙事器没接名册时照旧填_id():
+    """库里直接 new 一个 provider 的宿主和测试不该因此报错 —— 退回 id,不抛。"""
+    provider = MockNarrativeProvider()
+    assert provider.describe(
+        {"kind": "work", "params": {"location": "cafe"}}, "遥", {}
+    ) == "遥在cafe忙活"
+
+
+def test_名册查不到就退回_id_而不是掀翻叙事():
+    """叙事每 tick 都在跑:一个刚被节拍造出来、还没进名册的人不该让它炸。"""
+    provider = MockNarrativeProvider()
+    provider.bind_names(
+        agent_name=lambda aid: {"遥": "陆知遥"}.get(aid, aid),
+        place_name=lambda _lid: (_ for _ in ()).throw(RuntimeError("地图挂了")),
+    )
+    assert provider.describe(
+        {"kind": "work", "params": {"location": "cafe"}}, "遥", {}
+    ) == "陆知遥在cafe忙活"
+
+
 def test_no_action_kind_still_renders_an_english_template():
     """逐个种类盯措辞 —— 端到端那条只覆盖当次真的发生了的动作。"""
     provider = MockNarrativeProvider()

@@ -26,6 +26,15 @@
 `[waiting]`、`[停顿]` 原样交给玩家。ASCII 的闭括号还要**避开 JSON 里的 `]`**
 (`{"a":[1,2]}`),所以只认花括号深度为 0 的那个 `]`。
 
+**光写工具名也算**(`〔delay_reply {"minutes": 5}〕`,漏了 `tool:`)。同一条理由的
+另一半:线上抓到的样子是她整轮只输出了这一条标记、一句台词都没有,于是标记被摘掉、
+工具没跑、玩家收到**零个字节**。她的选择没兑现,而屏幕上和"应用崩了"长得一模一样。
+
+两道闸没松:**只认这个世界真有的能力名**(由 `chat_service` 注入 —— 这个模块不认识
+工具注册表,也不该认识;猜一份名字出来是这一层最坏的错法),而且**只在全角括号里认**。
+`[` 那一侧不认,因为 `eat` / `work` / `sleep` 这种名字在散文里是真会出现的,而全角
+`〔〕` 是提示词里教的权威写法 —— 写下它的人已经在说"这是一条指令"了。
+
 解析器是**流式**的:`feed()` 逐 token 喂,散文原样吐出,指令攒够一整条才交出去。
 一个只写了半个 `〔` 的 token 不会把标记漏给玩家。
 
@@ -45,7 +54,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Collection
 
 logger = logging.getLogger(__name__)
 
@@ -65,14 +74,32 @@ _PREFIX_HEADS = ("tool:", "tool：", "stance:", "stance：")
 _EXACT_HEADS = ("wait", "wait_for_user", "yield")
 
 
-def _looks_like_directive(body: str) -> bool:
+def _name_set(tool_names: Collection[str]) -> frozenset[str]:
+    return frozenset(str(name).strip().lower() for name in tool_names if str(name).strip())
+
+
+def _bare_tool_name(body: str, tool_names: frozenset[str]) -> str:
+    """`〔delay_reply {…}〕` —— 漏了 `tool:` 的那种写法。命中返回那个能力名。
+
+    只认注入进来的名字。「读不懂就是 unknown,绝不猜」那条一个字没松 —— 松的是
+    "她少写了两个字"这一种,而不是"这个词看起来像个动词"。
+    """
+    if not tool_names:
+        return ""
+    name = body.strip().split(" ", 1)[0].strip().lower()
+    return name if name in tool_names else ""
+
+
+def _looks_like_directive(body: str, tool_names: frozenset[str] = frozenset()) -> bool:
     """这段完整的体像不像一条指令 —— **不管它解析得成解析不成**。
 
     "像"和"成"必须分开:`tool:mute {坏 JSON}` 解析不成,但它显然是一条打残了的
     指令,照原文吐给玩家就是让人看见引擎的内脏。判"像"只看开头。
     """
     text = body.strip().lower()
-    return text in _EXACT_HEADS or text.startswith(_PREFIX_HEADS)
+    if text in _EXACT_HEADS or text.startswith(_PREFIX_HEADS):
+        return True
+    return bool(_bare_tool_name(body, tool_names))
 
 
 def _could_become_directive(partial: str) -> bool:
@@ -97,8 +124,31 @@ class Directive:
     raw: str = ""
 
 
-def parse_body(body: str) -> Directive:
-    """把 `〔…〕` 里面那段解析成一条指令。读不懂就是 unknown,绝不猜。"""
+def _tool_directive(rest: str, body: str) -> Directive:
+    """`<名字> <JSON>` 那一段。`tool:` 写了没写共用这一份 —— 两份写法解析出不同的
+    参数,是这一层最难查的错。"""
+    name, _, arg_text = rest.partition(" ")
+    params: dict[str, Any] = {}
+    arg_text = arg_text.strip()
+    if arg_text:
+        try:
+            loaded = json.loads(arg_text)
+        except ValueError:
+            logger.warning("tool 调用 %r 的参数不是 JSON:%r", name, arg_text)
+            return Directive(kind="unknown", name=name.strip(), raw=body)
+        if not isinstance(loaded, dict):
+            logger.warning("tool 调用 %r 的参数不是对象:%r", name, arg_text)
+            return Directive(kind="unknown", name=name.strip(), raw=body)
+        params = loaded
+    return Directive(kind="tool", name=name.strip(), params=params, raw=body)
+
+
+def parse_body(body: str, tool_names: Collection[str] = ()) -> Directive:
+    """把 `〔…〕` 里面那段解析成一条指令。读不懂就是 unknown,绝不猜。
+
+    `tool_names` 是这个世界真有的能力名(调用方注入)。给了它,漏写 `tool:`
+    的那种写法也认;不给,行为和从前逐字相同。
+    """
     text = body.strip()
     lowered = text.lower()
     if lowered in ("wait", "wait_for_user", "yield"):
@@ -106,22 +156,9 @@ def parse_body(body: str) -> Directive:
     if lowered.startswith("stance:") or lowered.startswith("stance："):
         return Directive(kind="stance", name=text.split(":", 1)[-1].split("：", 1)[-1].strip(), raw=body)
     if lowered.startswith("tool:") or lowered.startswith("tool："):
-        rest = text.split(":", 1)[-1].split("：", 1)[-1].strip()
-        name, _, arg_text = rest.partition(" ")
-        params: dict[str, Any] = {}
-        arg_text = arg_text.strip()
-        if arg_text:
-            try:
-                loaded = json.loads(arg_text)
-            except ValueError:
-                logger.warning("tool 调用 %r 的参数不是 JSON:%r", name, arg_text)
-                return Directive(kind="unknown", name=name.strip(), raw=body)
-            if isinstance(loaded, dict):
-                params = loaded
-            else:
-                logger.warning("tool 调用 %r 的参数不是对象:%r", name, arg_text)
-                return Directive(kind="unknown", name=name.strip(), raw=body)
-        return Directive(kind="tool", name=name.strip(), params=params, raw=body)
+        return _tool_directive(text.split(":", 1)[-1].split("：", 1)[-1].strip(), body)
+    if _bare_tool_name(text, _name_set(tool_names)):
+        return _tool_directive(text, body)
     return Directive(kind="unknown", raw=body)
 
 
@@ -133,14 +170,20 @@ class DirectiveParser:
     仍然落在那句话中间。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tool_names: Collection[str] = ()) -> None:
         self._buffer: str | None = None
         self._ascii = False          # 这一条候选是 `[` 开的还是 `〔` 开的
+        self._tools = _name_set(tool_names)
+
+    @property
+    def _bare_ok(self) -> frozenset[str]:
+        """这一条候选认不认光写工具名的写法 —— ASCII 那一侧一律不认(见模块说明)。"""
+        return frozenset() if self._ascii else self._tools
 
     # 没闭合/没解析成的候选怎么收场 —— 三处(超长、ASCII 早退、流结束)共用一份,
     # 因为它们是同一个判断:像指令就咽掉并记账,不像就原样还给玩家。
     def _abandon(self, opener: str, body: str) -> tuple[str, Any]:
-        if _looks_like_directive(body):
+        if _looks_like_directive(body, self._bare_ok):
             return ("directive", Directive(kind="unknown", raw=body))
         return ("text", opener + body)
 
@@ -196,7 +239,7 @@ class DirectiveParser:
             # `[waiting]`、`[停顿]` —— 方括号在散文里本来就有它自己的用法。
             out.append(("text", ASCII_OPEN + body + ASCII_CLOSE))
         else:
-            out.append(("directive", parse_body(body)))
+            out.append(("directive", parse_body(body, self._bare_ok)))
         return end + 1, True
 
     def _find_close(self, buffered: str, text: str) -> int:
@@ -226,9 +269,11 @@ class DirectiveParser:
         return [self._abandon(ASCII_OPEN if self._ascii else OPEN, buffered)]
 
 
-def strip_directives(text: str) -> tuple[str, list[Directive]]:
+def strip_directives(
+    text: str, tool_names: Collection[str] = ()
+) -> tuple[str, list[Directive]]:
     """一次性解析(非流式路径:摘要、分类器回包、测试)。"""
-    parser = DirectiveParser()
+    parser = DirectiveParser(tool_names)
     parts: list[str] = []
     found: list[Directive] = []
     for kind, value in list(parser.feed(text)) + list(parser.flush()):

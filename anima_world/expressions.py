@@ -148,6 +148,215 @@ def compile_expression(source: str, *, dice: bool = False) -> Expression:
     return Expression(source=source, names=frozenset(names), _tree=tree.body)
 
 
+_COMPARE_SYMBOLS: dict[type, str] = {
+    ast.Eq: "==",
+    ast.NotEq: "!=",
+    ast.Lt: "<",
+    ast.LtE: "<=",
+    ast.Gt: ">",
+    ast.GtE: ">=",
+}
+
+
+def lower_bounds(expression: Expression) -> dict[str, float]:
+    """这条式子要成立,每个名字**至少**得有多大。`名字 >= 数` / `名字 > 数` 那种。
+
+    只认**整条式子就是一个比较**的那种写法(`me_主动 >= 1.2`),`and` / `or` 一概
+    不认 —— 一个 or 里的分支不成立不等于整条不成立,而这一层的每个调用方都在问
+    「不满足会怎样」。认错了就会去报一道其实开得了的门。
+    """
+    node = expression._tree
+    if not isinstance(node, ast.Compare):
+        return {}
+    out: dict[str, float] = {}
+    operands = [node.left, *node.comparators]
+    for (left, right), op in zip(zip(operands, operands[1:]), node.ops):
+        if isinstance(op, (ast.GtE, ast.Gt)) and isinstance(left, ast.Name):
+            need, name = _numeric(right), left.id
+        elif isinstance(op, (ast.LtE, ast.Lt)) and isinstance(right, ast.Name):
+            need, name = _numeric(left), right.id
+        else:
+            continue
+        if need is not None:
+            out[name] = max(out.get(name, -math.inf), need)
+    return out
+
+
+def reachable_ceiling(expression: Expression, name: str, base: float) -> float:
+    """这条式子写回 `name` 之后,`name` 最高能到多少?**不知道就答 `inf`。**
+
+    给「够不到的门槛」那道 lint 用(`ontology.unreachable_requirements`):一道
+    `me_主动 >= 1.2` 的门,如果这个世界里没有任何一处抬得动「主动」,那它就是一个
+    **数学上永远开不了**的门 —— 而玩家看得见那个按钮、点得到、每次收到的都是
+    「你的主动不够」。他会一直试。**预防不了的失败教不会他任何东西**,而这一条
+    比拼错量名更坏:拼错还有闸,这个连一句话都没有。
+
+    只认得出**几种封得死的写法**,别的一律 `inf`(= 不知道 = 不报)。误报够多次的
+    警告等于没有警告,这一条和 `drift_warnings` 同一条纪律:
+
+        me_X                   → base          自己等于自己
+        me_X - k   (k ≥ 0)     → base          只减不增
+        max(f, k)              → max(ceil(f), k)   下限会把值**抬**到 k
+        min(f, k)              → min(ceil(f), k)
+        clamp(f, lo, hi)       → 夹一道
+        其它(含 `me_X + …`)   → inf
+
+    ⚠️ `max(f, k)` 那一行是这里唯一容易写错的地方:直觉上 `max` 是"保底",而保底
+    正是一种**抬升** —— `max(me_主动 - 0.02, 5)` 会把一个 1.0 的量顶到 5。把它当
+    非增处理的话,这道 lint 会去报一个其实开得了的门,而那种误报比漏报贵得多。
+    """
+    return _ceiling(expression._tree, name, base)
+
+
+def _nonnegative(node: ast.expr) -> bool:
+    """这一段的值**一定** ≥ 0 吗?拿不准就答 False。
+
+    只为衰减那种写法存在:`量 - 0.006 * dt`。不认 `dt` 的话每一条按流逝折算的
+    衰减规律都算成"不知道",而**按流逝折算恰恰是这个引擎劝作者写的那一种**
+    (`drift_warnings` 整条就在劝这个)—— 于是这道 lint 在真实世界里永远不响。
+
+    `dt` 是"过去了几个 tick",引擎里它永不为负;别的名字符号一概不知道。
+    """
+    number = _numeric(node)
+    if number is not None:
+        return number >= 0
+    if isinstance(node, ast.Name):
+        return node.id == "dt"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mult, ast.Div)):
+        return _nonnegative(node.left) and _nonnegative(node.right)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in ("min", "max", "abs", "floor", "ceil", "clamp"):
+            return all(_nonnegative(arg) for arg in node.args)
+    return False
+
+
+def _ceiling(node: ast.expr, name: str, base: float) -> float:
+    if isinstance(node, ast.Name):
+        return base if node.id == name else math.inf
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+        # 减一个**符号确定为非负**的东西才算得准。减一个量的话符号不知道,而
+        # `me_X - me_疲劳` 在疲劳为负时是在加。
+        if _nonnegative(node.right):
+            return _ceiling(node.left, name, base)
+        return math.inf
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        args = node.args
+        if node.func.id == "max" and len(args) == 2:
+            floor = _numeric(args[1])
+            if floor is not None:
+                return max(_ceiling(args[0], name, base), floor)
+        elif node.func.id == "min" and len(args) == 2:
+            cap = _numeric(args[1])
+            if cap is not None:
+                return min(_ceiling(args[0], name, base), cap)
+        elif node.func.id == "clamp" and len(args) == 3:
+            low, high = _numeric(args[1]), _numeric(args[2])
+            if low is not None and high is not None:
+                return min(max(_ceiling(args[0], name, base), low), high)
+    return math.inf
+
+
+def rewrite_source(
+    expression: Expression,
+    name_text: Callable[[str], str | None] | None = None,
+    threshold_text: Callable[[str, float, str], tuple[str, str] | None] | None = None,
+) -> str:
+    """把原文里的**名字**和**阈值**换成别的说法,别处一个字不动。
+
+    给拒绝语用(`ontology.speak_expression`):那句话最后印在玩家屏幕上,而
+    `me_体力` 和 `0.55` 都不是这个世界里的说法。这一层只回答"哪一段文字是个名字、
+    哪一段是某个量的阈值",**说法由调用方给** —— 词汇归本体那边。
+
+    **按语法树上的位置改,不按正则。** 拿名字拼一条正则去替换有两个洞:换出来的
+    字会被后一轮再换一次(`土湿` 换成「土」,轮到名字 `土` 那一遍再咬它一口),
+    而字符串字面量里恰好写着一个量名时也一样被改掉。位置两样都没有。
+
+    `threshold_text(name, value, op)` **只在比较的另一头是个光名字时才问** ——
+    `土 > 0.55` 问得到,`土 > 湿度 * 2` 里那个 `2` 问不到:它不是「土」的一个值,
+    把它念成档词就是胡说。链式比较(`0 < 土 < 1`)按相邻两两拆开,各问各的。
+    它回一对 `(阈值怎么说, 比较号怎么说)` —— **比较号也归它**,因为换掉数的那一方
+    才知道换出来的说法配不配得上原来那个号(见 `speak_expression` 里 `>=` 那条)。
+
+    ⚠️ 比较号在语法树上**没有位置**(`ast.cmpop` 不带 `lineno`),所以它是在两个
+    操作数之间那一段里找的 —— 那一段除了空白就只有它,切得干净。
+
+    ⚠️ `ast` 的 `col_offset` 数的是 **UTF-8 字节**,不是字符 —— 这个仓库里的量名
+    全是中文,照字符切会切在字节中间。
+    """
+    lines = expression.source.splitlines(keepends=True) or [""]
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+
+    def at(lineno: int, col: int) -> int:
+        line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+        return starts[lineno - 1] + len(line.encode("utf-8")[:col].decode("utf-8"))
+
+    def span(node: ast.expr) -> tuple[int, int]:
+        return (
+            at(node.lineno, node.col_offset),
+            at(node.end_lineno or node.lineno, node.end_col_offset or node.col_offset),
+        )
+
+    edits: list[tuple[int, int, str]] = []
+    thresholds: set[int] = set()
+    if threshold_text is not None:
+        for node in ast.walk(expression._tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            operands = [node.left, *node.comparators]
+            for (left, right), op in zip(zip(operands, operands[1:]), node.ops):
+                symbol = _COMPARE_SYMBOLS.get(type(op))
+                if symbol is None:
+                    continue
+                for name_node, value_node in ((left, right), (right, left)):
+                    if not isinstance(name_node, ast.Name):
+                        continue
+                    number = _numeric(value_node)
+                    if number is None or id(value_node) in thresholds:
+                        continue
+                    said = threshold_text(name_node.id, number, symbol)
+                    if said is None:
+                        continue
+                    word, said_symbol = said
+                    thresholds.add(id(value_node))
+                    edits.append((*span(value_node), word))
+                    if said_symbol != symbol:
+                        gap = (span(left)[1], span(right)[0])
+                        found = expression.source.find(symbol, *gap)
+                        if found >= 0:
+                            edits.append((found, found + len(symbol), said_symbol))
+
+    if name_text is not None:
+        for node in ast.walk(expression._tree):
+            if isinstance(node, ast.Name):
+                said = name_text(node.id)
+                if said:
+                    edits.append((*span(node), said))
+
+    out = expression.source
+    for start, end, said in sorted(edits, reverse=True):
+        out = out[:start] + said + out[end:]
+    return out
+
+
+def _numeric(node: ast.expr) -> float | None:
+    """这个节点是不是一个写死的数(带得动一个负号)。是就给出它的值。
+
+    `-0.3` 在语法树上不是常量而是 `UnaryOp(USub, 0.3)` —— 不认这一层的话,
+    负阈值(`me_心情 < -0.3`)会原样漏成数字,而它恰恰是最需要翻译的那种。
+    """
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _numeric(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
+    if isinstance(node, ast.Constant) and not isinstance(node.value, bool):
+        if isinstance(node.value, (int, float)):
+            return float(node.value)
+    return None
+
+
 def _validate(node: ast.AST, source: str, names: set[str], *, dice: bool = False) -> None:
     """逐个节点过白名单。白名单之外的一切在这里就被拒。"""
     if isinstance(node, ast.Constant):

@@ -157,6 +157,44 @@ def test_他做不了的时候和他不想是两句话(world):
     assert result["ok"] is False and "做不了" in result["error"]
 
 
+def test_拒绝那句话里_作者写的名字要划得出边界(world, open_world, tmp_path):
+    """**中文不分词,而名字和动词是作者写的。**
+
+    `沈遥` 后面紧跟着 `在赶路` 还看得懂,换成一个西文名字就成了
+    `Dr. Eleanor Finch在赶路`(线上原文);而作者若把人叫做「老陈的猫」,
+    `老陈的猫不在这儿` 会被读成"老陈的、猫不在这儿"。动词那一头同理:
+    `一起坐会儿 是一个人做的事` 靠一个空格顶着,而空格在中文里不是分隔符。
+
+    这不是排版讲究 —— 拒绝那句话是玩家唯一能读到的解释,读岔了他改错东西。
+    引擎自己的字(`是一个人做的事`)不划边界,划的是**数据里来的那一截**。
+    同一条纪律的第一个落点在 `_current_action` 那句忙碌拒绝(用「」不用反引号,
+    反引号是 markdown,玩家屏幕上就是两个撇号)。
+    """
+    seed = json.loads(json.dumps(_SEED))
+    seed["agents"][1]["name"] = "Dr. Eleanor Finch"
+    w = open_world(world_file=write_seed_file(tmp_path / "latin.cyberworld", seed))
+    w.act("遥", "walk", {"location": "yard"}, surface="body")
+    w.tick(30)
+
+    gated = _act(w, "夏", "同坐", **{"with": ["遥"]})
+    assert gated["ok"] is False
+    assert "「Dr. Eleanor Finch」" in gated["error"], "名字是数据,要划边界"
+
+    solo = _act(w, "夏", "擦一擦", **{"with": ["柔"]})
+    assert solo["ok"] is False
+    assert "「一起坐会儿」" not in solo["error"]
+    assert "「擦一擦」是一个人做的事" in solo["error"], "动词的人话也是作者写的"
+
+    short = _act(w, "夏", "同坐")
+    assert short["ok"] is False
+    assert "「一起坐会儿」得有人一起" in short["error"]
+
+    w.scheduler.stock_store.set_many("agent:柔", {"体力": 1.0}, tick=0)
+    incapable = _act(w, "夏", "同坐", **{"with": ["柔"]})
+    assert incapable["ok"] is False
+    assert "「林柔」这会儿做不了" in incapable["error"]
+
+
 def test_一个人过不了闸整件事就不发生(world):
     """三个人吃饭,一个人没钱,不该变成两个人吃饭 —— 那是引擎替他们改了计划。"""
     world.scheduler.stock_store.set_many("agent:柔", {"体力": 1.0}, tick=0)
@@ -406,6 +444,87 @@ def test_玩家不在她跟前就一起不了_这一条不挂开关(world):
         surface="body", player_id="p1",
     )
     assert result["ok"] is False and "跟前" in result["error"]
+
+
+def _open_talk(world, agent_id, player_id, turns):
+    """给他俩支一场**还开着**的会话。会话关闭那一刻才落记忆,而邀请正发生在中间。"""
+    store = world.chat_store
+    ts = world.scheduler.clock
+    cid = store.active_or_start(agent_id, ts, player_id=player_id,
+                                player_name=world.players[player_id]["display_name"])
+    for role, text in turns:
+        store.add_message(cid, role, text, ts)
+    return cid
+
+
+def test_玩家叫人时_判定器读得到他俩这会儿正说的话(world):
+    """线上撞出来的一整条:跟她聊完两轮再叫她,判定器手里**一个字都没有那两轮** ——
+    记忆是会话关闭那一刻才落的,而邀请正发生在会话中间。她于是在"我压根不记得跟
+    这个人说过话"的前提下判"熟不熟",一叫就推;玩家眼里是"我跟她聊得好好的,
+    一叫她就说不熟"。**世界照跑,日志一行不错。**
+    """
+    from anima_world.relationship_judge import InviteVerdict
+
+    class _Judge:
+        def __init__(self):
+            self.seen = []
+
+        def judge_invite(self, **kwargs):
+            self.seen.append(kwargs)
+            return InviteVerdict(accept=True, reason="刚聊得挺好")
+
+    world.player_move("p1", "cafe")
+    world.players["p1"]["display_name"] = "阿布"
+    _open_talk(world, "遥", "p1", [
+        ("user", "你还记得那把旧伞吗"),
+        ("assistant", "记得，你说过要还我。"),
+    ])
+
+    judge = _Judge()
+    world.scheduler.relationship_judge = judge
+    out = world.player_tool(
+        "p1", "interact", {"target": "bench:oak", "verb": "同坐", "with": ["遥"]})
+    assert out["ok"] is True, out
+
+    talk = list(judge.seen[0]["recent_talk"])
+    assert any("旧伞" in line for line in talk), f"当轮对话没进判定:{talk}"
+    assert talk[0].startswith("阿布："), "他读到的必须是名字,不是 user/assistant"
+    assert talk[1].startswith("沈遥：")
+
+
+def test_没在说话时这一格是空的_不是编一段出来(world):
+    from anima_world.relationship_judge import InviteVerdict
+
+    class _Judge:
+        seen: list = []
+
+        def judge_invite(self, **kwargs):
+            type(self).seen.append(kwargs)
+            return InviteVerdict(accept=True, reason="")
+
+    world.player_move("p1", "cafe")
+    world.scheduler.relationship_judge = _Judge()
+    assert world.player_tool(
+        "p1", "interact", {"target": "bench:oak", "verb": "同坐", "with": ["遥"]},
+    )["ok"] is True
+    assert _Judge.seen[0]["recent_talk"] == ()
+
+
+def test_一个人叫另一个人时没有转录可读_而且不该去找(world):
+    """NPC 之间没有会话这回事 —— 去读一个不存在的转录只会让每次邀请多一次白跑的
+    IO,而结果永远是空。"""
+    from anima_world.relationship_judge import InviteVerdict
+
+    class _Judge:
+        seen: list = []
+
+        def judge_invite(self, **kwargs):
+            type(self).seen.append(kwargs)
+            return InviteVerdict(accept=True, reason="")
+
+    world.scheduler.relationship_judge = _Judge()
+    assert _act(world, "夏", "同坐", **{"with": ["遥"]})["ok"] is True
+    assert _Judge.seen[0]["recent_talk"] == ()
 
 
 def test_替别人点头是不行的(world):

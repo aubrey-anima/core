@@ -1037,22 +1037,31 @@ class RedisLocationStore(_LocationStore):
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._rows_store.put(loc_id, row)
 
-    def seed_defaults(self, entries: list[dict[str, Any]]) -> None:
+    def seed_defaults(self, entries: list[dict[str, Any]], *,
+                      merge: bool = False) -> list[str]:
         """创世播地图。**已有地图就不动** —— 地图是运行数据,不许被今天的种子覆盖。
 
         条目是**扁平列表 + `parent` 字段**,不是嵌套的 `children`(我第一版照想象
         写了递归,互验当场抓到:只播出了顶层那一个)。父先于子的排序用 SQLite 版
         那份 `_parents_first` —— 拓扑排序也不该有第二份。
+
+        `merge=True` 见基类那份 docstring:粒度从整张表降到每个地点,**默认必须是
+        False**。返回真的写下去的那些 id(调用方要拿它发 `location_join`,并且
+        汇总时只报真的新增了多少)。
         """
         from anima_world.world_store import _LOCATION_FIELDS, _parents_first
 
-        if self.all():
-            return
+        have = {str(row.get("id")) for row in self.all()}
+        if have and not merge:
+            return []
+        written: list[str] = []
         for entry in _parents_first(entries):
-            self.upsert(
-                str(entry["id"]),
-                **{f: entry[f] for f in _LOCATION_FIELDS if f in entry},
-            )
+            loc_id = str(entry["id"])
+            if merge and loc_id in have:
+                continue          # 只增不改:这个地点已经有了,它的描述归这个世界自己
+            self.upsert(loc_id, **{f: entry[f] for f in _LOCATION_FIELDS if f in entry})
+            written.append(loc_id)
+        return written
 
 
 class RedisBTStore(_BTStore):
@@ -1080,9 +1089,19 @@ class RedisBTStore(_BTStore):
             self._actions.all().values(), key=lambda r: str(r.get("node_id") or "")
         )
 
-    def set_action(self, node_id: str, kind: str, params: dict[str, Any] | None = None) -> None:
-        self._actions.put(node_id, {
+    def set_action(
+        self,
+        node_id: str,
+        kind: str,
+        params: dict[str, Any] | None = None,
+        *,
+        tree: str | None = None,
+    ) -> None:
+        # 共享绑定的字段名保持**裸 node_id** —— 老引擎写下的行一个字都不用动,
+        # 读出来 `tree` 缺席 = 共享 = 和从前逐位相同的行为。
+        self._actions.put(node_id if tree is None else f"{tree}\x00{node_id}", {
             "node_id": node_id, "kind": kind, "params": dict(params or {}),
+            "tree": tree,
         })
 
     def add_node(self, tree: str, node_id: str, node_type: str, parent: str | None,
@@ -1342,6 +1361,34 @@ class RedisChatStateStore(_ChatStateStore):
     def clear_override(self, agent_id: str, player_id: str, kind: str) -> bool:
         return bool(self._overrides.drop(f"{agent_id}\x00{player_id}\x00{kind}"))
 
+    # ── 一个人离开了这个世界 ────────────────────────────────────────────────
+
+    def forget_player(self, player_id: str) -> int:
+        """把这几张表里关于这个玩家的**朝前看**的行清掉,返回清了几行。
+
+        stance / mutes / followups / overrides 四张按 (角色, 玩家) 存的都要走 ——
+        `refused_topics` 是按 (角色, 关键词) 存的,和玩家无关,不动。
+
+        **按行里的字段判,不按主键前缀判**:主键是 `\\x00` 拼出来的,而玩家 id
+        里出现过裸 UUID —— 按字符串前缀切会在某个 id 恰好是另一个的前缀时静默
+        多删一行,而多删的那一行属于另一个还活着的人。
+        """
+        player_id = str(player_id or "").strip()
+        if not player_id:
+            return 0
+        dropped = 0
+        with self._lock:
+            for rows, field_name in (
+                (self._stances, "target"),
+                (self._quiet, "player_id"),
+                (self._followups, "player_id"),
+                (self._overrides, "player_id"),
+            ):
+                for field, row in rows.all().items():
+                    if isinstance(row, dict) and row.get(field_name) == player_id:
+                        dropped += rows.drop(field)
+        return dropped
+
 
 class RedisKnowledgeGraph:
     """关系图的边。`(subject, predicate, object)` 唯一 —— **重复写不覆盖**
@@ -1548,6 +1595,22 @@ class RedisContactStore:
             return 0
         return int(row.get("fired_today") or 0)
 
+    def forget_player(self, player_id: str) -> int:
+        """他走了 —— 把每个角色对他的联系态清掉,返回清了几行。
+
+        留着的下场是这一层永远替一个不存在的人占着名额:线上那个世界里,6 个早就
+        注销的试玩账号在这张表里活着,而她每天能想起的人数是有上限的。
+        **按行里的 `player_id` 判**,理由同 `RedisChatStateStore.forget_player`。
+        """
+        player_id = str(player_id or "").strip()
+        if not player_id:
+            return 0
+        dropped = 0
+        for field, row in self._rows.all().items():
+            if isinstance(row, dict) and row.get("player_id") == player_id:
+                dropped += self._rows.drop(field)
+        return dropped
+
 
 class RedisEconomyStore:
     """货架与物品。**价格漂移曲线不重写** —— 那是世界的规则,不是存储。
@@ -1591,6 +1654,14 @@ class RedisEconomyStore:
             except (TypeError, ValueError):
                 restores = {}
         return dict(restores or {})
+
+    def name_of(self, item_id: str) -> str:
+        """这样东西的人话名字;没有定义就回空字符串,让调用方自己决定退回什么。
+
+        回 `item_id` 而不是空的话,调用方分不出"它叫这个名字"和"查不到" ——
+        而"引用即存在"那条路上,一样东西的名字**本来就是**它的 id。
+        """
+        return str((self._items.get(item_id) or {}).get("name") or "")
 
     def items(self) -> list[dict[str, Any]]:
         return sorted(self._items.all().values(), key=lambda r: str(r.get("id") or ""))
@@ -1650,26 +1721,38 @@ class RedisEconomyStore:
         self,
         items: list[tuple[str, str, str, float, dict[str, Any]]],
         stock: list[tuple[str, str, int, float | None]],
-    ) -> None:
+        *,
+        merge: bool = False,
+    ) -> list[str]:
         """种子里写下的物品定义与店铺货架,种进空 store(#12)。
 
         与 `seed_defaults` 同一条规矩:**空的才种**。作者数据先落地,内置演示
         物品随后看到非空 store 就整体让位。`price` 为 None 时取 base_price。
+
+        `merge=True`(作者指名的世界文件 + 已有世界)把粒度降到**每件物品 / 每格
+        货架**:已有的定义与货架一个字都不动 —— 货架上的数量是这个世界跑出来的
+        现在,按今天的文件写回去就是把卖掉的东西变回来。返回新增的物品 id。
         """
-        base_prices: dict[str, float] = {}
-        if not self._items.all():
+        rows = self._items.all()
+        base_prices = {
+            str(r["id"]): float(r.get("base_price") or 0.0) for r in rows.values()
+        }
+        added: list[str] = []
+        if not rows or merge:
             for item_id, name, kind, base_price, restores in items:
+                if merge and item_id in base_prices:
+                    continue
                 self.put_item(item_id, name, kind, base_price, restores)
                 base_prices[item_id] = float(base_price)
-        else:
-            base_prices = {
-                str(r["id"]): float(r.get("base_price") or 0.0)
-                for r in self._items.all().values()
-            }
-        if not self._shelves.all():
+                added.append(item_id)
+        shelves = set(self._shelves.all())
+        if not shelves or merge:
             for location_id, item_id, quantity, price in stock:
+                if merge and self._shelf_field(location_id, item_id) in shelves:
+                    continue
                 resolved = price if price is not None else base_prices.get(item_id, 0.0)
                 self.put_shelf(location_id, item_id, quantity, float(resolved))
+        return added
 
     def seed_defaults(self) -> None:
         """创世播默认货架。**已有货架就不动** —— 和别的 seed_* 同一条规矩。"""
@@ -1758,13 +1841,32 @@ class RedisRulesStore:
     def __len__(self) -> int:
         return len(self._rows)
 
-    def seed(self, entries: list, stamp: str) -> None:
-        """空的时候播一次;之后这里的行说了算 —— 和地图/行为树同一条契约。"""
-        if len(self._rows):
-            return
+    def seed(self, entries: list, stamp: str, *, merge: bool = False) -> list[str]:
+        """空的时候播一次;之后这里的行说了算 —— 和地图/行为树同一条契约。
+
+        `merge=True` 把粒度降到**每一条规律**(作者指名了世界文件那条路),而且
+        **同名的照文件里那条重写**:规律是这个世界的物理法则,是法不是状态,它身上
+        没有任何东西会随时间漂。从前同名的一个字都不动,于是一条漂了的规律(常数步
+        长不看 `dt`)在一个跑着的世界里永远改不掉 —— 只能连玩家的进度一起抹掉重建。
+
+        **默认必须是 False** —— 内置橱窗每次开机都在手上,让它逐条合并,一个写了
+        `kinds` 却没写 `rules` 的世界重开一次就会被塞进橱窗那条引用 `tree` 的生长
+        规律,而这个世界里没有 tree:下场不是算错,是这个世界从此打不开。
+
+        返回真的写下去的那些 id。**没变的不写**:每次开机都重写会把 `updated_at`
+        刷成开机时间,于是"这条规律上次改是什么时候"永远读不出来。
+        """
+        have = self._rows.all()
+        if have and not merge:
+            return []
+        written: list[str] = []
         for entry in entries:
             rule_id = str(entry.get("id"))
+            if merge and (have.get(rule_id) or {}).get("definition") == entry:
+                continue
             self._rows.put(rule_id, {"id": rule_id, "definition": entry, "updated_at": stamp})
+            written.append(rule_id)
+        return written
 
     def definitions(self) -> list[dict]:
         rows = self._rows.all()
@@ -1815,15 +1917,52 @@ class RedisOntologyStore:
     def __len__(self) -> int:
         return len(self._kinds)
 
-    def seed(self, kinds: list, entities: list, stamp: str) -> None:
-        """空的时候播一次 —— 和规律/地图/行为树同一条契约:只填缺,不覆盖。"""
-        if not len(self._kinds) and not len(self._entities):
-            for entry in kinds or []:
-                self._kinds.put(str(entry.get("id")), {"definition": entry, "updated_at": stamp})
-            for entry in entities or []:
-                self._entities.put(
-                    str(entry.get("id")), {"definition": entry, "updated_at": stamp}
-                )
+    def seed(self, kinds: list, entities: list, stamp: str, *,
+             merge: bool = False, replace_kinds: bool = False
+             ) -> tuple[list[str], list[str]]:
+        """空的时候播一次 —— 和规律/地图/行为树同一条契约:只填缺,不覆盖。
+
+        `merge=True` 把粒度降到**每个种类 / 每个实例**(作者指名了世界文件那条路):
+        **"种类是冻的"那一条没有被放开** —— 它说的是 *世界跑起来之后*不许长出新种类
+        (那会让"这条规律合不合法"随时间变化,重放就不再确定)。而这是**开机前**作者
+        的一次明示编辑:整份本体在这次开机里重新解析一遍(`_precheck_ontology` 按合并
+        后的**全集**验、`load` 再验一次),所以这一次开机之内它仍然是一个确定的闭集。
+
+        `replace_kinds=True` 让**同名的种类也照文件里那份重写**。理由在
+        `_seed_ontology` 的 docstring 里:种类是法不是状态,它身上没有会随时间漂的
+        东西,而"同名的一个字都不动"意味着一个跑着的世界永远改不了自己的声明 ——
+        改一个写错的 `label` 得连玩家的进度一起抹掉重建。实例照旧只增(它有位置,
+        而位置另有一份镜像在可见性表里)。
+
+        返回 `(真的写下去的种类 id, 新增的实例 id)` —— 种类那一半含"改了的",
+        调用方要拿它去把可见性镜像跟着改。**没变的不写**:每次开机都重写一遍会
+        把 `updated_at` 刷成开机时间,于是"这条声明上次改是什么时候"永远读不出来。
+        实例变了要挪版本号 —— 别的进程靠 `revision()` 判断"我手里这份还新不新"。
+        """
+        if not merge and (len(self._kinds) or len(self._entities)):
+            return [], []
+        have_kinds = self._kinds.all()
+        have_entities = set(self._entities.all())
+        new_kinds: list[str] = []
+        new_entities: list[str] = []
+        for entry in kinds or []:
+            kind_id = str(entry.get("id"))
+            if merge and kind_id in have_kinds:
+                if not replace_kinds:
+                    continue
+                if (have_kinds[kind_id] or {}).get("definition") == entry:
+                    continue
+            self._kinds.put(kind_id, {"definition": entry, "updated_at": stamp})
+            new_kinds.append(kind_id)
+        for entry in entities or []:
+            entity_id = str(entry.get("id"))
+            if merge and entity_id in have_entities:
+                continue
+            self._entities.put(entity_id, {"definition": entry, "updated_at": stamp})
+            new_entities.append(entity_id)
+        if merge and new_entities:
+            self._redis.incr(self._rev_key)
+        return new_kinds, new_entities
 
     def kind_definitions(self) -> list[dict]:
         rows = self._kinds.all()
@@ -1903,7 +2042,9 @@ class RedisChatStore:
     recent_messages 返回时间正序、past_summaries 最近的在前。
     """
 
-    __slots__ = ("_redis", "_world", "_convs", "_msgs", "_lock")
+    # `content_filter`:落库前的最后一道(`chat_store.filter_message_content`)。
+    # World 装的,用来把引擎自己的回执从她的台词里摘掉。
+    __slots__ = ("_redis", "_world", "_convs", "_msgs", "_lock", "content_filter")
 
     def __init__(self, redis: Any, world_id: str, lock: Any | None = None) -> None:
         import threading
@@ -1913,6 +2054,7 @@ class RedisChatStore:
         self._convs = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:conversations")
         self._msgs = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:messages")
         self._lock = lock if lock is not None else threading.RLock()
+        self.content_filter: Any | None = None
 
     # ── 内部 ────────────────────────────────────────────────────────────────
 
@@ -2008,6 +2150,9 @@ class RedisChatStore:
     # ── messages ────────────────────────────────────────────────────────────
 
     def add_message(self, conversation_id: int, role: str, content: str, ts: int) -> int:
+        from anima_world.chat_store import filter_message_content
+
+        content = filter_message_content(self, role, content)
         with self._lock:
             msg_id = int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:messages:id"))
             self._msgs.put(str(msg_id), {
@@ -2086,6 +2231,171 @@ class RedisChatStore:
         from anima_world.chat_store import summarize_annotations
 
         return summarize_annotations(self.annotation_rows(conversation_id))
+
+
+# ── 在场玩家(3.2.0:从进程内存搬进 Redis)──────────────────────────────────
+
+
+def players_index_key(world_id: str) -> str:
+    """在场玩家的名册索引(SET)。行本身在 `player_key` 的每人一个 hash 上。"""
+    return f"{KEY_PREFIX}:{world_id}:players"
+
+
+def player_key(world_id: str, player_id: str) -> str:
+    """一个在场玩家的行(HASH,字段值是 JSON)。**过期时间挂在这个键上。**"""
+    return f"{KEY_PREFIX}:{world_id}:player:{player_id}"
+
+
+#: 行程住在同一个 hash 的这个字段里。**不另开一个键**:两个键就有两条过期规则,
+#: 而"人走了但他的行程还在"这种半截状态会让 `player_in_transit` 说谎。
+_TRANSIT_FIELD = "__transit__"
+
+
+class RedisPlayerPresence:
+    """谁这会儿在场、他站在哪、他在往哪走。
+
+    **为什么它必须落 Redis(3.2.0 之前是"刻意的内存态")。** 那个"刻意"在单进程的
+    宿主里成立,在容器里不成立:一次重启把名册清空之后,`player_location()` 返回空串,
+    于是每一场对话都**静默**退回"手机私聊"的措辞 —— 世界照跑、日志干净,而人明明
+    就坐在她对面。按这个仓库的分家判据它本来就该在 Redis:并发的玩家是有限的
+    (有界),而 `_present_roster` 直接进她的决定上下文(进提示词)。
+
+    **过期只有一条规则:键还在不在。** 从前 `_present_roster` 自己按 `last_seen`
+    过滤,现在改用 Redis 自己的 TTL —— 两套过期规则迟早给出不同答案(一个进程说
+    他在场、另一个说他走了,而两边都不报错)。`last_seen` 照旧记着给人看,但**没有
+    任何判断读它**。
+
+    **只填缺不覆盖**:`create` 用 `HSETNX` 逐字段落,所以一个刚起来的进程不会把另一个
+    进程刚写下的"他在咖啡店"盖回 `None`。
+    """
+
+    __slots__ = ("_redis", "_world_id", "_ttl")
+
+    def __init__(self, redis: Any, world_id: str, ttl_seconds: float) -> None:
+        self._redis = redis
+        self._world_id = str(world_id)
+        self._ttl = float(ttl_seconds)
+
+    # ── TTL ───────────────────────────────────────────────────────────────
+    @property
+    def ttl_seconds(self) -> float:
+        return self._ttl
+
+    @ttl_seconds.setter
+    def ttl_seconds(self, value: float) -> None:
+        self._ttl = float(value)
+        # 改了就当场作用到在场的人身上。不重挂的话,改短 TTL 对已经在场的人无效,
+        # 而调用方看到的是"我明明调小了却还有幽灵"。
+        for pid in self.ids():
+            self._touch_ttl(player_key(self._world_id, pid))
+
+    def _touch_ttl(self, key: str) -> None:
+        if self._ttl <= 0:
+            # 0 / 负数 = 不过期(测试里的"永远在场")。持久化成没有 TTL 的键。
+            self._redis.persist(key)
+            return
+        self._redis.pexpire(key, max(1, int(self._ttl * 1000)))
+
+    # ── 读 ────────────────────────────────────────────────────────────────
+    def ids(self) -> list[str]:
+        """此刻在场的玩家 id。顺手把过期掉的人从索引里摘掉(惰性剪枝)。"""
+        raw = self._redis.smembers(players_index_key(self._world_id)) or set()
+        members = sorted(
+            (m.decode() if isinstance(m, bytes) else str(m)) for m in raw
+        )
+        if not members:
+            return []
+        pipe = self._redis.pipeline()
+        for pid in members:
+            pipe.exists(player_key(self._world_id, pid))
+        alive = pipe.execute()
+        live = [pid for pid, ok in zip(members, alive) if ok]
+        stale = [pid for pid, ok in zip(members, alive) if not ok]
+        if stale:
+            self._redis.srem(players_index_key(self._world_id), *stale)
+        return live
+
+    def get(self, player_id: str) -> dict[str, Any] | None:
+        raw = self._redis.hgetall(player_key(self._world_id, player_id)) or {}
+        if not raw:
+            return None
+        return {
+            (k.decode() if isinstance(k, bytes) else k): _loads(v)
+            for k, v in raw.items()
+            if (k.decode() if isinstance(k, bytes) else k) != _TRANSIT_FIELD
+        }
+
+    def all(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for pid in self.ids():
+            row = self.get(pid)
+            if row is not None:
+                out[pid] = row
+        return out
+
+    def __contains__(self, player_id: str) -> bool:
+        return bool(self._redis.exists(player_key(self._world_id, player_id)))
+
+    # ── 写 ────────────────────────────────────────────────────────────────
+    def create(self, player_id: str, defaults: dict[str, Any]) -> bool:
+        """第一次见到这个人。返回"这次真的是新建的吗"。
+
+        逐字段 `HSETNX`:多个进程同时操作一个世界,只填缺不覆盖。
+        """
+        key = player_key(self._world_id, player_id)
+        fresh = not self._redis.exists(key)
+        pipe = self._redis.pipeline()
+        for field, value in defaults.items():
+            pipe.hsetnx(key, field, _dumps(value))
+        pipe.sadd(players_index_key(self._world_id), player_id)
+        pipe.execute()
+        self._touch_ttl(key)
+        return fresh
+
+    def update(self, player_id: str, fields: dict[str, Any]) -> None:
+        """写几个字段,顺便续命(任何一次交互都算"我还在")。"""
+        key = player_key(self._world_id, player_id)
+        if fields:
+            self._redis.hset(
+                key, mapping={f: _dumps(v) for f, v in fields.items()}
+            )
+        self._redis.sadd(players_index_key(self._world_id), player_id)
+        self._touch_ttl(key)
+
+    def drop_field(self, player_id: str, field: str) -> None:
+        self._redis.hdel(player_key(self._world_id, player_id), field)
+
+    def forget(self, player_id: str) -> None:
+        """他走了。行与索引一起清 —— 只清一半就是留一个查不到行的名字。"""
+        pipe = self._redis.pipeline()
+        pipe.delete(player_key(self._world_id, player_id))
+        pipe.srem(players_index_key(self._world_id), player_id)
+        pipe.execute()
+
+    def expire_now(self, player_id: str) -> None:
+        """把 TTL 走到头这件事当场演一遍(测试用)。
+
+        故意**只删行、留索引**:真的过期就长这样,于是 `ids()` 的剪枝那条路也
+        跟着被验到。
+        """
+        self._redis.delete(player_key(self._world_id, player_id))
+
+    # ── 行程 ──────────────────────────────────────────────────────────────
+    def get_transit(self, player_id: str) -> dict[str, Any] | None:
+        raw = self._redis.hget(player_key(self._world_id, player_id), _TRANSIT_FIELD)
+        if raw is None:
+            return None
+        trip = _loads(raw)
+        return trip if isinstance(trip, dict) else None
+
+    def set_transit(self, player_id: str, trip: dict[str, Any]) -> None:
+        self.update(player_id, {_TRANSIT_FIELD: trip})
+
+    def clear_transit(self, player_id: str) -> None:
+        self.drop_field(player_id, _TRANSIT_FIELD)
+
+    def transit_ids(self) -> list[str]:
+        return [pid for pid in self.ids() if self.get_transit(pid) is not None]
 
 
 def drop_stale_copies_for_mysql(redis: Any, world_id: str) -> list[str]:

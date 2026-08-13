@@ -101,3 +101,34 @@ def test_orphan_conversation_closed_on_reopen(tmp_path):
             1 for e in w2.scheduler.event_log.replay() if e.type == "conversation"
         )
         assert n == 1, "补关也要发那一个 conversation 事件"
+
+
+def test_a_read_only_open_does_not_reap_a_live_world_conversations(tmp_path):
+    """**别的进程正跑着这个世界时,只读地开一次不许收割它的会话。**
+
+    world.db 时代"运行中的世界独占 db"是真的,于是开机看见的 open 行只能是崩溃
+    遗留。2.0 之后世界住 Redis,很多进程可以同时开同一个世界 —— 而 `map` /
+    `prompt` / 运维脚本这些**只读的门**一开就把玩家正说到一半的话掐了,还顺手
+    在一个马上要退出的进程里发起关系判定:会话关了、总结有了、判定永远落不了地。
+    玩家看到的是"她突然不记得刚才那段了",而日志一条错都没有。
+    """
+    db = str(tmp_path / "w.db")
+    live = open_world_at(db, force_mock_llm=True)
+    try:
+        ts = int(time.time())
+        cid = live.chat_store.start_conversation(
+            "夏", ts,
+            participants=[{"id": "p1", "kind": "user"}, {"id": "夏", "kind": "agent"}],
+            location=None, player_id="p1",
+        )
+        live.chat_store.add_message(cid, "user", "你好", ts)
+
+        peek = open_world_at(db, force_mock_llm=True)   # 只读的门,不接手这个世界
+        try:
+            assert peek.chat_store.get(cid)["status"] == "open", (
+                "只读地开一次,不该把活世界正在进行的会话关掉"
+            )
+        finally:
+            peek.close()
+    finally:
+        live.close()

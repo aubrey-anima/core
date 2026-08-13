@@ -227,18 +227,17 @@ def test_presence_报得出谁没有位置(world):
     assert report["enforced"] is False
 
 
-def test_presence_名单从落库那份补齐_而不是只看这个进程(world):
-    """**玩家的位置是进程内的**(`World.players` 是刻意的内存态),而这条命令永远
-    是另开一个进程问的。只看内存那份的话,它会对着一个热闹的世界说"没人跟她说过话"
-    —— 而那是一句彻头彻尾的谎。"""
+def test_presence_名单从落库那份补齐_而不是只看在场名册(world):
+    """在场带 TTL,只回答"此刻谁在";而"这个世界跟谁打过交道"没有 TTL。
+    只看在场那份的话,它会对着一个热闹的世界说"没人跟她说过话" —— 一句彻头彻尾的谎。"""
     world._note_player_contact("夏", "p9", "老熟人")
     report = world.presence()
     rows = {row["player_id"]: row for row in report["players"]}
     assert "p9" in rows and rows["p9"]["seen_before"] is True
     assert rows["p9"]["known"] is False, "落库的是名字与水位,不是位置"
     assert rows["p9"]["name"] == "老熟人"
-    assert report["location_source"] == "process-memory", (
-        "那道闸依赖的东西活不过一次重启、也跨不过第二个进程 —— 这一格是警告,不是元数据"
+    assert report["location_source"] == "redis", (
+        "3.2.0 起在场真的落库了 —— 这一格从警告降成元数据,但不许删(镜像端在读它)"
     )
 
 
@@ -256,4 +255,4 @@ def test_presence_命令有位置就退_0_没位置就退_1(tmp_path):
     done = run_cli("presence", "--world-id", "w")
     assert done.returncode == 1
     assert "player_move" in done.stdout
-    assert "进程内存" in done.stdout, "不说这一句的话,读的人会照着一个假警报去改宿主"
+    assert "过期" in done.stdout, "不说清为什么会没位置,读的人会照着一个假警报去改宿主"

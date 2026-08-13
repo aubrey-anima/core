@@ -379,6 +379,42 @@ def test_每_tick_都算的规律不点名():
     assert not drift_warnings(parse_rules([{**DRIFTY, "every": {"ticks": 1}}]))
 
 
+# 世界的量读写不同名:**写**光秃秃的 `雨天数`(带前缀写会被 `bad_output_name` 拒),
+# **读**必须写成 `world_雨天数`。所以上面那个 `DRIFTY` 虽然点得着名,却是作者几乎
+# 不会写的那一半 —— 真正在跑的两个世界(晚潮的雨、灯塔湾的雾)写的都是下面这个形状。
+DRIFTY_PREFIXED = {**DRIFTY, "set": {"雨天数": "world_雨天数 + 1"}}
+
+
+def test_世界的量按它真正的读法也要被点名():
+    """这道闸只按名字对得上判,而世界规律读自己要加 `world_` 前缀 —— 于是它对
+    **整类**世界规律是瞎的,**而它被写出来针对的那次事故恰恰就是一条世界规律**。
+
+    线上那个世界的雨天数写的就是 `world_雨天数 + 1`:多烧了 6 天雨、洪水提前
+    两天半,而这道专为它写的 lint 从头到尾一声没吭。灯塔湾同理 —— 10 条漂着的
+    规律里只有 7 条被点到名,少的 3 条全是 `owner: world` 那几条。
+    """
+    said = " ".join(drift_warnings(parse_rules([DRIFTY_PREFIXED])))
+    assert "雨天数" in said and "dt" in said, f"世界的量按真正的读法没被点名:{said!r}"
+
+
+def test_世界的量按流逝折算了就不点名():
+    """修法照旧是乘上 `dt / interval` —— 认得出病也要认得出药,不然作者改完
+    警告还在,下一次他就不看了。"""
+    assert not drift_warnings(parse_rules([
+        {**DRIFTY_PREFIXED, "set": {"雨天数": "world_雨天数 + dt / 288"}},
+    ]))
+
+
+def test_别人家的世界量不算自增():
+    """前缀这条只对 `owner: world` 的规律成立。一条按角色跑的规律写自己的 `雨天数`、
+    读世界的 `world_雨天数`,读写的是**两个**量 —— 那不是自增,点它就是误报,
+    而误报够多次的警告等于没有警告。"""
+    assert not drift_warnings(parse_rules([{
+        "id": "淋雨", "every": {"days": 1}, "for_each": {"kind": "agent"},
+        "set": {"雨天数": "world_雨天数 + 1"},
+    }]))
+
+
 def test_解析本身不打这条警告(caplog):
     """**一次开机解析三遍规律**(播种 / 装载 / 本体预检)。在 `parse_rules` 里打
     日志就是同一句话说三遍 —— 而说三遍的警告和没说过一样,人会开始略过它。
@@ -434,7 +470,7 @@ def test_一次真开机恰好点名一次(tmp_path, caplog):
     path = write_seed_file(tmp_path / "drifty.cyberworld", {
         "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
         "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
-        "stocks": [{"owner": "world", "key": "雨天数", "value": 0.0}],
+        "stocks": [{"owner": "world", "values": {"雨天数": 0.0}}],
         "rules": [DRIFTY],
         "kinds": [{"id": "tree", "name": "树", "quantities": {"树高": {"default": 1.0}}}],
         "entities": [{"id": "tree:oak", "name": "橡树", "location": "cafe"}],

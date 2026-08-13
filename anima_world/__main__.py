@@ -33,6 +33,12 @@ from anima_world.narrative import (
 )
 from anima_world.perception import parse_bands, visibility_band_errors
 from anima_world.planner import Planner, SyncLLM
+from anima_world.character_card import (
+    CARD_BILLINGS,
+    card_of_seed_agent,
+    world_card_errors,
+    world_card_warnings,
+)
 from anima_world.projection import project_events
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
@@ -285,8 +291,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_world_args(prompt)
     prompt.add_argument("--agent", default=None, help="看谁的(角色 id);不给就列出名册")
-    prompt.add_argument("--player-id", default=DEFAULT_PLAYER_ID,
-                        help="以谁的身份跟她说话(chat/play/prompt 共用一个)")
+    # **这一个默认成 None,不跟 chat/play 一样默认 `cli`。** 那两条会把玩家挪进世界
+    # (`player_move`),于是 `cli` 当场变成一个真人;`prompt` 是「看,但不碰」,永远
+    # 不会 —— 默认值在这条命令上必然是个世界不认得的幽灵,而拿幽灵算出来的提示词
+    # 和真的那一份差着三块。不给就去世界里找一个真站在她跟前的人(见 `run_prompt`)。
+    prompt.add_argument("--player-id", default=None,
+                        help="以谁的身份跟她说话;不给就挑一个真站在她跟前的玩家")
     prompt.add_argument("--name", default=None, help="你在她眼里的称呼")
     prompt.add_argument("--message", default="在吗", help="假设这一刻你说的是哪句话")
     prompt.add_argument(
@@ -308,6 +318,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ontology_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
+    roster_cmd = sub.add_parser(
+        "roster", help="这个世界里有谁:名字、一句话、立绘、主次、此刻在哪",
+    )
+    _add_world_args(roster_cmd)
+    roster_cmd.add_argument(
+        "--billing", default=None,
+        help=f"只看这一档({'/'.join(CARD_BILLINGS)})",
+    )
+    roster_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
+
     contact_cmd = sub.add_parser(
         "contact", help="谁想起过玩家、由头是什么(contact;--why 连没触发的一起解释)",
     )
@@ -320,7 +340,48 @@ def _build_parser() -> argparse.ArgumentParser:
         "--why", action="store_true",
         help="不看已发生的,改问「此刻每个人对每个玩家算出来是多少」—— 调阈值用",
     )
+    contact_cmd.add_argument(
+        "--inbox", action="store_true",
+        help="改看收件箱:谁**当面**叫住过这个玩家(agent_hail),要 --player",
+    )
     contact_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
+
+    relationship_cmd = sub.add_parser(
+        "relationship",
+        help="一段关系的人话:她把这个人当什么、粗到什么档、上一次是什么改变了它",
+    )
+    _add_world_args(relationship_cmd)
+    relationship_cmd.add_argument("--agent", default=None, help="谁的视角(不给就是所有人)")
+    relationship_cmd.add_argument("--with", dest="other", default=None,
+                                  help="跟谁(角色 id 或 player_id;不给就是所有对方)")
+    relationship_cmd.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
+
+    player_cmd = sub.add_parser("player", help="玩家在这个世界里的那一份数据的维护")
+    player_commands = player_cmd.add_subparsers(dest="player_command", required=True)
+    player_forget = player_commands.add_parser(
+        "forget",
+        help="让世界跟一个走掉的人告别:清掉关系/联系态/姿态,历史一个字不改",
+    )
+    _add_world_args(player_forget)
+    player_forget.add_argument("--player", required=True, help="他的 player_id")
+    player_forget.add_argument("--reason", default="", help="为什么(会写进那条事件)")
+    player_forget.add_argument(
+        "--dry-run", action="store_true", help="只报要清什么,不动世界"
+    )
+    player_forget.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+    player_options = player_commands.add_parser(
+        "options",
+        help="这个人此时此地点得动什么:有哪些东西、能被怎么做、点不动是为什么",
+    )
+    _add_world_args(player_options)
+    player_options.add_argument("--player", required=True, help="他的 player_id")
+    player_options.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
 
     presence_cmd = sub.add_parser(
         "presence",
@@ -419,6 +480,35 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="只报要改什么,不动库"
     )
     goals_repair.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+    set_card = agent_commands.add_parser(
+        "set-card",
+        help="改一个角色的卡:主次 / 一句话 / 立绘(一次一个人;这是覆盖)",
+    )
+    _add_world_args(set_card)
+    set_card.add_argument("--agent", required=True, help="改谁(角色 id)")
+    set_card.add_argument(
+        "--billing", default=None,
+        help=f"主次({'/'.join(CARD_BILLINGS)})",
+    )
+    set_card.add_argument(
+        "--tagline", default=None,
+        help="通讯录里名字底下那一行(不许换行;空串 = 抹掉这一格)",
+    )
+    set_card.add_argument(
+        "--portrait", default=None,
+        help="立绘 URI(https / http / data;空串 = 抹掉这一格)",
+    )
+    set_card.add_argument(
+        "--clear", action="store_true",
+        help="把整张卡删掉 —— 「作者说他是背景」和「作者什么也没说」是两件事,"
+             "所以它单独一格,而且不许和上面三个一起给",
+    )
+    set_card.add_argument(
+        "--dry-run", action="store_true", help="只报要改成什么,不动库"
+    )
+    set_card.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出"
     )
 
@@ -626,8 +716,17 @@ def _load_world_file(
         # 作者要到三个月后才发现自己写错了一个方括号。一次列全,所以
         # `validate world` 和这里说的是同一批话(它调的是同一个函数)。
         errors += visibility_band_errors(authored) if authored else []
+        # 角色卡同理,而它多一条理由:卡是**分发物里给玩家看的那一面**。写了个
+        # 相对路径的立绘,包发出去就是一张断的图;写了三百字的"一句话",通讯录
+        # 那一行在哪儿被截断由界面随手决定 —— 两样都不报错,而作者看不见。
+        errors += world_card_errors(authored) if authored else []
         if errors:
             raise WorldSeedError([f"{path}: {e}" for e in errors])
+        # 拼错的键只警告(`taglien` 什么也不做,但拦下来会让新版创作台配不了老引擎)。
+        # **开机也要说** —— 这条警告此前只有 `validate world` 才看得到,而托管环境里
+        # 没有人会去跑那条命令。
+        for problem in (world_card_warnings(authored) if authored else []):
+            logger.warning("%s: %s", path, problem)
         # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
         # 跑过的世界导出来、或者从 1.x 迁过来的,里面一条 author 记录都没有 ——
         # 交一个 `{}` 下去的话,下游会拿它当"作者写了一个没有地点的世界"去索引
@@ -865,11 +964,8 @@ def _planner_situation(scheduler: Any, agent_id: str) -> dict[str, Any]:
         if brain is None:
             return ctx
         loc_id = brain.agent.blackboard.read("loc") or brain.agent.location or ""
-        if loc_id and scheduler.location_store is not None:
-            row = scheduler.location_store.get(loc_id)
-            ctx["location"] = (row or {}).get("name") or loc_id
-        elif loc_id:
-            ctx["location"] = loc_id
+        if loc_id:
+            ctx["location"] = scheduler.place_name(loc_id)
 
         if scheduler._needs_enabled():
             values = {
@@ -888,9 +984,12 @@ def _planner_situation(scheduler: Any, agent_id: str) -> dict[str, Any]:
             if other_id == agent_id:
                 continue
             action = scheduler._current_action.get(other_id)
-            where = other.agent.blackboard.read("loc") or other.agent.location or "?"
+            where = other.agent.blackboard.read("loc") or other.agent.location or ""
+            # 上面那行名字翻了、这行地点没翻,于是提示词里是「林迟在studio上班」——
+            # 半句人话半句键名。她照着这句话排一天的事,而 `walk` 的清单本来就是
+            # id,两种写法混在一份提示词里只会让她更分不清哪个是地名。
             label = _ACTION_LABELS.get(action.kind if action else None, "闲着")
-            others.append(f"{other.agent.name}在{where}{label}")
+            others.append(f"{other.agent.name}在{scheduler.place_name(where) or '?'}{label}")
         if others:
             ctx["others"] = others
     return ctx
@@ -948,11 +1047,11 @@ def _make_beat_agent_factory(bt_store: BTStore | None):
         if bt_store is not None:
             bt_store.seed_duties(aid, list(bundle.get("duties") or []))
             bt_store.ensure_plan_node(aid)
-            if not any(r["node_id"] == f"chat_with_{aid}" for r in bt_store.actions()):
+            if f"chat_with_{aid}" not in bt_store.shared_action_ids():
                 bt_store.set_action(f"chat_with_{aid}", "chat", {"target": aid})
             _ensure_need_actions(bt_store)
             bt_root = bt_store.build_tree(aid)
-            action_table = bt_store.action_table()
+            action_table = bt_store.action_table(aid)
         else:
             bt_root = default_bt()
             action_table = ActionTable.default()
@@ -1159,6 +1258,11 @@ def build_serve_scheduler(
     # 编辑加得进新东西,但不会把这个世界跑出来的现在倒带回创世那一刻。
     authored_file = world_file is not None
     seed_author_layer = fresh_world or authored_file
+    # **合并 = 把作者指名的那份文件装进一个已经跑过的世界。** 创世那条路上每张表
+    # 本来就是空的,`merge` 传不传逐位等价;分开写是为了让"降粒度"这件事只发生在
+    # 它该发生的那一条路上 —— 内置兜底那份永远走不到这里(`authored_file` 是 False),
+    # 于是橱窗的橡树没有任何一条缝可以钻进别人的世界。
+    merge_author = authored_file and not fresh_world
 
     # ⚠️ **先验,再写 —— 因为这些表不是一起写的。**
     #
@@ -1173,18 +1277,23 @@ def build_serve_scheduler(
     # 文件里那份就在手上。验不过就一个字都不写 —— 和能力调用被拒时"一个字都不写"
     # 是同一条。
     if seed_author_layer and world_seed and world_seed.get("kinds"):
-        _precheck_ontology(world_seed, rules_store, location_store, economy_store)
+        _precheck_ontology(world_seed, rules_store, location_store, economy_store,
+                           ontology_store if merge_author else None)
     if fresh_world:
         _store_genesis_seed(meta, world_seed)  # 出生证明随世界走
         # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
         # 剩下的行就是"这个世界的作者决定了什么"。
+        #
+        # ⚠️ **这一条钉在 `fresh_world` 上,不跟着 `merge_author` 走。** `:config`
+        # 里的行是运维台/作者后来调过的运行参数(tick_rate、enforce_colocation),
+        # 拿文件里那份写回去等于每次重启都把人的调整悄悄撤销一次。
         _apply_seed_config_at_genesis(config_store, world_seed)
-    _seed_world_defs(location_store, bt_store, world_seed)
+    new_points = _seed_world_defs(location_store, bt_store, world_seed, merge=merge_author)
     # economy-v4: default items + cafe shelf, empty-store-only (authored
     # rows always win). #12: the seed's own material layer goes in FIRST,
     # precisely so the demo items find a non-empty store and stand down.
     with shared_lock:
-        _seed_material_layer(economy_store, world_seed)
+        _seed_material_layer(economy_store, world_seed, merge=merge_author)
         economy_store.seed_defaults()
     # llm-relationship-judge: judge only exists with a config store (it needs
     # the live llm.* stack); --no-llm gives it a mock client whose garbage
@@ -1329,19 +1438,24 @@ def build_serve_scheduler(
         # `_seed_ontology` 早就是这么判的(`fresh_world=`),这里只是把同一条补齐。
         #
         if seed_author_layer:
-            _seed_world_rules(rules_store, world_seed)
-            _seed_stock_visibility(world_seed, visibility_store)
-            _seed_stock_places(world_seed, visibility_store)
-        _seed_ontology(ontology_store, world_seed, fresh_world=seed_author_layer)
+            _seed_world_rules(rules_store, world_seed, merge=merge_author)
+            _seed_stock_visibility(world_seed, visibility_store, merge=merge_author)
+            _seed_stock_places(world_seed, visibility_store, merge=merge_author)
+        # 返回的是作者这次真的改动过的种类 —— 可见性那张表是声明的镜像,得跟着改。
+        redeclared_kinds = _seed_ontology(
+            ontology_store, world_seed, fresh_world=seed_author_layer, merge=merge_author)
         # `warn=True` 全仓库只有这一处:装载走一次,拿到的又是**这个世界真正在跑
         # 的那份**规律(播种那份可能根本没落库,预检那份还没落库)。
-        scheduler.world_rules = _load_world_rules(rules_store, warn=True)
+        scheduler.world_rules = _load_world_rules(
+            rules_store, warn=True,
+            ticks_per_day=max(1, 1440 // max(1, scheduler._minutes_per_tick())))
         # 本体的解析在规律之后:它要拿规律去查引用。声明过种类的世界从此走闸,
         # 没声明的照旧走警告 —— 那条警告只对后者还有意义。
         scheduler.ontology_store = ontology_store
         scheduler.ontology = _load_ontology(
             ontology_store, scheduler.world_rules, location_store, economy_store
         )
+        _warn_unreachable_requirements(scheduler.ontology, scheduler.world_rules)
         # 种子的显式值先落(它此刻仍是空库,"空库一次"那条守得住),声明的默认值
         # 后面**只填缺** —— 反过来的话作者写的 3.2 会被声明的 1.0 盖掉。
         # 而它现在拿得到本体了,于是"写了一个没声明过的量"这件事走得了闸。
@@ -1352,12 +1466,12 @@ def build_serve_scheduler(
         # 只是它凭空多了一棵别人世界里的橡树。
         if seed_author_layer:
             _seed_stocks(world_seed, stock_store, ontology=scheduler.ontology,
-                         tick=scheduler.clock)
+                         tick=scheduler.clock, merge=merge_author)
         if scheduler.ontology is None:
             _warn_unresolved_rule_names(stock_store, scheduler.world_rules)
         else:
             _apply_ontology(scheduler.ontology, stock_store, visibility_store,
-                            tick=scheduler.clock)
+                            tick=scheduler.clock, redeclare_kinds=redeclared_kinds)
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -1367,16 +1481,21 @@ def build_serve_scheduler(
         # **这是一次编辑,不是一次创世** —— 说清楚它能做什么、做不了什么。
         #
         # 从前这里是一句"你的编辑没有生效"的警告,因为作者层只进空世界。现在它进得去了
-        # (作者层本来就是给作者调试用的),但语义是**只填缺,不覆盖**:加得进新东西,
-        # 不会把这个世界跑出来的现在倒带回创世那一刻。
+        # (作者层本来就是给作者调试用的),而分界**不是**"新的还是旧的",是
+        # **声明还是状态**:
         #
-        # 这两句话必须一起说。只说"生效了",作者会以为改一条已有的 `kinds` 也能生效;
-        # 只说"不覆盖",他又会以为整份文件都白写了。
+        #   - 声明(`kinds` / `rules`)身上没有任何东西会随时间漂,所以文件里那条赢。
+        #     照搬"不覆盖"的代价是作者永远改不了自己世界的物理法则。
+        #   - 状态(名册、量、钱、位置、记忆)只填缺 —— 整份写回等于拿创世快照倒带她。
+        #
+        # 这两句话必须一起说。只说"生效了",作者会以为文件能把这个世界改回创世那天;
+        # 只说"不覆盖",他又会以为改一条写错的规律得把世界抹掉重建(而那要连玩家
+        # 的进度一起抹)。
         logger.info(
             "--world-file %s 装进了一个**已有**的世界 %r(%d 条事件)—— 这是一次编辑:"
-            "空着的那些段会被填上(比如给一个还没有本体层的世界补 kinds/rules),"
-            "而**已经有内容的段不会被覆盖** —— 名册与状态来自事件日志,"
-            "改一条已有的声明要走对应的 store。",
+            "同名的**声明**(kinds / rules)照文件里这份重写,"
+            "而**状态**(名册、量、钱、位置、记忆)只填缺不覆盖 —— "
+            "这个世界跑出来的现在不会被倒带回创世那一刻。",
             world_file, world_id, len(persisted),
         )
     boot_projection = scheduler._memory_projection
@@ -1393,6 +1512,26 @@ def build_serve_scheduler(
         if persisted
         else [_roster_entry(i, locs, world_seed) for i in range(n_agents)]
     )
+    # **一次编辑加进来的人。** 名册的权威是事件日志(所以上面那一支不看文件),
+    # 而作者指名一份文件恰恰是在说"这个世界从今天起还有这些人"。少了这一段,
+    # 新写的十六个角色只是文件里的十六段文字:地图上没有、提示词里没有、
+    # 谁也遇不到 —— 而开机日志一行不错。
+    newcomers: list[dict[str, str]] = []
+    joined: set[str] = set()
+    if merge_author and persisted and world_seed:
+        known = {e["id"] for e in roster} | set(boot_projection.agents) | away
+        for entry in _seed_entry_dicts(world_seed, "agents"):
+            aid = entry.get("id")
+            if not isinstance(aid, str) or aid in known:
+                continue
+            known.add(aid)
+            newcomers.append({
+                "id": aid,
+                "name": str(entry.get("name", aid)),
+                "location": str(entry.get("location") or ""),
+                "personality": str(entry.get("personality", "")),
+            })
+        roster = roster + newcomers
     for entry in roster:
         if entry["id"] in away:
             continue
@@ -1422,7 +1561,9 @@ def build_serve_scheduler(
         if projected_agent is not None and "goals" in projected_agent.spec:
             goals = _coerce_goals(projected_agent.spec["goals"])  # old events may carry a raw string
         agent.blackboard.write("goals", goals)
-        action_table = bt_store.action_table() if bt_store is not None else ActionTable.default()
+        action_table = (
+            bt_store.action_table(entry["id"]) if bt_store is not None else ActionTable.default()
+        )
         brain = Brain(agent=agent, action_table=action_table)
         scheduler.register(brain)
     # beat-director restart path: an agent who joined MID-RUN (a beat's
@@ -1468,8 +1609,20 @@ def build_serve_scheduler(
             # **走 reset_projection,别直接赋值**:水位要跟着一起挪,不然下一次
             # `catch_up_projection` 会把创世事件再折一遍(钱和随身物品当场翻倍)。
             scheduler.reset_projection(persisted)
+        elif newcomers or new_points:
+            joined = _join_authored_additions(
+                event_log, scheduler, world_seed, location_store, newcomers, new_points,
+            )
+            persisted = event_log.replay()
+            scheduler.reset_projection(persisted)   # 同一条:水位跟着挪
         scheduler.load_persisted_events(persisted)
         if memory_store is not None and trigger_engine is not None:
+            # ⚠️ 顺序要紧:`rebuild` 见了非空表就掉头(记忆是持久状态,重放一遍等于
+            # 把她的一生按今天的触发器重新裁一遍)。所以合并进来的新人的创世记忆
+            # 得**在这之前**自己折一次,而且只在表已经非空时折 —— 表是空的时候
+            # `rebuild` 会连他们一起折,两边都折就是每人两份。
+            if joined and memory_store.count() > 0:
+                _fold_seeded_memories(memory_store, persisted, joined)
             _rebuild_memories(memory_store, trigger_engine, persisted)
     # 黑板最后才搬进 Redis —— 必须晚于事件重放。**只填缺,不覆盖**:手里这份是
     # 创世/重放拼出来的快照,而 Redis 里已有的值是这个世界**更新的现在**;反过来
@@ -1611,11 +1764,16 @@ def _rebuild_memories(
 
 
 def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
-                 *, ontology: Any = None, tick: int = 0) -> None:
+                 *, ontology: Any = None, tick: int = 0, merge: bool = False) -> None:
     """种子里的初始存量(`"stocks": [{"owner": …, "values": {…}}]`)。空库一次。
 
-    坏条目逐条丢弃 —— 和种子里其它可选字段同一条宽容原则(规律本身不是这样:
-    那是世界的物理法则,坏一条就整体拒绝,见 `_seed_world_rules`)。
+    **读不懂的条目当场开不了机,不丢弃。** 这里从前是一条 `logger.warning` 加
+    `continue`,理由记的是"和其它可选字段同一条宽容原则" —— 那条类比是错的。
+    宽容原则说的是"这个引擎版本还不认识这个键"(种子会比引擎活得久,少点亮一项
+    好过整个世界打不开);而形状读不懂说的是"你写的这一行没有人读",在任何引擎
+    版本上都一样。灯塔湾就是这么丢的:11 行逐条写成 `{"owner","key","value"}`,
+    世界照常开机、日志干净,而五个角色的 `initiative` / `agreeableness` 全停在
+    声明的默认值上 —— 引用它们的条件照跑,算出来的全是同一个数。
 
     **声明过种类的世界例外:量名走闸,拼错当场开不了机。** 这一条和
     `_load_ontology` 的"声明本身就是开关"逐字同构 —— 一个不写 `kinds` 的世界里,
@@ -1625,19 +1783,32 @@ def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
     不吼一声而放行的样子是这个仓库最怕的那种:`树髙` 安静地建成第二个量,
     `树高` 停在声明的默认值上,规律照跑、日志干净,而作者要到某天发现那棵树
     三个月没长过才知道。
+
+    ⚠️ **`merge=True` 的粒度是每个 (owner, 量名),不是每个 owner。** 这一层最容易
+    分错:世界量全挂在同一个 owner(`world`)下,按 owner 判的话,一个已经有
+    `雨势` 的世界永远补不进 `气温` —— 而它不报错,只是那个量从此恒为 0,引用它的
+    规律照跑、算出来的全是同一个数。判据仍是**只增不改**:量的当前值是这个世界
+    跑出来的现在,拿今天文件里的初值写回去就是把江水位倒带回创世那一寸。
     """
     if world_seed is None:
         return
-    if store.owners():
+    have_owners = set(store.owners())
+    if have_owners and not merge:
         return
     problems: list[str] = []
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stocks")):
         owner = str(entry.get("owner") or "").strip()
         values = entry.get("values")
         if not owner or not isinstance(values, dict):
-            logger.warning("world_seed stocks[%s] 缺 owner 或 values;跳过", index)
+            problems.append(
+                f"stocks[{index}] 读不懂:要 {{\"owner\": …, \"values\": {{量名: 数}}}},"
+                f"收到的键是 {sorted(entry)} —— 逐条的 key/value 写法引擎不认,"
+                "整条会读不出任何一个量"
+            )
             continue
         declared = ontology.declared_quantities(owner) if ontology is not None else None
+        # 拼错的量名照样当场开不了机(闸在跳过之前),但**已经有值的量一个都不动**。
+        existing = set(store.of(owner)) if merge else set()
         clean: dict[str, float] = {}
         for key, raw in values.items():
             name = str(key)
@@ -1647,11 +1818,14 @@ def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
                     f"声明过这个量;声明过的是 {sorted(declared)}"
                 )
                 continue
+            if name in existing:
+                continue
             try:
                 clean[name] = float(raw)
             except (TypeError, ValueError):
-                logger.warning(
-                    "world_seed stocks[%s] 的 %s 不是数(%r);跳过这一项", index, key, raw
+                # 同上:跳过一项 = 这个量停在声明的默认值上,而作者以为他给过初值了。
+                problems.append(
+                    f"stocks[{index}] 给 {owner} 的「{name}」写了 {raw!r},不是一个数"
                 )
         if clean:
             # 创世那一刻,不是 tick 0 —— 一个从下午两点半开门的世界里,写死的 0
@@ -1663,24 +1837,32 @@ def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
         raise OntologyError(problems)
 
 
-def _seed_world_rules(rules_store: Any, world_seed: dict[str, Any] | None) -> None:
+def _seed_world_rules(rules_store: Any, world_seed: dict[str, Any] | None,
+                      *, merge: bool = False) -> None:
     """种子里的规律 → `:world_rules`。空的一次,之后那里的行说了算。
 
     **坏规律整体拒绝**(`RuleError`),不逐条丢弃:规律是这个世界的物理法则,
     少一条不是"少一点内容",是这个世界从此算错。宁可开不了机。
+
+    `merge=True` 把粒度降到**每条规律的 id**(作者指名了世界文件那条路),而且
+    **同名的照文件里那条重写** —— 规律是法不是状态,改它不会倒带任何人的现在,而
+    从前那条"同名的不动"意味着一条写漂了的规律在跑着的世界里永远修不掉。合并之后的
+    **全集**在 `_load_world_rules` 那一遍再解析一次 —— 所以"新规律引用了库里那条
+    规律"这种跨来源的引用查得到。
     """
     if world_seed is None:
         return
-    if len(rules_store):
+    if len(rules_store) and not merge:
         return
     entries = world_seed.get("rules")
     if not entries:
         return
     parse_rules(entries)   # 校验在这里,坏了当场抛
-    rules_store.seed(entries, datetime.now(timezone.utc).isoformat())
+    rules_store.seed(entries, datetime.now(timezone.utc).isoformat(), merge=merge)
 
 
-def _load_world_rules(rules_store: Any, *, warn: bool = False) -> list[Any]:
+def _load_world_rules(rules_store: Any, *, warn: bool = False,
+                      ticks_per_day: int | None = None) -> list[Any]:
     """从 store 读出规律并编译。被人手改坏了也当场报错,不带着坏规律开机。
 
     **常数步长那条 lint 由调用方开口(`warn=True`),而全仓库只有一处开。**
@@ -1695,7 +1877,11 @@ def _load_world_rules(rules_store: Any, *, warn: bool = False) -> list[Any]:
     definitions = rules_store.definitions()
     if not definitions:
         return []
-    rules = parse_rules(definitions)
+    # `every: {"days": 1}` 折成多少 tick 是**这个世界自己的配置** —— 写死 288 的话,
+    # 一个把 `minutes_per_tick` 调成 10 的世界里它一天跑两遍,而作者按"一天一次"
+    # 写的常数因此翻倍:世界照跑、日志干净,只有数是错的。
+    rules = parse_rules(definitions, **({} if ticks_per_day is None
+                                        else {"ticks_per_day": ticks_per_day}))
     if warn:
         for warning in drift_warnings(rules):
             logger.warning("%s", warning)
@@ -1716,6 +1902,42 @@ def _authored_drift_warnings(authored: Any) -> list[str]:
     try:
         return list(drift_warnings(parse_rules(entries)))
     except Exception:  # noqa: BLE001 - 坏规律的错由 world_seed_errors 负责报
+        return []
+
+
+def _warn_unreachable_requirements(ontology: Any, rules: list[Any]) -> None:
+    """开机点名「永远开不了的那道门」。**恰好一处开口**,和常数步长那条同一个安排。
+
+    这一处走的是装载那条路(`build_serve_scheduler`,每次开机一次),不是
+    `_precheck_ontology` —— 上一次就是因为预检和装载共用一个函数,同一句警告在
+    线上说了两遍。作者手上那一份归 `validate world`。
+    """
+    if ontology is None:
+        return
+    from anima_world.ontology import unreachable_requirements
+
+    for warning in unreachable_requirements(ontology.kinds, rules):
+        logger.warning("%s", warning)
+
+
+def _authored_unreachable_requirements(authored: Any) -> list[str]:
+    """`validate world` 那一份。开机那条落在服务器日志里,而作者手上只有这个命令。
+
+    和开机共用 `ontology.unreachable_requirements` 同一个函数 —— 另写一份判断
+    迟早出现"validate 说没问题、开机却在报"。声明本身写坏了不归这儿管
+    (`world_seed_errors` 已经列过),所以解析不动就安静退场。
+    """
+    if not isinstance(authored, dict) or not authored.get("kinds"):
+        return []
+    try:
+        rules = parse_rules(authored.get("rules") or [])
+    except Exception:  # noqa: BLE001 - 坏规律的错由 world_seed_errors 负责报
+        rules = []
+    try:
+        from anima_world.ontology import parse_kinds, unreachable_requirements as _check
+
+        return list(_check(parse_kinds(authored["kinds"]), rules))
+    except Exception:  # noqa: BLE001 - 坏声明的错同上
         return []
 
 
@@ -1761,8 +1983,9 @@ def _warn_unresolved_rule_names(stock_store: Any, rules: list[Any]) -> None:
 
 
 def _seed_ontology(
-    ontology_store: Any, world_seed: dict[str, Any] | None, *, fresh_world: bool
-) -> None:
+    ontology_store: Any, world_seed: dict[str, Any] | None, *, fresh_world: bool,
+    merge: bool = False
+) -> list[str]:
     """种子里的本体(`"kinds"` / `"entities"`)→ `:kinds` / `:entities`。**只在创世。**
 
     别的种子段落用的是"表空了就播",这一段不能 —— 一个创世时没有本体的世界,它的
@@ -1772,21 +1995,74 @@ def _seed_ontology(
 
     **坏声明整体拒绝**(`OntologyError`),和规律同一条理由:少一条不是"少一点
     内容",是这个世界从此有一部分东西静默地不存在。
+
+    `merge=True`(作者指名了 `--world-file`)是上一段唯一的例外:那不是"下次重开
+    被硬塞",是作者的一次明示编辑。校验喂的是**合并后的全集**而不是文件里那一份 ——
+    一个新实例挂在库里已有的种类上是完全正常的写法,只看文件会把它判成"引用了不存在
+    的种类"。
+
+    ⚠️ **种类与实例在这里的规矩不同,而这个不对称是有理由的。**
+
+    从前两边都是"同名的一个字都不动",于是**一个跑着的世界里的声明永远改不了** ——
+    作者写错一个 `label`、给的代价调得不对、一条规律漂了,唯一的修法是把世界抹掉
+    重建,而那要连同每个玩家的进度一起抹。灯塔湾就卡在这儿:一个教英语的世界,
+    每个动词按钮上印的是引擎的中文默认词(`look` → 「端详」),四个真人在里面。
+
+    只填缺不覆盖那条纪律**说的是状态**:整份写回会把长了三十天的树倒带回幼苗。
+    而**种类是法,不是状态** —— 它身上没有任何东西会随时间漂,所以那条理由在这儿
+    不成立。于是:
+
+    - **`kinds`:文件里那条赢。** 作者指名了这份文件,就是在说"照它来"。
+    - **`entities`:仍旧只增。** 实例有 `location`,而位置另有一份落在可见性表里
+      (`_apply_ontology` 只填缺地写);覆盖了这边不覆盖那边,同一个东西会有两个
+      "它在哪"。运行期 `spawn` 出来的实例根本不在文件里,不受影响。
+
+    返回**真的写下去的那些种类 id**(新的 + 改了的)。调用方要拿它去把可见性那份
+    镜像跟着改 —— 声明变了而镜像没变,是这个仓库最怕的那种不一致。
     """
     from anima_world.ontology import parse_entities, parse_kinds
 
-    if world_seed is None or not fresh_world or len(ontology_store):
-        return
+    if world_seed is None or not fresh_world:
+        return []
+    if len(ontology_store) and not merge:
+        return []
     kinds = world_seed.get("kinds") or []
     entities = world_seed.get("entities") or []
     if not kinds and not entities:
-        return
+        return []
+    if merge:
+        kinds = _union_by_id(ontology_store.kind_definitions(), kinds, incoming_wins=True)
+        entities = _union_by_id(ontology_store.entity_definitions(), entities)
     parse_entities(entities, parse_kinds(kinds))   # 校验在这里,坏了当场抛
-    ontology_store.seed(kinds, entities, datetime.now(timezone.utc).isoformat())
+    written, _ = ontology_store.seed(
+        kinds, entities, datetime.now(timezone.utc).isoformat(),
+        merge=merge, replace_kinds=merge)
+    return written
+
+
+def _union_by_id(
+    existing: list[dict], incoming: list[dict], *, incoming_wins: bool = False
+) -> list[dict]:
+    """库里那份 + 文件里那份,按 `id` 去重。默认**库里的赢**(只增不改)。
+
+    `incoming_wins=True` 用在声明上(种类、规律):它们是法不是状态,身上没有会随
+    时间漂的东西,所以"文件里那条赢"不会倒带任何人的现在 —— 而反过来会让一个跑着
+    的世界永远改不了自己的声明。顺序也跟着换:文件里那份排在前面,库里剩下的跟上。
+    """
+    if incoming_wins:
+        out = [dict(row) for row in incoming]
+        have = {str(row.get("id")) for row in out}
+        out += [row for row in existing if str(row.get("id")) not in have]
+        return out
+    out = [dict(row) for row in existing]
+    have = {str(row.get("id")) for row in out}
+    out += [row for row in incoming if str(row.get("id")) not in have]
+    return out
 
 
 def _precheck_ontology(
-    world_seed: dict[str, Any], rules_store: Any, location_store: Any, economy_store: Any
+    world_seed: dict[str, Any], rules_store: Any, location_store: Any, economy_store: Any,
+    ontology_store: Any = None
 ) -> None:
     """在动任何一张表之前,先把作者写的 `kinds` / `entities` 验一遍。
 
@@ -1836,8 +2112,15 @@ def _precheck_ontology(
 
         rules = rules + list(parse_rules(seeded_rules))
 
-    kinds = parse_kinds(world_seed.get("kinds") or [])
-    entities = parse_entities(world_seed.get("entities") or [], kinds)
+    # 本体同理:合并那条路上,库里已经声明过的种类此刻读得到,而文件里的新实例
+    # 完全可以挂在它们身上。只验文件那一份会把这种写法判成"引用了不存在的种类"。
+    kind_rows = world_seed.get("kinds") or []
+    entity_rows = world_seed.get("entities") or []
+    if ontology_store is not None and len(ontology_store):
+        kind_rows = _union_by_id(ontology_store.kind_definitions(), kind_rows)
+        entity_rows = _union_by_id(ontology_store.entity_definitions(), entity_rows)
+    kinds = parse_kinds(kind_rows)
+    entities = parse_entities(entity_rows, kinds)
     resolve(kinds, entities, rules=rules, locations=sorted(set(locations)),
             items=sorted({*items, *seed_items}))
 
@@ -1864,7 +2147,7 @@ def _load_ontology(
 
 
 def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
-                    *, tick: int = 0) -> None:
+                    *, tick: int = 0, redeclare_kinds: Any = ()) -> None:
     """把本体声明兑现成量、可见性、位置。**三样都只填缺,不覆盖。**
 
     每次开机都跑,不只创世 —— 它表达的是一条不变量:**一个实体存在,它声明过的量
@@ -1875,8 +2158,16 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
     而量记的是 0,第一帧就补上 175 tick 的生长。它以前恒等于 0 只是因为世界都从
     午夜开始 —— 而"往一个跑着的世界里补一层声明"这条路上,它一直就是错的
     (`api.py` 的 `stock_set` 早就写着"写进来的 updated_tick 是此刻")。
+
+    `redeclare_kinds` 是作者这次真的改动过的那些种类(`_seed_ontology` 的返回值)。
+    可见性那张表是**声明的镜像**,不是状态:量的 `visibility` / `label` / `bands`
+    都写在种类声明里。声明改了而镜像不改,同一个量会有两个答案 —— 而她读到的是
+    镜像那个。所以这几个种类的可见性行照新声明重写,其余的照旧只填缺(作者显式写
+    在 `stock_visibility` 段里的那些因此仍然赢)。
     """
     from anima_world.ontology import seed_quantities, visibility_declarations
+
+    redeclare = {str(k) for k in (redeclare_kinds or ())}
 
     for entity in ontology.entities.values():
         # **逐个量填,不是逐个实体填。** 按实体跳的话,种子里给某棵树写了一个
@@ -1893,7 +2184,7 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
 
     declared = visibility_store.rules_map()
     for kind, key, visibility, label in visibility_declarations(ontology):
-        if (kind, key) not in declared:
+        if (kind, key) not in declared or kind in redeclare:
             # 分档写在量声明里(`{"visibility": "here", "bands": [...]}`)——
             # 可见性是量声明的一部分,分档同理,不必再去 `stock_visibility` 写
             # 第二行。写了第二行的话它先落库,这里的 `not in declared` 让它赢。
@@ -1908,15 +2199,21 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
             visibility_store.place(entity.id, entity.location, entity.name)
 
 
-def _seed_stock_places(world_seed: dict[str, Any] | None, store: Any) -> None:
+def _seed_stock_places(world_seed: dict[str, Any] | None, store: Any,
+                       *, merge: bool = False) -> None:
     """种子里"这个东西在哪"(`"stock_places": [...]`)。空表一次。
 
     `here` 档的可见性靠它才成立 —— 没有它,一棵树永远不在任何地方,于是"在场可见"
     等于"永远看不见"。
+
+    `merge=True` 把粒度降到**每个 owner**:已经站在某处的东西一个都不挪。位置是
+    这个世界跑出来的现在(一条船会被撑到对岸),按今天文件里的写法放回去就是把它
+    挪回码头,而世界照跑、日志干净。
     """
     if world_seed is None:
         return
-    if store.labels():
+    have = set(store.labels())
+    if have and not merge:
         return
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stock_places")):
         owner = str(entry.get("owner") or "").strip()
@@ -1924,11 +2221,19 @@ def _seed_stock_places(world_seed: dict[str, Any] | None, store: Any) -> None:
         if not owner or not location:
             logger.warning("world_seed stock_places[%s] 缺 owner 或 location;跳过", index)
             continue
+        if owner in have:
+            continue
         store.place(owner, location, entry.get("label"))
 
 
-def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> None:
+def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any,
+                           *, merge: bool = False) -> None:
     """种子里的可见性声明(`"stock_visibility": [...]`)。空表一次。
+
+    `merge=True` 把粒度降到**每个 (种类, 量名)**。这一层和 `_seed_stocks` 是同一个
+    坑的两半:声明全挂在 `world` 这一个 kind 下,按整张表判的话,一个已经声明过
+    `雨势` 的世界永远补不进 `气温` 的 label 和 bands —— 她于是一直在报
+    "气温 0.62" 这种数字,而没有任何一处报错。
 
     **声明本身就是这一层的开关** —— 没声明过任何东西的世界,角色感知不到任何量,
     这一层不进提示词、不花 token。坏条目逐条丢弃并点名(可见性写错的后果是
@@ -1942,7 +2247,8 @@ def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> Non
     """
     if world_seed is None:
         return
-    if store.declarations():
+    have = {(str(r.get("kind") or ""), str(r.get("key") or "")) for r in store.declarations()}
+    if have and not merge:
         return
     problems = visibility_band_errors(world_seed)
     if problems:
@@ -1954,6 +2260,8 @@ def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> Non
         if not kind or not key:
             logger.warning("world_seed stock_visibility[%s] 缺 kind 或 key;跳过", index)
             continue
+        if merge and (kind, key) in have:
+            continue
         try:
             store.declare(kind, key, visibility, entry.get("label"),
                           bands=parse_bands(entry.get("bands")))
@@ -1962,14 +2270,19 @@ def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any) -> Non
 
 
 def _seed_world_defs(
-    location_store: LocationStore, bt_store: BTStore, world_seed: dict[str, Any] | None
-) -> None:
+    location_store: LocationStore, bt_store: BTStore, world_seed: dict[str, Any] | None,
+    *, merge: bool = False
+) -> list[str]:
     """Seed the definition tables once (empty-table no-op afterwards).
 
     Locations come from world_seed.json (fallback: the ids in `GRID`), grid
     coordinates from `locations.GRID`; the action table is generated from the
     live roster (`go_to_<loc>` / `chat_with_<agent>`) so it can't drift into
     ghost references the way the old hardcoded `ActionTable.default()` did.
+
+    `merge=True` 把两张表的粒度都降到每一行,并把**真的新开出来的那些地点 id**
+    交回给调用方 —— 它要拿这个去补 `location_join` 事件,不然新地点只存在于
+    地图表里,而投影(以及任何一次重放)里没有它。
     """
     if world_seed is not None:
         # **只改了一部分的文件不该被当成"作者删掉了其余段"。**
@@ -1986,9 +2299,39 @@ def _seed_world_defs(
     else:
         loc_entries = [dict(p) for p in DEFAULT_POINTS]
         agent_ids = [e["id"] for e in CHARACTER_ROSTER]
-    location_store.seed_defaults(loc_entries)
+    written = location_store.seed_defaults(loc_entries, merge=merge) or []
     point_ids = [e["id"] for e in loc_entries if e.get("kind", "point") == "point"]
-    bt_store.seed_defaults(agent_ids=agent_ids, location_ids=point_ids)
+    bt_store.seed_defaults(agent_ids=agent_ids, location_ids=point_ids, merge=merge)
+    point_set = set(point_ids)
+    return [loc_id for loc_id in written if loc_id in point_set]
+
+
+def _join_spec(aid: str, agent: Any, world_seed: dict[str, Any] | None) -> dict[str, Any]:
+    """一条 `agent_join` 的 `payload.spec` —— **创世那条路和一次编辑共用这一份**。
+
+    `card` 在这里进,而不是从黑板上读:角色卡是**写给玩家看的**,
+    `tagline` 尤其绝不许进提示词(混进人设她就会照着念,而那句是广告词)。
+    黑板是她的上下文的来源,所以卡不上黑板 —— 它只走事件日志,读回来走投影
+    (`character_card` 模块 docstring 第三条)。
+
+    **没写卡就一个字都不写**:凭空补一张 `{"billing": "supporting"}` 的话,每个
+    老世界重开一次都会多出一整份"作者说他们是背景角色"的声明,而宿主再也分不出
+    "作者说他是背景"和"作者什么也没说"。缺省在**读**的那一侧补(`billing_of`)。
+
+    ⚠️ **这条路只对「这一次新 join 的人」有效,而且语义是只填缺不覆盖** ——
+    已经在册的角色不会重新 join,所以拿一份世界文件是改不动他们的卡的。改一个
+    已经跑着的世界走 `World.set_card` / `anima-world agent set-card`,那条路
+    **有意是覆盖**(理由写在它的 docstring 里:一个人指名道姓地说"这个人是主角",
+    只填缺的话他永远说不动)。**两条语义相反是对的,别把其中一条"修"成另一条。**
+    """
+    spec: dict[str, Any] = {
+        "name": agent.name,
+        "personality": agent.blackboard.read("personality") or "",
+    }
+    card = card_of_seed_agent(aid, world_seed)
+    if card:
+        spec["card"] = card
+    return spec
 
 
 def _seed_initial_world(
@@ -2035,10 +2378,7 @@ def _seed_initial_world(
             "who": aid,
             "loc": agent.location,
             "payload": {
-                "spec": {
-                    "name": agent.name,
-                    "personality": agent.blackboard.read("personality") or "",
-                },
+                "spec": _join_spec(aid, agent, world_seed),
                 "state": {},
                 "location": agent.location,
             },
@@ -2067,6 +2407,105 @@ def _seed_initial_world(
         _seed_inventory(event_log, registered_ids, world_seed)
 
 
+def _join_authored_additions(
+    event_log: EventLog,
+    scheduler: Scheduler,
+    world_seed: dict[str, Any] | None,
+    location_store: LocationStore,
+    newcomers: list[dict[str, str]],
+    new_points: list[str],
+) -> set[str]:
+    """把一次编辑加进来的人和地方写进事件日志 —— 创世那条路的合并版。
+
+    为什么非得发事件而不只是写表:名册、位置、关系、随身物品、钱**全是事件的投影**。
+    只把人注册进调度器的话,他这一轮活着,重启之后就没有了 —— 而这中间他说过的话、
+    走过的路都还在日志里,指着一个不存在的人。
+
+    ⚠️ **`ts` 必须大于 0。** 重启时捡回"中途加入的人"那一段(`agent_join` 且
+    `ev.ts > 0`)靠的就是这个:钉成 0 的话他们会被当成创世名册的一部分,而创世
+    名册在有事件的世界里根本不被读 —— 于是这些人只在装文件的那一次开机里存在,
+    下次重启就整批消失。
+
+    关系只发**至少有一头是新人**的那些:两个老角色之间的关系是这个世界跑出来的现在,
+    拿文件里的初值写回去就是把三十天的交情倒带回创世那一刻。
+    """
+    from anima_world.economy import TOWN
+
+    ts = max(1, int(scheduler.clock))
+    for loc_id in new_points:
+        row = location_store.get(loc_id) or {}
+        event_log.append({
+            "ts": ts,
+            "type": "location_join",
+            "loc": loc_id,
+            "payload": {
+                "id": loc_id,
+                "name": row.get("name", loc_id),
+                "description": row.get("description", ""),
+            },
+        })
+    joined = [e["id"] for e in newcomers if e["id"] in scheduler.agents]
+    for aid in joined:
+        agent = scheduler.agents[aid].agent
+        event_log.append({
+            "ts": ts,
+            "type": "agent_join",
+            "who": aid,
+            "loc": agent.location,
+            "payload": {
+                "spec": _join_spec(aid, agent, world_seed),
+                "state": {},
+                "location": agent.location,
+            },
+        })
+        amount = _money_for(aid, world_seed)
+        if amount > 0:
+            event_log.append({
+                "ts": ts, "who": aid, "type": "payment",
+                "payload": {"from": TOWN, "to": aid, "amount": amount,
+                            "reason": "genesis_stipend"},
+            })
+    if world_seed is None or not joined:
+        return set()
+    registered = set(scheduler.agents)
+    _seed_relations(event_log, registered, world_seed, require_new=set(joined))
+    _seed_goals(event_log, set(joined), world_seed)
+    _seed_memories(event_log, registered, world_seed, only=set(joined))
+    _seed_inventory(event_log, set(joined), world_seed)
+    logger.info(
+        "作者层合并:%d 个新角色进了这个世界(%s),%d 个新地点上了地图",
+        len(joined), "、".join(joined[:8]) + ("…" if len(joined) > 8 else ""),
+        len(new_points),
+    )
+    return set(joined)
+
+
+def _fold_seeded_memories(
+    memory_store: MemoryStore, persisted: list[Event], only: set[str]
+) -> None:
+    """把刚写进日志的 `memory_seed` 折进记忆库 —— 只给这几个人,且只折一次。
+
+    创世那条路上这一步是 `_rebuild_memories` 顺手做的,而它见了非空表就掉头,
+    所以合并进来的人在那条路上永远拿不到自己的创世记忆:日志里有、库里没有,
+    她开口时对自己的过去一无所知,而开机日志一行不错。
+
+    幂等靠 `event_seq`:同一份文件连开两次,第二次这些事件的 seq 都已经在库里了。
+    """
+    have = {row.get("event_seq") for aid in only for row in memory_store.query(aid)}
+    for event in persisted:
+        if event.type != "memory_seed" or event.seq in have:
+            continue
+        payload = event.payload
+        aid = payload.get("agent_id")
+        if not aid or aid not in only:
+            continue
+        memory_store.add(
+            agent_id=aid, tick=event.ts, kind=payload.get("kind", "seed"),
+            summary=payload.get("summary", ""), importance=payload.get("importance", 0.5),
+            anchor=bool(payload.get("anchor", False)), event_seq=event.seq,
+        )
+
+
 def _wrap_with_needs_band(bt_root: Any) -> Any:
     """needs-v3: the urgent-needs band sits ABOVE the authored tree — a
     starving agent eats before it opens the shop. Wrapped unconditionally:
@@ -2093,7 +2532,7 @@ def _wrap_with_needs_band(bt_root: Any) -> Any:
 def _ensure_need_actions(bt_store: Any) -> None:
     """The need band's leaf ids must resolve in the action table, or the
     lookup falls back to idle_wander and a hungry agent just... wanders."""
-    existing = {row["node_id"] for row in bt_store.actions()}
+    existing = bt_store.shared_action_ids()
     for node_id, kind in (("eat", "eat"), ("go_sleep", "sleep"), ("idle_social", "idle_social")):
         if node_id not in existing:
             bt_store.set_action(node_id, kind, {})
@@ -2163,7 +2602,8 @@ def _material_qty(item: dict[str, Any], where: str) -> int | None:
     return qty
 
 
-def _seed_material_layer(store: Any, world_seed: dict[str, Any] | None) -> None:
+def _seed_material_layer(store: Any, world_seed: dict[str, Any] | None,
+                         *, merge: bool = False) -> None:
     """物质层的创世入口:物品定义与店铺货架(#12)。
 
     economy/needs 从首发起就有机制,却是唯一一个没有创世入口的子系统 ——
@@ -2237,7 +2677,9 @@ def _seed_material_layer(store: Any, world_seed: dict[str, Any] | None) -> None:
 
     if not defined and not stock:
         return  # 种子没碰物质层:内置演示物品照常出场
-    store.seed_authored(list(defined.values()), stock)
+    # `merge=True` 的粒度是每件物品 / 每格货架。货架上的数量尤其不能整份写回 ——
+    # 那是这个世界卖了三十天之后的现在,按今天的文件放回去就是把卖掉的东西变回来。
+    store.seed_authored(list(defined.values()), stock, merge=merge)
 
 
 def _money_for(agent_id: str, world_seed: dict[str, Any] | None) -> float:
@@ -2281,7 +2723,8 @@ def _seed_inventory(event_log: EventLog, registered_ids: set[str], world_seed: d
             event_log.append({"ts": 0, "who": agent_id, "type": "item_transfer", "payload": payload})
 
 
-def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any]) -> None:
+def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any],
+                    *, require_new: set[str] | None = None) -> None:
     """rich-injection: initial relation values, reusing the existing
     sentiment/r_type state_change genesis semantics — zero new projection
     code. Only emitted for agents that actually got registered this boot.
@@ -2290,13 +2733,19 @@ def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: d
     matching how live `chat` always emits a symmetric pair of sentiment
     events (actions.py `to_event`) — a single one-directional event would
     leave the other agent's view of the relationship at the Relation()
-    default, silently, for any seed declaring a mutual relationship."""
+    default, silently, for any seed declaring a mutual relationship.
+
+    `require_new`(作者层合并那条路)再加一道:**至少有一头是这次新来的人。**
+    两个老角色之间的关系是这个世界跑出来的现在,拿文件里的初值发一遍就是把
+    三十天的交情倒带回创世那一刻 —— 而 `state_change` 是覆盖写,不报错。"""
     for rel in _seed_entry_dicts(world_seed, "relations"):
         a, b = rel.get("a"), rel.get("b")
         if not isinstance(a, str) or not isinstance(b, str):
             logger.warning("world_seed relation has non-string agent ids (%r, %r); skipping", a, b)
             continue
         if a not in registered_ids or b not in registered_ids:
+            continue
+        if require_new is not None and a not in require_new and b not in require_new:
             continue
         if "sentiment" in rel and not isinstance(rel["sentiment"], (int, float)):
             logger.warning(
@@ -2343,15 +2792,28 @@ def _seed_goals(event_log: EventLog, registered_ids: set[str], world_seed: dict[
         })
 
 
-def _seed_memories(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any]) -> None:
+def _seed_memories(
+    event_log: EventLog,
+    registered_ids: set[str],
+    world_seed: dict[str, Any],
+    *,
+    only: set[str] | None = None,
+) -> None:
     """rich-injection: initial memories as `memory_seed` genesis events —
     event-sourced (D10) so a future memories-table rebuild can't lose them.
     Folded into MemoryStore by `_rebuild_memories`'s trigger closure, not
-    here — first-boot seeding and rebuild share that one path."""
+    here — first-boot seeding and rebuild share that one path.
+
+    `only` 是合并那条路上的"只给新人播":「这个人不是新来的」和「这个人根本不在
+    这个世界里」得分开报,合成一条的话每次合并都会为每个老角色喊一句"unknown
+    agent" —— 喊的是假话,而人一旦学会忽略它,真的那句也一起被忽略了。
+    """
     for mem in _seed_entry_dicts(world_seed, "memories"):
         aid = mem.get("agent_id")
         if not isinstance(aid, str) or aid not in registered_ids:
             logger.warning("world_seed memory references unknown agent %r; skipping", aid)
+            continue
+        if only is not None and aid not in only:
             continue
         importance = mem.get("importance", 0.5)
         try:
@@ -2661,6 +3123,10 @@ def run_contact(args: argparse.Namespace) -> int:
     - `--why` 打**此刻算出来是多少**,包括没触发的。调 `contact.threshold` 的人
       要的是这一份 —— 只看已发生的话,一个永远不触发的配置和一个刚好差一点的
       配置长得一模一样,而这一层默认关着、默认不响,静默失效是它最可能的坏法。
+    - `--inbox` 打**收件箱**(`agent_hail`)。它和上面那份是互补的一对:一条是
+      "你不在跟前时她想起了你",一条是"她当面叫住了你"。挂在同一条命令下面是
+      有意的 —— 分成两条命令,运维得先知道有两条命令,而这一层此前在 CLI 上
+      一个出口都没有(只能 `redis-cli HGETALL anima:<world>:contact`)。
 
     渲染是赠品,`--json` 才是契约(和 `map` / `ontology` 同一条)。
     """
@@ -2674,27 +3140,70 @@ def run_contact(args: argparse.Namespace) -> int:
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[contact] {exc}", file=sys.stderr)
         return 2
+    inbox_face = bool(getattr(args, "inbox", False))
+    if inbox_face and not args.player:
+        world.close()
+        print("[contact] --inbox 要 --player:收件箱是**某一个人**的",
+              file=sys.stderr)
+        return 2
+    # 游标那三格(cursor / next_seq / scanned)只有分页的两张脸有;`--why` 是
+    # 此刻算出来的一份快照,没有 seq 可言。
+    cursor: dict[str, Any] | None = None
     try:
-        if getattr(args, "why", False):
+        if inbox_face:
+            page = world.inbox_page(
+                args.player, since_seq=args.since_seq, limit=args.limit,
+            )
+            rows, cursor = page["events"], page
+            stats = world.contact_stats()
+        elif getattr(args, "why", False):
             rows = world.contact_forecast()
             if args.player:
                 rows = [r for r in rows if r["player_id"] == args.player]
             stats = world.contact_stats()
         else:
-            rows = world.contact_requests(
+            page = world.contact_requests_page(
                 args.player, since_seq=args.since_seq, limit=args.limit,
             )
+            rows, cursor = page["events"], page
             stats = world.contact_stats()
         enabled = bool(world.config_get("contact.enabled", False))
     finally:
         world.close()
 
     if args.as_json:
-        print(json.dumps(
-            {"enabled": enabled, "stats": stats,
-             ("forecast" if getattr(args, "why", False) else "requests"): rows},
-            ensure_ascii=False, indent=2, default=str,
-        ))
+        face = "inbox" if inbox_face else (
+            "forecast" if getattr(args, "why", False) else "requests"
+        )
+        payload: dict[str, Any] = {"enabled": enabled, "stats": stats, face: rows}
+        if cursor is not None:
+            # **空页也要带着游标。** 照着 `rows[-1].seq` 推游标的脚本会在一个热闹的
+            # 世界里饿死:一整窗都是别人的事件时它拿到空表,游标一步都推不动,
+            # 而那个人自己那条永远排在窗外。`--json` 是契约,所以这一格必须在。
+            payload.update({
+                "cursor": cursor["cursor"],
+                "next_seq": cursor["next_seq"],
+                "scanned": cursor["scanned"],
+                "total": cursor["total"],
+            })
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    if inbox_face:
+        # 收件箱和 contact.enabled 无关 —— `agent_hail` 走的是另一条路
+        # (她当面叫住你),那句"这一层没在跑"在这张脸上是句谎。
+        if not rows:
+            print(f"没有人叫住过 {args.player}。")
+            return 0
+        for event in rows:
+            payload = event.get("payload") or {}
+            where = payload.get("location_name") or payload.get("location") or "?"
+            who = payload.get("agent_name") or payload.get("agent_id")
+            print(f"#{event.get('seq')} {who} 在{where}叫住了 "
+                  f"{payload.get('player_name') or args.player}"
+                  f"({payload.get('reason') or 'hail'})")
+            if payload.get("text"):
+                print(f"    「{payload['text']}」")
         return 0
 
     if not enabled:
@@ -2736,6 +3245,59 @@ def run_contact(args: argparse.Namespace) -> int:
         print(f"    「{payload.get('topic')}」({payload.get('topic_source')})")
         for reason in payload.get("reasons") or []:
             print(f"    · {reason.get('label')}({reason.get('weight')}):{reason.get('note')}")
+    return 0
+
+
+def run_relationship(args: argparse.Namespace) -> int:
+    """`anima-world relationship` —— 一段关系此刻的人话。
+
+    此前这一层在 CLI 上一个出口都没有:要看一段关系只能去 `state --json` 里翻
+    `relations`,而那儿躺着的是四个 -1~1 的浮点数。**给数字等于把一段关系变成
+    一根进度条**,而刷分是恋爱陪伴产品最不该长出来的东西。
+
+    所以人看的那张脸**一个浮点数都不印**:一句话、一个档、和上一次改变它的
+    那件事。要数字的去拿 `--json`(`axes` 那一格) —— 渲染是赠品,`--json`
+    才是契约,和 `map` / `ontology` / `contact` 同一条。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "relationship"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[relationship] {exc}", file=sys.stderr)
+        return 2
+    agent, other = getattr(args, "agent", None), getattr(args, "other", None)
+    try:
+        if agent and other:
+            payload: Any = world.relationship_summary(agent, other)
+            rows = [payload]
+        else:
+            rows = world.relationship_summaries(agent_id=agent or "", other_id=other or "")
+            payload = {"relationships": rows}
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    if not rows:
+        print("这个世界里还没有任何一段关系。" if not (agent or other)
+              else "没有查到这一段关系 —— 两个人之间还没有来往。")
+        return 0
+    for row in rows:
+        # 判定还没落地的那些行没有档 —— `band` 是 sentiment 0.0 折出来的,印成
+        # 「还谈不上什么交情」等于把"还不知道"说成一个结论。
+        head = f"[{row['band_name']}] " if row.get("exists") else ""
+        print(f"{head}{row['summary']}")
+        change = row.get("last_change")
+        if change:
+            where = (f"第 {change['conversation_id']} 号对话"
+                     if change.get("conversation_id") is not None else "查不到是哪一场对话")
+            print(f"    上一次改变它的是 #{change['seq']}(tick {change['tick']},{where})")
     return 0
 
 
@@ -2822,7 +3384,14 @@ def run_ontology(args: argparse.Namespace) -> int:
         print(f"■ {kind['id']}  {kind['gloss']}{hint}".rstrip())
         for q in kind["quantities"]:
             unit = f" {q['unit']}" if q["unit"] else ""
-            print(f"    量   {pad(q['label'], 14)}默认 {q['default']:g}{unit}"
+            # **两个都印,和下面那几行能力同一条理由** —— 而这一行此前只印人话。
+            # 后果是这张表自己跟自己对不上:`agent` 的量表里写着「手上的活儿」,
+            # 底下的能力写着「她得 me_手艺 >= 1.0」,于是作者(和我)读出来的结论是
+            # "手艺 这个量没声明过,这几条能力永远做不成" —— 而它声明得好好的,
+            # 只是 label 换了个说法。查一个量到底叫什么,只有这里问得到。
+            key = q["key"] if q.get("label", q["key"]) == q["key"] else \
+                f"{q['key']}({q['label']})"
+            print(f"    量   {pad(key, 14)}默认 {q['default']:g}{unit}"
                   f"   她感知得到:{q['visibility']}")
             if q.get("bands"):
                 # **她读到的是这几个词,不是数字** —— 而"作者把这个量翻成了什么"
@@ -2888,6 +3457,85 @@ def run_ontology(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_roster(args: argparse.Namespace) -> int:
+    """`anima-world roster` —— **这个世界里有谁**,连人带卡一次给出。
+
+    补的是两个洞,都是真人试玩撞出来的:
+
+    - **显示名此前没有读出口**(已经在线上咬人):`map --json` 里地点有 `name`,
+      人只有 id,于是网站旁白印的是 `mai:`、`yu:`。剩下唯一的路是重放整份事件
+      日志去捞 `agent_join` —— 而那是历史,不是现在。
+    - **角色卡到不了玩家眼前**:作者写的主次 / 一句话 / 立绘进得去出不来,
+      而**一个进得去出不来的字段和没有这个字段是同一个 bug,只是发作得更晚**。
+
+    创作台那侧的判据是**有没有 CLI 出口** —— 库里有而命令行上没有,对不 import
+    本包的它等于不存在。渲染是赠品,`--json` 才是契约(和 `map` / `ontology` 同一条)。
+
+    `hidden` 的人**照出**:引擎是"这个世界里有谁"的权威。要不要给玩家看是宿主
+    那一层的事(运维台的壳在 `/internal/v1/roster` 上筛掉它们)。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "roster"):
+        return 2
+    if args.billing is not None and args.billing not in CARD_BILLINGS:
+        print(f"[roster] --billing 只认 {', '.join(CARD_BILLINGS)},收到 {args.billing!r}",
+              file=sys.stderr)
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[roster] {exc}", file=sys.stderr)
+        return 2
+    try:
+        payload = world.roster()
+    finally:
+        world.close()
+
+    agents = payload["agents"]
+    if args.billing is not None:
+        agents = [a for a in agents if a["billing"] == args.billing]
+
+    if args.as_json:
+        # **筛过的也照 `roster()` 的形状给** —— 消费方按同一个 key 读。
+        print(json.dumps({"operation": "roster", "world_id": world_id, "agents": agents},
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    from anima_world.mapview import display_width
+
+    def pad(text: str, width: int) -> str:
+        return text + " " * max(1, width - display_width(text))
+
+    if not agents:
+        print(f"{world_id}:一个人都没有。")
+        return 0
+
+    # 主次用记号而不是英文单词:通讯录那一屏本来就是靠一眼看出主次的。
+    mark = {"lead": "★", "supporting": " ", "hidden": "·"}
+    carded = sum(1 for a in payload["agents"] if a["card"])
+    print(f"{world_id}:{len(agents)} 人")
+    for row in agents:
+        where = row["location_name"] or "不在任何地方"
+        away = "  (离场)" if row["away"] else ""
+        print(f"{mark.get(row['billing'], ' ')} {pad(row['agent_id'], 14)}"
+              f"{pad(row['name'], 14)}@{where}{away}")
+        if row["tagline"]:
+            print(f"    {row['tagline']}")
+        if row["portrait"]:
+            print(f"    立绘 {row['portrait'][:72]}")
+    if carded == 0:
+        # 一张卡都没有要说出来 —— 什么也不说和"这个世界写了卡但没读出来"长得一样。
+        print("\n(这个世界没做过角色卡:通讯录上这些人一样重、没有一句话、没有立绘。"
+              "在世界文件的 agents[].card 里写。)")
+    else:
+        # 记号不解释就是一道谜:两个符号看得见,而"它们各是什么意思"看不见。
+        print("\n(★ 主角  · 还没出场(hidden,引擎照出,筛不筛是宿主的事)  "
+              "无记号 背景)")
+    return 0
+
+
 def run_presence(args: argparse.Namespace) -> int:
     """`anima-world presence` —— 开 `presence.enforce_colocation` 之前的体检。
 
@@ -2921,19 +3569,28 @@ def run_presence(args: argparse.Namespace) -> int:
         print(f"  {aid:<20}{here or '在路上 / 不知道'}")
     print("\n玩家在哪:")
     if not report["players"]:
-        print("  (这个世界跟谁都还没打过交道 —— 没人跟她说过话)")
+        # **筛过之后的空,和世界本身的空,是两件事。** 一句"这个世界跟谁都还没打过
+        # 交道"会让人跑去查宿主接没接上,而真相只是这一个 id 抄错了。
+        print(f"  (这个世界不认得 {args.player_id} —— 既没有在场记录,"
+              "也没有打过交道的记录。id 抄错了?)" if args.player_id else
+              "  (这个世界跟谁都还没打过交道 —— 没人跟她说过话)")
+    # 真部署里 player_id 是 membership 的 uuid(36 字),写死 20 会让 id 和地点
+    # 糊成一坨 —— 只有 `p1`/`cli` 那种短名字才看着是对的。
+    pad = max([20] + [len(r["player_id"]) + 2 for r in report["players"]])
     for row in report["players"]:
-        where = row["location"] or "✗ 这个进程不知道(没调过 player_move)"
+        where = row["location"] or "✗ 世界不知道(没调过 player_move,或者他已经不在场)"
         face = "、".join(row["face_to_face"]) or "没有人"
-        print(f"  {row['player_id']:<20}{where}")
-        print(f"  {'':<20}此刻面对面:{face}"
-              f"{'' if row['present'] else '(而且他不在这个进程的在场名单里)'}")
+        print(f"  {row['player_id']:<{pad}}{where}")
+        print(f"  {'':<{pad}}此刻面对面:{face}"
+              f"{'' if row['present'] else '(而且他不在在场名册上)'}")
     print()
-    # ⚠️ **这一句不许省。** 玩家的位置是**进程内**的(`World.players` 是刻意的
-    # 内存态),而这道命令永远是一个新开的进程 —— 于是它看到的"没位置"里,一部分
-    # 只是"我不是那个进程"。不说的话,读的人会照着一个假警报去改宿主。
-    print("说明:玩家的位置住在**进程内存**里(`World.players`),这条命令是另开一个"
-          "进程问的 —— 所以这里的位置只反映本进程。名单是从落库的那份补齐的。")
+    # ⚠️ **这一句不许省,但 3.2.0 起说的是另一件事。** 从前它警告"位置只活在这个
+    # 进程里";现在在场落 Redis 带 TTL,于是要说的是**为什么会没位置** ——
+    # 没人调过 `player_move`,或者他很久没动静、TTL 过了。不说的话,读的人会
+    # 照着一个假警报去改宿主。
+    print("说明:在场与位置住在 Redis 上(`anima:{world_id}:player:*`),带过期时间 ——"
+          "跨进程、扛重启。这里没有位置只有两种可能:宿主没调过 player_move,"
+          "或者他很久没动静已经过期。名单是从落库的联系态补齐的。")
     if report["unplaced"]:
         # **不许只报数字。** 这一句是这道命令唯一真正的产出:读的人要知道下一步
         # 该改哪儿,而不是知道有几个玩家没位置。
@@ -2943,13 +3600,32 @@ def run_presence(args: argparse.Namespace) -> int:
             "开 presence.enforce_colocation 之前,先让**跑世界的那个进程**每轮调一次 "
             "player_move,否则一开就是 give / 一起做事全线拒绝。"
         )
-        print(f"\n⚠ {report['unplaced']} 个玩家在本进程里没有位置。{tail}")
-        print("  多进程宿主要留意:那道闸认的是**本进程**的位置,"
-              "A 进程调了 player_move,B 进程照样认为他不在场(REFERENCE §2.9.9)。")
+        print(f"\n⚠ {report['unplaced']} 个玩家在世界里没有位置。{tail}")
+        print("  这里面有一部分只是**很久没动静**(在场带 TTL):真的没接 player_move 的话,"
+              "刚聊过的人也会没有位置。")
         return 1
     if report["players"]:
-        print("✓ 本进程手上每个玩家都有位置 —— 这道闸开得起来。")
+        print("✓ 每个玩家都有位置 —— 这道闸开得起来。")
     return 0
+
+
+def _pick_asker(world: Any, agent_id: str) -> str:
+    """没指定玩家时,替 `prompt` 挑一个**世界真认得**的人。
+
+    优先站在她跟前的那个 —— 调提示词的人想看的就是那一轮。挑不出来就退回
+    `DEFAULT_PLAYER_ID`,那时抬头上会明说这是个陌生人。
+    """
+    try:
+        report = world.presence(None)
+    except Exception:  # noqa: BLE001 —— 挑不出人不该让这条只读命令告吹
+        return DEFAULT_PLAYER_ID
+    rows = [r for r in (report.get("players") or []) if r.get("known")]
+    if not rows:
+        return DEFAULT_PLAYER_ID
+    # 排序而不是取第一个:名单顺序会随 Redis 变,而同一条命令两次给出不同的
+    # 提示词,比给错还难查。
+    facing = sorted(r["player_id"] for r in rows if agent_id in (r.get("face_to_face") or ()))
+    return facing[0] if facing else sorted(r["player_id"] for r in rows)[0]
 
 
 def run_prompt(args: argparse.Namespace) -> int:
@@ -2960,6 +3636,15 @@ def run_prompt(args: argparse.Namespace) -> int:
     一个假 LLM 去偷看 —— 世界作者(改的是 `prompt_templates` 里的模板)一点办法没有。
 
     **看,但不碰**:不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来。
+
+    ⚠️ **「不碰」有个代价:默认那个玩家是个幽灵。** `chat`/`play` 默认的 `cli` 会被
+    `player_move` 挪进世界,当场变成真人;这一条不写玩家状态,所以它永远不会。世界
+    不认得的人身上,身份/在场/关系三块整个换一套算法 —— 她被告知对方没报过名字、
+    不在她跟前、这是手机私聊,而真玩家被列成"同场角色,不是正在和你说话的人"。
+    线上实测:幽灵 8 块,真玩家 10 块,重合的那几块里有三块是反的。而它渲染得毫无
+    破绽 —— 一个来调提示词的人会照着它去改一个不存在的问题。
+    所以不给 `--player-id` 时**去世界里找一个真的**(优先站在她跟前的那个),
+    并且**永远把"这一份是拿谁算的"印在抬头上** —— 挑了谁不说,是另一种撒谎。
     """
     from anima_world.api import World
 
@@ -2980,9 +3665,10 @@ def run_prompt(args: argparse.Namespace) -> int:
             print(f"[prompt] 这个世界里没有 {args.agent!r}。", file=sys.stderr)
             _print_roster(world, world_id)
             return 2
+        player_id = args.player_id or _pick_asker(world, args.agent)
         seen = world.debug_prompt(
             args.agent,
-            player_id=args.player_id,
+            player_id=player_id,
             display_name=args.name or "",
             message=args.message,
         )
@@ -2994,8 +3680,23 @@ def run_prompt(args: argparse.Namespace) -> int:
         return 0
 
     name = roster[args.agent].get("name") or args.agent
+    asker = seen["asker"]
+    who = asker["display_name"] or asker["player_id"]
     print(f"{name} 此刻收到的提示词:{len(seen['blocks'])} 块 / {seen['system_chars']} 字")
-    print(f"(假设你说的是「{args.message}」)\n")
+    print(f"(假设 {who} 说的是「{args.message}」)")
+    if not asker["known"]:
+        # **这不是提醒,这是这一次输出的成色。** 下面那几块是拿一个世界不认得的人
+        # 算的,和任何一轮真对话都不一样 —— 不说的话,读的人会照着它去改提示词。
+        print(onboarding.yellow(
+            f"⚠ 这个世界不认得「{asker['player_id']}」"
+            + ("(你没给 --player-id,而这个世界里一个玩家都没有)"
+               if args.player_id is None else "(id 抄错了?)")
+        ))
+        print("  她眼里这是个没报过名字、也不在她跟前的陌生人:身份/在场/关系三块"
+              "因此和真的那一轮不一样。")
+        print("  想看真的那一份:anima-world prompt --agent … --player-id <真玩家>"
+              "(用 `anima-world presence` 查 id)。")
+    print()
     for block in seen["blocks"]:
         head = (block["text"].splitlines() or [""])[0]
         share = block["chars"] * 100 // max(1, seen["system_chars"])
@@ -3692,13 +4393,20 @@ def run_memory(args: argparse.Namespace) -> int:
 
 
 def run_agent(args: argparse.Namespace) -> int:
-    """`anima-world agent repair-goals` —— 把单字目标拼回来。
+    """`anima-world agent repair-goals` / `agent set-card` —— 角色数据的两个写口。
 
-    和 `memory repair-ticks` 同一个形状:算法在 `World.repair_agent_goals`,
-    CLI 只开世界、印出来、定退出码。**改之前先 `--dry-run` 看一眼**是这类命令的
-    用法,不是客套 —— 它动的是作者写的东西。
+    和 `memory repair-ticks` 同一个形状:算法在 `World` 上,CLI 只开世界、印出来、
+    定退出码。**改之前先 `--dry-run` 看一眼**是这类命令的用法,不是客套 ——
+    它们动的是作者写的东西。
     """
     from anima_world.api import World
+
+    command = getattr(args, "agent_command", None)
+    if command == "set-card":
+        return run_agent_set_card(args)
+    if command != "repair-goals":
+        print("[agent] 只有 repair-goals / set-card 两个子命令", file=sys.stderr)
+        return 2
 
     redis, world_id, mysql = _world_args(args)
     if not _require_existing_world(redis, world_id, "agent"):
@@ -3724,6 +4432,194 @@ def run_agent(args: argparse.Namespace) -> int:
         print(f"    改成 {len(row['after'])} 条:{json.dumps(row['after'], ensure_ascii=False)}")
     if not result["repaired"]:
         print("[agent] 没有要修的 —— 这个世界的 goals 是好的。")
+    return 0
+
+
+def run_agent_set_card(args: argparse.Namespace) -> int:
+    """`anima-world agent set-card` —— 给**一个已经跑着的世界**改一张角色卡。
+
+    补的是角色卡那一整轮改造漏掉的一节:卡只在 `agent_join` 的 `payload.spec` 上,
+    而已经在册的角色永远不会再 join —— 于是那一轮**对唯一一个有真人的世界等于
+    没做**(线上 20 个角色一张卡都装不进去,而作者写得进、校验放行、包也导得出)。
+
+    **一次只改一个人,不收文件。** 生产上这条路的入口是运维台的一次性容器,argv
+    由具名参数白名单生成 —— 容器里没有作者的文件;而 argv 是数组传递,中文和标点
+    直接当一个元素传,不过 shell。
+
+    判断都在 `World.set_card` 的 docstring 里(**覆盖**、部分合并、`--clear` 单独
+    一格、幂等)。这里只管三件事:参数互斥、退出码、印给人看。
+    **退出码 2 = 「我听懂了,但我不干」**(运维台把它翻译成 409);编一个空回执
+    出去的话,运维的人会以为改成功了。
+    """
+    from anima_world.api import World
+
+    given = {
+        key: getattr(args, key)
+        for key in ("billing", "tagline", "portrait")
+        if getattr(args, key, None) is not None
+    }
+    if args.clear and given:
+        print("[agent] --clear 和 --billing/--tagline/--portrait 不能一起给:"
+              "一句是「删掉这张卡」,一句是「这张卡写成这样」—— 引擎挑哪句都是猜。",
+              file=sys.stderr)
+        return 2
+    if not args.clear and not given:
+        print("[agent] 什么都没给 —— --billing / --tagline / --portrait / --clear "
+              "至少给一个。一次什么也没改的「成功」读起来和改成功了一模一样。",
+              file=sys.stderr)
+        return 2
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "agent"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[agent] {exc}", file=sys.stderr)
+        return 2
+    try:
+        receipt = world.set_card(
+            args.agent, given or None,
+            clear=bool(args.clear), dry_run=bool(args.dry_run),
+        )
+    except KeyError as exc:
+        # `KeyError` 的 str() 会加一层引号 —— 拿 args[0] 才是那句人话。
+        print(f"[agent] {exc.args[0]}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"[agent] {exc}", file=sys.stderr)
+        return 2
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps({"operation": "agent set-card", "world_id": world_id, **receipt},
+                         ensure_ascii=False, indent=2))
+        return 0
+
+    who = f"{receipt['name']}({receipt['agent_id']})"
+    if not receipt["changed"]:
+        # **说出「没有变化」** —— 一声不吭和改成功了长得一模一样,而这条命令
+        # 最常见的用法就是运维照着单子一个一个敲过去。
+        print(f"[agent] {who} 的卡没有变化,一个字都没写。")
+        return 0
+
+    before, after = receipt["before"] or {}, receipt["after"] or {}
+    verb = "要改" if receipt["dry_run"] else "改了"
+    print(f"[agent] {who} 的卡{verb}:")
+    for key in sorted(set(before) | set(after)):
+        was, now = before.get(key), after.get(key)
+        if was == now:
+            continue
+        print(f"    {key:10} {was if was is not None else '(没写)'}"
+              f" → {now if now is not None else '(删掉)'}")
+    for warning in receipt["warnings"]:
+        print(f"[agent] {warning}", file=sys.stderr)
+    if receipt["dry_run"]:
+        print("[agent] --dry-run:一个字节都没写。")
+    else:
+        print(f"[agent] 看一眼:anima-world roster --world-id {world_id}")
+    return 0
+
+
+def run_player(args: argparse.Namespace) -> int:
+    """`anima-world player forget` / `player options` —— 玩家那一份数据的两个出口。
+
+    **forget 不是一次删除,是往日志里追加一条事实**(`player_departed`);理由写在
+    `World.forget_player` 的 docstring 里,一句话:关系是投影,手删投影下一次重放
+    自己长回来。所以这条命令改的是世界的历史**加了一条**,而不是少了一条。
+
+    **options 是只读的**:这个人此时此地点得动什么。它存在的理由是宿主那侧 ——
+    `player_tools()` 说得出"有 interact 这个按钮",说不出"这会儿有什么可以 interact"。
+
+    和 `agent repair-goals` 同一个形状:算法在 `World` 上,CLI 只开世界、印出来、
+    定退出码。**先 `--dry-run` 看一眼**是写命令的用法。
+    """
+    from anima_world.api import World
+
+    command = getattr(args, "player_command", None)
+    if command not in {"forget", "options"}:
+        print("[player] 只有 forget / options 两个子命令", file=sys.stderr)
+        return 2
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "player"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[player] {exc}", file=sys.stderr)
+        return 2
+    if command == "options":
+        try:
+            menu = world.player_options(args.player)
+        finally:
+            world.close()
+        return _print_player_options(args, menu)
+    try:
+        receipt = world.forget_player(
+            args.player, reason=args.reason, dry_run=bool(args.dry_run),
+        )
+    except ValueError as exc:
+        print(f"[player] {exc}", file=sys.stderr)
+        return 2
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(receipt, ensure_ascii=False, indent=2, default=str))
+        return 0
+    verb = "要清" if args.dry_run else "清了"
+    chat_state = receipt["chat_state"]
+    print(f"[player] {receipt['player_id']} —— {verb}:"
+          f"关系 {receipt['relations']} 段、关系图 {receipt['edges']} 条边、"
+          f"联系态 {receipt['contact']} 行、"
+          f"聊天当前值 {'?' if chat_state is None else chat_state} 行。")
+    if args.dry_run:
+        print("[player] (--dry-run:世界一个字节都没动)")
+    else:
+        print(f"[player] 已记下 player_departed(seq={receipt['seq']})——"
+              "历史、记忆、转录、账本一个字没改。")
+    return 0
+
+
+_BLOCKED_SAYS = {
+    # **空菜单的原因要说出来。** 空表加一句沉默读起来像"这儿什么也没有",
+    # 而这三件事一件也不是那个意思(和 `presence` 的 `known` 那一格同一课)。
+    # ⚠️ **这一句 3.2.0 之前说的是另一件事。** 从前它警告"位置是进程内的,所以这条
+    # 命令对一个跑在别处的世界总是这一句" —— 而在场早就搬进了 Redis(`presence` 那条
+    # 已经改过口,这条漏了)。留着它更坏:它教人把一个**真**信号当成 CLI 的已知毛病
+    # 挥挥手过去,于是没接 player_move 的宿主永远查不出来。
+    "unknown_player_location": "世界不知道他这会儿在哪。三种可能:这个世界压根不"
+                               "认得这个 id(抄错了?)、宿主从没调过 player_move、"
+                               "或者他很久没动静、在场已经过期"
+                               "(`anima-world presence` 分得开这三种)",
+    "in_transit": "他这会儿在路上 —— 在途不算站在任何地方",
+    "no_ontology": "这个世界没有声明过任何东西(没有 kinds),没什么可交互的",
+}
+
+
+def _print_player_options(args: argparse.Namespace, menu: dict[str, Any]) -> int:
+    """`player options` 的两张脸。**`--json` 才是契约**,渲染是赠品。"""
+    if args.as_json:
+        print(json.dumps(menu, ensure_ascii=False, indent=2, default=str))
+        return 0
+    where = menu["location_name"] or menu["location"] or "?"
+    print(f"[player] {menu['player_id']} 在 {where}:")
+    if menu["blocked"]:
+        print(f"  —— {_BLOCKED_SAYS.get(menu['blocked'], menu['blocked'])}")
+        return 0
+    if not menu["targets"]:
+        print("  —— 这儿没有能做点什么的东西")
+    for row in menu["targets"]:
+        gloss = f"({row['gloss']})" if row["gloss"] else ""
+        print(f"  [{row['id']}] {row['name']}{gloss}")
+        for verb in row["verbs"]:
+            mark = "可以" if verb["available"] else f"不行/{verb['reason']}"
+            tail = f" —— {verb['refusal']}" if verb["refusal"] else ""
+            print(f"      {verb['label']}:{mark}{tail}")
+    if menu["overflow"]:
+        print(f"  (还有 {menu['overflow']} 样没带进来 —— 你没细看)")
     return 0
 
 
@@ -3821,10 +4717,15 @@ def run_validate(args: argparse.Namespace) -> int:
             return _report_validation("world", args.path, [read_error], [], args.json)
         return _report_validation(
             "world", args.path,
-            # 分档的闸和加载期**同一个函数** —— 另写一份的话,迟早出现
+            # 分档与角色卡的闸和加载期**同一个函数** —— 另写一份的话,迟早出现
             # "validate 说没问题,开机还是失败"。
-            world_seed_errors(authored) + visibility_band_errors(authored),
-            world_seed_warnings(authored) + _authored_drift_warnings(authored),
+            world_seed_errors(authored)
+            + visibility_band_errors(authored)
+            + world_card_errors(authored),
+            world_seed_warnings(authored)
+            + _authored_drift_warnings(authored)
+            + _authored_unreachable_requirements(authored)
+            + world_card_warnings(authored),
             args.json,
         )
 
@@ -3879,6 +4780,7 @@ def contract_payload() -> dict[str, Any]:
     镜像可以直接 diff 键集与 op 表。要跑不了世界也能回答,所以不碰 db、不建库。
     """
     import anima_world
+    from anima_world.api import _PLAYER_TTL_SECONDS
     from anima_world.beats import (
         OP_REQUIRED_FIELDS,
         PREDICATE_REQUIRED_FIELDS,
@@ -3887,7 +4789,18 @@ def contract_payload() -> dict[str, Any]:
     )
     from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
     from anima_world.world_package import PACKAGE_FORMAT_VERSION
-    from anima_world.world_seed import WORLD_SEED_AGENT_KEYS, WORLD_SEED_LOCATION_KEYS
+    from anima_world.character_card import (
+        CARD_BILLINGS as _BILLINGS,
+        CARD_KEYS,
+        DEFAULT_BILLING,
+        PORTRAIT_SCHEMES,
+        TAGLINE_MAX_CHARS,
+    )
+    from anima_world.world_seed import (
+        WORLD_SEED_AGENT_KEYS,
+        WORLD_SEED_AGENT_OPTIONAL_KEYS,
+        WORLD_SEED_LOCATION_KEYS,
+    )
 
     return {
         "operation": "contract",
@@ -3899,6 +4812,17 @@ def contract_payload() -> dict[str, Any]:
             "key_prefix": "anima:{world_id}:",
             "mysql_tables": ["events", "memories", "conversations", "messages"],
             "mysql_table_prefix": "{world_id}_",
+            # 3.2.0:在场玩家从进程内存搬进 Redis(重启不该让世界忘了人坐在她对面)。
+            # **带 TTL,而且不进 `.cyberworld`** —— JSON 存不了 TTL,装回去就是一份
+            # 永不过期的假在场;而包是分发物,不该带着别人的玩家此刻在哪儿。
+            # 镜像端(运维台 `lib/worldPackage.js`)照这一格对齐:打包时跳过这两类键。
+            "volatile_keys": ["lock", "players", "player:{player_id}"],
+            "presence": {
+                "index_key": "anima:{world_id}:players",
+                "row_key": "anima:{world_id}:player:{player_id}",
+                "ttl_seconds": _PLAYER_TTL_SECONDS,
+                "in_package": False,
+            },
         },
         # 她能调的能力**全目录**(声明在代码,`@tool` 登记)。宿主要显示"她走开了"
         # 之类的事件,得先知道有哪些能力会产生它们。
@@ -3912,6 +4836,12 @@ def contract_payload() -> dict[str, Any]:
                 "id": spec.id, "kind": spec.kind,
                 "params": sorted(spec.params_schema),
                 "surfaces": list(spec.surfaces),
+                # 这两格是**画按钮要先知道的**:一个要玩家真在她跟前,一个要手边
+                # 有一样能动的东西。FOR-STUDIO 早就照这条写着"从 contract --json
+                # 读 requires_colocation",而这里一直没给 —— 文档比代码走得快的那种
+                # 不一致,正是这个仓库最怕的一种。
+                "requires_colocation": spec.requires_colocation,
+                "requires_target_entity": spec.requires_target_entity,
             }
             for spec in chat_tools.tools_for("*")
         ],
@@ -3920,7 +4850,26 @@ def contract_payload() -> dict[str, Any]:
         "seed": {
             "schema_version": None,  # 无版本号:随主版本走
             "agent_keys": sorted(WORLD_SEED_AGENT_KEYS),
+            # **必填之外、引擎认得并且带得过河的那些。** 分开一格是因为
+            # `agent_keys` 是必填集(镜像端拿它算"少了什么"),把可选键混进去
+            # 等于要求每个世界给每个角色写一张卡。
+            "agent_optional_keys": sorted(WORLD_SEED_AGENT_OPTIONAL_KEYS),
             "location_keys": sorted(WORLD_SEED_LOCATION_KEYS),
+        },
+        # 角色卡:作者写给**玩家**看的那一面。创作台照这一段决定填什么、怎么校验,
+        # 而它此前只能靠版本号猜"这支引擎带不带得动" —— 猜错不报错。
+        "character_card": {
+            "keys": sorted(CARD_KEYS),
+            "billings": list(_BILLINGS),
+            "default_billing": DEFAULT_BILLING,
+            "tagline_max_chars": TAGLINE_MAX_CHARS,
+            "portrait_schemes": sorted(PORTRAIT_SCHEMES),
+            # 读出口。**没有出口的字段等于没有这个字段**,所以它和形状写在一起。
+            "read_command": "roster",
+            # 写出口。只报读出口的时候,"作者层写得进"和"一个跑着的世界改得动"
+            # 长得一模一样 —— 而那两件事差着这个仓库最怕的那一类 bug:线上那 20 个
+            # 早就在册的角色一张卡都装不进去,全程零报错。
+            "write_command": "agent set-card",
         },
         "beats": {
             "schema_version": None,
@@ -3955,6 +4904,12 @@ def run_contract(args: argparse.Namespace) -> int:
     print(f"  报表口径       {payload['report']['format_version']}   simulate --report")
     print(f"  种子 schema    agents{payload['seed']['agent_keys']} "
           f"locations{payload['seed']['location_keys']}")
+    print(f"  可选           agents{payload['seed']['agent_optional_keys']}")
+    print(f"  角色卡         {payload['character_card']['keys']}   "
+          f"主次 {'/'.join(payload['character_card']['billings'])}"
+          f"(缺省 {payload['character_card']['default_billing']})   "
+          f"读出口 anima-world {payload['character_card']['read_command']}   "
+          f"写出口 anima-world {payload['character_card']['write_command']}")
     print(f"  节拍 op        {', '.join(payload['beats']['ops'])}")
     print(f"  节拍谓词       {', '.join(payload['beats']['predicates'])}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
@@ -4455,8 +5410,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_map(args)
     if args.command == "ontology":
         return run_ontology(args)
+    if args.command == "roster":
+        return run_roster(args)
     if args.command == "contact":
         return run_contact(args)
+    if args.command == "relationship":
+        return run_relationship(args)
     if args.command == "presence":
         return run_presence(args)
     if args.command == "chat":
@@ -4471,6 +5430,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_memory(args)
     if args.command == "agent":
         return run_agent(args)
+    if args.command == "player":
+        return run_player(args)
     if args.command == "report":
         return run_report(args)
     if args.command == "validate":

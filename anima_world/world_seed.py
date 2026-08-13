@@ -1,9 +1,13 @@
 """Shared validation for authored world seed data.
 
-**镜像契约只有一件事**:`is_valid_world_seed` 的裁决(运维台 `lib/worldSeed.js` 镜像
-了它)。裁决只看 `agents` / `locations` 的必填键 —— 未知顶层字段一律忽略,所以往
-种子里加可选字段(`relations` / `memories` / `items` / `config` …)**不改跨仓库契约**,
-不需要同步改镜像端。这条是有意的:世界的丰富度会一直长,而裁决面必须稳。
+裁决面(`is_valid_world_seed`)是**必填键 + 引擎读得懂的形状**:`agents` /
+`locations` 的必填键,加上写了才查的可选段的条目形状。往种子里加**引擎认得的**
+可选字段(`relations` / `memories` / `items` / `config` …)不动这道闸 —— 世界的
+丰富度会一直长,而裁决面必须稳。
+
+但"未知顶层字段一律忽略"这条早先说得太宽:它把**引擎认得、只是作者写错了形状**
+的段也放了过去,而装载器对那种条目的处置是安静丢掉。一行没人读的初值和一行拼错
+的量名是同一类错误,后者当场开不了机,前者从前连个红都没有。
 """
 
 from __future__ import annotations
@@ -12,6 +16,16 @@ from typing import Any
 
 WORLD_SEED_AGENT_KEYS = frozenset({"id", "name", "location", "personality"})
 WORLD_SEED_LOCATION_KEYS = frozenset({"id", "name", "description"})
+
+#: 引擎**认得并且带得过河**的可选键。`WORLD_SEED_AGENT_KEYS` 是**必填**集
+#: (`world_seed_errors` 拿它算 `missing`),把 `card` 加进去等于要求每个世界给
+#: 每个角色写一张卡 —— 而"缺席 = 这个世界没做过角色卡,不是错误"是角色卡这一层
+#: 的地基(`character_card.normalize_card`)。所以它单列一格。
+#:
+#: 它进 `contract --json`(`seed.agent_optional_keys`),因为创作台需要一个**问得到**
+#: 的答案:"这支引擎带不带得动角色卡"。此前它只能靠版本号猜,而猜错不报错 ——
+#: 一个 dev tag 会让它安静地停在"不带"那一支上,作者填的卡照旧到不了玩家眼前。
+WORLD_SEED_AGENT_OPTIONAL_KEYS = frozenset({"card"})
 
 # 种子可以在创世时点亮的开关(`"config": {...}`)。**密文键一律不许**:种子是要
 # 分发的东西(`.cyberworld` 里就带着它),一个能携带 `llm.api_key` 的种子等于把
@@ -74,6 +88,55 @@ def world_seed_errors(data: Any, *, complete: bool = True) -> list[str]:
                 name = entry.get("id") or entry.get("name")
                 where = f"{label} ({name!r})" if name else label
                 errors.append(f"{where} is missing {', '.join(repr(k) for k in missing)}")
+
+    errors.extend(_stock_entry_errors(data.get("stocks")))
+    return errors
+
+
+def _stock_entry_errors(entries: Any) -> list[str]:
+    """`stocks` 的**形状**,硬错误 —— 这一段和引用完整性那类 advisory 不是一回事。
+
+    装载器只认 `{"owner": …, "values": {量名: 数}}`;形状不对的条目它**安静丢掉**
+    (从前是一条 `logger.warning` 然后 `continue`)。于是一份逐条写成
+    `{"owner": …, "key": …, "value": …}` 的文件会照常开机、日志干净,而这个世界里
+    一整批初值从此不存在 —— 量停在声明的默认值上,引用它们的规律和条件照跑,
+    算出来的全是同一个数。那正是"安静地少装一半世界"。
+
+    `world_seed_warnings` 的宽容原则(「只警告、绝不拒绝」)管的是**引用**:
+    引擎没有"合法值全集",一个自造的动作名、一个中途入场的角色都合法,把 advisory
+    升级成拒绝会让设计正确的世界在小版本升级后开不了机。而这里查的是"你写的这行
+    有没有人读" —— 没人读的行,答案在任何引擎版本上都一样。
+    """
+    if entries is None:
+        return []      # 可选段,不写就是不写
+    if not isinstance(entries, list):
+        return [f"'stocks' must be a list ({type(entries).__name__})"]
+
+    errors: list[str] = []
+    for index, entry in enumerate(entries):
+        label = f"stocks[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object, got {type(entry).__name__}")
+            continue
+        if not str(entry.get("owner") or "").strip():
+            errors.append(f"{label} is missing 'owner'")
+        values = entry.get("values")
+        if not isinstance(values, dict):
+            found = "missing" if "values" not in entry else type(values).__name__
+            hint = ""
+            if "key" in entry or "value" in entry:
+                hint = (" —— 写成 {\"owner\": …, \"values\": {量名: 数}};"
+                        "逐条的 key/value 引擎不认,那样的行会被整条丢掉")
+            errors.append(f"{label} 'values' must be an object ({found}){hint}")
+            continue
+        for key, raw in values.items():
+            # 判据和装载器逐字同一个(`float(raw)`),不是"长得像数吗" —— 两处各写
+            # 一份判断,迟早给出不同答案,而那种不一致会表现成"预检说没问题,
+            # 开机还是失败"。
+            try:
+                float(raw)
+            except (TypeError, ValueError):
+                errors.append(f"{label} 的「{key}」是 {raw!r},不是一个数")
     return errors
 
 

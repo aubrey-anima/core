@@ -132,3 +132,58 @@ def test_a_mangled_marker_is_swallowed_even_when_it_runs_past_the_length_cap():
     prose, found = strip_directives("〔tool:mute " + "很长的一段话" * 60)
     assert prose == "", "超长的打残标记漏给了玩家"
     assert [d.kind for d in found] == ["unknown"]
+
+
+# ── 漏写 `tool:`:线上抓到的第二种打法 ────────────────────────────────────────
+#
+# 她整轮只输出了 `〔delay_reply {"minutes": 5}〕`,少了那五个字符。标记被摘掉、工具
+# 没跑、玩家收到零个字节 —— 她的选择没兑现,而屏幕上和"应用崩了"长得一模一样。
+
+
+def test_a_marker_that_forgets_the_tool_prefix_is_still_understood():
+    directive = parse_body('delay_reply {"minutes": 5}', ["delay_reply", "mute"])
+    assert directive.kind == "tool", "漏写 tool: 就被咽掉 —— 她的选择在世界里没兑现"
+    assert directive.name == "delay_reply" and directive.params == {"minutes": 5}
+
+
+def test_both_writings_parse_to_exactly_the_same_thing():
+    """两份写法解析出不同的参数,是这一层最难查的错。"""
+    names = ["broadcast"]
+    payload = '{"text":"八点见","tags":["a","b"]}'
+    with_prefix = parse_body(f"tool:broadcast {payload}", names)
+    without = parse_body(f"broadcast {payload}", names)
+    assert (with_prefix.kind, with_prefix.name, with_prefix.params) == (
+        without.kind, without.name, without.params,
+    )
+
+
+def test_a_bare_name_this_world_does_not_have_is_still_refused():
+    """认得的只是**这一轮真有的**那几个 —— 猜一份名字出来是这一层最坏的错法。"""
+    assert parse_body('sing_a_song {"key": "C"}', ["mute"]).kind == "unknown"
+    assert parse_body('delay_reply {"minutes": 5}').kind == "unknown", "没给名字就不该认"
+
+
+def test_a_bare_name_is_only_read_inside_the_full_width_brackets():
+    """`[` 那一侧不认:`eat`/`work` 这种名字在散文里是真会出现的。"""
+    prose, found = strip_directives('〔delay_reply {"minutes": 5}〕', ["delay_reply"])
+    assert prose == "" and [d.kind for d in found] == ["tool"]
+
+    ascii_text = '[delay_reply {"minutes": 5}]'
+    prose, found = strip_directives(ascii_text, ["delay_reply"])
+    assert prose == ascii_text, "ASCII 那一侧认了裸名字,散文迟早被吞"
+    assert found == []
+
+
+def test_a_bare_name_survives_every_token_boundary_too():
+    text = '（她低头看表。）〔delay_reply {"minutes": 5}〕'
+    for chunk in range(1, 12):
+        parser = DirectiveParser(["delay_reply"])
+        prose: list[str] = []
+        found: list = []
+        for index in range(0, len(text), chunk):
+            for kind, value in parser.feed(text[index : index + chunk]):
+                (prose if kind == "text" else found).append(value)
+        for kind, value in parser.flush():
+            (prose if kind == "text" else found).append(value)
+        assert "".join(prose) == "（她低头看表。）", f"chunk={chunk} 时漏了标记"
+        assert [d.kind for d in found] == ["tool"], f"chunk={chunk}"

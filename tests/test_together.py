@@ -314,3 +314,128 @@ def test_判定模板里_reason_排在_accept_前面():
         "少了这一句,模型会觉得自己被要求成全一件事 —— 而这条机制的全部意义"
         "就是它可以被拒绝"
     )
+
+
+# ── 邀请那句话本身 ──────────────────────────────────────────────────────────
+
+
+def test_动词自己带了一起就别再加一个():
+    """线上撞出来的:晚潮世界十五个共同动词里有三个的 label 以「一起」开头,
+    于是她收到的邀请是「阿布叫你一起一起喝一杯」。**不报错,只是她读到一句
+    结巴的话** —— 而她下一句就会照着这个语气回你。"""
+    assert together.describe_invitation(
+        inviter="阿布", verb_label="一起喝一杯", target_name="吧台", others=[],
+    ) == "阿布指着吧台,叫你一起喝一杯"
+    assert together.describe_invitation(
+        inviter="阿布", verb_label="照料", target_name="老橡树", others=[],
+    ) == "阿布指着老橡树,叫你一起照料"
+
+
+def test_多带一个人的时候还是只有一个一起():
+    assert together.describe_invitation(
+        inviter="阿布", verb_label="一起吃个饭", target_name="长桌", others=["江晚"],
+    ) == "阿布指着长桌,叫你一起吃个饭(还有江晚)"
+
+
+def test_东西的名字不许焊在动词后面():
+    """线上撞出来的第二句结巴:「阿布叫你一起**树下坐会儿江堤上的老樟树**」。
+    作者写的 label 本来就是一句完整的话(「树下坐会儿」「听完一面」),后面
+    直接接一个名词就讲不通了 —— 而判定器只会照着这句读不通的话去判她答不答应,
+    一个字都不会报错。"""
+    line = together.describe_invitation(
+        inviter="阿布", verb_label="树下坐会儿", target_name="江堤上的老樟树",
+    )
+    assert line == "阿布指着江堤上的老樟树,叫你一起树下坐会儿"
+    assert "树下坐会儿江堤上的老樟树" not in line
+
+
+# ── 他俩这会儿正说着的话 ────────────────────────────────────────────────────
+
+
+def test_判定器读得到当轮对话_而不是只有关闭后才落的记忆():
+    """⚠️ **邀请正发生在会话中间,而记忆是会话关闭那一刻才落的。**
+
+    线上实测:跟江晚聊完两轮再叫她,判定器收到的 `memories` 里一个字都没有这两轮
+    (那会儿会话还开着),于是她在「我压根不记得跟这个人说过话」的前提下判"熟不熟",
+    一叫就推。玩家眼里的样子是"我跟她聊得好好的,一叫她就说不熟"。
+    """
+    seen = {}
+
+    class _LLM:
+        def complete_sync(self, messages):
+            seen["prompt"] = messages[0]["content"]
+            return json.dumps({"reason": "刚聊得挺好", "accept": True},
+                              ensure_ascii=False)
+
+    from anima_world.relationship_judge import RelationshipJudge
+
+    RelationshipJudge(_LLM()).judge_invite(
+        a={"name": "江晚", "personality": "话少"}, inviter="阿布",
+        invitation="阿布叫你一起喝一杯", relation={"a_to_b": 0.1},
+        memories=[], location="酒馆",
+        recent_talk=["阿布：你还记得那把旧伞吗", "江晚：记得，你说过要还我。"],
+    )
+    assert "旧伞" in seen["prompt"] and "还我" in seen["prompt"]
+    assert "江晚和阿布这会儿正说着话" in seen["prompt"]
+
+
+def test_零不是敌意_没来往的那一格不许说成形同陌路():
+    """**0.00 是「还没有来往」,不是「形同陌路」。**
+
+    这一条是线上真撞出来的:玩家跟 Dr. Finch 刚聊完两轮,她当场提议一起做套模拟题,
+    玩家点了那个按钮 —— 判定器读到的却是「观感 0.00(0 是形同陌路)」,于是它写下
+    「素不相识,没必要配合一个陌生人的即兴邀请」并推掉了**她自己提的那件事**。
+    转录明明就在同一份提示词里。模型没错,是引擎递给它一份自相矛盾的处境:
+    一边是刚说完的话,一边是一句"你跟这人形同陌路"。
+
+    零是**还没结算**,不是负数;这一格和 `relationship_summary` 那一格同一条纪律。
+    """
+    seen = {}
+
+    class _LLM:
+        def complete_sync(self, messages):
+            seen["prompt"] = messages[0]["content"]
+            return json.dumps({"reason": "x", "accept": True}, ensure_ascii=False)
+
+    from anima_world.relationship_judge import RelationshipJudge
+
+    RelationshipJudge(_LLM()).judge_invite(
+        a={"name": "江晚"}, inviter="阿布", invitation="一起走走",
+        relation={"a_to_b": 0.0}, memories=[], location="",
+        recent_talk=["阿布：坐一会儿吧", "江晚：好啊。"],
+    )
+    assert "形同陌路" not in seen["prompt"], "0 被说成形同陌路,而他们正说着话"
+    assert "还没有来往" in seen["prompt"]
+
+
+def test_没说过话时那一块整个不出现():
+    """空的时候写「(无)」是在告诉模型"他俩今天没搭过话" —— 而真相是这一格
+    没数据。自洽的一块要么有内容,要么整个不在。"""
+    seen = {}
+
+    class _LLM:
+        def complete_sync(self, messages):
+            seen["prompt"] = messages[0]["content"]
+            return json.dumps({"reason": "x", "accept": False}, ensure_ascii=False)
+
+    from anima_world.relationship_judge import RelationshipJudge
+
+    RelationshipJudge(_LLM()).judge_invite(
+        a={"name": "江晚"}, inviter="阿布", invitation="一起走走",
+        relation={}, memories=[], location="",
+    )
+    assert "正说着话" not in seen["prompt"]
+    # 老世界自己覆盖过的模板没有这个占位符,照样渲染得出来(`str.format` 忽略
+    # 多余 kwarg,和规划器的 `{situation}` 同一个套路)。
+    assert "{recent_talk}" not in seen["prompt"]
+
+
+def test_一条长发言不许把提示词撑爆():
+    """转录没有上限(一条消息可以有几千字),提示词有 —— 不夹的话一次长发言
+    就能盖过性格与记忆那两块。"""
+    from anima_world.relationship_judge import _TALK_LINE_CHARS, _talk_block
+
+    block = _talk_block("江晚", "阿布", ["阿布：" + "话" * 5000])
+    assert len(block) < _TALK_LINE_CHARS + 60
+    # 换行也夹掉:一条多行发言会把这一块的缩进排版拆散,读起来像另外几个人在说话。
+    assert _talk_block("江晚", "阿布", ["阿布：上\n下"]).count("\n") == 2

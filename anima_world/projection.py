@@ -49,12 +49,42 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_item_transfer(proj, e)
     elif e.type == "item_consume":
         _apply_item_consume(proj, e)
+    elif e.type == "player_departed":
+        _apply_player_departed(proj, e)
+
+
+def _apply_player_departed(proj: Projection, e: Event) -> None:
+    """「这个人离开了这个世界」—— 折掉他和所有人之间的关系,两个方向都折。
+
+    **为什么这是一条事件而不是一次删除。** 关系不是一张表,是
+    `state_change/sentiment_delta` 折出来的投影。手删投影里那一行,下一次重放
+    (换个进程、重启一次、`catch_up_projection` 一次)会原样把它折回来 —— 世界
+    照跑、日志干净,而"她还惦记着一个不存在的人"这件事一天之内自己长回来。
+    追加一条事实,重放才收敛;**对账即重放**这条不变量因此仍然成立。
+
+    **它不碰历史。** 那些 `sentiment_delta` 一条不少地留在日志里,记忆、转录、
+    账本也一样 —— 她记得这个人来过,只是不再等他。走的是**朝前看**的那一半。
+    """
+    player_id = str(e.payload.get("player_id") or "").strip()
+    if not player_id:
+        return
+    for key in [k for k in proj.relations if player_id in k]:
+        proj.relations.pop(key, None)
 
 
 # ── economy-v4: the ledger is a projection — audit = replay ────────────────
 
 
 def _apply_payment(proj: Projection, e: Event) -> None:
+    """一笔钱从一头挪到另一头。**进位在这儿,不在显示那一层。**
+
+    二进制浮点存不下 0.1,所以 `60 − 5.23 − 1.16 − …` 折下来是
+    `0.3799999999999921`。前端 `toFixed(2)` 把它盖住了,而账本是这个引擎对"钱"
+    的定义、不是屏幕上那一行:门禁读的是这个数,一笔"正好够"的交易迟早会被它
+    拒掉,而那一次不报错也不留痕。钱有最小单位,所以折账的时候就进位。
+
+    **两头一起进** —— 单边进的话玩家少的和镇上多的对不上,账本不再守恒。
+    """
     payload = e.payload
     src, dst = payload.get("from"), payload.get("to")
     try:
@@ -63,8 +93,11 @@ def _apply_payment(proj: Projection, e: Event) -> None:
         return
     if not src or not dst or amount <= 0:
         return
-    proj.balances[src] = proj.balances.get(src, 0.0) - amount
-    proj.balances[dst] = proj.balances.get(dst, 0.0) + amount
+    proj.balances[src] = round(proj.balances.get(src, 0.0) - amount, 2)
+    proj.balances[dst] = round(proj.balances.get(dst, 0.0) + amount, 2)
+    # 见面礼发过没有,记在账本这一侧 —— 理由见 `Projection.allowances`。
+    if payload.get("reason") == "allowance":
+        proj.allowances.add(str(dst))
 
 
 def _apply_item_transfer(proj: Projection, e: Event) -> None:
@@ -103,6 +136,24 @@ def _apply_item_consume(proj: Projection, e: Event) -> None:
             holding.pop(item_id, None)
 
 
+def _doing(state: Any) -> dict[str, Any]:
+    """`state` 装的是她**在干什么**,不装她**在哪**。
+
+    "在哪"只有一个家:`location_join` 折出来的 `agent.location`。而 `state` 是个
+    自由字典,谁都能往里塞一个 `location` —— 塞进去之后它只增不减(`work` 写,
+    `sleep` 和 `walk` 都不清),于是 `World.state()` 对同一个问题给出两个答案,
+    宿主读哪个全凭运气。线上量出来是 21 个人里 13 个对不上。
+
+    **过滤要留在读事件这一侧**,光修 `actions.py` 不够:投影是重放事件折出来的,
+    历史里每一条老 `work` 事件都会把那份陈旧的拷贝原样带回来。
+    """
+    if not isinstance(state, dict):
+        return {}
+    # 拷贝之后再删 —— 事件那个 dict 是**已经发生过的事实**,就地改它等于改写历史
+    # 的显示(见 `_apply_agent_join` 里 spec 那段的教训)。
+    return {k: v for k, v in state.items() if k != "location"}
+
+
 def _apply_agent_join(proj: Projection, e: Event) -> None:
     payload = e.payload
     agent_id = e.who
@@ -121,7 +172,7 @@ def _apply_agent_join(proj: Projection, e: Event) -> None:
         # 没造成过数据损失(goals 自己有一条 persona_update 事件),但这是个地雷:
         # 投影往后加的任何一处写,都会静默地改写"历史显示成什么样"。
         spec=dict(spec) if isinstance(spec, dict) else spec,
-        state=dict(payload.get("state") or {}),
+        state=_doing(payload.get("state")),
         location=location,
         joined_at=e.ts,
         updated_at=e.ts,
@@ -202,6 +253,23 @@ def _apply_state_change(proj: Projection, e: Event) -> None:
                         continue
                     value = getattr(rel, axis) + step
                     setattr(rel, axis, max(-1.0, min(1.0, value)))
+        # 出处:上一次改变它的就是**这一条**。和上面几行同一次折叠 ——
+        # 一句"你们更亲近了"如果说不出出处,和一根进度条没有区别。
+        conversation_id = payload.get("conversation_id")
+        try:
+            conversation_id = None if conversation_id is None else int(conversation_id)
+        except (TypeError, ValueError):
+            conversation_id = None
+        rel.last_change = {
+            "seq": e.seq,
+            "tick": e.ts,
+            "delta": delta,
+            "direction": "up" if delta > 0 else ("down" if delta < 0 else "flat"),
+            "conversation_id": conversation_id,
+            "summary": str(payload.get("conversation_summary") or ""),
+            "as_name": str(payload.get("as_name") or ""),
+            "target_name": str(payload.get("target_name") or ""),
+        }
 
     elif kind == "r_type":
         as_id = payload.get("as") or e.who
@@ -221,7 +289,7 @@ def _apply_state_change(proj: Projection, e: Event) -> None:
         if agent_id is None or agent_id not in proj.agents:
             return
         agent = proj.agents[agent_id]
-        agent.state.update(payload.get("state", {}))
+        agent.state.update(_doing(payload.get("state")))
         agent.updated_at = e.ts
 
     elif kind == "location_join":
@@ -314,6 +382,29 @@ def _apply_agent_idle(proj: Projection, e: Event) -> None:
     agent.updated_at = e.ts
 
 
+def _speaker_name(proj: Projection, speaker: str | None, payload: dict[str, Any]) -> str:
+    """发言人的**人话名**,永远非空。
+
+    三级回落:事件自己带的 → 名册(`agent_join` 那条事件里的 spec)→ id 本身。
+
+    **中间那一级是为了老日志。** 线上世界的库里已经躺着几千条只有 `speaker`
+    的 `narrative`,而重放是这个引擎的真相模型 —— 只在发射端补名字,等于说
+    "这个 bug 修好了,但你已经有的历史永远是坏的"。名册就在同一条日志里
+    (`agent_join.payload.spec.name`),重放到这一条时它必然已经折进来了。
+    """
+    given = str(payload.get("speaker_name") or "").strip()
+    if given:
+        return given
+    if speaker:
+        agent = proj.agents.get(speaker)
+        if agent is not None:
+            name = str(agent.spec.get("name") or "").strip()
+            if name:
+                return name
+        return speaker
+    return ""
+
+
 def _apply_narrative(proj: Projection, e: Event) -> None:
     """M2: append narrative entry to projection.narrative_log."""
     agent_id = e.who
@@ -322,6 +413,10 @@ def _apply_narrative(proj: Projection, e: Event) -> None:
     entry: dict[str, Any] = {
         "agent": agent_id,
         "speaker": speaker,
+        # **加一个字段,不改 `speaker` 的含义。** `speaker` 是宿主已经在用的
+        # 机器可读键(去重、按人过滤都靠它),把它换成名字等于跨仓库破坏。
+        # 而它同时被当成"发言人"渲染在玩家脸上 —— 那一半由这个字段接手。
+        "speaker_name": _speaker_name(proj, speaker, e.payload) or (agent_id or ""),
         "text": text,
         "ts": e.ts,
     }
@@ -369,9 +464,16 @@ def _apply_capability_registered(proj: Projection, e: Event) -> None:
 def _apply_user_message(proj: Projection, e: Event) -> None:
     """M3: append user_message to narrative_log with speaker='user'."""
     text = e.payload.get("text", "")
+    payload = e.payload
+    # `speaker` 是字面量 `"user"` —— 它同样会被渲染成发言人,所以这条也要有名字。
+    # 宿主给了就用宿主的(玩家的名字只有宿主知道),没给退回一句人话。
+    name = str(
+        payload.get("speaker_name") or payload.get("player_name") or ""
+    ).strip() or "玩家"
     proj.narrative_log.append({
         "agent": e.who or "user",
         "speaker": "user",
+        "speaker_name": name,
         "text": text,
         "ts": e.ts,
     })

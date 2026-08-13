@@ -62,8 +62,51 @@ def test_a_relation_shift_summary_uses_names_not_ids():
         projection,
     )
     assert descriptor is not None, "跨了一档却没生成记忆"
-    assert "苏晚夏" in descriptor.summary and "阿檀" in descriptor.summary
+    assert "阿檀" in descriptor.summary
     assert "8f3c" not in descriptor.summary, f"uuid 漏进了人话:{descriptor.summary!r}"
+
+
+def test_她在自己的记忆里是我_而不是她自己的名字():
+    """这条记忆的主人就是变了心的那个人(`agent_id=as_id`)。写成第三人称的话
+    她在自己的记忆里读到自己的名字,而八卦转述出来还是对的 ——「听苏晚夏说:我
+    和阿檀成了挚交」正是一个人转述另一个人的样子。和 `_on_agent_state` 同一课。
+    """
+    engine = TriggerEngine()
+    descriptor = engine.process(
+        {"seq": 7, "ts": 40, "type": "state_change", "who": "夏",
+         "payload": {"kind": "sentiment_delta", "as": "夏", "target": "檀",
+                     "delta": 0.35, "as_name": "苏晚夏", "target_name": "阿檀"}},
+        Projection(),
+    )
+    assert descriptor is not None
+    assert descriptor.summary.startswith("我")
+    assert "苏晚夏" not in descriptor.summary, f"她读到了自己的名字:{descriptor.summary!r}"
+
+
+def test_关系记忆里不许出现引擎的数字():
+    """线上读到的原文:「周叔 对 何师傅 的关系从「亲近」进入「挚交」(+0.80→+0.85)」。
+    人不会记得自己对谁的好感度从 0.80 涨到 0.85 —— 那是引擎的账,不是她的记忆,
+    而八卦会把它**原样**转述给下一个人。两条路都验:跨档那条和剧变那条。
+    """
+    engine = TriggerEngine()
+    band_cross = engine.process(
+        {"seq": 7, "ts": 40, "type": "state_change", "who": "夏",
+         "payload": {"kind": "sentiment_delta", "as": "夏", "target": "檀",
+                     "delta": 0.35, "target_name": "阿檀"}},
+        Projection(),
+    )
+    swing = engine.process(
+        {"seq": 8, "ts": 41, "type": "state_change", "who": "夏",
+         "payload": {"kind": "sentiment", "as": "夏", "target": "檀",
+                     "sentiment": -0.8, "target_name": "阿檀"}},
+        Projection(),
+    )
+    for descriptor in (band_cross, swing):
+        assert descriptor is not None
+        text = descriptor.summary
+        assert not any(ch.isdigit() for ch in text), f"引擎的数字漏进了记忆:{text!r}"
+        for junk in ("Δ", "+", "→"):
+            assert junk not in text, f"引擎的记号漏进了记忆:{text!r}"
 
 
 def test_an_old_log_without_names_still_reads_as_well_as_it_used_to():
@@ -76,7 +119,7 @@ def test_an_old_log_without_names_still_reads_as_well_as_it_used_to():
         projection,
     )
     assert descriptor is not None
-    assert "夏" in descriptor.summary and "遥" in descriptor.summary
+    assert "遥" in descriptor.summary
 
 
 def test_the_projection_supplies_the_name_when_the_event_does_not():
@@ -97,7 +140,8 @@ def test_the_projection_supplies_the_name_when_the_event_does_not():
         projection,
     )
     assert descriptor is not None
-    assert "苏晚夏" in descriptor.summary and "沈遥" in descriptor.summary
+    # id 是「遥」,投影里的名字是「沈遥」—— 后者出现才说明这一跳真的走到了
+    assert "沈遥" in descriptor.summary
 
 
 # ── ② 判定:引擎只搬运,不产生结论 ──────────────────────────────────────────
@@ -172,6 +216,42 @@ def test_a_name_outside_the_roster_is_dropped():
         a={"name": "夏"}, rumor="…", roster=_ROSTER, memories=[], location="",
     )
     assert [r.about for r in verdict.reactions] == ["阿檀"]
+
+
+def test_关系可以从一句闲话里长出来():
+    """闸问的是「这个世界里真有这么个人吗」,不是「她认不认识他」。
+
+    线上真踩:她听到一句关于林迟的闲话,而她跟林迟还没来往过 —— 于是林迟不在
+    她的 `roster` 里,整条反应被丢掉,日志上写着「林迟不在名单上」,**而林迟就在
+    这个世界里站着**。合着的时候这一层只能让已经认识的人之间的关系动,一段关系
+    永远不可能从一句闲话里长出来 —— 而"我还没见过他,但我已经听说了他的事"
+    恰恰是这个品类里最值钱的那一刻。
+    """
+    judge = RelationshipJudge(_FakeLLM(
+        _verdict("她把这个没见过的名字记住了", {"about": "林迟", "delta": -0.12})
+    ))
+    verdict = judge.judge_hearsay(
+        a={"name": "夏"}, rumor="听说林迟昨晚陪着谁到很晚",
+        roster=_ROSTER, memories=[], location="",
+        known=[*_ROSTER, "林迟"],
+    )
+    assert [r.about for r in verdict.reactions] == ["林迟"], (
+        "她还没来往过的人被当成模型编的丢掉了"
+    )
+
+
+def test_放宽的只是谁算真人_编出来的名字照旧当场丢掉():
+    """闸一个字没松 —— `known` 给全了,不在里面的仍旧翻不回任何 id。"""
+    judge = RelationshipJudge(_FakeLLM(
+        _verdict("她想起了一个不存在的人",
+                 {"about": "楚夭夭", "delta": -0.2},
+                 {"about": "林迟", "delta": -0.05})
+    ))
+    verdict = judge.judge_hearsay(
+        a={"name": "夏"}, rumor="…", roster=_ROSTER, memories=[], location="",
+        known=[*_ROSTER, "林迟"],
+    )
+    assert [r.about for r in verdict.reactions] == ["林迟"]
 
 
 def test_a_zero_delta_does_not_become_an_event():
@@ -313,6 +393,31 @@ def test_her_reaction_lands_as_a_real_relationship_change(tmp_path):
         assert "堵得慌" in reactions[0]["summary"]
 
 
+def test_判定器手里的地点也是人话_不是键名(tmp_path):
+    """名单那一头早就不许漏 id 了(上一条的 `"遥" not in roster`),地点这一头漏着。
+
+    判定器写出来的那句 `summary` **原样进她的长期记忆**,而喂给它的 `地点：{location}`
+    一直是键名。线上读到的原文:「舒白回江渡录电台选题,两人在 cart 碰面」——
+    `cart` 是键,那地方叫小念咖啡车。她从此记得自己在一个叫 cart 的地方见过人,
+    八卦还会把这句话原样转述出去。
+    """
+    from anima_world.relationship_judge import HearsayVerdict
+
+    world = _world_with_relations(tmp_path)
+    with world:
+        here = world.scheduler._where_is("夏")
+        place = (world.scheduler.location_store.get(here) or {}).get("name")
+        assert place and place != here, "演示世界的地点得有个跟 id 不一样的名字,否则这条验不出东西"
+
+        judge = _ScriptedJudge(HearsayVerdict(summary="没什么感觉", reactions=()))
+        _run_hearsay(world, "夏", "听柔说:昨晚港街很热闹", judge)
+
+        assert judge.calls, "判定压根没被调用"
+        assert judge.calls[0]["location"] == place, (
+            f"判定器拿到的是键名:{judge.calls[0]['location']!r}"
+        )
+
+
 def test_not_caring_changes_nothing_at_all(tmp_path):
     from anima_world.relationship_judge import HearsayVerdict
 
@@ -408,6 +513,54 @@ def test_a_closing_judge_pool_does_not_abort_the_event_fold(tmp_path):
         assert any(m["kind"] == "relation_shift" for m in world.memories("夏")), (
             "记忆那一半也被同一个异常带掉了"
         )
+
+
+def test_两份名单分得开_认识的进好感度_在场的只进翻译表(tmp_path):
+    """`weights` 是给模型看的(名字配好感度),`ids` 是闸(这儿真有这么个人)。
+
+    合成一份的话,她只可能对已经认识的人吃醋。分开之后:没来往过的人不进
+    `weights`(她说不出好感度,编一个出来是引擎替她做主),但进 `ids` ——
+    别人说起他不是编的。
+    """
+    world = _world_with_relations(tmp_path)
+    with world:
+        yao = world.scheduler.agents["遥"].agent.name
+        rou = world.scheduler.agents["柔"].agent.name
+        for key in [k for k in world.scheduler._memory_projection.relations if k == ("夏", "遥")]:
+            del world.scheduler._memory_projection.relations[key]
+
+        weights, ids = world.scheduler._hearsay_roster("夏")
+        assert yao not in weights, "还没来往过的人不该带着一个编出来的好感度进提示词"
+        assert ids.get(yao) == "遥", "他就在这个世界里站着,别人说起他不是编的"
+        assert weights.get(rou) is not None and ids.get(rou) == "柔", "认识的那一半没了"
+        assert "夏" not in ids.values(), "她自己不该在名单上"
+
+
+def test_她对一个还没见过的人动了心思_而世界真的记下了(tmp_path):
+    """端到端:反应落成真的 `sentiment_delta`,一段关系从此存在。"""
+    from anima_world.relationship_judge import HearsayReaction, HearsayVerdict
+
+    world = _world_with_relations(tmp_path)
+    with world:
+        yao = world.scheduler.agents["遥"].agent.name
+        for key in [k for k in world.scheduler._memory_projection.relations if k == ("夏", "遥")]:
+            del world.scheduler._memory_projection.relations[key]
+        assert ("夏", "遥") not in world.scheduler._memory_projection.relations
+
+        judge = _ScriptedJudge(HearsayVerdict(
+            summary="夏没见过这个人,却先记住了这个名字",
+            reactions=(HearsayReaction(about=yao, delta=-0.12),),
+        ))
+        _run_hearsay(world, "夏", f"听柔说:{yao}昨晚陪着谁到很晚", judge)
+        world.tick(1)
+
+        assert judge.calls, "判定压根没被提交"
+        assert yao in (judge.calls[0].get("known") or ()), (
+            f"闸那一半没把他算成真人:{judge.calls[0].get('known')}"
+        )
+        after = world.scheduler._memory_projection.relations.get(("夏", "遥"))
+        assert after is not None, "一段关系没能从一句闲话里长出来"
+        assert after.sentiment == pytest.approx(-0.12)
 
 
 def test_a_stranger_hears_nothing_worth_reacting_to(tmp_path):

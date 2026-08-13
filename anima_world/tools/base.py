@@ -117,15 +117,54 @@ class ToolRuntime(Protocol):
     def entity_names(self) -> dict[str, str]: ...
 
     def interact_with(
-        self, agent_id: str, target: str, verb: str,
+        self, actor_id: str, target: str, verb: str,
         participants: list[str] | None = None, player_id: str = "",
     ) -> dict[str, Any]: ...
+    """施动者是**角色 id 或 `player:<id>`** —— 见 `ToolContext.world_actor_id`。
+
+    `player_id` 是另一回事:它说的是"这一轮跟她说话的人是谁"(用来查静音、
+    姿态、以及"跟我一起"里那个「我」),一次角色调用照样有它。"""
 
     def close_conversation(self, agent_id: str, player_id: str) -> bool: ...
 
 
 AGENT_ACTOR = "agent"
 PLAYER_ACTOR = "player"
+
+
+def resolve_location(ctx: "ToolContext", where: str) -> str:
+    """把她写的地名换成世界认得的 id。**收人话**,拒绝时说得出有哪些。
+
+    她读到的世界里写着「江堤」,而 `move_agent` / `point_ids()` 只认 `levee` ——
+    这一轮反复撞见的那条缝(用一种写法印给她,却按另一种写法验她的回答),在走路
+    这件事上有两个落点:`walk` 的 `location` 和 `walk_away` 的 `to_location`。
+    两处都只认 id,于是她按世界里读到的名字写下来,第一次调用必然失败。
+
+    合成一个函数是因为**拒绝的那句话必须一模一样**:同一个玩家在同一个聊天窗里
+    问路,不该因为她挑了哪个动词而读到两种写法。`walk_away` 那半此前连清单都不给,
+    只有一句光秃秃的「没有 江堤 这个地方」—— 那等于告诉她"再猜一次"。
+
+    ⚠️ **清单说人话,不印 id。** 合成一个函数的时候这里写的是 `places_menu(points)`
+    (默认带 id),于是玩家点一次"走去哈尔滨",收到的是二十个拉丁字母 id 铺在一个中文
+    世界里 —— 而那正是上一版刚给 `places_menu` 加 `with_ids` 要分开的两个读者。
+    合并两个调用点时把读者也合并了:模型那份此前需要 id 是因为 `walk` 只收
+    `point_ids()`,而这个函数存在的**全部理由**就是它现在收人话了。重名的那几个
+    照旧带 id(`小院、小院;说准一点` 是一句没法照着做的回执)。
+    """
+    from anima_world.intent import places_menu, resolve_place
+
+    points = ctx.runtime.point_names()
+    resolved, candidates = resolve_place(where, points)
+    if resolved is not None:
+        return resolved
+    if candidates:
+        # 对得上好几个就**别猜**:猜错了她真的会走过去,而世界里一行日志都不报错。
+        readable = places_menu(
+            {pid: points.get(pid) or pid for pid in candidates}, with_ids=True
+        )
+        raise ToolCallError(f"{where} 对得上好几个地方:{readable};说准一点")
+    raise ToolCallError(
+        f"没有 {where} 这个地方;有的是 {places_menu(points, with_ids=False)}")
 
 
 @dataclass
@@ -154,8 +193,19 @@ class ToolContext:
 
     @property
     def actor_id(self) -> str:
-        """施动者的 id。事件的 `who` 用它 —— 玩家的动作不该记在角色名下。"""
+        """施动者的 id,**裸的**。宿主署名用它 —— 玩家的动作不该记在角色名下。"""
         return self.player_id if self.is_player else self.agent_id
+
+    @property
+    def world_actor_id(self) -> str:
+        """施动者在**世界那一侧**的 id —— 玩家带 `player:` 前缀。
+
+        和上面那个不是同一件事,而且两个都对。世界里"人"分好几种(角色、玩家、
+        货架、金库),所以库存的 holder、量的 owner、事件的 `who` 一律带前缀;
+        宿主那一侧只有玩家,前缀是噪音。传错的样子是安静的:一个叫 `p1` 的
+        施动者在世界看来根本不存在,于是他的体力扣在一个空账户上。
+        """
+        return f"player:{self.player_id}" if self.is_player else self.agent_id
 
 
 ToolHandler = Callable[[ToolContext, dict[str, Any]], ToolResult]
@@ -208,6 +258,19 @@ class ToolSpec:
     params_schema: dict[str, Any]
     handler: ToolHandler
     surfaces: tuple[str, ...] = (CHAT,)
+    player_description: str = ""
+    """**同一份声明有两个读者。** 这一格是写给人的那一半,空着就回落 `description`。
+
+    存在的理由是一次真人试玩:宿主问引擎"玩家能做什么",拿回来的 `interact` 说明
+    写着「东西的 id 和它能被怎么做,都写在你感觉到的那几行里」—— 而那是**她的提示词
+    里的一个块**,玩家那一侧根本没有那个东西;`target` 的例子是 `tree:harbor_oak`,
+    橱窗世界的 id,换个世界就是一句错的话。于是宿主只剩一条路:画一个文本框,
+    让人自己猜一个 id 和一个动词打进去。
+
+    ⚠️ 这一格**只管文案**。"这儿有什么、能被怎么做、这会儿点不点得动"是数据,
+    走 `World.player_options()` —— 把它写进说明里等于把某一个世界的样子刻进引擎,
+    而刻错了不报错。
+    """
     requires_colocation: bool = False
     """**这个能力要玩家真的在她跟前。**
 
@@ -229,6 +292,17 @@ class ToolSpec:
     `presence.enforce_colocation` 上、默认关,关着时行为与今天**逐位相同**。
     迁移说明在 REFERENCE §2.9.7。
     """
+    requires_target_entity: bool = False
+    """**这个能力要她这儿真有一样能被做点什么的东西。**
+
+    和上面那条是同一件事的另一半:一个是"跟前得有人",一个是"手边得有东西"。
+    两条都只回答**这一刻它有没有可能成**,而那正是"要不要把它摆上菜单"的判据。
+
+    存在的理由是线上量出来的:一轮真世界的自主决定,63 次问、0 次动作、5 次失败,
+    五次全是同一句 —— 提示词刚说完「这会儿你身边没有别人」,菜单还照样摆着
+    `reach_out`。给了菜单却必然执行不了,是这个仓库骂过的那个形状(#15 的原话:
+    给了能力却不给许可;这是它的镜像 —— 给了必然被拒的许可)。
+    """
     writes: tuple[str, ...] = ()
     """**它把世界改在哪儿。** 每一项是一张表名,或 `events:<类型>`。
 
@@ -242,6 +316,22 @@ class ToolSpec:
     从一句人得自己记住的话,变成一条会红的测试。
 
     留空是**故意的空**,不是忘了填 —— 有测试盯着不许留空。
+    """
+    writes_late: tuple[str, ...] = ()
+    """`writes` 里**不在这次调用栈上落地**的那几项(必须是 `writes` 的子集)。
+
+    "改在哪儿"不够,还得说"**什么时候**"。`talk_to` 是这条的由来:它当场发
+    `agent_action`,而记忆是关系判定的产物,判定按硬不变量"**LLM 永不在 tick 线程
+    调用**"跑在判定线程池上 —— `act()` 返回时那两处**还没变**(实测 40 次里有 10 次
+    如此)。只写 `writes` 的话,这份声明读起来是"调用返回时这些地方都已经变了",
+    而那是一句会在四分之一的时候变成假话的话。
+
+    对外面的进程,这一格就是"**别在这一瞬间去查**":照着 `writes` 读完立刻查库的
+    宿主,会随机地看见一个"她说了话但谁也没记住"的世界,而且不报错 —— 正是这个
+    字段当初要堵的那类。
+
+    ⚠️ **它不是"可以不兑现"的许可证。** 声明成 late 的落点照样必须落,只是晚一点;
+    `tests/test_verb_writes.py` 对它照等不误,等不到一样红。
     """
 
     def prompt_line(self) -> str:
@@ -260,9 +350,12 @@ _REGISTRY: dict[str, ToolSpec] = {}
 def tool(
     *, id: str, kind: str, description: str,  # noqa: A002 - id 是这份契约里的字段名
     params: dict[str, Any] | None = None,
+    player_description: str = "",
     surfaces: tuple[str, ...] = (CHAT,),
     writes: tuple[str, ...] = (),
+    writes_late: tuple[str, ...] = (),
     requires_colocation: bool = False,
+    requires_target_entity: bool = False,
 ) -> Callable[[ToolHandler], ToolHandler]:
     """把一个函数登记成能力。重复登记同一个 id 是错,不是覆盖。"""
 
@@ -272,10 +365,28 @@ def tool(
         unknown = [surface for surface in surfaces if surface not in SURFACES]
         if unknown:
             raise ToolCallError(f"tool {id!r} 声明了不存在的面:{unknown}")
+        # `writes_late` 说的是 `writes` 里某几项**什么时候**落地,不是另一份落点表。
+        # 不是子集的话,那一项就只在"什么时候"里出现过、从没在"改哪儿"里出现过 ——
+        # 一个照着 `writes` 办事的宿主永远看不见它。
+        stray = [place for place in writes_late if place not in writes]
+        if stray:
+            raise ToolCallError(
+                f"tool {id!r} 的 writes_late 有 {stray} 不在 writes 里 —— "
+                "它说的是 writes 里哪几项是稍后落的,不是第二份落点表"
+            )
+        if player_description and PLAYER not in surfaces:
+            # 写给一个不在这个面上的读者。留着不报的话,那句话永远没人读到,
+            # 而作者会以为自己已经把玩家那一侧说清楚了。
+            raise ToolCallError(
+                f"tool {id!r} 写了 player_description 却不在 PLAYER 面上"
+            )
         _REGISTRY[id] = ToolSpec(
             id=id, kind=kind, description=description, writes=tuple(writes),
+            player_description=player_description,
+            writes_late=tuple(writes_late),
             params_schema=dict(params or {}), handler=handler,
             surfaces=tuple(surfaces), requires_colocation=bool(requires_colocation),
+            requires_target_entity=bool(requires_target_entity),
         )
         return handler
 
@@ -314,6 +425,7 @@ def capability_payloads() -> list[dict[str, Any]]:
             # 要玩家走到她跟前才点得动"是界面上必须先知道的事 —— 点下去才发现
             # 的话,那是一次没有任何人预告过的失败。
             "requires_colocation": spec.requires_colocation,
+            "requires_target_entity": spec.requires_target_entity,
         }
         for spec in tools_for("*")
     ]

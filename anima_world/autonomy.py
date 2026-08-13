@@ -49,6 +49,12 @@ DEFAULT_DECIDE_PROMPT = (
     "什么时候值得主动:**身边有你在意(或在意不起来)的人,而你还没跟他开口**;"
     "有件事你想让这一带的人都知道;有人反复越界让你不想再理他;"
     "或者你就是想找个人说句话。\n"
+    # 第二版补的那一句(2026-08-11,线上量出来的):第一版四条由头**全是社交的**,
+    # 于是即便菜单上摆着世界的动词,她也只在"有人"的那一栏里找理由。而真世界里
+    # 那 63 次问,大多数时候她跟前一个人都没有。
+    "**人不是只跟人打交道。** 上面那几行里,带着方括号 id 又写着「可以……」的东西,"
+    "都是你这会儿真能上手做的 —— 该浇的、该收的、该添的,看见了就做,"
+    "那和找个人说句话一样正常。\n"
     "要做就只输出一行,别的什么都不要写:\n"
     "〔tool:能力名 {{\"参数\": 值}}〕\n"
     "可用的能力:\n"
@@ -74,6 +80,13 @@ class AutonomyContext:
     activity: str = "闲着"
     present: list[dict[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)
+    """她这儿**能被做点什么**的东西(声明过动词的那些实体的 id)。
+
+    只看不能碰的东西不算 —— 它们进不了 `interact` 的参数,和不存在没有区别。
+    这一格与 `present` 是同一件事的两半:菜单摆哪几样,由"跟前有谁"和"手边有什么"
+    一起决定。
+    """
 
     def present_block(self) -> str:
         if not self.present:
@@ -122,7 +135,9 @@ def parse_decision(text: str, allowed: Sequence[str]) -> dict[str, Any]:
     raw = (text or "").strip()
     if not raw:
         return decide_nothing("她没回话(空回复),这轮什么也不做")
-    _, directives = strip_directives(raw)
+    # 认得的裸名字就是这一轮**允许**的那几个:她漏写 `tool:` 时(线上真会)
+    # 照样读得懂,而读错一个不在这个面上的名字仍然会被下面那道闸挡回去。
+    _, directives = strip_directives(raw, allowed)
     calls = [directive for directive in directives if directive.kind == "tool"]
     if not calls:
         return decide_nothing("她选择什么都不做")

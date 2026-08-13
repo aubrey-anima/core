@@ -76,6 +76,43 @@ def test_a_duplicate_id_is_a_warning(tmp_path):
     assert any("不止一次" in w for w in payload["warnings"])
 
 
+def test_a_stock_row_the_loader_would_drop_is_an_error_not_a_warning(tmp_path):
+    """引用完整性只提醒,**形状读不懂是硬错误** —— 这两类要分得开。
+
+    提醒说的是"你八成写错了",而引擎没有合法值全集,所以拒绝它会让设计正确的世界
+    在小版本升级后开不了机。这一条说的是"你写的这行没有人读":装载器只认
+    `{"owner","values"}`,逐条的 `{"owner","key","value"}` 整条丢掉 —— 在任何引擎
+    版本上都一样,而作者到发现那个量三个月没动过才知道。灯塔湾丢了 11 行。
+    """
+    seed = json.loads(json.dumps(_GOOD_SEED))
+    seed["stocks"] = [{"owner": "agent:夏", "key": "initiative", "value": 1.5}]
+    result = _validate("world", _write(tmp_path / "s.cyberworld", seed), "--json")
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["valid"] is False
+    # 报的是**该怎么写**,不是一句"不合法" —— 作者看不出自己这行错在哪儿。
+    assert any("values" in e for e in payload["errors"]), payload["errors"]
+
+
+def test_a_stock_value_that_is_not_a_number_is_refused_too(tmp_path):
+    """和装载器同一个判据(`float(raw)`)。两处各写一份,迟早表现成"预检说没问题,
+    开机还是失败"。"""
+    seed = json.loads(json.dumps(_GOOD_SEED))
+    seed["stocks"] = [{"owner": "agent:夏", "values": {"initiative": "很高"}}]
+    result = _validate("world", _write(tmp_path / "s.cyberworld", seed), "--json")
+    assert result.returncode == 2
+    assert any("不是一个数" in e for e in json.loads(result.stdout)["errors"])
+
+
+def test_a_well_formed_stocks_section_still_passes(tmp_path):
+    seed = json.loads(json.dumps(_GOOD_SEED))
+    seed["stocks"] = [{"owner": "agent:夏", "values": {"initiative": 1.5}}]
+    result = _validate("world", _write(tmp_path / "s.cyberworld", seed), "--json")
+    assert result.returncode == 0, result.stdout
+    assert json.loads(result.stdout)["errors"] == []
+
+
 def test_a_broken_beat_script_is_refused_with_every_error_at_once(tmp_path):
     """加载期严格 —— 而且一次列全,不是修一个报一个。"""
     bad = {"beats": [{"id": "a", "trigger": {"at": {"day": 0}},

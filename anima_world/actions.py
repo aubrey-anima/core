@@ -68,14 +68,18 @@ def to_event(
         ]
 
     if kind == "work":
+        # **只说她在干什么,不说她在哪。** "她在哪"的权威是 `location_join`
+        # 折出来的 `agent.location`,而这里曾经顺手在 `state` 里再写一份 ——
+        # 于是 `World.state()` 对同一个问题给出两个答案,一个跟着她走、一个停在
+        # 她上一次干活的地方。`sleep` 不写它,`walk` 也不清它,所以那份拷贝只增不减:
+        # 线上 21 个人里 13 个的 `state.location` 和她真实的位置对不上。
+        # 更糟的是这个位置本来就可能是假的 —— 行为树的 `do_work` 把它写死成
+        # `workshop`,而她可能正在码头。
         return [
             {
                 "type": "state_change",
                 "who": agent_id,
-                "payload": {
-                    "kind": "agent_state",
-                    "state": {"status": "working", "location": p.get("location")},
-                },
+                "payload": {"kind": "agent_state", "state": {"status": "working"}},
             }
         ]
 

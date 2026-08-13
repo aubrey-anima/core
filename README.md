@@ -335,6 +335,7 @@ anima-world chat           # 说一轮话就退(时钟不走);不带 --agent 列
 anima-world prompt         # 她收到的提示词,逐块带来源
 anima-world map            # 地图、谁在哪、谁去了哪儿(--json)
 anima-world ontology       # 有哪些种类的东西、量与动词(--json / --check)
+anima-world roster         # 这个世界里有谁:名字、一句话、立绘、主次、此刻在哪(--json)
 anima-world doctor         # 体检:Redis 持久化、密钥、真调一次 LLM、时钟
 anima-world config         # 读写配置;api key 自动进机器配置,不进世界
 
@@ -346,7 +347,9 @@ anima-world validate       # 不建世界就查一份 .cyberworld 或一份节�
 anima-world contract       # 引擎自报存储契约与包格式版本 —— 持镜像的仓库拿它对账
 anima-world report         # 只读地出一份运行摘要,不跑世界
 anima-world events         # 事件流导出成 JSONL
-anima-world contact        # 谁想起过玩家、由头是什么(--why 连没触发的一起解释)
+anima-world contact        # 谁想起过玩家、由头是什么(--why 连没触发的;--inbox 看敲门)
+anima-world relationship   # 一段关系此刻的人话:当什么、哪一档、上一次是什么改变了它
+anima-world player         # 玩家那一侧:options 看他点得动什么;forget 跟走掉的人告别
 anima-world presence       # 谁在谁跟前(开同处一地那道闸之前的体检)
 anima-world memory / agent # 老世界的数据修补(记忆 tick、被拆碎的 goals)
 ```

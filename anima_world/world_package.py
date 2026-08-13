@@ -317,6 +317,16 @@ def _select_all_rows(conn: Any, table: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _is_presence_key(short: str) -> bool:
+    """这个去前缀键装的是不是"谁这会儿在场"。**导出与导入都跳过它。**
+
+    理由见 `dump_world_records` 的 docstring:带 TTL 的东西进不了 JSON,而在场
+    是会话态、不是世界的内容。导入侧也要拦 —— 老包里没有这些键,但手改过的包有,
+    而"装回一份永不过期的在场"这个坏法从哪个入口进来都一样坏。
+    """
+    return short == "players" or short.startswith("player:")
+
+
 def _is_growing_key(short: str) -> bool:
     """这个去前缀键装的是不是"随时间无限增长的四样"之一(含其计数器/索引)。"""
     return short in {
@@ -330,6 +340,8 @@ def _is_growing_key(short: str) -> bool:
 def _restore_redis_entries(redis: Any, world_id: str, entries: dict[str, dict[str, Any]]) -> None:
     prefix = _world_prefix(world_id)
     for short in sorted(entries):
+        if _is_presence_key(short):
+            continue
         entry = entries[short]
         key = prefix + short
         ktype, value = entry["type"], entry["value"]
@@ -495,8 +507,13 @@ def dump_world_records(
 
     - `lock` **不带走**:跨进程互斥的临时钥匙(带 TTL)。JSON 存不了 TTL,原样装回去
       就是一把没有过期时间的死锁,新世界第一次 `act()` 就撞上它。
-    - `meta` 里的 `owner_pid` / `owner_host` **剥掉**:装进新世界等于让一个还没人跑过
-      的世界自称"有人在跑"。
+    - `players` / `player:*` **不带走**:同一条理由再加一条。在场是带 TTL 的
+      (`RedisPlayerPresence`),JSON 存不了 TTL,装回去就是一份**永不过期的假在场** ——
+      新世界一开机就有一屋子谁也找不到的幽灵访客。而且包是**分发物**:把一个世界
+      发给别人,不该带着别人的玩家此刻站在哪儿。它落 Redis 是为了扛重启,不是为了
+      被打包发出去。
+    - `meta` 里的 `owner_pid` / `owner_host` / `owner_token` **剥掉**:装进新世界等于让一个
+      还没人跑过的世界自称"有人在跑"。
     - `config` 里 `is_secret` 的行 **剥掉**:包是**分发物**,带着作者的钥匙发出去
       是不可挽回的。
     """
@@ -504,7 +521,7 @@ def dump_world_records(
     growing: dict[str, dict[str, Any]] = {}
     for key in sorted(_scan_world_keys(redis, world_id)):
         short = key[len(prefix):]
-        if short == "lock":
+        if short == "lock" or _is_presence_key(short):
             continue
         ktype = _text(redis.type(key))
         value: Any
@@ -513,7 +530,7 @@ def dump_world_records(
             if short == "config":
                 value = _strip_secret_config_rows(value)
             elif short == "meta":
-                for transient in ("owner_pid", "owner_host"):
+                for transient in ("owner_pid", "owner_host", "owner_token"):
                     value.pop(transient, None)
         elif ktype == "list":
             value = [_text(v) for v in (redis.lrange(key, 0, -1) or [])]

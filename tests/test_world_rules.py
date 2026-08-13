@@ -540,3 +540,46 @@ def test_预检和播种必须看同一批物品来源(tmp_path):
         )
     finally:
         scheduler.stop()
+
+
+def test_一天多少tick是这个世界自己的配置_不是写死的288():
+    """`every: {"days": 1}` 折成多少 tick,取决于 `world.minutes_per_tick`。
+
+    写死 288 的下场是这个模块开头那句话说的事:一个把 `minutes_per_tick` 调成 10
+    的世界(一天 144 tick)里,它一天跑**两遍** —— 而作者按"一天一次"写的常数
+    因此翻倍。世界照跑、日志干净,只有数是错的。
+    """
+    from anima_world.rules import parse_rules
+
+    entry = [{"id": "r", "every": {"days": 1}, "for_each": {"owner": "world"},
+              "set": {"雨天数": "雨天数 + 1"}}]
+    assert parse_rules(entry)[0].interval_ticks == 288, "没人说话时仍是 5 分钟一 tick"
+    assert parse_rules(entry, ticks_per_day=144)[0].interval_ticks == 144, (
+        "一天 144 tick 的世界里,「每天一次」被折成了别人世界的 288"
+    )
+
+
+def test_装载时喂进去的是这个世界真正的那份换算(tmp_path):
+    """闸在真路径上 —— `parse_rules` 收得下参数不等于开机时有人喂它。"""
+    import fakeredis
+
+    from anima_world.__main__ import build_serve_scheduler
+    from _worldfile import write_seed_file
+
+    seed = write_seed_file(tmp_path / "slow.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "config": {"world.minutes_per_tick": 10},
+        "rules": [{"id": "r", "every": {"days": 1}, "for_each": {"owner": "world"},
+                   "set": {"雨天数": "雨天数 + dt"}}],
+    })
+    scheduler = build_serve_scheduler(
+        "slow", fakeredis.FakeStrictRedis(decode_responses=True),
+        world_file=seed, force_mock_llm=True)
+    try:
+        live = {r.id: r for r in scheduler.world_rules}["r"]
+        assert live.interval_ticks == 144, (
+            f"这个世界一天 144 tick,而它的「每天一次」是 {live.interval_ticks}"
+        )
+    finally:
+        scheduler.stop()

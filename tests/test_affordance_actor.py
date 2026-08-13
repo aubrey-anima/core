@@ -130,7 +130,31 @@ def test_做不了和这会儿不行是两个理由():
 
     tired = apply_affordance(tend, values={"树高": 1.0, "最大树高": 12.0},
                              me_values={"体力": 5.0, "手艺": 1.0})
-    assert tired.reason == "incapable" and "me_体力 >= 20" in tired.refusal
+    # 阈值要留着(她得知道还差什么),但 `me_` 是引擎的命名空间标记、不是这个世界里
+    # 的名字 —— 作者声明的那个量就叫「体力」。这句话印给玩家看,也当工具回执递给她。
+    assert tired.reason == "incapable"
+    assert "你的体力 >= 20" in tired.refusal and "me_" not in tired.refusal
+
+
+def test_日历名字在拒绝语里也要说人话():
+    """线上现场:「这会儿不行:「hour >= 23 or hour < 2」不成立」。
+
+    和 `me_` / `have_` / 地名是同一类 —— 引擎的词汇漏进了印给玩家看的那句话。
+    日历名比另外几个更容易被漏掉,因为它们不带前缀,看上去就像作者自己写的量;
+    而作者恰恰**不可能**声明一个叫 `hour` 的量(`parse_kinds` 当场拒),所以这
+    六个名字永远是引擎的。
+    """
+    kinds = parse_kinds([ACTOR, {
+        "id": "灶", "quantities": {"火候": 1.0},
+        "affordances": {"生火": {"when": ["hour >= 23 or hour < 2"],
+                                 "set": {"火候": "火候 + 1"}}},
+    }])
+    out = apply_affordance(kinds["灶"].affordances["生火"], values={"火候": 1.0},
+                           now=12 * 12, minutes_per_tick=5)      # 正午
+    assert out.reason == "conditions"
+    assert "hour" not in out.refusal, f"引擎的日历名漏出来了:{out.refusal!r}"
+    assert "钟点 >= 23" in out.refusal and "钟点 < 2" in out.refusal, (
+        f"阈值要留着 —— 她得知道还差什么:{out.refusal!r}")
 
 
 def test_两条都不成立时先说做不了():
@@ -260,7 +284,8 @@ def test_照料一次_树长了她也累了(tmp_path, open_world):
     result = world.scheduler.perform_affordance("甲", "tree:a", "tend")
     assert result["ok"], result
     assert result["changed"] == {"树高": 1.3}
-    assert result["cost"] == {"体力": 80.0}
+    assert result["me_changed"] == {"体力": 80.0}
+    assert result["me_delta"] == {"体力": -20.0}
     assert world.stocks("agent:甲")["体力"] == 80.0
     assert world.stocks("tree:a")["树高"] == 1.3
 
@@ -286,11 +311,17 @@ def test_做不成时两边一个字都不写(tmp_path, open_world):
 
 
 def test_代价也进事件(tmp_path, open_world):
-    """账上只有"树高了"没有"她累了"的话,历史里就找不出她为什么第二天没干活。"""
+    """账上只有"树高了"没有"她累了"的话,历史里就找不出她为什么第二天没干活。
+
+    两栏要一起验:`me_changed` 是她现在剩多少,`me_delta` 是这一次花了多少。
+    只验前一栏的话,一个把"剩下多少"当成"花了多少"来读的宿主永远不会被逮到 ——
+    这条测试从前就只验了它,而那个字段那时还叫 `cost`。
+    """
     world = _world(tmp_path, open_world)
     world.scheduler.perform_affordance("甲", "tree:a", "tend")
     rows = [e for e in world.events() if e["type"] == "entity_interaction"]
-    assert rows and rows[-1]["payload"]["cost"] == {"体力": 80.0}
+    assert rows and rows[-1]["payload"]["me_changed"] == {"体力": 80.0}
+    assert rows[-1]["payload"]["me_delta"] == {"体力": -20.0}
 
 
 def test_她自己的量进得了她的感知(tmp_path, open_world):
@@ -434,7 +465,8 @@ def test_consumes_自带一道你得有的门():
     assert apply_affordance(axe, values={"树高": 4.0}, held={"油": 2}).ok
     thin = apply_affordance(axe, values={"树高": 4.0}, held={"油": 1})
     assert not thin.ok and thin.reason == "incapable"
-    assert thin.refusal == "你手上的 油 不够:要 2 个,你有 1 个"
+    # 名字划出边界:这一句是散文,右边紧跟着一个「不」字,而中文不分词。
+    assert thin.refusal == "你手上的「油」不够:要 2 个,你有 1 个"
 
 
 def test_做成了才说要花掉什么():
@@ -607,3 +639,46 @@ def test_种子里拼错东西的名字开不了机(tmp_path, open_world):
         _tool = open_world(seed_path=str(path))
         _tool.close()
     assert "油" in str(excinfo.value)
+
+
+def _two_trees(tmp_path, open_world):
+    """两棵树站在同一个地方 —— `tree` 这一截于是是**歧义的**,而 `a`/`b` 不是。"""
+    seed = {
+        "locations": [{"id": "cafe", "name": "咖啡店", "description": "拐角那家"}],
+        "agents": [{"id": "甲", "name": "甲", "location": "cafe", "personality": "安静"}],
+        "kinds": [ACTOR, TREE],
+        "entities": [
+            {"id": "tree:a", "name": "门口那棵", "location": "cafe"},
+            {"id": "tree:b", "name": "墙根那棵", "location": "cafe"},
+        ],
+    }
+    path = tmp_path / "twotrees.json"
+    path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
+    return open_world(seed_path=str(path))
+
+
+def test_她把复合_id_劈成一半时_认得出是哪一样(tmp_path, open_world):
+    """感知那一行印的是 `黑子[cat:hei]`,线上她写回来的是 `hei`;另一行印的是
+    `剃头铺墙上那口[clockwall:barber]`,她写回来的是 `clockwall` —— 同一种复合 id
+    被从冒号处劈开,取哪一半还没准。两次都换来一句"这儿没有它",一轮自主白费。
+    """
+    world = _two_trees(tmp_path, open_world)
+    for said in ("a", "门口那棵", "tree:a"):
+        result = world.scheduler.perform_affordance("甲", said, "look")
+        assert result["ok"], f"{said!r} 只有一样对得上,她说的就是它:{result}"
+        assert result["target"] == "tree:a", result
+    world.close()
+
+
+def test_对得上不止一个时照旧拒绝(tmp_path, open_world):
+    """**这不是把闸放松了。** 候选集就是她够得着的那几样,而 `tree` 这一截
+    两棵都对得上 —— 猜哪一棵都是替她编。拒绝那句话里本来就列着正确的 id。
+    """
+    world = _two_trees(tmp_path, open_world)
+    result = world.scheduler.perform_affordance("甲", "tree", "look")
+    assert not result["ok"] and result["reason"] == "unknown_entity", result
+    assert "tree:a" in result["refusal"] and "tree:b" in result["refusal"], result
+
+    far = world.scheduler.perform_affordance("甲", "月球", "look")
+    assert not far["ok"] and far["reason"] == "unknown_entity", far
+    world.close()

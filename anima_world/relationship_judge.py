@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -139,7 +140,8 @@ _DEFAULT_INVITE_PROMPT = (
     "有人叫{a_name}一起做一件事。\n\n"
     "【{a_name}】{a_personality}\n"
     "{a_name}最近记得的事：{memories}\n"
-    "{a_name}眼下对{inviter}的观感：{a_to_b}（范围 0 到 1，0 是形同陌路）\n"
+    "{recent_talk}"
+    "{a_name}眼下对{inviter}的观感：{a_to_b}（范围 0 到 1）\n"
     "地点：{location}\n\n"
     "邀请是：「{invitation}」\n\n"
     "按{a_name}这个人的性格判断，他这会儿去不去。\n"
@@ -241,6 +243,44 @@ def _extract_json_obj(text: str) -> Any:
 
 def _clamp(value: Any) -> float:
     return max(-MAX_DELTA, min(MAX_DELTA, float(value)))
+
+
+def _closeness_phrase(value: float) -> str:
+    """观感那一格该怎么念。**0 是「还没有来往」,不是「形同陌路」。**
+
+    这条区分是线上撞出来的:玩家跟 Dr. Finch 刚聊完两轮,她自己提议一起做套模拟题;
+    玩家点了按钮,判定器读到「观感 0.00(0 是形同陌路)」,写下「素不相识,没必要
+    配合一个陌生人的即兴邀请」,把**她自己提的那件事**推掉了。转录就在同一份提示词
+    里,模型是在两句话之间挑了更斩钉截铁的那句。
+
+    根子不在模型:**没有关系行和关系值为零是两件事**,而 `together.closeness(None)`
+    把前者折成了后者(它必须这么折 —— 陌生不取负)。折完那个 0 再被念成一句
+    「形同陌路」,一句本来只是"还没结算"的空白就长成了敌意。这一格和
+    `World.relationship_summary` 的 `exists` 是同一条纪律的两个落点。
+    """
+    if value <= 0.0:
+        return "0.00 —— 他们还没有来往（这不是嫌隙，是还没处出交情）"
+    return f"{value:.2f}"
+
+
+# 一条转录行最多带进提示词多少字。转录本身没有上限(一条消息可以有几千字),
+# 而提示词有 —— 不夹的话,一次长发言就能把这一块撑到盖过性格与记忆。
+_TALK_LINE_CHARS = 80
+
+
+def _talk_block(a_name: str, inviter: str, lines: Sequence[str]) -> str:
+    """把「他俩这会儿正说着的话」渲染成自洽的一块:没有就是空串。
+
+    收的是已经渲染好的 `名字：内容` 字符串,不是消息 dict —— 这一层不认识聊天
+    存储长什么样。空的时候返回空串而不是「(无)」:模板里这一块整个消失,老世界
+    自己覆盖过的模板没有这个占位符也照样渲染。
+    """
+    kept = [str(line).strip().replace("\n", " ") for line in lines]
+    kept = [line[:_TALK_LINE_CHARS] for line in kept if line]
+    if not kept:
+        return ""
+    body = "\n".join(f"  {line}" for line in kept)
+    return f"{a_name}和{inviter}这会儿正说着话：\n{body}\n"
 
 
 def _clamp_axes(value: Any) -> dict[str, float]:
@@ -523,13 +563,23 @@ class RelationshipJudge:
         roster: dict[str, float],
         memories: list[str],
         location: str,
+        known: Iterable[str] | None = None,
     ) -> HearsayVerdict | None:
         """她听到一句闲话之后的反应(吃醋那一条)。
 
-        `roster` 是**她认识的人 → 她此刻对他的好感度**,按名字。它同时是给模型的
-        输入和一道闸:回包里名单外的人一律丢掉。让模型自由指认第三方的话,它编出
-        的名字会翻不回任何 id,而"翻不回去就静默丢弃"和"根本没判定"在产物上一模
-        一样 —— 于是这一层坏掉的样子,和它没接上长得完全相同。
+        `roster` 是**她认识的人 → 她此刻对他的好感度**,按名字 —— 这是给模型看的
+        那一半。`known` 是**这个世界里真有这么个人**的全集(不给就退回 `roster`),
+        这是闸的那一半。让模型自由指认第三方的话,它编出的名字会翻不回任何 id,
+        而"翻不回去就静默丢弃"和"根本没判定"在产物上一模一样 —— 于是这一层坏掉
+        的样子,和它没接上长得完全相同。
+
+        ⚠️ **两半必须分开,合成一个的话关系永远生不出来。** 线上真踩:她听到一句
+        关于林迟的闲话,而她跟林迟还没来往过 —— 于是林迟不在她的 `roster` 里,
+        整条反应被丢掉,日志上写的是「林迟不在名单上」,**而林迟就在这个世界里
+        站着**(id `chi`)。合着的时候这一层只能让**已经认识的人**之间的关系动,
+        一段关系永远不可能**从一句闲话里长出来** —— 而"我还没见过他,但我已经
+        听说了他的事"恰恰是这个品类里最值钱的那一刻。
+        闸一个字没松:编出来的名字照旧翻不回 id,照旧当场丢掉。
 
         `None` 表示这次判定没产出可用的东西(模型挂了、回包读不懂);和空的
         `reactions`(她听了不在乎)**是两件事**,调用方要分得开:前者要吭声,
@@ -566,14 +616,16 @@ class RelationshipJudge:
         if not isinstance(summary, str) or not summary.strip():
             return None
 
+        real = set(known) if known is not None else set(roster)
         reactions: list[HearsayReaction] = []
         for item in data.get("reactions") or ():
             if not isinstance(item, dict):
                 continue
             about = str(item.get("about") or "").strip()
-            if about not in roster:      # 名单外的人:模型编的,丢掉
+            if about not in real:        # 这个世界里没这么个人:模型编的,丢掉
                 if about:
-                    logger.warning("hearsay judge named %r, who is not on the roster", about)
+                    logger.warning(
+                        "hearsay judge named %r, who is nobody in this world", about)
                 continue
             try:
                 delta = _clamp(item.get("delta"))
@@ -597,6 +649,7 @@ class RelationshipJudge:
         relation: dict[str, Any],
         memories: list[str],
         location: str,
+        recent_talk: Sequence[str] = (),
     ) -> InviteVerdict | None:
         """有人叫她一起做件事,她答不答应(一起做事那条)。
 
@@ -607,6 +660,10 @@ class RelationshipJudge:
         ⚠️ **这条路上没有"世界说不行"**。同地、睡没睡、手上有没有事、做不做得了,
         全在调用方那一段(`Scheduler.joint_gate`)判完了 —— 拿一个睡着的人去问
         模型"你想不想去",它一定给得出一句像话的回答,而那句话是编的。
+
+        `recent_talk` 是他和邀请人**这会儿正说着的话**,和 `memories` 不重复:
+        记忆是会话关闭那一刻才落的,而邀请几乎总发生在会话中间 —— 只给记忆的话,
+        判定器判的是一个「我不认识这个人」的处境,而他们刚聊了两轮。
         """
         template = _DEFAULT_INVITE_PROMPT
         if self._prompt_store is not None:
@@ -616,9 +673,12 @@ class RelationshipJudge:
             "a_personality": a.get("personality", ""),
             "inviter": inviter or "有人",
             "invitation": invitation or "（没说清楚）",
-            "a_to_b": f"{float(relation.get('a_to_b', 0.0) or 0.0):.2f}",
+            "a_to_b": _closeness_phrase(float(relation.get("a_to_b", 0.0) or 0.0)),
             "memories": "；".join(memories) or "（无）",
             "location": location or "（未知地点）",
+            # 自洽的一块:没内容就是空串,老模板没有这个占位符也照样渲染
+            # (`str.format` 忽略多余 kwarg,和规划器的 `{situation}` 同一个套路)。
+            "recent_talk": _talk_block(a.get("name", "他"), inviter, recent_talk),
         }
         try:
             prompt = template.format(**variables)

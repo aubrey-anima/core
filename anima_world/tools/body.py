@@ -27,7 +27,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from anima_world.tools.base import BODY, PLAYER, ToolCallError, ToolContext, ToolResult, tool
+from anima_world.tools.base import (
+    AUTONOMY, BODY, CHAT, PLAYER, ToolCallError, ToolContext, ToolResult,
+    resolve_location, tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,19 +67,37 @@ def _do(ctx: ToolContext, kind: str, params: dict[str, Any]) -> ToolResult:
     id="walk",
     writes=("events:travel",),
     kind="walk",
-    description="走到某个地方去。**要花时间**,途中她在路上(不是瞬移)",
+    # 这一条**三个面共用**(CHAT / BODY / PLAYER),所以主语不能写「她」——
+    # PLAYER 面上它是玩家自己那个按钮的说明,一句「途中她在路上」说的是别人。
+    # 同一份清单两个读者那条的又一处,只是这回漏在文案上。
+    description="走到某个地方去。**要花时间**,途中人在路上(不是瞬移)",
     params={"location": {"type": "string", "description": "去哪儿", "required": True}},
-    surfaces=(BODY, PLAYER),
+    surfaces=(CHAT, BODY, PLAYER),
 )
 def walk(ctx: ToolContext, params: dict) -> ToolResult:
+    """走到某个地方去 —— **聊天里也够得着**。
+
+    这个模块开头那段说的割裂("聊天里她能走开,排班表里没有这个词;排班表里她会走到
+    咖啡店,而她自己决定时挑不了")在 `walk` 上一直没合拢:它给了 BODY 和 PLAYER,
+    独独没给 CHAT。于是最显眼的那条边还开着 —— 玩家说「带我去个安静点的地方」,
+    她答应了,还自己挑了地方:
+
+        潮汐里3号。我那儿。……(程屿拉下卷帘门,锁扣咔哒一声。)……二十分钟。
+
+    下一轮她的散文里人已经摸黑上到三楼掏钥匙了,而世界里她还站在唱片店
+    (`loc=records`,一条日志都不报错)。这正是"只改提示词的版本"那种坏法:
+    她说了走,世界没动,而**没有任何一层会发现**。她手上没有别的办法 ——
+    聊天面上只有 `walk_away`(离开这场对话),没有"去某个地方"。
+
+    地名收**人话**:她写的是"潮汐里3号",不是 `flat`。只认 id 的话她第一次调用
+    必然失败,而那正是这一轮反复撞见的那条缝(用一种写法印给她,按另一种写法验她的
+    回答)。走 `resolve_location` —— 和 `walk_away` 同一份,因为**拒绝的那句话
+    必须一模一样**;它第二层照旧认 id,所以老调用方一个字都不用改。
+    """
     where = str(params.get("location") or "").strip()
     if not where:
         raise ToolCallError("没说去哪儿")
-    known = set(ctx.runtime.point_ids())
-    if where not in known:
-        # 在场语义由引擎守住:模型编一个不存在的地名是常事,不该变成一次静默的空动作
-        raise ToolCallError(f"没有 {where} 这个地方;有的是 {sorted(known)}")
-    return _do(ctx, "walk", {"location": where})
+    return _do(ctx, "walk", {"location": resolve_location(ctx, where)})
 
 
 @tool(
@@ -119,6 +140,14 @@ def sleep(ctx: ToolContext, params: dict) -> ToolResult:
 @tool(
     id="talk_to",
     writes=("events:agent_action", "events:memory_seed", "memories"),
+    # **这两处是稍后落的,不是当场落的。** 一次搭话当场只发 `agent_action`;
+    # 她记住的那句话是**关系判定**的产物,而判定按"LLM 永不在 tick 线程调用"
+    # 那条硬不变量跑在判定线程池上(`Scheduler._submit_chat_judgment`)。于是
+    # `act()` 返回时它们**还没变** —— 实测 40 次里 10 次如此,而这正是
+    # `test_verb_writes.py` 那条测试四分之一概率变红的全部原因:它拿一个同步的
+    # 瞬间去量一件异步的事。不写这一行,声明读起来就是"调用返回时都变好了",
+    # 而照着它办事的宿主会随机看见一个"她说了话但谁也没记住"的世界。
+    writes_late=("events:memory_seed", "memories"),
     kind="chat",
     description="跟同在这儿的另一个角色搭话(对方不在这儿就不成)",
     params={"target": {"type": "string", "description": "跟谁", "required": True}},
@@ -174,12 +203,33 @@ def seek_company(ctx: ToolContext, params: dict) -> ToolResult:
     kind="interact",
     description=(
         "对你这儿的一样东西做点什么(照料、收取产出、读……)。"
-        "东西的 id 和它能被怎么做,都写在【你此刻感觉到的】那一段里。"
+        # 别提那个块的名字:同一句说明要在两个面上都成立,而【你此刻感觉到的】
+        # 这个标题只有聊天那一路才有 —— 自主轮次里那几行是光秃秃的。指路指到一个
+        # 她那一轮根本看不见的标题上,和没指一样。
+        "东西的 id 和它能被怎么做,都写在你感觉到的那几行里 —— 带方括号 id、"
+        "后面跟着「可以……」的就是。"
         "标着「得有人一起」的那些,要用 with 点名跟你一起做的人"
     ),
+    # 写给**人**的那一半。上面那句指路指到「你此刻感觉到的」那个提示词块上,
+    # 而玩家那一侧没有那个东西 —— 一句对一个人等于没说的话。这儿有什么、能被
+    # 怎么做、这会儿点不点得动,走 `World.player_options()`(它每一帧算一次,
+    # 且和真点下去那一次共用同一条判定)。
+    player_description=(
+        "对你这儿的一样东西做点什么(照料、收取产出、擦一擦……)。"
+        "这会儿有哪些东西、每样能被怎么做、点不点得动,"
+        "都在 target / verb 两个参数的 options 里"
+    ),
     params={
-        "target": {"type": "string", "description": "东西的 id,像 tree:harbor_oak", "required": True},
-        "verb": {"type": "string", "description": "做什么,比如 照料 / tend", "required": True},
+        "target": {
+            "type": "string", "required": True,
+            # 别举例子。举一个 id 出来的下场是:那个 id 只在橱窗世界里存在,
+            # 而每个别的世界读到的都是一句错的话。
+            "description": "对哪样东西(options 里给的 id)",
+        },
+        "verb": {
+            "type": "string", "required": True,
+            "description": "做什么(options 里给的动词;人话和 id 都认)",
+        },
         # 一起做的事才用得上。**必须进 params_schema**:菜单上没有的参数她永远
         # 不会填,于是那些能力对她等于不存在(#15 那一课的原话)。
         "with": {
@@ -187,10 +237,23 @@ def seek_company(ctx: ToolContext, params: dict) -> ToolResult:
             "description": "跟你一起做这件事的人(名字或 id);只有标着「得有人一起」的才要填",
         },
     },
-    # ⚠️ 暂不进 PLAYER 面。`interact_with` 的施动者、产出归属、`stocks` 的扣减
-    # 全按角色写的,给玩家开需要一份对应的账;而且今天线上那个世界一个实体都没
-    # 声明(`entity_names()` 是空的),开了也没有对象。要开先补这两样。
-    surfaces=(BODY,),
+    # **玩家也做得了。** 从前不进 PLAYER 面,理由是"施动者、产出归属、扣减全按
+    # 角色写的" —— 那份账现在有了(玩家身上的量、他此刻在哪、扣他的账、一起做事
+    # 时算他一份)。不开的样子是一扇她擦得了、我擦不了的窗:同一个世界里两套物理。
+    #
+    # **它是唯一进自主面的日常动词**,而且是被一轮真世界逼进去的:那个世界有 116 条
+    # 规律、76 个实体、一整套动词,而她自己决定时的菜单上只有四样社交能力,三样要
+    # 跟前有人 —— 于是 63 次问出来 0 次动作。世界里能做的事和她自己挑得动的事,
+    # 是两张不相交的表。
+    #
+    # 别的日常动词(`walk`/`work`/`eat`/`sleep`)**照旧不进**:那几样是行为树按
+    # 排班和需求带在管的,摆进菜单等于给同一件事开第二个不商量的入口 —— 她会在
+    # 上班时间决定去睡觉,而排班表根本不知道。`interact` 没有这个问题:行为树里
+    # 没有任何一条会替她去照料一棵树。
+    surfaces=(BODY, AUTONOMY, PLAYER),
+    # 她这儿一样能动的东西都没有时,这条必然失败。而她感觉到的那几行正是它的
+    # 参数表:那里没有带 id 的东西,菜单上就不该有这个动词。
+    requires_target_entity=True,
 )
 def interact(ctx: ToolContext, params: dict) -> ToolResult:
     target = str(params.get("target") or "").strip()
@@ -200,7 +263,7 @@ def interact(ctx: ToolContext, params: dict) -> ToolResult:
     if not verb:
         raise ToolCallError("没说做什么")
     outcome = ctx.runtime.interact_with(
-        ctx.agent_id, target, verb,
+        ctx.world_actor_id, target, verb,
         participants=_party(params.get("with")), player_id=ctx.player_id,
     )
     if not outcome.get("ok"):

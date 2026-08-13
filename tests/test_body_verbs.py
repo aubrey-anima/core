@@ -121,19 +121,56 @@ def test_the_world_saying_not_yet_is_reported_honestly(world):
 
 
 def test_a_made_up_place_is_refused_with_the_real_list(world):
-    """模型编地名是常事。当场拒,并告诉她有哪些地方 —— 只说"不行"等于没说。"""
+    """模型编地名是常事。当场拒,并告诉她有哪些地方 —— 只说"不行"等于没说。
+
+    而这份清单和 `interact` 那份是同一句话的两半:`test_拒绝的话是给人读的_不是
+    调试转储` 早就把 `interact` 那半改成人话了,`walk` 这半漏着 —— 一串
+    `sorted(known)` 的 Python list 字面量,`['awning:cart', 'bench:barber', …]`。
+    同一个玩家在同一个聊天窗里,问东西读到人话,问路读到裸 id。
+
+    ⚠️ **清单只说人话,不带 id。** 这条断言上一版钉的是「名字(id)」,理由写着
+    "`walk` 只收 `point_ids()`,不给 id 就是让模型接着猜" —— 而**同一版**把
+    `walk` 改成了收人话(`resolve_location`),那个理由当场就不成立了,断言没跟着
+    改。留下的样子是:玩家点一次"走去哈尔滨",收到二十个拉丁字母铺在一个中文
+    世界里(线上现场)。两个读者现在都打得出名字,id 就只是引擎自己的记账。
+    重名的那几个照旧带 id —— 见 `resolve_location`。
+    """
     agent = _an_agent(world)
     result = world.act(agent, "walk", {"location": "月球"}, surface="body")
     assert result["ok"] is False
-    for place in world._tool_runtime.point_ids():
-        assert place in result["error"]
+    for junk in ("[", "]", "'"):
+        assert junk not in result["error"], \
+            f"问路那半还是 Python 字面量:{result['error']}"
+    named = {
+        pid: name for pid, name in world._tool_runtime.point_names().items()
+        if name and name != pid
+    }
+    assert named, "这个世界的地点得有跟 id 不一样的名字,否则这条验不出东西"
+    for pid, name in named.items():
+        assert name in result["error"], \
+            f"少了一个地方,她照着这份清单挑不到它:{result['error']}"
+        assert pid not in result["error"], \
+            f"清单里漏出了 id,那是引擎自己的记账:{result['error']}"
 
 
-def test_body_verbs_stay_off_the_chat_and_autonomy_menus(world):
-    """**纯加法**:这批动词不进那两个面,所以提示词逐字不变。
+def test_body_verbs_stay_off_the_chat_menu_and_only_interact_crosses_into_autonomy(world):
+    """进聊天面的**只有 `walk` 一个**;进自主面的**只有 `interact` 一个**。
 
-    把 `walk` 摆进自主轮次的菜单是另一件事 —— 它会改提示词,而改提示词必须接真模型
-    验过再说(这个仓库为此付过学费:位置就是权重,给了菜单不等于她会用)。
+    原先一个都不进,理由是"改提示词必须接真模型验过再说"。验过了:一轮真世界
+    63 次问出 0 次动作 —— 菜单上四样社交能力,三样要跟前有人,而世界里那一整套
+    动词一样都不在。`interact` 因此跨了过去。
+
+    `walk` 是第二个跨过去的,同样是被真人试玩逼出来的:玩家说「带我去个安静点的
+    地方」,程屿答应了、自己挑了地方、散文里已经摸黑上到三楼掏钥匙,而世界里他还
+    站在唱片店(`loc=records`),一条日志都不报错。他手上没有第二个办法 —— 聊天面上
+    只有 `walk_away`,而那个**会结束这场对话**,恰恰是他不想要的。
+
+    这条原先写着"`walk`/`work`/`eat`/`sleep` 归行为树按排班和需求带管,摆进菜单等于
+    开第二个不商量的入口",而举的例子是**睡觉**。那个理由对 `eat`/`sleep`/`work`
+    成立(它们是需求带上的动作,从聊天里触发等于让玩家直接充她的需求条);对 `walk`
+    不成立,而且这道门早就被 `walk_away` 走通了 —— 它一直在 CHAT 面上,一直真的把
+    人挪走。所以差别从来不是"能不能从聊天里走路",是"走完还能不能接着说话"。
+    排班表照旧在下一个时段把她带回去,那是它该做的事,不是它被绕开了。
     """
     agent = _an_agent(world)
     chat = {v["id"] for v in world.verbs(agent, "chat")}
@@ -142,8 +179,8 @@ def test_body_verbs_stay_off_the_chat_and_autonomy_menus(world):
 
     assert body == {"walk", "work", "eat", "sleep", "talk_to", "wander", "seek_company",
                     "interact"}
-    assert not (body & chat), f"日常动词漏进了聊天菜单:{body & chat}"
-    assert not (body & autonomy), f"日常动词漏进了自主菜单:{body & autonomy}"
+    assert body & chat == {"walk"}, f"漏进聊天菜单的不只 walk:{body & chat}"
+    assert body & autonomy == {"interact"}, f"漏进自主菜单的不只 interact:{body & autonomy}"
     # 而它们确实在总目录里
     assert body <= {v["id"] for v in world.verbs(agent)}
 
@@ -254,8 +291,12 @@ def test_隔着半个地图照料不到(world):
 
     assert result["ok"] is False
     assert "不在你这儿" in result["error"]
-    # 两头都要说出来:只说"它在 cafe"会读成一句谎
-    assert "cafe" in result["error"] and "workshop" in result["error"]
+    # 两头都要说出来:只说"它在咖啡店"会读成一句谎 —— 她也可能就在咖啡店,而真正的
+    # 原因是引擎不知道**她**在哪(在路上就是这样)。
+    # 而说的必须是**地名**:这句话上玩家的屏幕、也当工具回执递给她,`cafe`/`workshop`
+    # 是键名(`place_name` 的 docstring 记着同一条教训的另一半)。
+    assert "咖啡店" in result["error"] and "建筑工作室" in result["error"]
+    assert "cafe" not in result["error"] and "workshop" not in result["error"]
     assert _tree_height(world) == before
 
 
@@ -266,6 +307,40 @@ def test_做不到的事当场拒绝而不是静默成功(world):
     ):
         result = world.act("夏", "interact", params, surface="body")
         assert result["ok"] is False and fragment in result["error"]
+
+
+def test_拒绝的话是给人读的_不是调试转储(world):
+    """线上玩家的聊天窗里读到过这一句:
+
+        (这儿没有 树底下 这个东西;有的是 ['awning:cart', 'bench:barber', …])
+
+    两处坏:一串 Python list 的 repr 直接进了聊天流;而那十个 id 是**整个世界按
+    字母序的前十个**,跟她面前有什么毫无关系 —— 玩家照着它挑一个,多半也够不着。
+    这句话本来就是给人读的(`intent._interact` 把 `ToolCallError` 的原文括起来就
+    发出去),所以判据是"读起来是不是人话"。
+    """
+    where = _at_the_tree(world)
+    bad = world.act("夏", "interact", {"target": "树底下", "verb": "tend"},
+                    surface="body")
+    text = bad["error"]
+    assert bad["ok"] is False
+    for junk in ("[", "]", "'", "{"):
+        assert junk not in text, f"拒绝里漏出了 Python 字面量:{text}"
+    assert "tree:harbor_oak" in text, "得告诉她手边真有什么,而不是世界头十个 id"
+    at_hand = {
+        eid for eid in world.scheduler.ontology.entities
+        if world.scheduler._place_of(eid) == where
+    }
+    elsewhere = set(world.scheduler.ontology.entities) - at_hand
+    assert not (elsewhere & {e for e in elsewhere if e in text}), \
+        f"列了她够不着的东西:{text}"
+
+    verb = world.act("夏", "interact", {"target": "tree:harbor_oak", "verb": "enter"},
+                     surface="body")
+    assert verb["ok"] is False
+    for junk in ("[", "]", "'"):
+        assert junk not in verb["error"], f"拒绝里漏出了 Python 字面量:{verb['error']}"
+    assert "照料" in verb["error"], "得报人话那份动词 —— 她读到的就是那几个字"
 
 
 def test_交互进世界的历史(world):

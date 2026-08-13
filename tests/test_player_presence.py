@@ -101,3 +101,78 @@ def test_an_agent_on_the_road_is_never_face_to_face(tmp_path):
         system = _say(world, agent_id)
         assert "面对面交谈" not in system, "她正在路上,不可能和你面对面"
         assert "手机文字私聊" in system
+
+
+# ── 体检那两扇门:找不到人的时候说的是什么 ────────────────────────────────
+#
+# 真人试玩顺手翻出来的两件,和上面是同一个病根:一个世界不认得的 player_id 递进去,
+# 门照样一本正经地作答,而答的是另一件事。
+
+from _worldfile import run_cli
+
+
+def _cli_world() -> str:
+    done = run_cli("simulate", "--world-id", "w", "--ticks", "0", "--llm", "mock")
+    assert done.returncode == 0, done.stderr
+    return "w"
+
+
+def _land(player_id: str, agent_id: str = "夏") -> None:
+    from _worldfile import current_client
+
+    w = World.open("w", redis=current_client(), force_mock_llm=True)
+    try:
+        w.player_move(player_id, w._tool_runtime.agent_location(agent_id))
+    finally:
+        w.close()
+
+
+def test_presence_does_not_blame_the_world_for_one_bad_id():
+    """筛过之后的空,和世界本身的空,是两件事。
+
+    `--player-id` 抄错时说「这个世界跟谁都还没打过交道」,会让人跑去查宿主接没接上
+    player_move —— 而世界里明明有人,只是这一个 id 不对。
+    """
+    _cli_world()
+    _land("玩家甲")
+
+    one = run_cli("presence", "--world-id", "w", "--player-id", "玩家鉒")
+    assert "跟谁都还没打过交道" not in one.stdout, (
+        "世界里有玩家,却说这个世界谁都没见过 —— 读的人会去查错的那一层"
+    )
+    assert "不认得" in one.stdout and "玩家鉒" in one.stdout
+
+    every = run_cli("presence", "--world-id", "w")
+    assert "玩家甲" in every.stdout, "前提没成立:这个世界里本来就没人"
+
+
+def test_presence_lines_up_when_the_ids_are_real_uuids():
+    """真部署里 player_id 是 membership 的 uuid(36 字)—— 写死 20 列会糊成一坨。
+
+    只有 `p1`/`cli` 那种短名字才看着是对的,而线上一个都不是。
+    """
+    _cli_world()
+    long_id = "f6e79cbb-51a2-47b8-a9d4-a5a58c463fab"
+    _land(long_id)
+
+    done = run_cli("presence", "--world-id", "w")
+    line = next(l for l in done.stdout.splitlines() if long_id in l)
+    assert line.rstrip() != f"  {long_id}", "前提没成立:这一行本来就没有地点"
+    assert line.startswith(f"  {long_id} "), f"id 和地点糊在一起了:{line!r}"
+
+
+def test_the_cli_no_longer_claims_player_location_is_process_local():
+    """3.2.0 把在场搬进了 Redis,`presence` 改了口,`player options` 漏了。
+
+    留着更坏:它教人把一个**真**信号(宿主没接 player_move)当成 CLI 的已知毛病
+    挥手过去。判据是这两条命令说的是不是同一件事。
+    """
+    _cli_world()
+    blocked = run_cli("player", "options", "--world-id", "w", "--player", "没这个人")
+    assert "进程内" not in blocked.stdout, (
+        "这一句 3.2.0 起是假的 —— 位置住 Redis,跨进程、扛重启"
+    )
+    assert "player_move" in blocked.stdout, "去掉了假话,也把唯一那条线索一起去掉了"
+
+    here = run_cli("presence", "--world-id", "w")
+    assert "进程内" not in here.stdout, "前提没成立:另一条也还在说这句"

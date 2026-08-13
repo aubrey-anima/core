@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 
-from anima_world.tools.base import AUTONOMY, CHAT, PLAYER, ToolCallError, ToolContext, ToolResult, tool
+from anima_world.tools.base import (
+    AUTONOMY, CHAT, PLAYER, ToolCallError, ToolContext, ToolResult,
+    resolve_location, tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +132,11 @@ def walk_away(ctx: ToolContext, params: dict) -> ToolResult:
     还在咖啡店,下一句照旧发得到(手机私聊),于是她又"走开"了一次,再一次,连着四趟
     行程,而每一趟在世界里都是真事件。**对一个不在你面前的人"走开"是个空动作** ——
     在场的语义得由引擎守住,不能指望模型每次都想到自己此刻是在打电话。
+
+    `to_location` 收**人话**(`resolve_location`,和 `walk` 同一份)。此前它把
+    她写的那几个字原样递给 `move_agent`,而那一层只认 id:她读到的世界里写着
+    「江堤」,写下「江堤」就被顶回一句光秃秃的「没有 江堤 这个地方」—— 连有哪些
+    都不说,等于让她再猜一次。
     """
     here = ctx.runtime.agent_location(ctx.agent_id)
     if not ctx.runtime.face_to_face(ctx.agent_id, ctx.player_id):
@@ -136,7 +144,8 @@ def walk_away(ctx: ToolContext, params: dict) -> ToolResult:
             end_conversation=True, stop_loop=True,
             detail={"degraded_to": "end_conversation", "reason": "对方不在你这儿,走开没有意义 —— 这一下等于挂断"},
         )
-    destination = str(params.get("to_location") or "").strip()
+    raw = str(params.get("to_location") or "").strip()
+    destination = resolve_location(ctx, raw) if raw else ""
     if not destination or destination == here:
         options = [pid for pid in ctx.runtime.point_ids() if pid != here]
         if not options:
@@ -299,9 +308,12 @@ def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
         "loc": here or None,
         "payload": {
             "agent_id": ctx.agent_id,
+            # 玩家收到的推送上写的就是这个,和调度器那两条 agent_hail 一样。
+            "agent_name": ctx.runtime.agent_names().get(ctx.agent_id, ctx.agent_id),
             "player_id": target,
             "player_name": ctx.runtime.player_name(target),
             "location": here,
+            "location_name": ctx.runtime.point_names().get(here, here),
             "reason": "initiative",   # 不是"闲着想找人",是她自己决定的
             "text": text,
         },

@@ -77,17 +77,16 @@ def test_a_style_rule_is_remembered_across_sessions(tmp_path):
     world, chat, _ = _world(
         tmp_path,
         _classification("style_adjust", 0.9, kind="address_form", value="叫他霜霜"),
-        replies=("（夏点头。）好。",),
+        replies=("（苏晚夏点头。）好。",),
     )
     with world:
         meta: dict = {}
         reply = _say(world, "以后叫我霜霜", meta)
 
-        assert meta["handled_by"] == "style_adjust"
-        assert "霜霜" in reply and "记下了" in reply
         assert [r["value"] for r in world.persona_overrides("夏", "p1")] == ["叫他霜霜"]
-        # 这一句是"规则已记下",不是她在说话 —— 所以根本没走生成。
-        assert chat.prompts == []
+        # 规则记下了,**而这一轮照旧是她在说话** —— 见下面那条专门盯这件事的测试。
+        assert reply == "（苏晚夏点头。）好。"
+        assert chat.prompts, "规则记下了不等于这一轮不必回话"
 
     # 换一个进程重开同一个世界:规则还在,而且真的进了提示词。
     reopened = open_world_at(str(tmp_path / "w.db"), force_mock_llm=True)
@@ -97,6 +96,37 @@ def test_a_style_rule_is_remembered_across_sessions(tmp_path):
         reopened.player_move("p1", _where(reopened, "夏"))
         _say(reopened, "在吗")
         assert "叫他霜霜" in chat.system_prompts[0], "重开之后那条规则没有回到提示词里"
+
+
+def test_teaching_a_rule_does_not_cost_the_player_his_turn(tmp_path):
+    """教一条规则,换回来的不该是一张收条 —— 她得照旧开口。
+
+    线上灯塔湾逮到的:那个世界的法律是"一律用英语回答",玩家用中文求「麻烦你用中文
+    回答我，我英文不好」。判成 `style_adjust`,整轮回复就只有
+    「（记下了:口气偏好 —— …。）」—— **一个字都不是她说的**。两轮之后她照旧用英语,
+    并当面说明自己不打算照办:那张收条替世界许了一个世界不会兑现的诺。
+
+    `intent.py` 的 docstring 早写明这两种错不对等:「你正说的话被吞掉,只回一句系统
+    确认。后者更贵」。这条盯的就是那个更贵的。
+
+    三件事一起验,因为它们各修各的一半:规则落库了、她这一轮真的说了话、而且她读到
+    的提示词里有"刚刚被教了这条"这个事实(不接上的话她会莫名其妙地改口)。
+    """
+    world, chat, _ = _world(
+        tmp_path,
+        _classification("style_adjust", 0.95, kind="tone_preference", value="以后都用中文"),
+        replies=("（苏晚夏抬眼。）行，那我说中文。",),
+    )
+    with world:
+        meta: dict = {}
+        reply = _say(world, "麻烦你用中文回答我", meta)
+
+        assert [r["value"] for r in world.persona_overrides("夏", "p1")] == ["以后都用中文"]
+        assert meta["intent"] == "style_adjust"
+        assert "handled_by" not in meta, "规则那条路不该再把这一轮吞掉"
+        assert reply == "（苏晚夏抬眼。）行，那我说中文。"
+        assert "记下了" not in reply, "系统收条不是她的台词"
+        assert "以后都用中文" in chat.system_prompts[0]
 
 
 def test_a_style_rule_survives_without_the_flag_once_it_is_written(tmp_path):
@@ -251,6 +281,7 @@ def test_the_classifier_runs_on_the_burst_path_too(tmp_path):
     world, chat, _ = _world(
         tmp_path,
         _classification("style_adjust", 0.95, kind="address_form", value="叫他霜霜"),
+        replies=("（苏晚夏点头。）好，霜霜。",),
     )
     with world:
         world.config_set("chat.loop.enabled", True)
@@ -259,13 +290,12 @@ def test_the_classifier_runs_on_the_burst_path_too(tmp_path):
             player_id="p1", display_name="阿檀",
         ))
 
-        messages = [step for step in steps if step["kind"] == "message"]
-        assert messages and "霜霜" in messages[0]["text"]
-        assert steps[-1]["reason"] == "handled_by_intent"
         assert [r["value"] for r in world.persona_overrides("夏", "p1")] == ["叫他霜霜"]
-        assert chat.prompts == [], "已经处理掉的这条不该再走一遍 in-character 生成"
+        messages = [step for step in steps if step["kind"] == "message"]
+        assert messages and messages[0]["text"] == "（苏晚夏点头。）好，霜霜。"
+        assert chat.prompts, "规则记下了不等于这一轮不必回话"
         tagged = next(step for step in steps if step["kind"] == "intent")
-        assert tagged["intent"] == "style_adjust" and tagged["handled"] is True
+        assert tagged["intent"] == "style_adjust" and tagged["handled"] is False
 
 
 def test_the_burst_path_reports_the_classification_even_when_it_changes_nothing(tmp_path):

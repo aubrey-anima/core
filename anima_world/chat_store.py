@@ -68,6 +68,32 @@ def annotation_values(
     return out
 
 
+def filter_message_content(store: Any, role: str, content: str) -> str:
+    """落库前过一道 `store.content_filter`(没装就原样放行)。
+
+    **装它的是 `World`,为的是把引擎自己的回执从她的台词里摘掉** —— 那句
+    「(没有 哈尔滨 这个地方;有的是 …)」是塞在她的回复前面流给玩家的,而宿主
+    原样把整段流当成"她这一轮说的话"交回来。
+
+    ⚠️ **闸必须在这一层,不在 `World.record_chat_turn`。** 那个方法是"记一轮并当场
+    关闭",而真宿主(运维台的世界壳)**有意绕开它**:每轮都关会话等于每句话生成一次
+    摘要、跑一次关系判定,既贵、语义也不对(一句「你好」不是一场会面)。它直接调
+    `world.chat_store.add_message`。第一版只修了 `record_chat_turn`,于是整条修法在
+    真部署上一次都没生效 —— 而单测全绿,因为测试走的是引擎自带的那条路。
+    **两条路都要过这道闸,所以闸放在两条路的交汇处:落库那一下。**
+
+    过滤器的形状是 `(role, content) -> content`,永不抛(它坏掉不该让一句话丢掉)。
+    """
+    fn = getattr(store, "content_filter", None)
+    if fn is None:
+        return content
+    try:
+        return str(fn(role, content))
+    except Exception:  # noqa: BLE001 - 过滤器坏掉不该吃掉一句话
+        logger.warning("转录内容过滤器出错,原样落库", exc_info=True)
+        return content
+
+
 class ChatStore:
     """会话转录存储的接口占位(仅供类型注解)。
 

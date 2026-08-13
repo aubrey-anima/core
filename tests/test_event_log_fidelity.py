@@ -97,18 +97,30 @@ def _player_action_rows(world: World) -> list[tuple[str, str]]:
 
 
 def test_a_player_action_reaches_the_event_log_with_its_content(tmp_path):
-    """玩家做了什么,得真的落在库里 —— 不是一个空对象。"""
+    """玩家做了什么,得真的落在库里 —— 不是一个空对象。
+
+    `role` 这一格从前恒等于字面量 `"player"`(那是形参的默认值),于是它验的其实
+    只是"这个键在"。而事件是**不可改的历史**:记一个从来没成立过的身份进去,
+    以后谁都分不清"他当时的身份是 player"和"这一路压根没拿到身份"——
+    所以这里两种都验,而且给一个真身份,让它验的是一个有意义的值。
+    """
     with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        world.player_move("p1", "cafe", role="旅人")
         world.player_action("p1", "挥手", {"target": "夏"})
+        # 宿主这一路没给身份,但世界记着 —— 落库的该是世界记着的那个
+        world.player_action("p1", "点头", {})
+        # 从没报过身份的人:那一格是空的,不是一个假身份
+        world.player_action("p2", "张望", {})
 
         rows = _player_action_rows(world)
-        assert len(rows) == 1
-        _, raw = rows[0]
-        payload = json.loads(raw)
+        assert len(rows) == 3
+        payload = json.loads(rows[0][1])
         assert payload.get("action") == "挥手", f"落库的 payload 是 {payload!r}"
         assert payload.get("details") == {"target": "夏"}
         assert payload.get("player_id") == "p1"
-        assert payload.get("role") == "player"
+        assert payload.get("role") == "旅人"
+        assert json.loads(rows[1][1]).get("role") == "旅人"
+        assert json.loads(rows[2][1]).get("role") == ""
 
 
 def test_a_replayed_player_action_keeps_the_shape_the_live_stream_had(tmp_path):
@@ -119,10 +131,11 @@ def test_a_replayed_player_action_keeps_the_shape_the_live_stream_had(tmp_path):
     """
     db = str(tmp_path / "w.db")
     with open_world_at(db, force_mock_llm=True) as world:
+        world.player_move("p1", "cafe", role="旅人")
         world.player_action("p1", "挥手", {"target": "夏"})
         live = [e for e in world.events() if e.get("type") == "player_action"][-1]
         assert live["player_id"] == "p1"
-        assert live["role"] == "player"
+        assert live["role"] == "旅人"
         assert live["action"] == "挥手"
         assert live["details"] == {"target": "夏"}
 
@@ -164,3 +177,53 @@ def test_投影不许就地改写一条已经发生过的事件(tmp_path):
     assert shown["payload"] == written["payload"], (
         "内存窗口里的事件和日志里的对不上 —— 有人在事后改写了已经发生过的事"
     )
+
+
+def test_她在哪只能有一个答案(tmp_path):
+    """`World.state()` 交给宿主的一个人身上,不该有两个"她在哪"。
+
+    `state` 装的是她**在干什么**,位置的家是 `agent.location`。而 `work` 曾经顺手
+    往 `state` 里再写一份 —— `sleep` 不清它,`walk` 也不清它,于是那份拷贝只增不减,
+    停在她上一次干活的地方。线上量出来是 21 个人里 13 个对不上,而宿主读哪一个
+    全凭它先看见谁。这正是这个仓库最怕的坏法:世界照跑,答案是错的,没有任何报错。
+
+    两半都要钉,**而且要分开钉**(投影那道闸会把发事件那一侧的错盖住):
+    1. **发出去的那条事件**里就不该有位置 —— 它进日志、进导出、进 `.cyberworld`,
+       而行为树的 `do_work` 把它写死成 `workshop`,她可能正在码头;
+    2. **历史里那些老事件重放回来**也不该把它带回来 —— 线上世界的投影是重放
+       MySQL 折出来的,只修发事件那一侧,已经写下的每一条 `work` 都会原样复活它。
+    """
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        who = sorted(world.scheduler.agents)[0]
+        assert world.act(who, "work", {}, surface="body")["ok"] is True
+        world.tick(1)
+
+        worked = [
+            e for e in world.scheduler.event_log.replay()
+            if e.who == who and (e.payload.get("state") or {}).get("status") == "working"
+        ]
+        assert worked, "前提没成立:她根本没干成活"
+        for e in worked:
+            assert "location" not in e.payload["state"], (
+                f"落进日志的那条 work 自带了一个位置:{e.payload['state']!r}"
+            )
+
+        # 老历史长这样(线上库里躺着的就是它):干活的同时报了个位置
+        world._record_and_fan({
+            "type": "state_change",
+            "who": who,
+            "payload": {
+                "kind": "agent_state",
+                "state": {"status": "working", "location": "上一次干活的地方"},
+            },
+        })
+        world.tick(1)
+
+        shown = world.state()["agents"][who]
+        assert shown["state"].get("status") == "working", (
+            f"前提没成立:她根本没在干活({shown['state']!r})"
+        )
+        assert "location" not in shown["state"], (
+            f"{who} 身上有两个位置:location={shown['location']!r},"
+            f"state.location={shown['state'].get('location')!r}"
+        )

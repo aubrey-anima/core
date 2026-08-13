@@ -21,6 +21,17 @@ _DEFAULT_SENTIMENT_THRESHOLD = 0.3
 _USER_CONVERSATION_IMPORTANCE = 0.8
 _STATE_CHANGE_IMPORTANCE = 0.5
 
+# 状态那几个词是**引擎的枚举**,不是人话。这条摘要要进她的提示词、还会被八卦原样
+# 转述(`_relation_names` 记的正是这一课),而它此前写的是「guo 的状态从 sleeping
+# 变为 working」—— 她在自己的记忆里读到自己的 id 和两个英文词。作者写得出引擎不
+# 认识的状态,认不出来的**原样留着**:替他编一个中文词等于替他说话。
+_STATUS_WORDS = {"working": "开始干活", "sleeping": "睡下"}
+
+
+def _status_word(status: Any) -> str:
+    text = str(status or "").strip()
+    return _STATUS_WORDS.get(text, text)
+
 # 收到一件礼物有多重。比八卦重(那是别人嘴里的事),比"有人当面交代我一件事"
 # (`directive`,0.7)轻一点 —— 一件礼物是心意,一句交代是**他等着我的回音**。
 # 落在 0.6 以上是有原因的:`contact._contact_reasons` 拿 0.6 当"强记忆"的线,
@@ -34,15 +45,23 @@ _NON_PERSON_HOLDERS = {"__town__", "__world__"}   # economy.TOWN / beats.BEAT_WO
 
 # relationship-stage-machine: fixed band edges over the sentiment axis. The
 # band a value falls in is DERIVED, never stored (a stored copy would be a
-# second source of truth — the bt-duties D3 / nested-map D7 lesson). Names
-# are only ever rendered into memory summaries.
+# second source of truth — the bt-duties D3 / nested-map D7 lesson).
+#
+# ⚠️ 这几个名字**不再只进记忆摘要了** —— `World.player_relationships()` 把 `band_name`
+# 直接递给玩家那一屏。所以中间那一档的名字要按"玩家读到它是什么感觉"选,不是按
+# "写进她的记忆里通不通顺"选:−0.2…0.2 是**每一段关系的起点**,一个刚聊过一次的人
+# 落在这儿。它从前叫「淡漠」,而那是一句判词(她对你冷淡),不是一段距离 —— 玩家
+# 刚跟她热络地聊完一场,屏幕上一行写着「淡漠」、下一行写着「上一次两个人的来往让它
+# 更近了一步」,同一屏两个情绪。真话是"你俩还不熟",所以叫「不远不近」:它两个方向
+# 都读得通(从「熟识」退回来也是这句),而且说的是距离,不是她的态度。
+# 和 `_closeness_phrase` 那条同一件事的两半 —— 那一半改的是散文,这一半是档名。
 BAND_EDGES = (-0.6, -0.2, 0.2, 0.5, 0.8)
-BAND_NAMES = ("宿敌", "交恶", "淡漠", "熟识", "亲近", "挚交")
+BAND_NAMES = ("宿敌", "交恶", "不远不近", "熟识", "亲近", "挚交")
 
 
 def band(value: float) -> int:
     """Which relationship band a sentiment value falls in (0..5). Pure;
-    boundary values belong to the upper band (band(-0.2) == 淡漠)."""
+    boundary values belong to the upper band (band(-0.2) == 不远不近)."""
     return bisect_right(BAND_EDGES, value)
 
 
@@ -240,6 +259,11 @@ class TriggerEngine:
         名字优先从**事件自己**上读(`as_name` / `target_name`,判定那一刻写下的),
         读不到才回落到投影里的角色名,最后才是 id。顺序是有讲究的:投影只认识
         角色,玩家不在里面;而事件是那一刻的事实,重放出来对得上。
+
+        ⚠️ **这条记忆的主人就是 `as_id` 本人**(两个调用方都写着 `agent_id=as_id`),
+        所以摘要里那一头是「我」,`as_name` 如今只剩这两个用处:兜底与对账。
+        写成第三人称的话她在自己的记忆里读到自己的名字 —— 和 `_on_agent_state`
+        那条同一个病。
         """
         as_name = str(payload.get("as_name") or "").strip()
         target_name = str(payload.get("target_name") or "").strip()
@@ -269,12 +293,13 @@ class TriggerEngine:
         delta = abs(new_sentiment - old_sentiment)
         if delta < self._sentiment_threshold:
             return None
-        as_name, target_name = self._relation_names(payload, as_id, target_id, projection_state)
+        _, target_name = self._relation_names(payload, as_id, target_id, projection_state)
+        toward = "亲近" if new_sentiment > old_sentiment else "疏远"
         return MemoryDescriptor(
             agent_id=as_id,
             tick=tick,
             kind="relation_shift",
-            summary=f"{as_name} 对 {target_name} 的关系发生剧变（Δ={delta:.2f}）",
+            summary=f"我忽然觉得{target_name}{toward}了很多",
             importance=delta,
             event_seq=event.get("seq"),
         )
@@ -304,14 +329,14 @@ class TriggerEngine:
         old_band, new_band = band(old), band(new)
         if old_band == new_band:
             return None
-        as_name, target_name = self._relation_names(payload, as_id, target_id, projection_state)
+        _, target_name = self._relation_names(payload, as_id, target_id, projection_state)
         return MemoryDescriptor(
             agent_id=as_id,
             tick=tick,
             kind="relation_shift",
             summary=(
-                f"{as_name} 对 {target_name} 的关系从「{BAND_NAMES[old_band]}」"
-                f"进入「{BAND_NAMES[new_band]}」（{old:+.2f}→{new:+.2f}）"
+                f"我和{target_name}从「{BAND_NAMES[old_band]}」"
+                f"变成了「{BAND_NAMES[new_band]}」"
             ),
             importance=min(0.9, 0.5 + 0.1 * abs(new_band - old_band)),
             event_seq=event.get("seq"),
@@ -332,7 +357,7 @@ class TriggerEngine:
             agent_id=agent_id,
             tick=tick,
             kind="state_change",
-            summary=f"{agent_id} 的状态从 {old_status} 变为 {new_status}",
+            summary=f"我{_status_word(new_status)}了",
             importance=_STATE_CHANGE_IMPORTANCE,
             event_seq=event.get("seq"),
         )

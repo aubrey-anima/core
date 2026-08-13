@@ -76,10 +76,11 @@ anima-world chat --world-id w --agent 昀 --message "十九年前那份报告是
 
 ---
 
-## 1. 现在 CLI 上有什么(18 个子命令)
+## 1. 现在 CLI 上有什么(22 个子命令)
 
 ```
-start  config  doctor  chat  prompt  map  ontology  contact  run  simulate  events  report  validate  play  contract  world  memory  agent
+start  config  doctor  chat  prompt  map  ontology  roster  contact  relationship  player
+presence  run  simulate  events  memory  agent  report  validate  play  contract  world
 ```
 
 按你们用得上的顺序:
@@ -94,7 +95,12 @@ start  config  doctor  chat  prompt  map  ontology  contact  run  simulate  even
 | `prompt --agent X` | **看她收到的提示词,逐块带来源** | 1.3.0 新增,见 §3 |
 | `map [--json]` | **地图 + 谁在哪 + 谁去了哪儿** | 1.4.0 新增,见 §3.6 —— `--json` 出数据,你们自己渲染 |
 | `ontology [--json] [--check]` | **有哪些种类的东西、身上有哪些量、能对它们做什么**,以及**一件事要她付出什么**(`requires` / `costs` / `consumes` / `duration`)。`--check` 跑出生自检 | 2.0 新增,见 §3.7 —— 能力表**只有这里问得到**,猜不出来;动词现在是**你们声明的**,不是引擎的十个;世界能自己长出新东西(`spawn`) |
-| `contact [--player] [--why] [--json]` | **谁想起过玩家、由头是什么**;`--why` 打此刻每对 (角色, 玩家) 算出来是多少,含没触发的 | 2.2.0 新增,见 §3.8 —— 调 `contact.threshold` 靠 `--why`:这一层默认关着、默认不响,**静默失效是它最可能的坏法**,而只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样 |
+| `roster [--billing] [--json]` | **这个世界里有谁**:名字(**显示名**)、一句话、立绘、主次、此刻在哪 | 本轮新增,见 §3.19 —— 你们的《引擎接口诉求-角色卡》交付了。⚠️ 顺带补上一个已经在线上咬人的洞:**显示名此前根本没有读出口**(`map --json` 里地点有 `name`,人只有 id) |
+| `agent set-card --agent X [--billing] [--tagline] [--portrait] [--clear] [--dry-run] [--json]` | **改一个跑着的世界里某个人的卡** | 本轮新增,见 §3.20 —— ⚠️ 上面那条 `roster` 只有**读**这一半:卡此前只写在 `agent_join` 上,而那条事件一个角色一辈子只有一条。于是**线上那个已经有真人在玩的世界一张卡都补不进去**,重开也不行(作者层的合并语义是「只填缺不覆盖」)。这一条是**明示的编辑,故意覆盖**;一次一个人,不吃文件 |
+| `contact [--player] [--why] [--inbox] [--json]` | **谁想起过玩家、由头是什么**;`--why` 打此刻每对 (角色, 玩家) 算出来是多少,含没触发的;`--inbox` 改读**敲门**那一半 | 2.2.0 新增,见 §3.8 —— 调 `contact.threshold` 靠 `--why`:这一层默认关着、默认不响,**静默失效是它最可能的坏法**,而只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。`--inbox` 是这一轮补的:`World.inbox()` 一直是对的而 CLI 上一个出口都没有,于是运维只能 `redis-cli HGETALL` |
+| `player forget --player X [--reason] [--dry-run] [--json]` | **一个人离开了这个世界** | 本轮新增 —— 试炼跑完留下的一堆试玩账号会**占着角色的联系配额和社交需求**(她会想起一个永远不会再出现的人)。⚠️ **这不是删数据的口子**:关系是投影,删了下一次重放会原样折回来。它往日志里追加一条 `player_departed` 事实,由折叠端和世界去响应 —— 关系两个方向、联系冷却、姿态、静音、回头找你、他教过的规则一并作废,**历史一个字不改**。幂等,`--dry-run` 一个字节都不写。⚠️ **关系有两份记法**:投影里的数值折叠端会清,而关系图上那条「他俩是朋友」的**边**住在自己的表里、折叠端碰不到 —— 不显式撤的话 `cliques()` 里会坐着一个不存在的人。回执里 `edges` 那一格就是撤掉了几条 |
+| `relationship [--agent X] [--with Y] [--json]` | **一段关系此刻的人话**:她把这个人当什么、粗到什么档、**上一次是什么改变了它** | 本轮新增 —— 此前只能去 `state --json` 里翻 `relations`,而那儿躺着的是四个 -1~1 的浮点数。⚠️ **人看的那张脸一个浮点数都不印**:给数字等于把一段关系变成一根进度条,而刷分是恋爱陪伴产品最不该长出来的东西。要数字的拿 `--json` 的 `axes`。档走的是引擎自己那个 `band()`,不是另写的一份阈值表;`last_change` 说得出出处(哪一 tick、哪一场对话、那场讲了什么),**查不到就明说查不到,不编** |
+| `player options --player X [--json]` | **他此时此地点得动什么**:有哪些东西、每样能被怎么做、这会儿点不点得动、点不动是为什么 | 本轮新增 —— 试炼里"这个世界给玩家的到底是什么"只有这里问得到。四类拒绝原样报(`conditions`/`incapable`/`busy`/讲不通的那摞)。⚠️ 玩家的位置是**进程内**的,所以对一个跑在别处的世界它只会说 `blocked: unknown_player_location`;同进程的试炼脚本里先 `player_move` 再问 |
 | `world export/import/inspect` | `.cyberworld` 打包 | 出厂 |
 | `world drop --yes` | **把一个世界从 Redis 上整个抹掉** | 2.0 新增 —— 试炼跑在用完即弃的世界上,跑完抹掉;不带 `--yes` 只数不删 |
 | `memory repair-ticks [--dry-run] [--json]` | **把老世界里盖了墙钟的记忆 tick 折回世界时钟** | 2.0 新增 —— 只有**2.0 之前跑过、聊过天**的世界需要它。那批 `conversation` 记忆的 tick 是 Unix 时间戳,而记忆按 tick 倒序召回,于是**跟玩家的几条对话把角色的召回列表整个占满**(实测 382 条记忆里它只占 20 条,前 20 条却 100% 是它)。装老世界之后跑一次;新世界永远扫到 0 条。有查不到出处的行时退出码 1,那些一律不动 |
@@ -230,6 +236,13 @@ start  config  doctor  chat  prompt  map  ontology  contact  run  simulate  even
 "rules":  [ … 上面那条 … ]
 ```
 
+⚠️ **`values` 是唯一的写法。** 逐条的 `{"owner": …, "key": …, "value": …}` 引擎不认,
+而它从前被**安静丢掉**(一条 warning),于是那一批初值整个不存在:量停在声明的默认值
+上,引用它们的条件和规律照跑、算出来的全是同一个数,`validate world` 说"没有发现
+问题"。线上一个世界因此丢了 11 行,五个角色的性格量全停在默认的 1.0。
+**现在校验和开机都当场拒绝**(值不是数的那一项同样),判据两边是同一个 `float(raw)`。
+你们生成世界文件时按上面那个形状写就行 —— 拒绝语里会直接告诉作者该怎么改。
+
 **CLI 可达性**:✅ 种子写进去、`validate` 校验、`simulate` 跑。
 
 ✅ **"读一个世界当前的量"这条洞补上了。** 原文是"❌ 没有任何 CLI 能读…… 你们做
@@ -340,6 +353,15 @@ anima-world prompt --world-id w --agent 夏 --json          # 给程序
 1. **它不撒谎** —— 和真聊天共用同一个拼装函数,有测试拿真提示词逐字比对。
 2. **它解释缺席** —— "少了哪块、为什么",照着那句话就能让它出现。
 3. **看,但不碰** —— 不推时钟、不进 LLM、不写玩家状态。
+
+⚠️ **第 1 条有个前提,3.2.0 起才补上:喂给它的那个人也得是真的。**「以谁的身份问」
+(`--player-id`)指到一个这个世界不认得的人时(id 抄错了、或者这个世界里压根没有玩家),
+提示词**照拼不误**,而身份 / 在场 / 关系三块全是拿一个陌生人算的 —— 她被告知对方没报过
+名字、不在她跟前、这是手机私聊,连真站在她跟前的玩家都被列成「只是同场角色」。
+渲染毫无破绽,字数像模像样,只是**没有哪一轮真的长这样**。现在两件事变了:不给
+`--player-id` 时它**去世界里挑一个真站在她跟前的人**,而且**抬头永远印着这一份是拿谁
+算的**(是陌生人时黄字明说)。`--json` 里对应 `asker`(`known` = 世界认不认得他)——
+拿它去调模板前先看这一格,否则你会照着一份不存在的提示词去改一个不存在的问题。
 
 为什么对你们有用:你们做的是"把小说变成世界",而世界好不好玩最后落在**她收到了什么**
 上。人物卡写得再好,如果那段人设在提示词里只占 13%、后面压着两块更响的规则,她就
@@ -930,6 +952,13 @@ anima-world config set presence.enforce_colocation true --world-id w
 
 **能力目录多了一格**:`world.verbs()` 和 `contract --json` 的能力表里每条都带
 `requires_colocation` —— 你们画按钮时照它决定什么时候可点,别等点下去才发现。
+(⚠️ 这句话此前只在 `world.verbs()` 上成立,`contract --json` 一直没给这一格 ——
+文档比代码走得快,已补上。)
+
+**同一张表又多了一格:`requires_target_entity`**。它是上一格的另一半 —— 一个要
+"跟前有人",一个要"手边有一样能动的东西"(今天只有 `interact`)。判据是那样东西
+**声明过动词**:只能看不能碰的进不了参数,按钮也就不该是亮的。引擎自己在她的自主
+菜单上用的就是这两格(REFERENCE §2.9.2)。
 
 ### CLI 可达性
 
@@ -938,6 +967,7 @@ anima-world config set presence.enforce_colocation true --world-id w
 | 查这个世界的位置维护得怎么样 | `anima-world presence [--json]` | ✅ 新增 |
 | 开/关这道闸 | `anima-world config set presence.enforce_colocation …` | ✅ |
 | 知道哪个能力要当面 | `contract --json` / `world.verbs()` 的 `requires_colocation` | ✅ 新增 |
+| 知道哪个能力要手边有东西 | 同上,`requires_target_entity` | ✅ 新增 |
 
 ## 3.16 修复:你们填的店面栏,`inspect` 此前只报一半(2.3.1)
 
@@ -1122,3 +1152,265 @@ anima-world world inspect x.cyberworld --json
 
 要不要让 `validate world` 也跑规律/本体那两道闸,是一条值得提的 issue —— 说清楚它
 卡在你们流程的哪一步。
+
+## 3.18 修复:`ontology` 的量表此前印的是 label,而能力行印的是键名(3.2.0)
+
+**一张表自己跟自己对不上,读它的人会得出一个错的结论。** 人类渲染里量那一行印的是
+作者写的 `label`,而紧跟着的能力行印的是表达式里的键名:
+
+```
+■ agent
+    量   手上的活儿    默认 1   她感知得到:here      ← label
+    …
+    能力 刷漆          改变世界
+         她得 me_手艺 >= 1.0                          ← 键名
+```
+
+于是读表的结论是「`手艺` 这个量没声明过,这几条能力永远做不成」—— 而它声明得好好的,
+只是作者给它起了个别的说法。(我自己这一轮就照这份输出判过一次"这个世界坏了"。)
+
+现在两个都印,和隔壁那几行能力(`verb(label)`)同一个写法:
+
+```
+    量   手艺(手上的活儿)   默认 1   她感知得到:here
+```
+
+**`--json` 一个字没动**(`kinds[].quantities[].key` / `.label` 一直是分开的两栏),
+所以照 JSON 画界面的地方不受影响 —— 变的只有那张给人看的字符表。
+
+| 你们要做的事 | 出口 | 状态 |
+|---|---|---|
+| 查一个量在表达式里到底叫什么 | `anima-world ontology --world-id w`(量那行括号里那个) | ✅ 修好 |
+| 同上,程序读 | `anima-world ontology --json` 的 `quantities[].key` | ✅ 一直都有 |
+
+## 3.19 新增:角色卡 —— 主次、一句话、立绘(`anima-world roster`,本轮)
+
+**你们那份《引擎接口诉求-角色卡》交付了。** 采纳的是"引擎只存一个不透明的 URI"
+那一条,并且加了一道闸(见下)。
+
+由来是一次真人试玩:线上那个世界 21 个角色,4 个是作者写了几周的主角、17 个是背景
+NPC,而玩家的通讯录里这 21 个人长得一模一样。**作者写得进、校验放行、世界跑得动、
+包也导得出 —— 就是到不了玩家眼前,而全程零报错。**
+
+### 你们要写的
+
+作者层里每个角色多一个**可选**的 `card`(不写 = 这个世界没做过角色卡,**不是错误**;
+老世界一个字都不用改):
+
+```json
+{"kind": "author", "type": "agent", "body": {
+  "id": "夏", "name": "苏晚夏",
+  "card": {"billing": "lead",
+           "tagline": "老港咖啡的店员,记得每个人爱喝什么",
+           "portrait": "https://cdn.example.com/su-wanxia.png"},
+  "location": "cafe", "personality": "…"}}
+```
+
+| 格 | 规则 |
+|---|---|
+| `billing` | `lead` / `supporting` / `hidden`,**缺省 `supporting`**。是枚举不是布尔 —— "解锁后才出现的人"是真需求,布尔长不出第三档,等要的时候再改就是一次跨仓库破坏 |
+| `tagline` | ≤ **80 字**,不许换行。**绝不进提示词** —— 那是写给玩家看的广告词,混进人设她就会照着念 |
+| `portrait` | **必须是带 scheme 的绝对 URI**(`https` / `http` / `data`)。写相对路径**开不了机** |
+
+⚠️ **相对路径那道闸是有意的。** `.cyberworld` 是**分发物**:写 `portraits/a1.png` 而图
+留在作者笔记本上,包发出去就是一张断的图,而且不报错。要让包自足就写 `data:` URI ——
+gzip JSONL 装得下,而且不必新增记录类型(新增 `{"kind":"asset"}` 会当场破掉线格式契约)。
+
+**不认识的键原样带过去,只警告不拦** —— 你们预告的第四样(声线、主题色、CV)现在就
+能写进去,新版工作台不会因此配不了这一版引擎。但会在警告里点名,免得一个拼错的
+`taglien` 静静地什么也不做。
+
+### 你们要读的
+
+```bash
+anima-world roster --world-id w                # 一屏名册:★主角 ·未出场
+anima-world roster --world-id w --billing lead # 只看主角
+anima-world roster --world-id w --json         # 契约
+```
+
+`--json` 的每一行**九栏是冻结的线格式**(平台壳照它写),外加第十栏 `card` 是那张卡的
+**原样**:
+
+```json
+{"agents": [{"agent_id": "夏", "name": "苏晚夏",
+             "tagline": "老港咖啡的店员,记得每个人爱喝什么",
+             "portrait": "https://cdn.example.com/su-wanxia.png",
+             "billing": "lead", "location": "cafe", "location_name": "海边咖啡店",
+             "state": {...}, "away": false, "card": {...}}]}
+```
+
+三条要知道的:
+
+- **`billing` 缺省 `supporting`,不是 `lead`。** 猜错方向的代价不对称:把主角说成配角
+  只是排版难看,把还没出场的人说成主角是**剧透**。
+- **`hidden` 的人引擎照出。** 引擎是"这个世界里有谁"的权威,它得说得出;筛掉是宿主
+  那一层的事(泄露的边界在进程上,不在浏览器里)。
+- **顺序跟世界自己的名册走**(事件日志序),不按字母重排。
+
+### 出包前怎么校验
+
+`validate world` 和 `simulate --ticks 0` **这次是同一批判断**(同一个
+`world_card_errors`),所以这一层不存在"validate 说没问题、开机却失败":
+
+```bash
+anima-world validate world my.cyberworld    # 坏卡:退出码 2,一次列全
+```
+
+### 契约怎么问
+
+`contract --json` 新增两处,**别再靠版本号猜"这支引擎带不带得动角色卡"**(猜错不报错——
+一个 dev tag 会让你们安静地停在"不带"那一支上,作者填的卡照旧到不了玩家眼前):
+
+```json
+{"seed": {"agent_keys": [...], "agent_optional_keys": ["card"]},
+ "character_card": {"keys": ["billing", "portrait", "tagline"],
+                    "billings": ["lead", "supporting", "hidden"],
+                    "default_billing": "supporting",
+                    "tagline_max_chars": 80,
+                    "portrait_schemes": ["data", "http", "https"],
+                    "read_command": "roster"}}
+```
+
+⚠️ **`agent_keys` 是必填键,`card` 没有加进去**(加进去等于要求每个世界给每个角色写
+一张卡,老世界全部开不了机)。要判"这支引擎认不认得 card",看 `agent_optional_keys`
+或 `character_card` 段。
+
+| 你们要做的事 | 出口 | 状态 |
+|---|---|---|
+| 世界文件里写主次 / 一句话 / 立绘 | 作者层 `agents[].card` | ✅ 新增 |
+| 出包前校验它 | `anima-world validate world <file>`(错误退出码 2,不建世界) | ✅ 新增 |
+| 读回来给界面 | `anima-world roster --json` | ✅ 新增 |
+| 读一个角色的**显示名** | 同上的 `name` | ✅ 新增(此前**只有**重放事件日志一条路) |
+| 只看主角 / 只看还没出场的 | `anima-world roster --billing lead\|supporting\|hidden` | ✅ 新增 |
+| 问"这支引擎带不带得动角色卡" | `anima-world contract --json` 的 `character_card` 段 | ✅ 新增 |
+| 写自定义的第四格(声线/主题色/CV) | 照写,引擎原样带过去(会警告一行) | ✅ 新增 |
+| 内置世界里看一眼它长什么样 | `anima-world roster`(橱窗三个人一人一张卡) | ✅ 新增 |
+| **改一个已经跑着的世界里某个人的卡** | `anima-world agent set-card`(见 §3.20) | ✅ 补上 —— 上面那一整格此前**只对新世界成立** |
+
+## 3.20 补上:上面那张卡,**已经跑着的世界也改得动了**(`anima-world agent set-card`,本轮)
+
+⚠️ **这是 §3.19 的洞,不是新特性。** §3.19 交付的是**写进世界文件**和**读回来**两半,
+中间少了一节:卡只存在 `agent_join` 事件的 `payload.spec` 上,而**一个角色一辈子只
+join 一次**。于是——
+
+- 新世界:作者层写卡 → 创世发 `agent_join` → `roster` 读得到。✅
+- **已经有真人在玩的那个世界:一张卡都补不进去。** 拿一份写好卡的世界文件
+  `--world-file` 重开也不行 —— 作者层的合并语义是**只填缺不覆盖**,在册的人不会
+  再收到一条 `agent_join`,那份卡连门都没进。
+
+而全程**零报错**:作者写得进、`validate world` 放行、测试全绿、包也导得出,就是到不了
+玩家眼前。线上那个世界 20 个角色(4 主 16 背景)一个都没吃到 —— 和 §3.19 由来的那个
+洞是**同一个洞的第二段**。
+
+### 出口
+
+```bash
+anima-world agent set-card --world-id w --agent 夏 \
+    --billing lead \
+    --tagline "老港咖啡的店员,记得每个人爱喝什么" \
+    --portrait "https://cdn.example.com/su-wanxia.png"
+
+anima-world agent set-card --world-id w --agent 夏 --tagline "新的一句"   # 只改一格
+anima-world agent set-card --world-id w --agent 禾 --clear                # 把卡整个删掉
+anima-world agent set-card --world-id w --agent 夏 --billing hidden --dry-run --json
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--agent` | 必填,角色 **id**(不是显示名)。**一次一个人** |
+| `--billing` | `lead` / `supporting` / `hidden` |
+| `--tagline` | ≤ 80 字,不许换行 |
+| `--portrait` | 带 scheme 的绝对 URI |
+| `--clear` | **把整张卡删掉**;不能和上面三个一起给 |
+| `--dry-run` | 算出回执,**一个字节都不写** |
+| `--json` | 回执按契约印 |
+
+### 五条要知道的(判断本身,不是用法)
+
+- **它故意覆盖,和作者层正好相反。** 作者层(`--world-file`)是**只填缺不覆盖**,
+  因为那是「补一层」;这一条是**明示的编辑**,你敲下 `--billing lead` 就是要它变成
+  `lead`。⚠️ **两条语义相反是对的,别把其中一条当 bug「修」成另一条** —— 填缺语义下,
+  一个已经是 `supporting` 的人永远也变不成 `lead`。
+- **部分更新是往现有的卡上合并,不是整张替换。** 只给 `--tagline` 不会把
+  `billing` / `portrait` 抹掉;合并**之后**才校验。**要抹掉某一格,把它给成空串**
+  (`--tagline ""` 只删这一句,立绘和主次不动);要删**整张卡**才用 `--clear`。
+- **`--clear` 是单独一格。** 「这个世界没做过角色卡」和「这个人是背景」是两件事:
+  前者宿主该回落到默认排版,后者是作者的一个决定。
+- **一模一样等于没改:不写、并且当面说「没有变化」。** 事件溯源的世界里,一条
+  内容相同的 `persona_update` 只是噪音;而一声不吭的「成功」和真改了长得一样。
+- **改的是历史的下一条,不是回去改创世那一条。** 走的是已有的 `persona_update`
+  事件路径,`agent_join` 一个字不动 —— 导出来的包里那条创世事件仍是作者当初写的样子。
+
+### 回执长什么样(`--json`)
+
+```json
+{"operation": "agent set-card", "world_id": "w",
+ "agent_id": "夏", "name": "苏晚夏",
+ "before": {"billing": "supporting"},
+ "after": {"billing": "lead", "tagline": "老港咖啡的店员,记得每个人爱喝什么"},
+ "changed": true, "cleared": false, "dry_run": false, "warnings": []}
+```
+
+`before` / `after` 是**归一化之后**的整张卡(没有卡时是 `null`)。`changed: false`
+就是那次「一模一样」——**它是成功(退出码 0),不是失败**。
+
+### 退出码
+
+**2 = 「我听懂了,但我不干」**(运维台翻成 409),而且**一个字节都没写**:
+
+| 情况 | 说了什么 |
+|---|---|
+| 这个世界里没有这个角色 | 报错时**把在册的人列出来** —— 编一个空结果出去,运维的人会以为改成功了 |
+| 卡本身不合法(相对路径 / 超长 / 不认识的 `billing`) | 和 `validate world` 同一批判断,合并后**写之前**校验 |
+| `--clear` 和值一起给 / 一个都没给 | 两句互相矛盾的指令,引擎挑哪句都是猜 |
+| `--world-id` 抄错了 | **写命令也不许创世** —— 否则你会对着一个刚建出来的空世界改卡 |
+
+### 契约怎么问
+
+`contract --json` 的 `character_card` 段多了一格 `"write_command": "agent set-card"`
+(此前只有 `read_command`)。**只报读口的话,「作者写得进」和「跑着的世界改得动」
+长得一模一样** —— 而这两件事之间差的正是这一整节。
+
+| 你们要做的事 | 出口 | 状态 |
+|---|---|---|
+| 给线上世界一个角色补卡 / 改主次 | `anima-world agent set-card --agent X --billing lead` | ✅ 新增 |
+| 只改一句话,不动立绘 | 同上只给 `--tagline`(合并,不是替换) | ✅ 新增 |
+| 只抹掉一句话,卡还留着 | 同上 `--tagline ""`(空串 = 删这一格) | ✅ 新增 |
+| 把一张卡整个撤掉 | 同上 `--clear` | ✅ 新增 |
+| 敲之前先看会改成什么 | 同上 `--dry-run [--json]` | ✅ 新增 |
+| 改完确认 | `anima-world roster --world-id w [--json]` | ✅ 一直都有 |
+| 问"这支引擎改不改得动跑着的世界" | `contract --json` 的 `character_card.write_command` | ✅ 新增 |
+| Python 宿主直接调 | `World.set_card(agent_id, card=None, *, clear=False, dry_run=False)` | ✅ 新增 |
+
+---
+
+## 玩家兜里的第一笔钱由世界给(`economy.player_allowance`,2026-08-12)
+
+给创作台的一句:**你们的世界文件里如果摆了货架,就得顺手写这一格**,否则玩家在
+那个世界里只能当观众。
+
+现场是这样的 —— 线上晚潮世界,`shop_stock` **43 行**,15 样能力 `consumes` 要的
+东西一样不缺、都标了价、库存 20,NPC 的账本活得好好的;而玩家点开的 44 个按钮里
+**15 个的拒绝语是同一句**「你手上的 X 不够:要 1 个,你有 0 个」——
+**而 X 就在两条街外卖 1 块 2**,他兜里是 0。
+
+```
+anima-world config set economy.player_allowance 60 --world-id w
+```
+
+或者世界文件的 author `config` 段里写一行(内置橱窗就是这么写的,60)。
+
+三条要知道的:
+
+- **默认 0 = 这个世界不给。** 声明本身就是开关,和 perception / ontology 逐字同构。
+- **只给一次** —— 他第一次在这个世界里露面那一次,落成账本上一笔 `allowance` 的
+  `payment`。每次露面补满的钱包不构成代价,他永远不必掂量买哪一样,于是货架又成了
+  摆设,只是换了个方向。
+- **值要够买下这个世界里最便宜的那样东西。** 给 1 块而最便宜的卖 6 块,和给 0 是
+  同一种体验,只是拒绝语从「你没有」变成了「你差得远」。
+
+| 你们要做的事 | 出口 | 状态 |
+|---|---|---|
+| 给一个世界定见面礼 | `config set economy.player_allowance <n>` / 世界文件 author `config` 段 | ✅ 新增 |
+| 看一屏货架 + 钱包 + 随身物品 | `World.player_shop(player_id)`(Python 宿主)| ✅ 新增 |
+| 让玩家买 | `World.player_buy(player_id, location_id, item_id)`,**人得站在那儿** | ✅ 加了在场闸 |

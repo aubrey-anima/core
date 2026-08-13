@@ -591,6 +591,9 @@ class MySQLChatStore:
     # ── messages ────────────────────────────────────────────────────────────
 
     def add_message(self, conversation_id: int, role: str, content: str, ts: int) -> int:
+        from anima_world.chat_store import filter_message_content
+
+        content = filter_message_content(self, role, content)
         with self._lock:
             message_id = self._write(
                 f"INSERT INTO {self._t('messages')}"

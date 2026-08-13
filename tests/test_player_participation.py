@@ -60,7 +60,7 @@ def test_a_player_conversation_moves_the_relationship_with_no_api_key(tmp_path):
 
 
 def test_a_regular_visitor_eventually_crosses_a_band_and_grows_an_edge(tmp_path):
-    """常来的人会真的从「淡漠」变成「熟识」,并在图谱上长出一条边。
+    """常来的人会真的从「不远不近」变成「熟识」,并在图谱上长出一条边。
 
     这是"参与世界演化"的分界线:跨档才生 relation_shift 记忆、才长图谱边、
     才进小团体计算 —— 只涨数字不跨档,等于什么都没发生。
@@ -158,7 +158,7 @@ def test_the_stand_in_refuses_to_rewrite_an_authored_r_type():
     替身,用机械标签盖掉作者的字是**把有的东西换成更差的东西**,比冻住更糟。
     """
     assert DeterministicRelationshipJudge().relabel(
-        old_r_type="有点好奇的新面孔", old_band="淡漠", new_band="熟识",
+        old_r_type="有点好奇的新面孔", old_band="不远不近", new_band="熟识",
         a={"name": "夏"}, b={"name": "遥"}, memories=[],
     ) is None
 

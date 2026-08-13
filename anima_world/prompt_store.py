@@ -35,6 +35,9 @@ from anima_world.chat_service import (
     _DEFAULT_WORLD_MEMORY_TEMPLATE as _CHAT_WORLD_MEMORY,
 )
 from anima_world.chat_service import (
+    _DEFAULT_SILENT_TURN_TEMPLATE as _CHAT_SILENT_TURN,
+)
+from anima_world.chat_service import (
     _DEFAULT_LOOP_CONTINUE_TEMPLATE as _CHAT_LOOP_CONTINUE,
 )
 from anima_world.chat_service import (
@@ -108,11 +111,18 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         "a_name": "遥", "a_personality": "话少,慢热", "memories": "（无）",
         "inviter": "苏晚夏", "a_to_b": "0.42", "location": "cafe",
         "invitation": "苏晚夏叫你一起在门口那棵老橡树下小坐",
+        # 他俩这会儿还在说的话。**整块由引擎渲染**(没说过话就是空串),作者只决定
+        # 它摆在哪儿 —— 所以样本给的是渲染好的那个样子,不是一份消息列表。
+        "recent_talk": "遥和苏晚夏这会儿正说着话：\n  苏晚夏：你还记得那把旧伞吗\n",
     },
     "chat.world_memory_block": {"memories": "- 债务解除了"},
     "chat.presence_block": {
         "day": 5, "hh": "20", "mm": "15", "location": "酒吧", "activity": "在值班",
         "others": "罗本",
+        # 她去得了哪儿。**只有名字,没有 id** —— `walk` / `walk_away` 都收人话了
+        # (`resolve_location`),而这一行是给她读的那份(`places_menu(with_ids=False)`)。
+        # 作者拿这个样本预览时看见的写法,就是她真收到的那个写法。
+        "places": "酒吧、码头、老陈的面馆",
     },
     "chat.relation_block": {"r_type": "有点好奇的新面孔", "band": "熟识"},
     "chat.perception_block": {"lines": "- 你自己:功力 120"},
@@ -129,6 +139,7 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
         "places": "咖啡店(cafe)、家(home)、建筑工作室(workshop)",
         "speaker": "苏晚夏",
     },
+    "chat.silent_turn": {"name": "苏晚夏"},
     "chat.loop_continue": {"emitted": 2, "left": 3},
     "chat.loop_interrupt": {"text": "等等,我不是这个意思"},
     "autonomy.decide": {
@@ -249,6 +260,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "chat.intent_classifier": (
         _INTENT_CLASSIFIER,
         "意图分类器的 prompt——dialogue / narrative_direction / style_adjust（#16）",
+    ),
+    "chat.silent_turn": (
+        _CHAT_SILENT_TURN,
+        "她整轮只调了个能力、一句台词都没有时，补给玩家的那句旁白"
+        "（**不是提示词**，是直接进回复的一行；空着零个字节和「应用崩了」没有区别）",
     ),
     "chat.loop_continue": (
         _CHAT_LOOP_CONTINUE,

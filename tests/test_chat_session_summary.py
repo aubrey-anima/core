@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import pytest
@@ -76,6 +77,15 @@ class FixedPromptStore:
         return self.text if name == "chat.session_summary" else (default or "")
 
 
+def _speaks_as(transcript: str, label: str) -> bool:
+    """转录里有没有一行是这个人开的口。
+
+    **不能用 `in`**:`夏` 是 `苏晚夏` 的子串,于是"有没有漏光秃秃的 id"这个问题
+    用子串问出来永远是"有"。标签只出现在行首,所以按行首问。
+    """
+    return re.search(rf"^{re.escape(label)}[:：]", transcript, re.M) is not None
+
+
 def _conv(**over: Any) -> dict[str, Any]:
     row = {
         "id": 7,
@@ -103,11 +113,26 @@ def _messages() -> list[dict[str, Any]]:
     ]
 
 
-def _close(store: FakeStore, llm: RecordingLLM, prompt_store=None) -> list[dict]:
+# 名册:id 和名字必须**不一样**,否则漏 id 的测试永远是绿的
+# (`夏` 恰好是 `苏晚夏` 的子串,断言 `"夏" in system` 那种写法就抓不到)。
+_ROSTER = {"夏": "苏晚夏"}
+
+
+def _roster_lookup(agent_id: str) -> str:
+    """和 `api.py` 逐字同构 —— 查不到时回落的是 **id 本身**。
+
+    这个回落是承重的:`_speaker_labels` 得认出"名册没这个人",不能把 id 当名字用。
+    """
+    return _ROSTER.get(agent_id, agent_id)
+
+
+def _close(
+    store: FakeStore, llm: RecordingLLM, prompt_store=None, agent_name=_roster_lookup
+) -> list[dict]:
     events: list[dict] = []
     manager = ChatSessionManager(
         store=store, llm=llm, emit_event=events.append,
-        clock=lambda: 200, prompt_store=prompt_store,
+        clock=lambda: 200, prompt_store=prompt_store, agent_name=agent_name,
     )
     asyncio.run(manager.close_conversation(int(store.conv["id"])))
     return events
@@ -118,12 +143,12 @@ def test_summary_prompt_carries_who_and_where_from_the_world():
     store, llm = FakeStore(_conv(), _messages()), RecordingLLM()
     _close(store, llm)
 
-    assert "夏" in llm.system
+    assert "苏晚夏" in llm.system
     assert "阿檀" in llm.system
     assert "cafe" in llm.system
     # 转录不再只有 `user:` / `assistant:`:那两个标签不告诉模型谁是谁,
     # 而"谁说的这句"正是它编身份时缺的那一样。
-    assert "夏: 还行，刚磨完一批豆子" in llm.transcript
+    assert "苏晚夏: 还行，刚磨完一批豆子" in llm.transcript
     assert "阿檀: 今天忙吗" in llm.transcript
     assert "assistant:" not in llm.transcript
 
@@ -149,7 +174,7 @@ def test_author_template_cannot_delete_the_facts_or_the_guard():
     _close(store, llm, prompt_store=FixedPromptStore("写三句，用力煽情。"))
 
     assert "写三句，用力煽情。" in llm.system      # 模板那一半照旧生效
-    assert "夏" in llm.system and "cafe" in llm.system
+    assert "苏晚夏" in llm.system and "cafe" in llm.system
     assert "不要写出其中没有出现过的人物、地点、场所、身份或职业" in llm.system
 
 
@@ -176,6 +201,46 @@ def test_unnamed_player_falls_back_to_访客_never_to_the_player_id():
     assert "访客" in llm.system
     assert "访客: 今天忙吗" in llm.transcript
     assert "p1" not in llm.system and "p1" not in llm.transcript
+
+
+def test_她自己那一头也不许漏_id_名册查得到就用名册():
+    """玩家那一头早就不许漏 id 了,她自己这一头一直漏着。
+
+    线上 `night-tide` 的记忆库里躺着十六条这样的摘要:「店主 wan 表示唱机转但不稳」
+    「yun 因江堤上没有树荫且地面湿冷」「被刚睡醒的 bai 听见」。最离谱的一条是她读完
+    之后自己写下的反应:「隐约对那个 'wan' 有点好奇」—— 她对一个字符串产生了好奇。
+
+    成因是转录行上只有 `agent_id`,而 `participants` 里她那一条从来不带 `name`
+    (`start_conversation` 只给玩家那条抄名字)。名册是她名字的唯一出处,所以接名册,
+    不往转录行上再抄一份 —— 抄一份就是两份真相。
+    """
+    store, llm = FakeStore(_conv(), _messages()), RecordingLLM()
+    _close(store, llm)
+
+    assert "说话的角色是苏晚夏" in llm.system
+    assert _speaks_as(llm.transcript, "苏晚夏")
+    assert not _speaks_as(llm.transcript, "夏"), f"转录里还是那个 id:{llm.transcript!r}"
+
+
+def test_名册没这个人时退泛称_而不是把_id_当名字():
+    """回落链的末端:名册查不到 → `_roster_lookup` 原样退回 id → 必须认出来。
+
+    「她」一望而知是泛称,`wan` 看上去像个名字 —— 和玩家那一头退「访客」同一个理由。
+    """
+    store, llm = FakeStore(_conv(agent_id="wan"), _messages()), RecordingLLM()
+    _close(store, llm)
+
+    assert "说话的角色是她" in llm.system
+    assert "wan" not in llm.system and "wan" not in llm.transcript
+
+
+def test_宿主没接名册时也不许漏_id():
+    """`agent_name=None`(老宿主、直接构造的 manager)照样不许把 id 印出来。"""
+    store, llm = FakeStore(_conv(), _messages()), RecordingLLM()
+    _close(store, llm, agent_name=None)
+
+    assert "说话的角色是她" in llm.system
+    assert not _speaks_as(llm.transcript, "夏")
 
 
 def test_summary_failure_is_logged_not_swallowed(caplog):
@@ -219,7 +284,10 @@ def test_real_close_path_grounds_the_summary(world):
     ])
 
     assert llm.prompts, "关会话时应该真的问了一次模型"
-    assert "夏" in llm.system
+    # 名册里 `夏` 叫「苏晚夏」。这里原来写的是 `"夏" in llm.system` —— 而 `夏` 是
+    # `苏晚夏` 的子串,于是这条断言在只印 id 的那些天里也是绿的。
+    assert "说话的角色是苏晚夏" in llm.system
+    assert not _speaks_as(llm.transcript, "夏"), "转录里还是那个 id"
     # 地点是**人话**,不是 `cafe`:这条摘要进她的长期记忆和下一场的记忆块,
     # 一个漏进去的英文 id 会被她当成地名说出口(这一轮在提示词那一层修过同一个病)。
     assert "咖啡店" in llm.system

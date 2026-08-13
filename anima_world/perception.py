@@ -110,6 +110,11 @@ class Perception:
     own_labels: dict[str, str] = field(default_factory=dict)
     here_labels: dict[str, dict[str, str]] = field(default_factory=dict)
     public_labels: dict[str, str] = field(default_factory=dict)
+    # 单位。⚠️ **这两格补的是一个洞**:`units` 那张 owner 表只填了 `here` 那一档,
+    # 于是同一个 `unit: "点"` 在树身上念得出「树高 3.2米」,在她自己身上念成
+    # 「体力 100」—— 作者写了一个字,引擎按感知档次决定认不认。
+    own_units: dict[str, str] = field(default_factory=dict)
+    public_units: dict[str, str] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)   # 东西的名字(owner → 老橡树)
     # 本体给的两样:一行人话、她能对它做什么。没有本体的世界这两个是空的。
     glosses: dict[str, str] = field(default_factory=dict)
@@ -130,6 +135,11 @@ class Perception:
         "上了江岸街"、或者把键从 `江水位` 换成 label,都会让宿主的代码在作者改一个
         字的那天读到 KeyError 或者画不出那根水位曲线 —— **键与数字是契约,人话是
         赠品**。
+
+        `verbs` 那一栏是唯一不能靠别处推出来的:量给得出数字,数字不告诉你
+        「擦一擦」这个词存不存在,而**按实例查**才认得出作者只给这一扇窗开的口子。
+        宿主自己拼一份动词表出来是这一层最容易犯的错 —— 拼错了不报错,按钮点下去
+        才发现世界不认。`names` 是这几样东西的人话名字,`glosses` 是那一行说明。
         """
         return {"own": dict(self.own), "here": {k: dict(v) for k, v in self.here.items()},
                 "public": dict(self.public), "overflow": self.overflow,
@@ -142,15 +152,26 @@ class Perception:
                     "own": dict(self.own_labels),
                     "here": {k: dict(v) for k, v in self.here_labels.items()},
                     "public": dict(self.public_labels),
-                }}
+                },
+                "verbs": {k: list(v) for k, v in self.verbs.items()},
+                "names": dict(self.labels),
+                "glosses": dict(self.glosses),
+                # `units` 按 owner 排(和 `here` 一个键),`own_units` /
+                # `public_units` 跟着 `own` / `public` 那两个**扁平**字典走。
+                # 把三档合成一张嵌套表读起来更整齐,但那是改形状 —— 镜像端会当场
+                # 读到 KeyError,而这一格从来只加不改。
+                "units": {k: dict(v) for k, v in self.units.items()},
+                "own_units": dict(self.own_units),
+                "public_units": dict(self.public_units)}
 
     def describe_own(self) -> str:
-        """`功力 120、体力 有点累` —— 她自己那一行的正文。"""
-        return _describe(self.own, self.own_words, labels=self.own_labels)
+        """`功力 120点、体力 有点累` —— 她自己那一行的正文。"""
+        return _describe(self.own, self.own_words, self.own_units, self.own_labels)
 
     def describe_public(self) -> str:
-        """`粮价 7、雨势 瓢泼大雨` —— 人人都知道那一行的正文。"""
-        return _describe(self.public, self.public_words, labels=self.public_labels)
+        """`粮价 7文、雨势 瓢泼大雨` —— 人人都知道那一行的正文。"""
+        return _describe(self.public, self.public_words, self.public_units,
+                         self.public_labels)
 
     def describe_here(self, owner: str) -> str:
         """`门口那棵老橡树[tree:harbor_oak](树冠遮住半条街):树高 3.2米。可以照料、收取产出`
@@ -213,14 +234,56 @@ def _describe(
     而次序不确定的提示词是没法 diff 的。
     """
     units, labels = units or {}, labels or {}
-    parts: list[str] = []
+    return "、".join(
+        readout_text(key, values[key], words.get(key), units.get(key, ""), labels.get(key))
+        for key in sorted(values)
+    )
+
+
+def readout_text(
+    key: str, value: float, word: str | None = None, unit: str = "",
+    label: str | None = None,
+) -> str:
+    """**一个量该被念成什么** —— 这个仓库里唯一的那条措辞规矩。
+
+    `label` 换名字、`bands` 换值、单位跟着**数字**走(档词后面不跟单位)。
+    抽出来是因为它有第二个读者:玩家那一屏(`World.player_options`)。同一个世界
+    的同一个量,她读到「雨势 瓢泼大雨」而玩家读到 `雨势 0.82`,不是排版问题 ——
+    是两个人看见了两种东西。各写一遍的话它们必然分叉,而分叉了不报错。
+    """
+    name = label or key
+    return f"{name} {word}" if word else f"{name} {_trim(value)}{unit}"
+
+
+def readouts(
+    values: dict[str, float], words: dict[str, str], units: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """一档量摊成宿主那一屏上的一排:`[{key,label,value,word,unit,text}, …]`。
+
+    **`text` 是给人看的,其余五格是给代码用的** —— 宿主想自己排版(把档词做成
+    一个色块、把数字画成一根曲线)就拿分开的那五格,不想排版就印 `text`。
+    只给 `text` 等于逼所有人接受引擎的排版;只给五格等于让每个宿主各自拼一遍
+    措辞,而拼出来的和她读到的不一样。
+
+    `label` 这一格**总是印得出来**(作者没写就是量名本身),和 `_describe` 里那个
+    `name` 同一条回落 —— 宿主拿它当显示名,不必自己再写一次 `label or key`。
+    排序同样按量名(key),理由见 `_describe`。
+    """
+    units, labels = units or {}, labels or {}
+    rows: list[dict[str, Any]] = []
     for key in sorted(values):
-        word = words.get(key)
-        name = labels.get(key) or key
-        parts.append(
-            f"{name} {word}" if word else f"{name} {_trim(values[key])}{units.get(key, '')}"
-        )
-    return "、".join(parts)
+        word = words.get(key) or ""
+        unit = units.get(key, "")
+        rows.append({
+            "key": key,
+            "label": labels.get(key) or key,
+            "value": float(values[key]),
+            "word": word,
+            "unit": unit,
+            "text": readout_text(key, values[key], word or None, unit, labels.get(key)),
+        })
+    return rows
 
 
 def band_word(bands: Any, value: float) -> str | None:
@@ -445,6 +508,8 @@ def perceive(
         return "" if name == key else name
 
     own_owner = f"agent:{agent_id}"
+    # 单位按**种类**查,所以玩家(`agent:player:p1`)和角色查的是同一份声明。
+    own_units = ontology.units_of(own_owner) if ontology is not None else {}
     for key, value in stock_store.of(own_owner).items():
         level = visibility_of(rules, "agent", key)
         if level in (SELF, HERE, PUBLIC):
@@ -456,6 +521,9 @@ def perceive(
             name = name_of("agent", key)
             if name:
                 result.own_labels[key] = name
+            unit = own_units.get(key)
+            if unit:
+                result.own_units[key] = unit
 
     if here:
         # **按种类分别封顶。** 有上限本身不是可选的:这一格里站着一万棵树的话,
@@ -503,6 +571,7 @@ def perceive(
                         result.units[owner] = units
             result.overflow += max(0, len(members) - budget)
 
+    world_units = ontology.units_of(world_owner) if ontology is not None else {}
     for key, value in stock_store.of(world_owner).items():
         if visibility_of(rules, "world", key) == PUBLIC:
             result.public[key] = value
@@ -512,5 +581,8 @@ def perceive(
             name = name_of("world", key)
             if name:
                 result.public_labels[key] = name
+            unit = world_units.get(key)
+            if unit:
+                result.public_units[key] = unit
 
     return result

@@ -44,6 +44,39 @@ MOCK_TEMPLATE_PREFIX = "narrative.mock."
 MOCK_MEMORY_SUFFIX_NAME = "narrative.mock_memory_suffix"
 
 
+class _NamesMixin:
+    """把 id 翻成人话 —— 两个叙事器共用,因为它们写的是同一种给人读的文本。
+
+    ⚠️ **查不到就原样退回 id,而且不吭声。** 这里和别处不一样:叙事每 tick 都在
+    跑,一个还没进名册的 id(刚被节拍造出来的人、玩家的临时占位)会把日志刷爆,
+    而它对玩家的伤害只是一行字里出现了一个键名 —— 不值得为它掀翻一次叙事。
+    """
+
+    agent_name: Any | None = None
+    place_name: Any | None = None
+
+    def bind_names(self, agent_name: Any, place_name: Any) -> None:
+        """接上名册。由 `Scheduler.__init__` 调用 —— 叙事器在 scheduler 之前就造好
+        了,而名册要等世界起来才有,所以是后绑的。没绑上时照旧填 id。"""
+        self.agent_name = agent_name
+        self.place_name = place_name
+
+    def _resolve(self, resolver: Any | None, value: Any) -> str:
+        text = str(value or "")
+        if not text or resolver is None or text.startswith("{"):
+            return text
+        try:
+            return str(resolver(text) or text)
+        except Exception:  # noqa: BLE001 - 翻不成人话不该掀翻一次叙事
+            return text
+
+    def _who(self, agent_id: Any) -> str:
+        return self._resolve(self.agent_name, agent_id)
+
+    def _place(self, location_id: Any) -> str:
+        return self._resolve(self.place_name, location_id)
+
+
 @runtime_checkable
 class NarrativeProvider(Protocol):
     """A narrative provider describes agent actions in human text."""
@@ -57,7 +90,7 @@ class NarrativeProvider(Protocol):
         ...
 
 
-class MockNarrativeProvider:
+class MockNarrativeProvider(_NamesMixin):
     """Default offline stub: deterministic one-line summaries for each action kind.
 
     `prompt_store`, when given, is where the templates actually live — read live
@@ -87,14 +120,21 @@ class MockNarrativeProvider:
         params = action.get("params", {})
         fallback = _MOCK_TEMPLATE_DEFAULTS.get(kind, _MOCK_TEMPLATE_DEFAULTS["custom"])
         template = self._template(f"{MOCK_TEMPLATE_PREFIX}{kind}", fallback)
-        # Fill from params; fall back to "{k}" when missing
-        kwargs = {k: params.get(k, "{" + k + "}") for k in ("location", "target")}
+        # Fill from params; fall back to "{k}" when missing.
+        # ⚠️ **这三个占位符填的是给人看的名字,不是键名。** 这句话是 `narrative`
+        # 事件的正文,玩家在世界动态里逐字读到它 —— 线上读到的是
+        # 「chi在studio忙着」「nian冒着雨往yard去」。没配 key 时它就是第一屏。
+        kwargs = {
+            "location": self._place(params.get("location", "{location}")),
+            "target": self._who(params.get("target", "{target}")),
+        }
+        agent = self._who(agent_id)
         try:
-            text = template.format(agent=agent_id, **kwargs)
+            text = template.format(agent=agent, **kwargs)
         except (KeyError, IndexError, ValueError):
             # PromptStore.check_renders rejects unknown placeholders on save, so
             # this only fires for a row written around it (a hand-edited db).
-            text = fallback.format(agent=agent_id, **kwargs)
+            text = fallback.format(agent=agent, **kwargs)
         memory_suffix = self._memory_suffix(agent_id)
         return text + memory_suffix if memory_suffix else text
 
@@ -112,7 +152,7 @@ class MockNarrativeProvider:
             return _MOCK_MEMORY_SUFFIX.format(summary=memories[0]["summary"])
 
 
-class OpenAICompatibleNarrativeProvider:
+class OpenAICompatibleNarrativeProvider(_NamesMixin):
     """Narrative provider backed by an OpenAI-compatible chat completions API.
 
     Chinese model vendors commonly expose OpenAI-compatible endpoints. Configure
@@ -148,6 +188,13 @@ class OpenAICompatibleNarrativeProvider:
         # describe() call instead of frozen at construction (design.md D3) —
         # mirrors ConfigBackedLLMClient's live-read pattern for the chat path.
         self.config_store = config_store
+
+    def bind_names(self, agent_name: Any, place_name: Any) -> None:
+        """连降级那一份一起接上 —— 它才是模型不通时真正在写字的那个。"""
+        super().bind_names(agent_name, place_name)
+        bind = getattr(self.fallback, "bind_names", None)
+        if bind is not None:
+            bind(agent_name, place_name)
 
     def _resolved_settings(self) -> tuple[str, str, str, float]:
         cfg = self.config_store
@@ -206,18 +253,25 @@ class OpenAICompatibleNarrativeProvider:
         personality = raw.get("personality") or raw.get("state.personality") or "自然、简洁、有角色感"
         user_input = params.get("user_input") or params.get("text") or params.get("reply") or ""
         # prompt-grounding: without the agent's whereabouts the model set its
-        # "slice of life" text in whatever scenery the worldview suggested
-        location = raw.get("loc") or ""
-        location_line = f"location={location}\n" if location else ""
+        # "slice of life" text in whatever scenery the worldview suggested.
+        # 人话,不是键名:模型会把喂给它的字**原样抄进正文**,而正文是玩家读到的
+        # 那一行(mock 那边同一个病,线上原文「chi在studio忙着」)。
+        location = self._place(raw.get("loc") or "")
+        location_line = f"地点={location}\n" if location else ""
         instruction = (
             self.prompt_store.get("narrative.describe", default=_DEFAULT_DESCRIBE_TEMPLATE)
             if self.prompt_store is not None
             else _DEFAULT_DESCRIBE_TEMPLATE
         )
+        display_params = dict(params)
+        if display_params.get("location"):
+            display_params["location"] = self._place(display_params["location"])
+        if display_params.get("target"):
+            display_params["target"] = self._who(display_params["target"])
         prompt = (
-            f"agent_id={agent_id}\n"
+            f"角色={self._who(agent_id)}\n"
             f"action_kind={kind}\n"
-            f"action_params={json.dumps(params, ensure_ascii=False)}\n"
+            f"action_params={json.dumps(display_params, ensure_ascii=False)}\n"
             f"{location_line}"
             f"personality={personality}\n"
             f"user_message={user_input}\n\n"

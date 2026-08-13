@@ -186,6 +186,23 @@ def test_the_material_world_is_furnished(flagship):
         assert flagship.inventory(agent_id), f"{agent_id} 什么都没带"
 
 
+def test_玩家兜里也有钱(flagship):
+    """**做了却开箱看不见等于没做。**
+
+    货架摆得再满,一个余额恒为 0 的玩家在这个世界里只能当观众 —— 那正是
+    2026-08-12 那次真人试玩的现场:43 行货架,15 个"你手上的 X 不够",
+    而 X 就在两条街外卖 1 块 2。橱窗必须自己点亮 `economy.player_allowance`,
+    因为引擎默认值是 0(没人说话时的样子),而这是**这个世界的作者的意见**。
+    """
+    flagship.player_move("看客", "cafe")
+    screen = flagship.player_shop("看客")
+    assert screen["balance"] > 0, "玩家进门时兜里一分钱都没有"
+    assert screen["shelf"], "咖啡店的货架对玩家是空的"
+    assert any(row["available"] for row in screen["shelf"]), (
+        "一样都买不起 —— 见面礼要够买下橱窗里最便宜的那样"
+    )
+
+
 def test_everyone_wants_something(flagship):
     """目标进 planner 的 prompt —— 没有目标的角色只会闲逛。"""
     for agent_id, brain in flagship.scheduler.agents.items():
@@ -340,6 +357,70 @@ def test_橱窗里想起你这条链是接通的(flagship):
     # hook 真的挂在时钟上(而不是"开关点亮了但没人读它")。
     assert flagship.scheduler._contact_hook is not None
     assert flagship.scheduler._contact_interval > 0
+
+
+def test_橱窗里一个玩家进来就有按钮可点(flagship):
+    """**做了却开箱看不见等于没做。**
+
+    玩家那一侧的能力表自带选项(`player_options`)这件事,只有在一个真有东西可点
+    的世界里才看得出来。橱窗必须是那样的世界:走进咖啡店,菜单上得有一样带人话
+    名字的东西、和至少一个能对它做的动词 —— 而不是一个空表加一句沉默。
+    """
+    flagship.player_move("u1", "cafe")
+    menu = flagship.player_options("u1")
+    assert menu["blocked"] == "", menu
+    assert menu["targets"], "橱窗里一个玩家站在咖啡店中央,什么也点不动"
+    first = menu["targets"][0]
+    assert first["name"] and first["name"] != first["id"], (
+        "按钮上印 id 等于没画"
+    )
+    assert first["verbs"], f"{first['id']} 摆在那儿却做不了任何事"
+    assert any(v["available"] for v in first["verbs"]), (
+        "每一个动词都点不动 —— 那和没有菜单是一样的第一屏"
+    )
+    # 说明书那一半也得是写给人的(它随 `player_id` 一起长出 options)。
+    interact = {row["id"]: row for row in flagship.player_tools("u1")}["interact"]
+    assert interact["params_schema"]["target"]["options"], "菜单没自带选项"
+
+
+def test_橱窗里玩家自己那一排也说人话(flagship):
+    """`own` 是这一版新开的一扇窗,而窗后面的东西没人替它排过版。
+
+    东西身上的量作者一个不落地分了档(`发条 满的` / `土 正好`),因为那些一直
+    印在屏幕上;**玩家自己身上的量从来没有被显示过**,于是同一个作者、同一份
+    声明,`agent` 那几个量一个 `bands` 都没写。新开的窗一装上,第一屏就是
+    `主动 0.998 / 睡眠债 0.384 / 心动 0` —— 线上真的这样。
+
+    「库里有 ≠ 玩家点得到」这条的镜像:**我开了一层显示,而它后面的内容不是照着
+    "会被人读到"写的**。判据不是"作者写没写 bands",是**渲染出来那一行有没有
+    数字的噪音**:有单位的数字是能行动的信息(`体力 100点` 对着 `要 4 点`),
+    没单位又没档词的裸浮点数是内脏。
+    """
+    flagship.player_move("u1", "cafe")
+    own = flagship.player_options("u1")["own"]["readouts"]
+    assert own, "玩家自己身上一个量都没有"
+    naked = [r for r in own if not r["word"] and not r["unit"]]
+    assert not naked, (
+        f"橱窗第一屏上这几行是裸数字:{[r['text'] for r in naked]}。"
+        "分档,或者给个单位 —— 两样都没有的话,屏幕上那行字对玩家不构成任何信息"
+    )
+
+
+def test_橱窗里一段关系说得出人话(flagship):
+    """三个人开箱就互相认识(`test_the_characters_already_know_each_other`),
+    而那份认识此前只能以四个浮点数的形状拿到手。**给数字等于把一段关系变成
+    一根进度条** —— 橱窗第一屏就该演得出那句人话。
+    """
+    rows = flagship.relationship_summaries()
+    assert rows, "橱窗里一段说得出人话的关系都没有"
+    for row in rows:
+        assert row["band_name"], row
+        assert row["summary"].strip()
+        # 橱窗里的 id 恰好是名字里的一个字(`夏` / `苏晚夏`),所以"id 没出现"
+        # 这条断言在这儿证明不了什么。钉得住的是另一半:**两边都用人话叫**。
+        assert row["agent_name"] in row["summary"], row["summary"]
+        assert row["other_name"] in row["summary"], row["summary"]
+        assert row["agent_name"] != row["agent_id"], "名册里的名字没翻出来"
 
 
 def test_橱窗里的事件是有人经历过的():

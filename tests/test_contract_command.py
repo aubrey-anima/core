@@ -15,6 +15,7 @@ import sys
 import pytest
 
 import anima_world
+from anima_world.api import _PLAYER_TTL_SECONDS
 from anima_world.beats import OP_REQUIRED_FIELDS, VALID_OPS
 from anima_world.tools import tools_for
 from anima_world.sim_report import REPORT_FORMAT_VERSION
@@ -46,6 +47,16 @@ def test_contract_reports_every_wire_format_version():
         "key_prefix": "anima:{world_id}:",
         "mysql_tables": ["events", "memories", "conversations", "messages"],
         "mysql_table_prefix": "{world_id}_",
+        # 3.2.0:在场玩家搬进 Redis。**打包时必须跳过 `volatile_keys`** —— 镜像端
+        # (运维台 `lib/worldPackage.js`)照这一格对齐,漏了的下场是导出的世界带着
+        # 别人的玩家此刻在哪儿,装回去还成了一份永不过期的假在场(JSON 存不了 TTL)。
+        "volatile_keys": ["lock", "players", "player:{player_id}"],
+        "presence": {
+            "index_key": "anima:{world_id}:players",
+            "row_key": "anima:{world_id}:player:{player_id}",
+            "ttl_seconds": _PLAYER_TTL_SECONDS,
+            "in_package": False,
+        },
     }
     assert payload["package"]["format_version"] == PACKAGE_FORMAT_VERSION
     assert payload["report"]["format_version"] == REPORT_FORMAT_VERSION

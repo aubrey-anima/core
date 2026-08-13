@@ -155,10 +155,22 @@ def address_for(role: str) -> str:
     return role if role and not _is_placeholder_role(role) else DEFAULT_ADDRESS
 
 
+# 她这一轮**一个字都没说**、只留下一条控制指令时,补给玩家的那一句旁白。
+# 线上抓到的样子:她整轮只输出了 `〔delay_reply {...}〕`,标记被摘掉之后玩家的屏幕上
+# 什么也没有 —— 而"她选择不回答"和"这个应用崩了"在零个字节上长得一模一样。
+# **写旁白,不替她说话**:括号里那半是引擎在陈述这一轮发生了什么,不是她的台词。
+# 具体是哪种沉默由别的路交代(下一条消息会收到静音的理由、到点她自己回来敲门)——
+# 在这儿按工具分岔就是把某一版文案刻进引擎,而刻错了不报错。
+_DEFAULT_SILENT_TURN_TEMPLATE = "（{name}没有接话。）"
 _DEFAULT_MEMORY_BLOCK_TEMPLATE = "你和对方过去的对话回顾：\n{summaries}"
 _DEFAULT_WORLD_MEMORY_TEMPLATE = "你最近记得的事：\n{memories}"
 _DEFAULT_PRESENCE_TEMPLATE = (
-    "现在是第 {day} 天 {hh}:{mm}。你在{location}，{activity}。同在这里的还有：{others}。"
+    "现在是第 {day} 天 {hh}:{mm}。你在{location}，{activity}。同在这里的还有：{others}。\n"
+    # **她去得了哪儿,得由世界告诉她。** `walk` 的 `location` 是必填,而在这一行出现
+    # 之前整份提示词里没有一处列过这个世界有哪些地方 —— 她只能编一个,然后整件事
+    # 退回散文。这个洞被引擎自带的那份 world.setting 盖了很久(它手写着"街区只有三个
+    # 地方——咖啡店(cafe)…"),作者一换掉 setting 清单就没了,而真世界都会换。
+    "这个世界里你去得了的地方：{places}。"
 )
 _DEFAULT_RELATION_TEMPLATE = "对方在你眼中：{r_type}（你们的关系处于「{band}」）。"
 
@@ -316,8 +328,26 @@ def compute_budget(
     return {"budget": budget, "traits": traits, "reasons": reasons}
 
 
+# 动作块开头指代说话人的第三人称代词。带 `们` 的**有意不在里面**:
+# 「他们都笑了」的主语不是她一个人,而「林迟他们」在中文里正好是"林迟一伙" ——
+# 那一种摞上去反倒是对的。
+_SPEAKER_PRONOUN = re.compile(r"^[他她它](?!们)")
+
+
 class _ActionNameNormalizer:
-    """Prefix full-width parenthetical action blocks with the speaker name."""
+    """把动作块的主语落到说话人身上 —— 名字**顶掉**代词,不是摞在它前面。
+
+    冠名本身是要的:多人在场时 `（顿了顿。）` 不说是谁顿了顿,而 `（林迟顿了顿。）`
+    说了。但从前一律往前摞,于是模型写 `（他打了个哈欠……）`,玩家读到的是
+
+        （林迟他打了个哈欠,把被子往肩上拽了拽。）
+
+    没有人这么写中文。线上转录里逐字躺着 `（老陈他转身往灶台走……）`,而这不是
+    模型写的 —— 模型写的是 `（他转身往灶台走……）`,这一层给加的。量下来是模型
+    写的动作块的 **10%**(108 块里 11 块),一局玩下来撞得到好几次。
+
+    `（他的手在抖。）`→`（林迟的手在抖。）` 也对,所以 `的` 不必排除。
+    """
 
     def __init__(self, name: str) -> None:
         self._name = name
@@ -344,7 +374,9 @@ class _ActionNameNormalizer:
             self._buffer += text[:end]
             inner = self._buffer[1:].lstrip()
             if not inner.startswith(self._name):
-                inner = f"{self._name}{inner}"
+                inner = _SPEAKER_PRONOUN.sub(self._name, inner, count=1)
+                if not inner.startswith(self._name):
+                    inner = f"{self._name}{inner}"
             output.append(f"（{inner}）")
             self._buffer = None
             text = text[end + 1 :]
@@ -574,6 +606,9 @@ class ChatService:
                 "location": presence.get("location", "未知地点"),
                 "activity": presence.get("activity", "闲着"),
                 "others": presence.get("others") or "没有别人",
+                # 世界里有哪些地方。**空世界给一句"就这儿一处"而不是空白** ——
+                # 空白会拼成"你去得了的地方:。",而她读到那个句号只会更糊涂。
+                "places": presence.get("places") or "就这儿一处",
             }
             try:
                 blocks.append(PromptBlock("presence", template.format(**variables)))
@@ -828,6 +863,23 @@ class ChatService:
                             f"{address}当前在{member_location_name}，你当前在{agent_location_name}，"
                             "因此对话媒介是手机文字私聊。"
                         )
+                        # **是你走开的 —— 这句得说出口。** 一场面对面的对话说到一半,
+                        # 排班可以把她挪走(世界的时钟不等人,那是对的),而在这之前
+                        # 这件事对谁都不留一个字:玩家读到「走吧，你跟紧点」然后她
+                        # 就没影了;她自己只看见这一段静静地翻成「手机私聊」,于是
+                        # 照着转录的惯性接着写在原地做事 —— 线上现场是苏念人在潮汐里
+                        # 3 号,却在擦咖啡车的台子、把磨豆机收进架子。
+                        # 只在她**刚好是从他站的那个地方走开**时说:那时这句话必定
+                        # 成立,也正是"他被落下了"的那一种。别的走法(她一早从家里
+                        # 出来)与这场对话无关,说了就是往提示词里塞噪音。
+                        if presence.get("came_from") == member_location:
+                            identity += (
+                                f"**是你走开的**：你原本和{address}一起在"
+                                f"{member_location_name}，后来你去了{agent_location_name}，"
+                                f"他还在{member_location_name}。"
+                                f"你的动作只能发生在{agent_location_name}——"
+                                f"{member_location_name}那边的东西已经不在你手边了。"
+                            )
                     else:
                         identity += "对话媒介是手机文字私聊，对方不在你当前场景中。"
                     identity += (
@@ -867,6 +919,15 @@ class ChatService:
         prompt.extend(history[-20:])
         return prompt
 
+    def _directive_tool_names(self) -> tuple[str, ...]:
+        """解析器认得的裸能力名 —— 她漏写 `tool:` 时按什么去认(见 `directives`)。
+
+        **不看 `chat.tools.enabled`。** 开关关着时她本不该看见菜单,但真收到一条
+        标记的话,认出来才走得到 `_run_tool` 那句"记进 `ignored_tool_calls`" ——
+        当成 unknown 咽掉,等于把"她想走却没走成"和"她压根没想走"合成一件事。
+        """
+        return tuple(spec.id for spec in tools_mod.tools_for("*", tools_mod.CHAT))
+
     async def _stream_step(
         self, messages: Sequence[Message], *, speaker_name: str
     ) -> AsyncIterator[tuple[str, Any]]:
@@ -875,7 +936,7 @@ class ChatService:
         空流回退成一次完整 completion —— 一次瞬时的空流不该让玩家对着沉默(1.2 的
         老行为,原样保留)。指令解析在归一化**之前**:控制标记不该被当成动作描写。
         """
-        parser = DirectiveParser()
+        parser = DirectiveParser(self._directive_tool_names())
         normalizer = _ActionNameNormalizer(speaker_name)
 
         def _emit(chunk: str) -> list[tuple[str, Any]]:
@@ -936,6 +997,28 @@ class ChatService:
             meta["end_conversation"] = True
         return result
 
+    def _silent_turn_note(self, agent_id: str, meta: dict[str, Any]) -> str:
+        """这一轮她一个字都没说时补的那句旁白。没什么可交代的就返回空串。
+
+        **判据是"这一轮有没有发生过什么"**,不是"文本空不空"。一次空的模型回包同样
+        是零个字节,而那是个故障 —— 给故障配一句「她没有接话」,等于把 LLM 挂了
+        伪装成她的性格。所以只在她**做过选择**(调了工具 / 让了位 / 写了一条读不懂
+        的标记)时才说话。
+        """
+        happened = (
+            meta.get("tool_calls") or meta.get("ignored_tool_calls")
+            or meta.get("unknown_directives") or meta.get("stop_reason")
+        )
+        if not happened:
+            return ""
+        persona = self._persona_provider(agent_id) or {}
+        template = self._template("chat.silent_turn", _DEFAULT_SILENT_TURN_TEMPLATE)
+        try:
+            return template.format(name=persona.get("name") or agent_id)
+        except (KeyError, IndexError, ValueError):
+            logger.warning("chat.silent_turn 渲染失败,这一轮只好交出沉默")
+            return ""
+
     def _record_stance(
         self, agent_id: str, target_id: str, raw: str | None, meta: dict[str, Any]
     ) -> None:
@@ -984,8 +1067,10 @@ class ChatService:
         persona = self._persona_provider(agent_id) or {}
         speaker_name = persona.get("name") or agent_id
         stance_seen: str | None = None
+        said = False
         async for kind, value in self._stream_step(prompt, speaker_name=speaker_name):
             if kind == "text":
+                said = said or bool(value.strip())
                 yield value
                 continue
             if value.kind == "stance":
@@ -995,6 +1080,7 @@ class ChatService:
             if value.kind == "tool":
                 result = self._run_tool(agent_id, interlocutor_id, value, sink)
                 if result is not None and result.text:
+                    said = True
                     yield result.text
                 continue
             if value.kind == "wait":
@@ -1002,6 +1088,11 @@ class ChatService:
                 continue
             logger.warning("%s 输出了一条读不懂的控制指令:%r", agent_id, value.raw)
             sink.setdefault("unknown_directives", []).append(value.raw)
+        if not said:
+            note = self._silent_turn_note(agent_id, sink)
+            if note:
+                sink["silent_turn"] = True
+                yield note
         if self.stance_enabled():
             self._record_stance(agent_id, interlocutor_id, stance_seen, sink)
 
@@ -1059,6 +1150,13 @@ class ChatService:
                     meta["stop_reason"] = "explicit_yield"
                 else:
                     logger.warning("%s 输出了一条读不懂的控制指令:%r", agent_id, value.raw)
+                    meta.setdefault("unknown_directives", []).append(value.raw)
+            if not "".join(parts).strip():
+                note = self._silent_turn_note(agent_id, meta)
+                if note:
+                    meta["silent_turn"] = True
+                    parts.append(note)
+                    yield note
         finally:
             if self.stance_enabled():
                 self._record_stance(agent_id, player_id, stance_seen, meta)
@@ -1289,10 +1387,20 @@ class ChatService:
                 said_before.append(said)
                 turn = list(turn) + [{"role": "assistant", "content": said}]
                 yield {"kind": "message", "text": said, "meta": dict(meta)}
-            elif not stop_now:
-                # 一步什么也没说出来:再转一圈只会再空一次。
-                stop_reason = "empty_step"
-                break
+            else:
+                # 整轮下来一个字都没交出去(她只调了个工具就让位)——补一句旁白,
+                # 理由见 `_silent_turn_note`。**只补一次**:后面几步的沉默上面
+                # 已经说过话了,再补等于在对话里插一句多余的旁白。
+                note = "" if emitted else self._silent_turn_note(agent_id, meta)
+                if note:
+                    meta["silent_turn"] = True
+                    emitted += 1
+                    yield {"kind": "text", "text": note}
+                    yield {"kind": "message", "text": note, "meta": dict(meta)}
+                if not stop_now:
+                    # 一步什么也没说出来:再转一圈只会再空一次。
+                    stop_reason = "empty_step"
+                    break
             if stop_now:
                 break
             if said and _looks_like_a_question(said):

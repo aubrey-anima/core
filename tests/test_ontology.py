@@ -17,6 +17,7 @@ from anima_world.ontology import (
     parse_kinds,
     resolve,
     seed_quantities,
+    unreachable_requirements,
     visibility_declarations,
 )
 from anima_world.rules import parse_rules
@@ -453,6 +454,51 @@ def test_种子把量名拼错时开不了机(tmp_path, open_world):
     assert "树髙" in str(caught.value) and "树高" in str(caught.value)
 
 
+def test_逐条写的初值当场开不了机(tmp_path, open_world):
+    """`{"owner","key","value"}` —— 引擎只认 `{"owner","values"}` 那一种写法。
+
+    从前是一条 warning 加跳过。灯塔湾那份世界文件就是这么丢的:11 行初值一个都没
+    进世界,五个角色的 `initiative` / `agreeableness` 停在声明的默认值上,世界照常
+    开机、日志干净,而引用它们的条件算出来的全是同一个数。和量名拼错是同一类错误 ——
+    你写的这一行没有人读,而这个判断不需要知道任何世界的内容。
+    """
+    from anima_world.world_seed import WorldSeedError
+
+    with pytest.raises((OntologyError, WorldSeedError)) as caught:
+        _seeded(tmp_path, open_world, [{"owner": "agent:甲", "key": "功力", "value": 1.0}])
+    assert "values" in str(caught.value)
+
+
+def test_装载器自己也不肯丢掉读不懂的初值():
+    """两道闸各自独立:校验在动任何一张表之前拦,装载器是最后一道。
+
+    只留前一道的话,任何绕开校验的入口(库里直接调、状态记录混装的文件)照旧会
+    安静地少装一批初值 —— 而那正是这个 bug 上一次发生的样子。
+    """
+    from anima_world.__main__ import _seed_stocks
+
+    class _Store:
+        def __init__(self):
+            self.written = []
+
+        def owners(self):
+            return []
+
+        def of(self, owner):
+            return {}
+
+        def set_many(self, owner, values, *, tick=0):
+            self.written.append((owner, values))
+
+    store = _Store()
+    with pytest.raises(OntologyError, match="values"):
+        _seed_stocks({"stocks": [{"owner": "agent:甲", "key": "功力", "value": 1.0}]}, store)
+
+    # 值不是数也一样:那个量会停在声明的默认值上,而作者以为他给过初值了。
+    with pytest.raises(OntologyError, match="不是一个数"):
+        _seed_stocks({"stocks": [{"owner": "agent:甲", "values": {"功力": "很高"}}]}, store)
+
+
 def test_没声明kinds的世界照旧不拦(tmp_path, open_world):
     """**声明本身就是开关。** 没有 `kinds` 时 owner 和量名都是任意字符串,
 
@@ -525,3 +571,151 @@ def test_重开一个世界不会被塞进别人的物理法则(tmp_path, open_w
     reopened = open_world("norules", redis=fresh_redis)
     assert reopened.scheduler.world_rules == [], "别人的物理法则被塞了进来"
     assert [e["id"] for e in reopened.entities()] == ["bench:a"]
+
+
+# ── 永远开不了的那道门 ──────────────────────────────────────────────────────
+#
+# 线上真有一条,而且它跑了几千条事件都没人发现:晚潮的 `poster.撕下来` 要
+# `me_主动 >= 1.2`,「主动」默认 1.0,整个世界里唯一写它的表达式是
+# `max(me_主动 - 0.02, 0)` —— 只减不增。那个按钮从开机第一秒起就不可能亮。
+#
+# 玩家看得见它、点得到它,每次收到「你的主动不够」。他会一直试。这是最伤的一类:
+# 系统告诉他「你还差一点」,而那一点在数学上不存在。
+
+_ACTOR_ONLY_SHRINKS = {
+    "id": "agent",
+    "quantities": {"主动": {"default": 1.0, "visibility": "self"}},
+}
+_POSTER = {
+    "id": "poster",
+    "gloss": "墙上那张",
+    "quantities": {"完好": {"default": 1.0, "visibility": "here"}},
+    "affordances": {
+        "撕下来": {"label": "撕下来", "requires": ["me_主动 >= 1.2"],
+                   "costs": {"主动": "max(me_主动 - 0.02, 0)"}},
+    },
+}
+
+
+def test_门槛比这个量够得到的最高点还高_当场点名():
+    said = " ".join(unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, _POSTER)))
+    assert "撕下来" in said and "主动" in said
+    assert "1.2" in said and "永远开不了" in said
+    # 要说得出**下一步**:降门槛,或者给这个量一条涨上去的路。
+    assert "涨上去" in said
+
+
+def test_有一处抬得动它就不点名():
+    """`min(me_主动 + 0.03, 3)` 顶得到 3,门槛 1.2 够得着 —— 一个字都不该说。"""
+    lifts = {
+        **_POSTER,
+        "affordances": {
+            **_POSTER["affordances"],
+            "重描一遍": {"label": "重描一遍", "costs": {"主动": "min(me_主动 + 0.03, 3)"}},
+        },
+    }
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, lifts)) == []
+
+
+def test_规律抬得动它也算():
+    """写点不只在能力里 —— 少数一处就会多报一条,而多报的那条指着一道开得了的门。"""
+    rules = parse_rules([{"id": "缓过来", "every": {"ticks": 12},
+                          "for_each": {"kind": "agent"},
+                          "set": {"主动": "min(主动 + 0.05, 2)"}}])
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, _POSTER), rules) == []
+
+
+def test_认不出的写法一律闭嘴():
+    """误报够多次的警告等于没有警告 —— `reachable_ceiling` 不认识的一律算「不知道」。"""
+    murky = {
+        **_POSTER,
+        "affordances": {
+            **_POSTER["affordances"],
+            "说不好": {"label": "说不好", "costs": {"主动": "me_主动 * 完好"}},
+        },
+    }
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, murky)) == []
+
+
+def test_max_的下限是一种抬升_不是保底():
+    """这一条是这道 lint 唯一容易写反的地方。
+
+    `max(me_主动 - 0.02, 5)` 直觉上是"只减不增再保个底",实际上它把一个 1.0 的量
+    **顶到 5**。当成非增处理的话,这道 lint 会去报一道其实开得了的门。
+    """
+    floored = {
+        **_POSTER,
+        "affordances": {
+            "撕下来": {"label": "撕下来", "requires": ["me_主动 >= 1.2"],
+                       "costs": {"主动": "max(me_主动 - 0.02, 5)"}},
+        },
+    }
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, floored)) == []
+
+
+def test_够得到的门槛不点名():
+    ok = {
+        **_POSTER,
+        "affordances": {
+            "撕下来": {"label": "撕下来", "requires": ["me_主动 >= 0.5"],
+                       "costs": {"主动": "max(me_主动 - 0.02, 0)"}},
+        },
+    }
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, ok)) == []
+
+
+def test_没有任何一处写它的量也算得出上界():
+    """一个谁都不写的量,上界就是它的默认值 —— 这是最容易漏的一种「够不到」。"""
+    frozen = {
+        "id": "poster",
+        "gloss": "墙上那张",
+        "quantities": {"完好": {"default": 1.0, "visibility": "here"}},
+        "affordances": {"撕下来": {"label": "撕下来", "requires": ["me_主动 >= 1.2"]}},
+    }
+    said = " ".join(unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, frozen)))
+    assert "没有任何一处写它" in said
+
+
+def test_have_不归这道闸管():
+    """随身物品想买就买得到,没有"够不着"这回事 —— 报它就是误报。"""
+    with_item = {
+        **_POSTER,
+        "affordances": {"撕下来": {"label": "撕下来", "requires": ["have_刀片 >= 3"]}},
+    }
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, with_item)) == []
+
+
+def test_按流逝折算的衰减也算得出上界():
+    """`量 - 0.006 * dt` 是这个引擎**劝作者写**的那一种(`drift_warnings` 整条在劝它)。
+
+    不认 `dt` 的话每一条正确写法都算成"不知道",这道 lint 在真实世界里永远不响 ——
+    一个只在教科书写法上生效的 lint 等于没有。
+    """
+    rules = parse_rules([{"id": "耗着", "every": {"ticks": 12},
+                          "for_each": {"kind": "agent"},
+                          "set": {"主动": "max(主动 - 0.006 * dt, 0)"}}])
+    said = " ".join(unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, _POSTER), rules))
+    assert "撕下来" in said, "规律只往下走,门槛 1.2 仍然够不到"
+
+
+def test_规律读光名字_能力读me_前缀_别搞混():
+    """两边读自己的写法不一样,而搞混不会报错 —— 只会给出一个假的上界。
+
+    `min(主动 + 0.06, 2)` 这条规律真的把上界抬到 2。要是拿 `me_主动` 去它的语法树上
+    找,找不到、答 `inf`,**恰好也不报** —— 于是这个洞在"报不报"这一层看不出来。
+    分得开它的只有反过来那条:一条封得住的衰减(`max(主动 - 0.006 * dt, 0)`),
+    名字对得上才算得出 1.0,对不上就是 `inf`,而 `inf` 会把同一个量的上界顶穿。
+    """
+    lifts = parse_rules([{"id": "缓过来", "every": {"ticks": 12},
+                          "for_each": {"kind": "agent"},
+                          "set": {"主动": "min(主动 + 0.06, 2)"}}])
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, _POSTER), lifts) == []
+
+    # 同一个量再加一条只往下走的规律:上界还是 2(抬得动那条说了算),仍然不报。
+    both = parse_rules([
+        {"id": "缓过来", "every": {"ticks": 12}, "for_each": {"kind": "agent"},
+         "set": {"主动": "min(主动 + 0.06, 2)"}},
+        {"id": "耗着", "every": {"ticks": 12}, "for_each": {"kind": "agent"},
+         "set": {"主动": "max(主动 - 0.006 * dt, 0)"}},
+    ])
+    assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, _POSTER), both) == []

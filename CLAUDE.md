@@ -80,10 +80,16 @@ anima-studio(创作台)──子进程──▶ 本包的某个版本 ──▶ 
 `docs/引擎接口诉求-试炼与试聊.md` 提了两条,我早就交付了却没回执,他们的 P1
 白等了几天。**加了 CLI 出口就去那份文档里记一笔。**
 
-⚠️ **v3 是一次跨仓库破坏,运维台欠两笔**:它的 `lib/worldPackage.js` 还停在 v1
-(注释里还写着 `world.db?`),从没吸收 v2;现在直接跳 v3。`lib/worldSeed.js` 整个可删 ——
-种子这个概念没有了。双向互验(`test/contract.test.js`)要照 v3 重写。经过写在
+v3 那次跨仓库破坏**运维台已经认账**(2026-08-12 核实):`lib/worldPackage.js` 是
+v3 的**只读**镜像(写那一半有意不实现 —— 导出要遍历 Redis 里的类型化键并按语义
+拆段,那是引擎的活),`lib/worldSeed.js` 已删,双向互验照 v3 重写了。经过在
 `platform/docs/引擎-2.0-同步.md`。
+
+⚠️ **新欠的一笔在我们这边**:3.2.0 的 `storage` 段多了 `volatile_keys` 与
+`presence`。运维台已加 `STORAGE_CONTRACT` 常量,并让 `test/contract.test.js` 对着
+真门 `contract --json` 逐格 deepEqual —— **这一格以后再改,它那侧会当场红**,
+镜像本该是这个样子。反过来 `inspectWorldFile()` 已经报 `volatileKeys` 而我们的
+`world inspect --json` 不报:同一个包,两边给出不同的清单。
 
 节拍脚本的严格校验有个硬要求:**坏脚本必须在加载时当场报错,不能流到世界启动**。
 **显式指定的世界文件同规矩**(`WorldFileError`):作者层只读进空库一次,静默降级成
@@ -207,6 +213,19 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
   - **落库的永远是作者动过的**:`list()` 是合并视图,整份落库等于把刚拆掉的
     快照原样重建(31 条默认模板的教训)。
   `tests/test_config_provenance.py` 是这几条的闸。
+- **水位前进的条件是"折过了",不是"我写了一条"**(`_projection_seq`)。它的含义是
+  「≤ 它的事件我都折过了」,而 `catch_up_projection` 只往前看 —— 任何一处把它推过
+  没折过的事件,那些事件**再也补不回来**。`_apply_memory_trigger` 曾经在自己追加一条
+  时直接挪到自己那条的 seq,于是**别的进程写的一整段被签了字**:线上从维护容器写的
+  四张角色卡,长驻世界里永远是 `card: null`;`player forget` 更贵 —— **关系就是投影**,
+  共享 Redis 清干净了而那个进程内存里的幽灵留着,她继续惦记一个不存在的人。
+  一个跑着的世界每 tick 都在追加事件,所以这**不是竞态,是必然**,而且零报错。
+  修法是自己追加前先补空档(`_fold_gap_before`),**只在真有空档时才多跑一次 replay**
+  (无条件 replay = 每条事件一次 Redis 往返),补的时候按 seq 截断别把自己折两遍。
+  写 `_projection_seq` 的地方只该有三处:开机、`reset_projection`、真折过之后。
+  连带一条:**只读门自己补课**(`state()` / `roster()` 已加)—— 跑着的世界会在下一次
+  追加时自愈,暂停的不会,而只读门不该指望世界正好在动。
+  `tests/test_cross_process_projection.py` 守这几条。
 - **投影拷一份,别拿事件那个 dict 当自己的状态**(`_apply_agent_join`)。投影是从事件
   折出来的**派生数据**,事件是已经发生过的**事实**;共用一个可变 dict 的话,后来的一条
   `persona_update` 会顺着 `agent.spec.update(...)` **就地改写那条创世 `agent_join` 在内存

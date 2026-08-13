@@ -77,6 +77,192 @@ def test_一份指名的世界文件能改一个已有的世界(tmp_path, minima
         scheduler.stop()
 
 
+# ── 作者改得动一个跑着的世界的声明 ──────────────────────────────────────
+#
+# 「只填缺,不覆盖」那条纪律**说的是状态**:整份写回会把长了三十天的树倒带回
+# 幼苗。而**声明不是状态** —— 一个种类、一条规律身上没有任何东西会随时间漂,
+# 所以那条理由在它们身上不成立,而照搬的代价是:一个跑着的世界里的声明**永远
+# 改不了**。灯塔湾就卡在这儿 —— 一个教英语的世界,每个动词按钮上印的是引擎的
+# 中文默认词,而里面住着四个真人,唯一的修法是连他们的进度一起抹掉重建。
+#
+# 下面四条钉的是同一件事的四个面:改得动、镜像跟着改、实例仍旧只增、
+# **而内置兜底那份一个字都改不动**(最后那条是安全的那一半,松了就等于让橱窗
+# 每次开机去改写别人世界的物理法则)。
+
+def _kind_patch(path, kind_body: dict, world_id: str = "w"):
+    import json as _json
+    path.write_text(
+        _json.dumps({"kind": "manifest", "version": 3, "world_id": world_id},
+                    ensure_ascii=False) + "\n"
+        + _json.dumps({"kind": "author", "type": "kind", "body": kind_body},
+                      ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+_ROCK = {
+    "id": "rock",
+    "gloss": "a rock",
+    "quantities": {"moss": {"default": 0.0, "visibility": "here", "label": "moss"}},
+    "affordances": {"look": {}},
+}
+
+
+def _world_with_a_rock(tmp_path, client):
+    seed = pathlib.Path(write_seed_file(tmp_path / "rocky.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "kinds": [_ROCK],
+        "entities": [{"id": "rock:one", "name": "a rock", "location": "cafe"}],
+    }))
+    build_serve_scheduler("w", client, world_file=seed, force_mock_llm=True).stop()
+    return seed
+
+
+def test_作者指名的文件改得动一个已有种类的人话(tmp_path):
+    """`look` 不写 `label` 就念引擎的中文默认词。一个教英语的世界里那是噪音,
+    而从前它改不掉 —— 「同名的一个字都不动」把作者永远锁在创世那天的笔误上。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    _world_with_a_rock(tmp_path, client)
+
+    patch = _kind_patch(tmp_path / "relabel.cyberworld", {
+        **_ROCK, "affordances": {"look": {"label": "take a good look"}},
+    })
+    scheduler = build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True)
+    try:
+        verb = scheduler.ontology.kinds["rock"].affordances["look"]
+        assert verb.label == "take a good look", (
+            f"作者改了这个动词的人话,世界还念着旧的:{verb.label!r}"
+        )
+    finally:
+        scheduler.stop()
+
+
+def test_声明改了_可见性那份镜像跟着改(tmp_path):
+    """可见性表是声明的**镜像**,而她读到的是镜像那个。两边不一致的话,同一个量
+    在菜单上一个名字、在拒绝语里另一个名字 —— 而没有任何一处会报错。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    _world_with_a_rock(tmp_path, client)
+
+    patch = _kind_patch(tmp_path / "revis.cyberworld", {
+        **_ROCK,
+        "quantities": {"moss": {"default": 0.0, "visibility": "public", "label": "how mossy"}},
+    })
+    scheduler = build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True)
+    try:
+        table = scheduler.visibility_store.labels_map()
+        assert table.get(("rock", "moss")) == "how mossy", (
+            f"声明改了而镜像没改,同一个量两个名字:{table.get(('rock', 'moss'))!r}"
+        )
+    finally:
+        scheduler.stop()
+
+
+def test_实例仍旧只增_改不动一个已有实例(tmp_path):
+    """种类放开了,实例没有 —— 它有 `location`,而位置另有一份落在可见性表里
+    (那一份是只填缺地写的)。覆盖了这边不覆盖那边,同一个东西会有两个"它在哪"。"""
+    import fakeredis
+    import json as _json
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    _world_with_a_rock(tmp_path, client)
+
+    patch = tmp_path / "moverock.cyberworld"
+    patch.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "w"}\n'
+        + _json.dumps({"kind": "author", "type": "entity", "body": {
+            "id": "rock:one", "name": "somewhere else", "location": "cafe",
+        }}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    scheduler = build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True)
+    try:
+        assert scheduler.ontology.entities["rock:one"].name == "a rock", (
+            "实例被文件覆盖了 —— 它的位置在可见性表里还有一份,两边会对不上"
+        )
+    finally:
+        scheduler.stop()
+
+
+def test_内置兜底那份一个字都改不动这个世界的声明(tmp_path):
+    """安全的那一半。放开的是**作者指名的那份文件**,不是"每次开机手里那份"——
+    内置橱窗每次开机都在,让它去重写同名的声明,等于每次重启都拿别人世界的物理
+    法则盖掉这个世界的。而橱窗里恰好就有一个 `agent` 种类。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    seed = pathlib.Path(write_seed_file(tmp_path / "mine.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "kinds": [{"id": "agent", "quantities": {"nerve": {"default": 0.5, "label": "nerve"}}}],
+    }))
+    build_serve_scheduler("w3", client, world_file=seed, force_mock_llm=True).stop()
+    mine = json.loads(client.hget("anima:w3:kinds", "agent"))["definition"]
+
+    # 第二次开机**不给** --world-file:走内置兜底那条路
+    scheduler = build_serve_scheduler("w3", client, force_mock_llm=True)
+    try:
+        after = json.loads(client.hget("anima:w3:kinds", "agent"))["definition"]
+        assert after == mine, f"橱窗重写了这个世界的 agent 声明:{after}"
+    finally:
+        scheduler.stop()
+
+
+def test_没变的声明不重写_不然改动时间永远读不出来(tmp_path):
+    """同一份文件再开一次机,`updated_at` 不许被刷成开机时间 —— 刷了的话
+    "这条声明上次改是什么时候"这个问题从此没有答案。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    seed = _world_with_a_rock(tmp_path, client)
+    stamped = json.loads(client.hget("anima:w:kinds", "rock"))["updated_at"]
+
+    scheduler = build_serve_scheduler("w", client, world_file=seed, force_mock_llm=True)
+    try:
+        assert json.loads(client.hget("anima:w:kinds", "rock"))["updated_at"] == stamped
+    finally:
+        scheduler.stop()
+
+
+def test_作者指名的文件改得动一条已有的规律(tmp_path, minimal_seed):
+    """规律是这个世界的物理法则,而一条常数步长不看 `dt` 的规律会漂(线上那个
+    世界因此把雨天数多烧了 6 天)。从前修它要连玩家的进度一起抹掉重建。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w4", client, world_file=minimal_seed, force_mock_llm=True).stop()
+
+    def _patch(path, expression):
+        path.write_text(
+            '{"kind": "manifest", "version": 3, "world_id": "w4"}\n'
+            + json.dumps({"kind": "author", "type": "rule", "body": {
+                "id": "drift", "every": {"days": 1}, "for_each": {"owner": "world"},
+                "set": {"雨天数": expression},
+            }}, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    build_serve_scheduler(
+        "w4", client, world_file=_patch(tmp_path / "v1.cyberworld", "雨天数 + 1"),
+        force_mock_llm=True).stop()
+    scheduler = build_serve_scheduler(
+        "w4", client, world_file=_patch(tmp_path / "v2.cyberworld", "雨天数 + dt / 288"),
+        force_mock_llm=True)
+    try:
+        live = {r.id: r for r in scheduler.world_rules}["drift"]
+        assert "dt" in live.outputs["雨天数"].names, (
+            "作者修好了一条漂着的规律,而这个世界还在跑旧的那条"
+        )
+    finally:
+        scheduler.stop()
+
+
 def test_内置那份兜底文件不许去填一个已有的世界(tmp_path, minimal_seed):
     """这是上面那条的另一半,而它守的是一个真出过的 bug。
 

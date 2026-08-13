@@ -66,6 +66,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from anima_world.expressions import Expression, ExpressionError, compile_expression
+from anima_world.world_time import TICKS_PER_DAY
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,13 @@ logger = logging.getLogger(__name__)
 # 他那个量。`ontology.parse_kinds` 因此把它当**加载期错误**拒掉。
 BUILTIN_NAMES = ("dt", "now", "day", "hour", "minute", "minute_of_day")
 # `world` 这个 owner 的量,在任何表达式里都能以 `world_<key>` 读到。
+#
+# 注意这一对名字是**不对称**的:世界规律**写**的是光秃秃的 `雨天数`(带前缀写反而
+# 被 `bad_output_name` 拒掉),**读**回来却必须是 `world_雨天数`。任何一处拿"名字
+# 对得上"当"读的是同一个量"来判的地方,都要把这层前缀补上 —— `drift_warnings`
+# 就为此瞎过一次,而且恰好瞎在它被写出来针对的那类规律上。
 WORLD_PREFIX = "world_"
+WORLD_OWNER = "world"
 
 # 谁参与这条规律。`action` / `not_action` 是一对:此刻**正在**做某件事的人,
 # 和此刻**没在**做某件事的人。
@@ -164,11 +171,17 @@ class Rule:
         return frozenset(names)
 
 
-def parse_rules(entries: Any) -> list[Rule]:
+def parse_rules(entries: Any, *, ticks_per_day: int = TICKS_PER_DAY()) -> list[Rule]:
     """把 JSON 里的规律列表编译成 `Rule`。**任何一条坏了就整体拒绝。**
 
     不逐条丢弃(那是种子里可选字段的宽容原则):规律是世界的物理法则,少一条不是
     "少一点内容",是这个世界从此算错。宁可开不了机。
+
+    `ticks_per_day` 是 `every: {"days": N}` 的换算,而**一天多少 tick 是每个世界
+    自己的配置**(`world.minutes_per_tick`)。默认值只是"没人说话时的样子" ——
+    真正在跑的那份由装载方喂进来。把 288 写死在这儿的下场是:一个把
+    `minutes_per_tick` 调成 10 的世界里,`every: {"days": 1}` 一天跑两遍,而
+    作者按"一天一次"写的常数因此翻倍 —— 世界照跑、日志干净,只有数是错的。
     """
     if entries is None:
         return []
@@ -195,7 +208,7 @@ def parse_rules(entries: Any) -> list[Rule]:
         seen.add(rule_id)
 
         try:
-            rules.append(_parse_one(rule_id, label, entry))
+            rules.append(_parse_one(rule_id, label, entry, ticks_per_day))
         except RuleError as exc:
             errors.extend(exc.errors)
 
@@ -229,14 +242,22 @@ def drift_warnings(rules: Iterable[Rule]) -> list[str]:
     (比如数的就是"这条规律跑过几轮")。所以判据收得很紧 —— **读了自己写的那个量、
     又没有用 `dt`、而且 `every` 大于 1 tick**,三条都占才点名。误报够多次的警告
     等于没有警告。
+
+    ⚠️ "读了自己"在**世界的量**上换一副样子:`for_each: {"owner": "world"}` 的规律
+    写的是光秃秃的 `雨天数`,读回来却要写成 `world_雨天数`(见 `WORLD_PREFIX`)——
+    上面那个例子按字面根本跑不起来。只按名字对得上判的话,这道闸对世界的量整个
+    是瞎的,**而它被写出来针对的那次事故(线上的雨天数)恰恰就是一条世界规律**。
     """
     messages: list[str] = []
     for rule in rules:
         if rule.interval_ticks <= 1:
             continue          # 每 tick 都算的话根本没有"多算一次"这回事
+        world_owned = rule.selector_kind == "owner" and rule.selector_value == WORLD_OWNER
         drifty = sorted(
             key for key, expression in rule.outputs.items()
-            if key in expression.names and "dt" not in expression.names
+            if "dt" not in expression.names
+            and (key in expression.names
+                 or (world_owned and f"{WORLD_PREFIX}{key}" in expression.names))
         )
         if not drifty:
             continue
@@ -251,10 +272,11 @@ def drift_warnings(rules: Iterable[Rule]) -> list[str]:
     return messages
 
 
-def _parse_one(rule_id: str, label: str, entry: dict[str, Any]) -> Rule:
+def _parse_one(rule_id: str, label: str, entry: dict[str, Any],
+               ticks_per_day: int = TICKS_PER_DAY()) -> Rule:
     errors: list[str] = []
 
-    interval = _parse_interval(label, entry.get("every"), errors)
+    interval = _parse_interval(label, entry.get("every"), errors, ticks_per_day)
     selector = _parse_selector(label, entry.get("for_each"), errors)
 
     raw_outputs = entry.get("set")
@@ -425,8 +447,13 @@ def bad_output_name(name: str) -> str | None:
     return None
 
 
-def _parse_interval(label: str, raw: Any, errors: list[str]) -> int:
-    """`every` 是**节流**,不是步长 —— 真实流逝由 `dt` 带。缺省每 tick 都算。"""
+def _parse_interval(label: str, raw: Any, errors: list[str],
+                    ticks_per_day: int = TICKS_PER_DAY()) -> int:
+    """`every` 是**节流**,不是步长 —— 真实流逝由 `dt` 带。缺省每 tick 都算。
+
+    `days` 折成 tick 走的是**这个世界的** `world.minutes_per_tick`,不是写死的
+    288 —— 那正是这个模块开头那句"`now % 288` 这种手算解决不了"说的事。
+    """
     if raw is None:
         return 1
     if not isinstance(raw, dict) or not raw:
@@ -437,7 +464,7 @@ def _parse_interval(label: str, raw: Any, errors: list[str]) -> int:
         errors.append(f"{label}:every 只认 ticks / days,不认 {sorted(unknown)}")
         return 1
     ticks = 0
-    for unit, per_unit in (("ticks", 1), ("days", 288)):
+    for unit, per_unit in (("ticks", 1), ("days", max(1, int(ticks_per_day)))):
         if unit not in raw:
             continue
         try:

@@ -360,6 +360,72 @@ def test_the_table_lets_go_the_moment_the_journey_starts(tmp_path):
         )
 
 
+_GHOST = "3f86be36-0650-4d39-9141-eb4cd6810c21"
+
+
+def test_没报过名字的玩家在感知块里也是访客_不是他的_id(tmp_path):
+    """`_players_here` 的 docstring 早写下了这条,可见性表这一头没做。
+
+    落款那句是"这些是你**确实知道**的事,可以自然地提到"—— 于是她把一个 uuid
+    当成人名念出口。线上 `night-tide` 的 `stock_places` 里躺着五行这样的标签。
+
+    同一份提示词里两块因此打架:presence 走 `_players_here` 说「访客」,
+    perception 走这张表说「这里的 3f86be36-…」。
+    """
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        here = _where(world)
+        world.player_move(_GHOST, here)
+        world.tick(1)
+
+        assert world.scheduler.visibility_store.place_of(
+            f"agent:player:{_GHOST}") == here, "前提没成立:他没落进可见性表"
+        text = _prompt_now(world)
+        assert _GHOST not in text, "她的提示词里躺着一个 uuid,而那一块写着「你确实知道」"
+        assert "这里的访客" in text, "泛称也得给一个 —— 少一个人比多一个 id 强"
+
+
+def test_他报过名字之后_感知块跟着改口(tmp_path):
+    """标签只在**换地方**时写,于是"落地时还没报名、聊过之后才有名字"这条最常见的
+    路上,perception 会一直叫他「访客」而 presence 已经叫他「阿檀」——
+    同一份提示词里同一个人两个称呼,她挑一个,而且无声。"""
+    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
+        here = _where(world)
+        world.player_move(_GHOST, here)
+        world.tick(1)
+        assert "这里的访客" in _prompt_now(world), "前提没成立"
+
+        world.players[_GHOST]["display_name"] = "阿檀"
+        world.tick(1)
+        text = _prompt_now(world)
+        assert "这里的阿檀" in text, "他报过名字了,感知块还在叫他访客"
+
+
+def test_重开一次_表上不留下已经离场的幽灵玩家(tmp_path):
+    """扫幽灵要**问表,不问这个进程的缓存**。
+
+    `gone` 那一段只遍历 `_actor_placed` —— 进程内的。世界一重启这张缓存是空的,
+    于是上一个进程落下的行没人认领,**永远**留在表上。线上 `night-tide` 攒了六个:
+    在场名册是空的,可 `alley` / `bathhouse` / `yard` / `cart` 四个地方各站着
+    几天前就走了的人,每一条都占着 perception 那一格的预算,把真东西挤出去。
+    """
+    db = str(tmp_path / "w.db")
+    owner = f"agent:player:{_GHOST}"
+    with open_world_at(db, force_mock_llm=True) as world:
+        here = _where(world)
+        world.player_move(_GHOST, here)
+        world.tick(1)
+        assert world.scheduler.visibility_store.place_of(owner) == here
+        world.presence_store.expire_now(_GHOST)   # 他下线了,而这个进程没再跑过 tick
+
+    with open_world_at(db, force_mock_llm=True) as reopened:
+        assert reopened.who_is_present() == [], "前提没成立:他该早就不在场了"
+        reopened.tick(1)
+        assert reopened.scheduler.visibility_store.place_of(owner) is None, (
+            "上一个进程落下的行没人认领 —— 一个走了几天的人还站在她面前"
+        )
+        assert _GHOST not in _prompt_now(reopened)
+
+
 def _prompt_now(world: World) -> str:
     spy = PromptSpy()
     _say(world, spy)
