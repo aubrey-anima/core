@@ -543,6 +543,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="立绘 URI(https / http / data;空串 = 抹掉这一格)",
     )
     set_card.add_argument(
+        "--portrait-file", default=None, dest="portrait_file", metavar="PATH",
+        help="从文件里读那条立绘 URI(`-` = 标准输入)—— 内嵌的 data: URI 长过 "
+             "约 128 KiB 就塞不进 argv 了,那是操作系统的上限,不是引擎的",
+    )
+    set_card.add_argument(
         "--clear", action="store_true",
         help="把整张卡删掉 —— 「作者说他是背景」和「作者什么也没说」是两件事,"
              "所以它单独一格,而且不许和上面三个一起给",
@@ -781,6 +786,43 @@ def _authored_media_warnings(authored: dict[str, Any] | None) -> list[str]:
     if not authored:
         return []
     return world_card_warnings(authored) + world_location_media_warnings(authored)
+
+
+def _edit_location_media_warnings(authored: dict[str, Any] | None) -> list[str]:
+    """一次编辑(`--edit`)里的图**装不进已经存在的地点** —— 离线这两扇门也得说。
+
+    此前这句话只活在 `redis_state._warn_skipped_location_media` 的 `logger.warning`
+    里,也就是**只有真开机的人看得到**。而 `--edit` 这条路的用法恰恰是"先离线验一遍,
+    再拿去装":作者拿到一个绿灯,装上去图没了,两边日志都干净 —— 一个什么都没说的
+    绿灯,正是这两个校验出口存在的理由本身。
+
+    **只在文件里真的写了图的时候说**(说了也只说一句):一句总在响的警告等于没有
+    警告,而这条的收件人很具体 —— 拿着一份补了图的编辑包的那个人。
+
+    ⚠️ 它是**警告不是错误**,而且措辞必须带上那个条件("目标世界里**已经有的**那些
+    地点"):校验器手上没有目标世界,所以"这个地点在不在那边"它答不出。写成一句
+    光秃秃的"图装不进去"是把猜测说成判决 —— 给一个**新**地点配图这条路完全走得通。
+    """
+    if not authored:
+        return []
+    entries = authored.get("locations")
+    if not isinstance(entries, list):
+        return []
+    named = [
+        str(entry.get("id") or "?")
+        for entry in entries
+        if isinstance(entry, dict) and any(entry.get(key) for key in LOCATION_IMAGE_KEYS)
+    ]
+    if not named:
+        return []
+    return [
+        f"这是一次编辑(--edit),而其中 {len(named)} 个地点写了图"
+        f"({'、'.join(named[:5])}{'…' if len(named) > 5 else ''})—— "
+        "**目标世界里已经有的那些地点,这几格装不进去**:作者层合并按地点 id 整条"
+        "跳过已有地点(整行合并会把这个世界跑出来的名字和描述倒带回创世那天)。"
+        "只有目标世界里还没有的地点才会带着图落地;给一个已经在跑的地点补图,"
+        "眼下只能重建那个世界"
+    ]
 
 
 def _load_world_file(
@@ -3139,7 +3181,17 @@ def _map_frame(world: Any, args: argparse.Namespace) -> str:
     data = world.map_data(
         from_tick=args.from_tick, to_tick=args.to_tick, agents=args.agent
     )
-    places = [MapPlace(**place) for place in data["places"]]
+    # **逐格取,不 `**place`。** `map_data()` 的 `places` 行是**契约**,它会长
+    # (地点的两格图就是这么加进去的);而这张字符画是**赠品**,画不出图片。
+    # `MapPlace(**place)` 让"契约加一格"变成"`anima-world map` 当场 TypeError" ——
+    # 加图那一轮真的这么炸过,而当时橱窗里一格图都没有,所以没有一条测试碰得到它。
+    places = [
+        MapPlace(
+            id=place["id"], name=place["name"], kind=place["kind"],
+            x=place["x"], y=place["y"], w=place.get("w"), h=place.get("h"),
+        )
+        for place in data["places"]
+    ]
     tracks = [] if args.now else [
         Track(
             agent=t["agent"],
@@ -4650,9 +4702,18 @@ def run_agent_set_card(args: argparse.Namespace) -> int:
     而已经在册的角色永远不会再 join —— 于是那一轮**对唯一一个有真人的世界等于
     没做**(线上 20 个角色一张卡都装不进去,而作者写得进、校验放行、包也导得出)。
 
-    **一次只改一个人,不收文件。** 生产上这条路的入口是运维台的一次性容器,argv
-    由具名参数白名单生成 —— 容器里没有作者的文件;而 argv 是数组传递,中文和标点
-    直接当一个元素传,不过 shell。
+    **一次只改一个人。** 生产上这条路的入口是运维台的一次性容器,argv 由具名参数
+    白名单生成;而 argv 是数组传递,中文和标点直接当一个元素传,不过 shell。
+
+    ⚠️ **`--portrait` 够不到契约公布的那个 1 MiB**:Linux 的 `MAX_ARG_STRLEN` 把
+    单个 argv 元素封在 128 KiB(实测 122902 字节过、177518 字节炸),再往上
+    `execve` 直接 `E2BIG`,壳报「参数列表过长」并给 rc 126 —— **那是操作系统在
+    说话,不是引擎**:引擎连被叫起来的机会都没有,于是没有回执、没有退出码 2、
+    没有一句能翻译给运维的人的话。一条 `data:` URI 到 1 MiB 是常事(base64 之后
+    约是原图的 4/3),所以契约上"能写 1 MiB"和这扇门上"能传 128 KiB"之间那段,
+    从前是个只有撞上去才知道的坎。`--portrait-file` 就是补这一段:URI 走文件或
+    标准输入进来,不过 argv。**文件里装的是那条 URI 文本,不是图片字节** ——
+    引擎不碰字节(嗅 MIME、转 base64 都是创作台的活,见 `media.py`)。
 
     判断都在 `World.set_card` 的 docstring 里(**覆盖**、部分合并、`--clear` 单独
     一格、幂等)。这里只管三件事:参数互斥、退出码、印给人看。
@@ -4661,19 +4722,57 @@ def run_agent_set_card(args: argparse.Namespace) -> int:
     """
     from anima_world.api import World
 
+    portrait = args.portrait
+    source = getattr(args, "portrait_file", None)
+    if source is not None:
+        if portrait is not None:
+            print("[agent] --portrait 和 --portrait-file 不能一起给:"
+                  "两句话都在说这一格写成什么 —— 引擎挑哪句都是猜。",
+                  file=sys.stderr)
+            return 2
+        try:
+            raw = sys.stdin.read() if source == "-" else Path(source).read_text("utf-8")
+        except OSError as exc:
+            print(f"[agent] 读不了 {source}:{exc}", file=sys.stderr)
+            return 2
+        except UnicodeDecodeError:
+            # 有人会把 PNG 本身喂进来。**说清楚这里要的是哪一样东西** ——
+            # 「不是 UTF-8」这句话对着一个刚把图片拖进来的人什么也没解释。
+            print(f"[agent] {source} 不是文本 —— 这里要的是那条 URI(比如 "
+                  "`data:image/png;base64,…` 或一条 https 链接),不是图片字节;"
+                  "转 base64 是创作台那侧的活。", file=sys.stderr)
+            return 2
+        portrait = raw.strip()
+        if not portrait:
+            # 空文件几乎总是「写失败了 / 路径写错了」,而不是「我要抹掉这一格」。
+            # 当成后者的话,一次失败的写会安静地删掉线上那张立绘。
+            print(f"[agent] {source} 是空的 —— 要抹掉这一格请明写 --portrait ''。",
+                  file=sys.stderr)
+            return 2
+        if any(ch.isspace() for ch in portrait):
+            # 一条 URI 里不该有空白。掐掉两头之后还剩空白 = 文件被编辑器折了行,
+            # 而闸只看 scheme 和字节数,这种 URI 它照放 —— 出去就是一张断的图。
+            print(f"[agent] {source} 里那条 URI 中间有空白(换行?)—— 一条 URI "
+                  "不该断行,多半是被编辑器折了。整条写成一行再来一次。",
+                  file=sys.stderr)
+            return 2
+
     given = {
-        key: getattr(args, key)
-        for key in ("billing", "tagline", "portrait")
-        if getattr(args, key, None) is not None
+        key: value
+        for key, value in (
+            ("billing", args.billing), ("tagline", args.tagline), ("portrait", portrait)
+        )
+        if value is not None
     }
     if args.clear and given:
-        print("[agent] --clear 和 --billing/--tagline/--portrait 不能一起给:"
+        print("[agent] --clear 和 --billing/--tagline/--portrait(-file) 不能一起给:"
               "一句是「删掉这张卡」,一句是「这张卡写成这样」—— 引擎挑哪句都是猜。",
               file=sys.stderr)
         return 2
     if not args.clear and not given:
-        print("[agent] 什么都没给 —— --billing / --tagline / --portrait / --clear "
-              "至少给一个。一次什么也没改的「成功」读起来和改成功了一模一样。",
+        print("[agent] 什么都没给 —— --billing / --tagline / --portrait / "
+              "--portrait-file / --clear 至少给一个。"
+              "一次什么也没改的「成功」读起来和改成功了一模一样。",
               file=sys.stderr)
         return 2
 
@@ -5057,6 +5156,7 @@ def run_validate(args: argparse.Namespace) -> int:
                     "可以来自目标世界,而目标世界不在手上 —— 要连着世界查,"
                     "用 `simulate --ticks 0 --world-file …`"
                 )
+                warnings += _edit_location_media_warnings(authored)
             else:
                 errors += _authored_ontology_errors(authored)
         return _report_validation("world", args.path, errors, warnings, args.json)
@@ -5206,6 +5306,20 @@ def contract_payload() -> dict[str, Any]:
             # 数按读出口定 —— 地点的图骑在 `state()` 上,而那道门每几秒被问一次、
             # 一次带回全部地点,所以它比立绘那一格贵得多,数也就不一样。
             "location_image_max_bytes": LOCATION_IMAGE_MAX_BYTES,
+            # 读出口与写出口,和 `character_card` 那两格同一个形状、同一个理由。
+            # **契约必须说得出「没有写门」** —— 少了这两格,一份契约看上去和
+            # `character_card` 一模一样,而创作台的铁律是"问引擎,不读文档":
+            # 它会合理地推断"既然作者层写得进,那跑着的世界当然也改得动",
+            # 然后把那个按钮画出来。`None` 是一句真话,沉默是一句谎。
+            "location_image_read_command": "map",
+            "location_image_write_command": None,
+            "location_image_write_gloss": (
+                "没有写门:这两格只在**作者层**落地(建世界时,或 `world import` "
+                "一份新地点)。往一个已经跑着的世界补图眼下不行 —— 作者层合并"
+                "按地点 id **整条**跳过已有地点(整行合并会把这个世界跑出来的"
+                "名字和描述倒带回创世那天),于是只有目标世界里还没有的地点才"
+                "带得进图。给一个在册的地点补图,今天只能重建那个世界"
+            ),
         },
         # 角色卡:作者写给**玩家**看的那一面。创作台照这一段决定填什么、怎么校验,
         # 而它此前只能靠版本号猜"这支引擎带不带得动" —— 猜错不报错。
@@ -5272,6 +5386,9 @@ def run_contract(args: argparse.Namespace) -> int:
           f"立绘 ≤ {payload['character_card']['portrait_max_bytes'] // 1024} KiB   "
           f"地点每格 ≤ {payload['seed']['location_image_max_bytes'] // 1024} KiB"
           f"(量的是 URI 本身;引擎不存字节)")
+    write_cmd = payload["seed"]["location_image_write_command"]
+    print(f"  地点图出口     读出口 anima-world {payload['seed']['location_image_read_command']}"
+          f"   写出口 " + (f"anima-world {write_cmd}" if write_cmd else "没有(只在作者层落地)"))
     print(f"  节拍 op        {', '.join(payload['beats']['ops'])}")
     print(f"  节拍谓词       {', '.join(payload['beats']['predicates'])}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
@@ -5629,7 +5746,16 @@ def _print_check_media(payload: dict[str, Any]) -> None:
     inline = payload.get("inline_media_bytes") or {}
     if not external and not inline.get("count"):
         return
-    print(f"  {onboarding.dim('图 —— 不联网探活,只报这个包指向哪儿')}")
+    if external:
+        # **把这一段自己的用途说出来。** 只写一句"报这个包指向哪儿"的话,读的人
+        # 会当它是一栏统计;而它真正要说的是一句代价:**这些图不在包里** ——
+        # 包发出去之后,下面列出的每一台服务器都得继续活着,少了哪一台也不会有
+        # 任何一处报错,只是玩家那边少几张图。这句话是准备自建部署的人在装载之前
+        # 唯一一次听得到它的机会。
+        print(f"  {onboarding.dim('图 —— 这些图不在包里:发出去之后要靠下面这几台还活着')}")
+        print(f"  {onboarding.dim('     (不联网探活,只报这个包指向哪儿)')}")
+    else:
+        print(f"  {onboarding.dim('图 —— 都内嵌在包里,不依赖任何一台服务器')}")
     for row in external:
         print(
             f"    {row['count']:>4} 张  {row['scheme']}://{row['host']}"
@@ -5753,6 +5879,7 @@ def run_world_check(args: argparse.Namespace) -> int:
                     "这是一次编辑(--edit),引用完整性没查:种类 / 地点 / 物品 / 规律"
                     "可以来自目标世界,而目标世界不在手上"
                 )
+                warnings += _edit_location_media_warnings(authored)
             else:
                 errors += _authored_ontology_errors(authored)
         payload["errors"] = errors

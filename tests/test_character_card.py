@@ -777,6 +777,87 @@ def test_set_card_command_refuses_a_bad_card_before_writing(tmp_path):
     assert {r["agent_id"]: r for r in roster["agents"]}["a0"]["billing"] == "lead"
 
 
+def test_立绘走文件进来_argv装不下的那一段(tmp_path):
+    """契约公布 1 MiB,而 `--portrait` 这扇门到 128 KiB 就没了。
+
+    Linux 的 `MAX_ARG_STRLEN` 把单个 argv 元素封在 128 KiB,再往上 `execve` 直接
+    `E2BIG` —— 报错的是**操作系统**,引擎连被叫起来的机会都没有:没有回执、没有
+    退出码 2、没有一句能翻译给运维的人的话(壳给的是 rc 126「参数列表过长」)。
+    一条 `data:` 立绘到 1 MiB 是常事(base64 之后约是原图的 4/3),所以"契约说
+    能写 1 MiB"和"这扇门能传 128 KiB"之间那一段,从前只有撞上去才知道。
+
+    `--portrait-file` 补的就是这一段:URI 走文件或标准输入,不过 argv。
+    这里用 200 KiB —— **刚好在那道坎的另一边**,写成 1 KiB 的话这条测试永远绿,
+    而它要防的那件事从来没被验到。
+    """
+    import base64
+
+    world = _running_world(tmp_path, None, None)
+    world.close()
+
+    uri = "data:image/png;base64," + base64.b64encode(b"\0" * 150_000).decode()
+    assert len(uri) > 128 * 1024, "小于那道坎的话这条测试什么也没验"
+    path = tmp_path / "portrait.txt"
+    path.write_text(uri + "\n", encoding="utf-8")     # 尾巴上的换行是必然的,得吃掉
+
+    done = run_cli("agent", "set-card", "--world-id", "w", "--agent", "a0",
+                   "--portrait-file", str(path), "--json")
+    assert done.returncode == 0, done.stderr
+    roster = json.loads(run_cli("roster", "--world-id", "w", "--json").stdout)
+    assert {r["agent_id"]: r for r in roster["agents"]}["a0"]["portrait"] == uri
+
+    # `-` = 标准输入:运维台那个一次性容器里连一个能写的文件都不一定有。
+    piped = run_cli("agent", "set-card", "--world-id", "w", "--agent", "a1",
+                    "--portrait-file", "-", "--json",
+                    input="https://cdn.example.com/a1.png")
+    assert piped.returncode == 0, piped.stderr
+    roster = json.loads(run_cli("roster", "--world-id", "w", "--json").stdout)
+    assert {r["agent_id"]: r for r in roster["agents"]}["a1"]["portrait"] \
+        == "https://cdn.example.com/a1.png"
+
+
+def test_立绘文件那几种拒绝_每一种都说得出为什么(tmp_path):
+    """这扇门新开的口子上,几种拒绝各有各的理由,而**猜错了都是安静的**。"""
+    world = _running_world(tmp_path, {"portrait": "https://cdn.example.com/old.png"})
+    world.close()
+
+    def attempt(*extra):
+        return run_cli("agent", "set-card", "--world-id", "w", "--agent", "a0",
+                       *extra, "--json")
+
+    # 1. 两句都在说这一格写成什么 —— 挑哪句都是猜。
+    both = attempt("--portrait", "https://cdn.example.com/x.png",
+                   "--portrait-file", str(tmp_path / "any.txt"))
+    assert both.returncode == 2 and "usage:" not in both.stderr
+
+    # 2. 读不了。**别把它读成"作者要抹掉这一格"** —— 一次失败的写会安静地
+    #    删掉线上那张立绘。
+    gone = attempt("--portrait-file", str(tmp_path / "nope.txt"))
+    assert gone.returncode == 2 and "nope.txt" in gone.stderr
+
+    # 3. 空文件同理:几乎总是"写失败了 / 路径写错了",不是"抹掉它"。
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n", encoding="utf-8")
+    blank = attempt("--portrait-file", str(empty))
+    assert blank.returncode == 2 and "--portrait ''" in blank.stderr
+
+    # 4. 中间断了行:闸只看 scheme 和字节数,这种 URI 它照放 —— 出去是一张断的图。
+    folded = tmp_path / "folded.txt"
+    folded.write_text("data:image/png;base64,AAAA\nBBBB\n", encoding="utf-8")
+    wrapped = attempt("--portrait-file", str(folded))
+    assert wrapped.returncode == 2 and "空白" in wrapped.stderr
+
+    # 而文件里写了一条**坏 URI** 时,拒绝它的仍然是原来那道闸(这扇门不另判一次)。
+    bad = tmp_path / "bad.txt"
+    bad.write_text("portraits/a0.png\n", encoding="utf-8")
+    assert attempt("--portrait-file", str(bad)).returncode == 2
+
+    # 每一次都没写进去 —— 拒绝了还改了一半是这一类命令最坏的收场。
+    roster = json.loads(run_cli("roster", "--world-id", "w", "--json").stdout)
+    assert {r["agent_id"]: r for r in roster["agents"]}["a0"]["portrait"] \
+        == "https://cdn.example.com/old.png"
+
+
 def test_set_card_command_refuses_a_world_that_does_not_exist(tmp_path):
     """写命令同样不许**创建**世界:抄错 world_id 会当场创世,而回执看上去是成功的。"""
     world = _running_world(tmp_path, None)

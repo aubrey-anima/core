@@ -2650,10 +2650,27 @@ secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的
 `contract --json` 的 `seed.location_optional_keys` / `location_image_keys`(**哪个是哪个
 也在里面**)/ `location_image_schemes` / `location_image_max_bytes` 自报形状。
 
+⚠️ **两个读出口的形状有意不同,别拿同一段代码去读。** `state()` 的行**永远带这两个键**
+(照 `api._LOCATION_KEYS` 逐键取,没写的是 `None`);`map_data()` 的行**只在写了时才有
+这一格**(照 `w`/`h` 那条既有的约定 —— 于是一张没有图的地图,它的 `--json` 和从前逐
+字节相同)。所以对着 `places[]` 写 `row["map_image"]` 会 `KeyError`,要 `row.get(...)`。
+两边统一成一种形状会破坏其中一条约定,所以留着,但**必须写出来** —— 一个只在"这个
+世界恰好没配图"时才炸的宿主,是这里最难查的那种坏法。
+
 ⚠️ **写口还欠着。** 作者层合并是"只填缺、不覆盖",而覆盖粒度是**整行** —— 一个地点
 只要已经在世界里,拿一份补了图的世界文件装回去**不生效**(整行合并会把这个世界跑
 出来的名字和描述倒带回创世那天)。这是角色卡那一课的同一个形状,眼下的处置是
-**不许它安静**:合并跳过一个"文件里有图、库里没有"的地点时当场 `logger.warning`。
+**不许它安静**,而且三处都问得出来:
+
+- `contract --json` 的 `seed.location_image_read_command`(`"map"`)与
+  **`seed.location_image_write_command`(`null`)**,外加 `location_image_write_gloss`
+  一句人话。对照 `character_card.write_command`(`"agent set-card"`)—— 两段形状一样、
+  答案不一样。**"没有写门"是一个答案,沉默不是**:少了这一格,消费方最合理的推断是
+  "作者层写得进,跑着的世界当然也改得动",然后那个按钮就被画出来了。
+- `validate world --edit` 与 `world check --edit`:文件里真带了图时**逐个点名**哪几个
+  地点的图装不进去。从前这句话只在真开机时进日志,而作者的顺序是先校验、绿了才装。
+- 真开机:合并跳过一个"文件里有图、库里没有"的地点时 `logger.warning`。
+
 一个像 `agent set-card` 那样的写口(`location set-image`)是下一步,还没定。
 
 ---
@@ -3285,6 +3302,8 @@ anima-world world drop --world-id w --yes    # 真删
 anima-world agent set-card --world-id w --agent 夏 --billing lead
 anima-world agent set-card --world-id w --agent 夏 --tagline "老港咖啡的店员" --dry-run
 anima-world agent set-card --world-id w --agent 夏 --portrait https://cdn.example.com/su.png
+anima-world agent set-card --world-id w --agent 夏 --portrait-file ./su.uri   # 大图走这条
+printf '%s' "$uri" | anima-world agent set-card --world-id w --agent 夏 --portrait-file -
 anima-world agent set-card --world-id w --agent 夏 --clear          # 收回这张卡
 ```
 
@@ -3294,18 +3313,29 @@ anima-world agent set-card --world-id w --agent 夏 --clear          # 收回这
 | `--billing` | 不动 | `lead` / `supporting` / `hidden` |
 | `--tagline` | 不动 | 通讯录里名字底下那一行,不许换行。**空串 = 抹掉这一格** |
 | `--portrait` | 不动 | 立绘 URI(`https` / `http` / `data`)。**空串 = 抹掉这一格** |
-| `--clear` | 否 | 把**整张卡**删掉。和上面三个**不许一起给** |
+| `--portrait-file` | 不动 | 从文件里读那条 URI(`-` = 标准输入)。和 `--portrait` **不许一起给** |
+| `--clear` | 否 | 把**整张卡**删掉。和上面几个**不许一起给** |
 | `--dry-run` | 否 | 只报要改成什么,一个字节都不写 |
 | `--json` | - | 机器可读:`{"operation":"agent set-card","world_id":…, agent_id, name, before, after, changed, cleared, dry_run, warnings}` |
 
 `World.set_card()`(§3)的 CLI 出口。判断全在那份 docstring 里(**覆盖**、部分合并、
-`--clear` 单独一格、幂等、合并后再校验),这里只补三件命令行上的事:
+`--clear` 单独一格、幂等、合并后再校验),这里只补几件命令行上的事:
 
-- **一次只改一个人,不收文件。** 生产上这条路的入口是运维台的一次性容器,argv 由具名
-  参数白名单生成 —— 容器里没有作者的文件;而 argv 是数组传递,中文和标点直接当一个
-  元素传,不过 shell。
+- **一次只改一个人。** 生产上这条路的入口是运维台的一次性容器,argv 由具名参数白名单
+  生成;而 argv 是数组传递,中文和标点直接当一个元素传,不过 shell。
+- ⚠️ **`--portrait` 到 128 KiB 就没了,而炸的不是引擎。** Linux 的 `MAX_ARG_STRLEN` 把
+  单个 argv 元素封在 128 KiB(实测 122902 字节过、177518 字节炸),再往上 `execve` 直接
+  `E2BIG`,壳报「参数列表过长」并给 **rc 126** —— 引擎连被叫起来的机会都没有:没有回执、
+  没有退出码 2、没有一句能翻译给运维的人的话。而 `portrait` 的契约上限是 **1 MiB**,
+  一条 `data:` 立绘到那个量级是常事。`--portrait-file` 补的就是这中间那一段:URI 走文件
+  或标准输入,不过 argv。**文件里装的是那条 URI 文本,不是图片字节** —— 引擎不碰字节
+  (嗅 MIME、转 base64 是创作台的活)。两头空白掐掉;**空文件退 2**(一次失败的写会
+  安静地删掉线上那张立绘,所以不读成"抹掉这一格" —— 要抹请明写 `--portrait ''`);
+  URI 中间还剩空白(编辑器折了行)也退 2 —— 原来那道闸只看 scheme 和字节数,这种 URI
+  它照放,出去就是一张断的图。
 - **退出码 2 = "我听懂了,但我不干"**(运维台把它翻译成 409):不认识的 agent、
-  `--clear` 和值同时给、四个 flag 一个都没给、坏卡、不存在的 world_id。**每一种都一个
+  `--clear` 和值同时给、几个 flag 一个都没给、`--portrait` 与 `--portrait-file` 同时给、
+  文件读不了 / 是空的 / 中间断了行、坏卡、不存在的 world_id。**每一种都一个
   字都不写**,而且 `--json` 时 stdout 一个字节都不出 —— 编一个空回执出去的话,运维的
   人会以为改成功了,而那正是这条命令要修的病。不认识的 agent 会**把这个世界里有谁
   列出来**。

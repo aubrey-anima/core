@@ -23,6 +23,7 @@ from anima_world.api import World
 from anima_world.media import (
     LOCATION_IMAGE_KEYS,
     LOCATION_IMAGE_MAX_BYTES,
+    MEDIA_SCHEMES,
     MediaScan,
 )
 from anima_world.character_card import PORTRAIT_MAX_BYTES
@@ -277,6 +278,13 @@ def test_同一张图抄在几处只算一张(tmp_path):
     seed = _seed(map_image=_MAP, scene_image=_MAP)
     payload = _check(_write(tmp_path, seed))
     assert [row["count"] for row in payload["external_media"]] == [1]
+    # 但**「几张图」和「这台图床供着哪几格」是两个问题**,去重只该答第一个。
+    # 从前 `fields` 挂在去重之后 return 的下游,于是第二格整个消失:同一张图
+    # 既当缩略又当背景(网站的图床是内容寻址的 —— 同一张图传两次拿回同一条 URL,
+    # 所以"一张图两处用"是常态不是边角),报出来却成了"这台只供缩略图"。
+    assert [row["fields"] for row in payload["external_media"]] == [
+        ["map_image", "scene_image"]
+    ]
 
 
 def test_跑过的世界导出来_图照样数得出(tmp_path):
@@ -357,10 +365,35 @@ def test_契约自己说得出两格是什么(tmp_path):
     assert set(seed["location_image_keys"]) == set(LOCATION_IMAGE_KEYS)
     for gloss in seed["location_image_keys"].values():
         assert gloss.strip(), "每一格都得说清它是干什么用的"
+    # 闸的另一半:哪些 scheme 算数。**没钉住的契约格子等于没有契约** ——
+    # 少了这一行,把 `data:` 从许可名单里拿掉不会让任何一处变红,而创作台照着
+    # 一份旧契约生成的世界会在装载时才发现自己写的图引擎不认。
+    assert seed["location_image_schemes"] == sorted(MEDIA_SCHEMES)
     assert seed["location_image_max_bytes"] == LOCATION_IMAGE_MAX_BYTES
     assert payload["character_card"]["portrait_max_bytes"] == PORTRAIT_MAX_BYTES
     # 两处上限都在契约里,而且**不相等** —— 按各自的读出口定,见 media.py。
     assert seed["location_image_max_bytes"] != payload["character_card"]["portrait_max_bytes"]
+
+
+def test_契约说得出这两格没有写门(tmp_path):
+    """**"没有写门"也是一个答案,而沉默不是。**
+
+    创作台的铁律是问引擎不读文档 —— 而在这两格上,一份只报了形状和上限的契约
+    和 `character_card` 那一段长得一模一样,后者是有写门的(`agent set-card`)。
+    于是最合理的推断是"作者层写得进,跑着的世界当然也改得动",然后那个按钮就
+    被画出来了,点下去改不动任何东西,而且没有一处会报错。
+    `None` 加一句人话,是这里唯一诚实的形状。
+    """
+    payload = json.loads(run_cli("contract", "--json").stdout)
+    seed = payload["seed"]
+    assert seed["location_image_read_command"] == "map"
+    assert seed["location_image_write_command"] is None
+    assert "作者层" in seed["location_image_write_gloss"]
+    # 对照组:有写门的那一段照旧报得出来 —— 两段形状一致,答案不一致。
+    assert payload["character_card"]["write_command"] == "agent set-card"
+
+    human = run_cli("contract").stdout
+    assert "没有(只在作者层落地)" in human
 
 
 def test_必填集没变_老世界一个都不该被拦下(tmp_path):
@@ -392,3 +425,30 @@ def test_给已有的世界补图_装不进去时得说一句(tmp_path, caplog):
     finally:
         world.close()
     assert any("map_image" in r.getMessage() for r in caplog.records), "没生效的编辑一声不吭"
+
+
+def test_离线两扇门也说得出这次编辑的图装不进去(tmp_path):
+    """上一条那句话从前**只在真开机时才说得出来**。
+
+    而作者的顺序是先 `validate world --edit`(或运维台的 `world check --edit`),
+    绿了才装。于是他拿到一个绿灯、装完、图没了 —— 只有去翻服务器日志才查得到
+    原因,而那正是"离线两扇门"存在的全部理由:开机之前就把话说完。
+
+    **两扇门都得说**:`test_validate_matches_boot` 只钉了错误相等,警告可以不同 ——
+    也就是说这里少钉一扇,两扇门就会安静地给出不同的判断,而那正是那份文件在防的事。
+    """
+    path = _write(tmp_path, _seed(map_image=_MAP, scene_image=_SCENE))
+
+    validate = json.loads(run_cli("validate", "world", path, "--edit", "--json").stdout)
+    assert validate["valid"] is True, "有图不是错,这条只该是警告"
+    check = json.loads(run_cli("world", "check", path, "--edit", "--json").stdout)
+    assert check["loadable"] is True
+
+    for label, warnings in (("validate", validate["warnings"]), ("check", check["warnings"])):
+        said = [w for w in warnings if "wharf" in w]
+        assert said, f"{label} --edit 没说这次编辑的图装不进已有的地点"
+
+    # 不是每次 `--edit` 都喊 —— 一句总在响的警告等于没有警告。
+    bare = _write(tmp_path, _seed(), "bare.cyberworld")
+    quiet = json.loads(run_cli("validate", "world", bare, "--edit", "--json").stdout)
+    assert not [w for w in quiet["warnings"] if "wharf" in w]

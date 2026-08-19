@@ -1686,6 +1686,19 @@ build backend + 一个 `build_py` 钩子),而这个仓库的发布管线是一�
 铁律照旧、而且这一次尤其要守:**能力问 `contract --json`,不看这份文档、更不看版本号**。
 下面每一个数,`contract --json` 里都问得到,**问得到的那个才是权威**。
 
+⚠️ **交付之后的一轮收口(同一个 Unreleased 里,五件跟你们有关的)**:
+⓪ 🔴 **`anima-world map`(不带 `--json`)对任何一个配了图的世界当场 TypeError** ——
+渲染那一步是 `MapPlace(**place)`,而 `places` 行多了两格。已修(逐格取,不再 `**`)。
+**如果你们那侧也有照 `map --json` 的行往一个固定形状里灌的代码,顺手检查一遍** ——
+`places[]` 是**会长**的契约;
+① `world check` 的 `external_media[].fields` 从前**漏报**同一条 URI 的第二格 ——
+而你们的图床是内容寻址的,"一张图两处用"是常态,所以这个错答案很容易撞上;
+② `--portrait` 有一道 **128 KiB 的 argv 坎**(报错的是操作系统),新开了
+`--portrait-file`;③ 契约现在说得出**这两格没有写门**(`location_image_write_command:
+null`),而 `--edit` 那两扇离线门也会点名"这次的图装不进去";
+④ `1.37 MiB` 那个换算是**算错的**,正确是 **1.33 MiB** —— 你们照它设闸,所以单列一条。
+各自的细节写在下面对应的小节里。
+
 ### 裁决本身:这不是一件事,是三件
 
 「地点、背景、人物都有图」按判定程序两问拆:
@@ -1732,9 +1745,11 @@ build backend + 一个 `build_py` 钩子),而这个仓库的发布管线是一�
 | 读出口 | `World.state()` 的 `locations[]` 行(**没写图的地点这两格是 `None`**)与 `World.map_data()` / `map --json` 的 `places[]`(**写了才出现**,和 `w`/`h` 同一个安排);立绘照旧在 `roster()` |
 
 ⚠️ **上限量的是这条 URI 字符串本身,不是原图字节** —— base64 之后约 **4/3**。
-你们那条按**原图**字节设的 `PORTRAIT_MAX_BYTES = 1 MB` 因此会放过一张变成约 1.37 MiB URI
-的图,而引擎当场拒收。**建议把你们那侧的原图闸压到 750 KiB 左右**,或者干脆改成量
-`len(data_uri.encode())` 再和 `contract --json` 报的数比 —— 后者不会随引擎改数而失准。
+你们那条按**原图**字节设的 `PORTRAIT_MAX_BYTES = 1 MB` 因此会放过一张变成约 **1.33 MiB**
+URI 的图(1048576 × 4/3 + 22 = **1398126** 字节),而引擎当场拒收。**建议把你们那侧的
+原图闸压到 750 KiB 左右**(768 KiB 是数学上的临界,加上 `data:image/png;base64,` 这
+二十来个字节的前缀正好越线),或者干脆改成量 `len(data_uri.encode())` 再和
+`contract --json` 报的数比 —— 后者不会随引擎改数而失准。
 
 ⚠️ **两个上限不必相等,理由是"读出口"不是"图的重要性"**:`roster()` 是按需拿一次,
 而地点的图骑在 `state()` 上 —— 那道门被网站**每几秒轮询一次**,且**一次带回全部地点**。
@@ -1742,9 +1757,45 @@ CLAUDE.md 那条「进得了提示词的必须有界」在这里的对偶是**�
 
 ⚠️ **一扇还欠着的写门**(现在就说,免得你们撞上去):作者层是"只填缺不覆盖",而合并装载
 是**按地点 id 整条跳过**已有地点 —— 所以拿一份带图的文件去编辑一个**已经跑起来的**世界,
-图**装不进去**。这一轮先保证它不无声(引擎逐个地点 `logger.warning` 点名"这次没装进去的是
-哪几格"),真正的修法是补一扇 `location set-image`(形状对着 `agent set-card`),**下一单**。
+图**装不进去**。真正的修法是补一扇 `location set-image`(形状对着 `agent set-card`),**下一单**。
 **给新世界出包不受影响** —— 那条路是创世,图正常落地。
+
+这一轮把这件事做成了**三处都问得出来**,不用你们读这份文档才知道:
+
+| 问谁 | 它怎么答 |
+|---|---|
+| `contract --json` | `seed.location_image_read_command == "map"`,而 **`seed.location_image_write_command` 是 `null`**,外加一句 `location_image_write_gloss` 说明为什么。对照 `character_card.write_command == "agent set-card"` —— **两段形状一样,答案不一样** |
+| `validate world --edit` / `world check --edit` | 文件里真带了图时**逐个点名**"目标世界里已有的那几个地点,这几格装不进去"。从前这句话只在真开机时进服务器日志,而你们的顺序是先校验、绿了才装 —— 拿到绿灯、装完、图没了 |
+| 真开机 | 引擎照旧逐个地点 `logger.warning` |
+
+**`write_command: null` 是一句真话,沉默不是。** 少了这一格,一份契约看上去和 `character_card`
+那段一模一样,而最合理的推断是"作者层写得进,跑着的世界当然也改得动" —— 然后那个按钮被画
+出来,点下去改不动任何东西,零报错。
+
+### 立绘走 CLI 有一道**操作系统**的坎,以及新开的那扇门
+
+`--portrait <data:…>` 在 URI 超过约 **128 KiB** 时会炸,而**炸的不是引擎**:Linux 的
+`MAX_ARG_STRLEN` 把单个 argv 元素封在 128 KiB(实测 122902 字节过、177518 字节炸),
+再往上 `execve` 直接 `E2BIG`,壳报「参数列表过长」并给 **rc 126**。引擎连被叫起来的机会
+都没有 —— 没有回执、没有退出码 2、没有一句能翻译给用户的话。于是"契约公布 1 MiB"和
+"这扇门传得动 128 KiB"之间那一段,从前只有撞上去才知道。
+
+**新开的口子:`anima-world agent set-card --portrait-file <PATH>`**(`-` = 标准输入)。
+
+```bash
+anima-world agent set-card --world-id w --agent 夏 --portrait-file ./portrait.uri
+printf '%s' "$uri" | anima-world agent set-card --world-id w --agent 夏 --portrait-file -
+```
+
+四条要知道的:
+
+- **文件里装的是那条 URI 文本,不是图片字节。** 嗅 MIME、转 base64 仍然是你们那侧的活
+  (引擎一个字节都不碰,这条没变)。
+- 两头的空白会被掐掉(尾部那个换行是必然的);**空文件当场拒绝**(退 2),不读成
+  "作者要抹掉这一格" —— 一次失败的写会安静地删掉线上那张立绘。要抹请明写 `--portrait ''`。
+- URI 中间还剩空白(多半是编辑器折了行)也拒绝:原来那道闸只看 scheme 和字节数,
+  这种 URI 它照放,出去就是一张断的图。
+- `--portrait` 和 `--portrait-file` 不许一起给。坏 URI 照旧由**原来那道闸**拒(不另判一次)。
 
 ### 两条你们**现在就该改流水线**的产品纪律(它们不靠引擎的闸执行)
 
@@ -1813,7 +1864,8 @@ core 早就留好了,它就叫 `data:` URI;老板选了外链,那是**产品选�
 
 ```bash
 anima-world contract --json | jq '.seed | {location_keys, location_optional_keys,
-    location_image_keys, location_image_schemes, location_image_max_bytes}'
+    location_image_keys, location_image_schemes, location_image_max_bytes,
+    location_image_read_command, location_image_write_command}'
 anima-world contract --json | jq '.character_card.portrait_max_bytes'
 ```
 
@@ -1829,3 +1881,24 @@ anima-world contract --json | jq '.character_card.portrait_max_bytes'
 ```bash
 anima-world world check my.cyberworld --json | jq '.external_media, .inline_media_bytes'
 ```
+
+`external_media[].count` 是**去重之后有几张图**,`external_media[].fields` 是**这台图床
+供着哪几格** —— 两个不同的问题,别拿 `count` 去推 `fields` 的长度。你们的图床是内容
+寻址的:同一张图传两次拿回同一条 URL,所以"一张图既当 `map_image` 又当 `scene_image`"
+是常态,那种情况下 `count` 是 1 而 `fields` 有两项。
+
+### 有一份带图的参照世界可以对着写
+
+引擎自带的 `demo.cyberworld` 现在给三个走得进去的地点(`cafe` / `workshop` / `home`)
+各配了两格图,两个大区(`oldport` / `harbor_st`)故意留空 —— 那两格是**可选**的,
+全写满的橱窗会让人以为它们必填。要一份**真的带图**的世界去对着写前端 / 对着验流水线:
+
+```bash
+anima-world simulate --world-id demo --ticks 0
+anima-world map --world-id demo --json | jq '.places[] | {id, map_image, scene_image}'
+```
+
+⚠️ 注意两个读出口的形状**有意不同**:`state()` 的 `locations[]` 行**永远带这两个键**
+(没写的是 `None`),而 `map_data()` / `map --json` 的 `places[]` **写了才出现**
+(和 `w`/`h` 同一个安排)。对着 `map_data` 写 `row["map_image"]` 会 `KeyError` ——
+用 `row.get(...)`。

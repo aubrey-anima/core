@@ -34,8 +34,9 @@
 
 - base64 把 N 字节的原图变成约 **4/3 N** 的文本(再加 `data:image/png;base64,`
   这二十来个字节的前缀)。创作台那侧的 `PORTRAIT_MAX_BYTES` 量的是**原图**字节 ——
-  同一个 1 MiB 在两边不是同一个东西,它那份 1 MiB 原图到这里是 1.37 MiB,**过不了**。
-  要对齐的话创作台的闸该收到 750 KiB 原图上下(768 KiB 是数学上的临界,加上前缀正好越线)。
+  同一个 1 MiB 在两边不是同一个东西:1048576 × 4/3 + 22 = **1398126 字节 ≈ 1.33 MiB**,
+  **过不了**。要对齐的话创作台的闸该收到 750 KiB 原图上下(768 KiB 是数学上的临界,
+  加上前缀正好越线)。
 - 对 `http(s):` 而言这个上限实际上是一条"URL 别长到离谱"的闸(两千字符的链接照过)。
   真正会撑爆读出口的只有 `data:` —— 但**一条规则比两条好记**,而且给 http 单独开一格
   的那天,没人记得它为什么在那儿。
@@ -277,11 +278,19 @@ class MediaScan:
     def record(self, field: str, uri: str) -> None:
         """记一条。空串与写坏了的值不算 —— 那些归闸报,不归这里数。
 
-        **同一条 URI 只数一次。** 数的是"这个世界有多少张图、指向哪儿",不是
-        "这个字符串在文件里出现了几次" —— 后者是导出格式的实现细节:出生证明
-        (`:meta.world_seed`)里抄着一份作者层,`agent_join` 的载荷里又是一份,
-        于是一个只有一张立绘的新世界会被报成三张。**同一件事被数成三件,和数漏了
-        一样是个错答案。**
+        **同一条 URI 只数一次,但每个用到它的字段都要点名。** 这两句话是两回事,
+        而把它们合成一件是这段代码第一版的 bug:去重时直接 `return`,于是
+        `fields` 再也走不到。
+
+        - `count` 数的是"这个世界有多少**张**图",不是"这个字符串在文件里出现了
+          几次" —— 后者是导出格式的实现细节:出生证明(`:meta.world_seed`)里抄着
+          一份作者层,`agent_join` 的载荷里又是一份,于是一个只有一张立绘的新世界
+          会被报成三张。**同一件事被数成三件,和数漏了一样是个错答案。**
+        - `fields` 答的是另一个问题:"这台服务器供着**哪几格**图"。同一条 URI 用在
+          两格上是**常态不是边角** —— 网站那个图床是**内容寻址**的,同一张图传两次
+          拿回同一条 URL,而一张图既当地图缩略图又当场景图完全正当。只报先遇到的
+          那一格,准备自建部署的人会照这份账得出"这台只供缩略图"的错结论,而这一整
+          段的存在理由正是**不让外链的代价被看错**。
 
         去重靠摘要而不是留一份原串:一条 `data:` URI 可以有几百 KB,把它们整个
         攒在内存里等于为了数数把这个包又装了一遍。
@@ -290,12 +299,13 @@ class MediaScan:
         if not text:
             return
         digest = blake2b(text.encode("utf-8"), digest_size=16).digest()
-        if digest in self._seen:
-            return
+        seen_before = digest in self._seen
         self._seen.add(digest)
         parsed = urlparse(text)
         scheme = parsed.scheme.lower()
         if scheme == "data":
+            if seen_before:
+                return      # 内嵌那一段只报字节账,没有 `fields` 这一格
             size = len(text.encode("utf-8"))
             self.inline_count += 1
             self.inline_bytes += size
@@ -307,8 +317,11 @@ class MediaScan:
         row = self._hosts.setdefault(
             (host, scheme), {"host": host, "scheme": scheme, "count": 0, "fields": set()}
         )
-        row["count"] += 1
+        # **字段先记,再判重复** —— 顺序就是这条 bug 本身。
         row["fields"].add(field)
+        if seen_before:
+            return
+        row["count"] += 1
         self.external_count += 1
 
     def external_media(self) -> list[dict[str, Any]]:

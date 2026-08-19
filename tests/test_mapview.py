@@ -470,6 +470,13 @@ def test_the_cli_prints_a_map(tmp_path):
     db_path = str(tmp_path / "w.db")
     with open_world_at(db_path, force_mock_llm=True) as world:
         world.tick(288)
+        # ⚠️ **`map_data()` 的 `places` 行是契约,它会长;这张字符画是赠品,画不出图。**
+        # 下面那次 `_cli` 从前是 `MapPlace(**place)`,于是地点多了 `map_image` 那一格
+        # 之后,`anima-world map`(不带 `--json`)对**任何一个配了图的世界当场
+        # TypeError**。交付那一轮没红,只是因为橱窗里一格图都没有 —— 现在有了,
+        # 所以先在这儿钉住"这个世界真的带图",再让 CLI 跑一遍。
+        assert any(row.get("map_image") for row in world.map_data()["places"]), \
+            "橱窗里没有图的话,下面那次渲染什么也没验"
 
     done = _cli("--world-id", "w")
     assert done.returncode == 0, done.stderr

@@ -552,6 +552,41 @@ def test_橱窗里的量说人话():
     assert on_kinds, "种类的量一个分档都没有"
 
 
+def test_橱窗里的地点是看得见的(flagship):
+    """开箱那份世界里,走得进去的地点都带着两格图。
+
+    这一条是"**做了却开箱看不见等于没做**"那条纪律在图这一层的落点。图片版本
+    交付之后橱窗里一格图都没有,于是:新用户装上包看到的第一屏证明不了这个引擎
+    带得动图;网站那侧也没有一个**带图的参照世界**可以对着写前端 —— 他们只能
+    照文档编一份,而编出来的形状和引擎真给的形状不一致时没有任何一处会报错。
+
+    两头都验:文件里写了(作者层),读出口真的带出来了(`state()` / `map_data()`)。
+    只验前一半的话,一次改错了键名的重构会让图安静地停在半路。
+    """
+    authored = {
+        r["body"]["id"]: r["body"] for r in _bundled_rows() if r.get("type") == "location"
+    }
+    with_images = {
+        loc_id: body for loc_id, body in authored.items()
+        if body.get("map_image") and body.get("scene_image")
+    }
+    assert with_images, "橱窗里一个地点都没有图 —— 开箱看不见的特性等于没做"
+
+    state_rows = {row["id"]: row for row in flagship.state()["locations"]}
+    for loc_id, body in with_images.items():
+        for key in ("map_image", "scene_image"):
+            assert state_rows[loc_id][key] == body[key], f"{loc_id}.{key} 没走到 state()"
+
+    map_rows = {row["id"]: row for row in flagship.map_data()["places"]}
+    for loc_id, body in with_images.items():
+        for key in ("map_image", "scene_image"):
+            assert map_rows[loc_id].get(key) == body[key], f"{loc_id}.{key} 没走到 map_data()"
+
+    # 图是**可选**的,而橱窗要把这一点也演出来:两个大区没有图,世界照样跑。
+    # 全都写满的橱窗会让人以为这两格是必填的。
+    assert len(with_images) < len(authored), "橱窗该留几个没有图的地点,证明它是可选的"
+
+
 def _bundled_rows() -> list[dict]:
     """橱窗那份文件的作者层逐行 —— 它是纯文本进仓库的,可以直接读。"""
     text = resources.files("anima_world").joinpath("demo.cyberworld").read_text("utf-8")
