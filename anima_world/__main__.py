@@ -564,6 +564,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "world", aliases=["seed"], help="检查一个世界文件(.cyberworld)"
     )
     validate_seed.add_argument("path", help="世界文件")
+    validate_seed.add_argument(
+        "--edit", action="store_true",
+        help="这份文件要装进一个**已有**的世界(= 一次编辑):不要求它把名册和地图"
+             "再抄一遍,引用完整性也不查(它们可以来自目标世界)",
+    )
     validate_seed.add_argument("--json", action="store_true", help="机器可读输出")
     validate_beats = validate_commands.add_parser("beats", help="检查节拍脚本")
     validate_beats.add_argument("path", help="节拍脚本文件")
@@ -620,6 +625,20 @@ def _build_parser() -> argparse.ArgumentParser:
     world_inspect.add_argument(
         "--json", action="store_true", dest="as_json",
         help="输出一行 JSON(给启动器/工具消费),而不是给人看的清单",
+    )
+    world_check = world_commands.add_parser(
+        "check",
+        help="这一版引擎装得进这份 .cyberworld 吗 —— 真跑校验器,不读封皮,不建世界",
+    )
+    world_check.add_argument("package", help="要查的 .cyberworld 文件")
+    world_check.add_argument(
+        "--edit", action="store_true",
+        help="这份文件要装进一个**已有**的世界(= 一次编辑):不要求它把名册和地图"
+             "再抄一遍,引用完整性也不查(它们可以来自目标世界)",
+    )
+    world_check.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="输出一行 JSON(给启动器/运维台消费),而不是给人看的清单",
     )
     world_import = world_commands.add_parser(
         "import", help="把一个 .cyberworld 装进 --world-id 那个世界(目标必须是空的)",
@@ -700,6 +719,50 @@ def _authored_only(records, path):
     return gen()
 
 
+def authored_layer_errors(
+    authored: dict[str, Any] | None, *, complete: bool = True
+) -> list[str]:
+    """一份作者层装不装得进世界 —— **开机与 `validate world` 共用的那一份判断**。
+
+    三道闸,一次列全:
+
+    - `world_seed_errors` —— 必填键与引擎读得懂的形状(写错的 `stocks` 会被装载器
+      整条丢掉,那是"安静地少装一半世界")。
+    - `visibility_band_errors` —— 分档声明。放行的样子是这个仓库最怕的那种:世界
+      照跑、日志干净,而她一直在报数字,作者要到三个月后才发现写错了一个方括号。
+    - `world_card_errors` —— 角色卡。它多一条理由:卡是**分发物里给玩家看的那一面**,
+      相对路径的立绘发出去就是一张断的图,而作者自己看不见。
+
+    两条纪律都在这个函数的**存在**上,不在它的实现里:
+
+    **① 只有带作者层的文件才查。** 一个跑过的世界导出来只有状态记录,拿
+    "agents 必须是个列表"去要求它是在**问错问题** —— 开机那条路一直是这么判的
+    (`authored or None`),而 `validate world` 从前不是:它对每一份 `.cyberworld`
+    都要求一份完整的名册和地图,于是**任何一份导出的世界在它嘴里都是非法的**
+    (`'agents' must be a list (missing)`,退出码 2)。同一份文件,开机说好、
+    校验器说坏。
+
+    **② `complete=False` 是"这是一次编辑,不是一个世界"。** 把一份只含 `author`
+    记录的文件装进一个**已有**的世界就是一次编辑,那时要求它把名册和地图再抄一遍
+    等于逼作者维护一份迟早会不一致的抄件。开机按目标世界空不空自己判;校验器手上
+    没有目标世界,所以那一格由调用方说(`validate world --edit`)。
+
+    ⚠️ **这两条从前只写在开机那一侧**,于是"创作台经 CLI 委托校验"这句话在最要紧
+    的两种文件上不成立 —— 而 2026-08-19 舰队上那次开不了机(`stocks[8] 'values'
+    must be an object`,一份 2.3.0 时代导入的世界撞上收紧了的作者层)正是运维台
+    离线问不出答案的那一种:`world inspect` 只读封皮,答 `runnable: true`;
+    `validate world` 答得出,但它对同一份文件的答案和开机不是同一个。
+    **判断只有一份**,是这条修法的全部内容。
+    """
+    if not authored:
+        return []
+    return (
+        _world_seed_errors(authored, complete=complete)
+        + visibility_band_errors(authored)
+        + world_card_errors(authored)
+    )
+
+
 def _load_world_file(
     path: Path | str = WORLD_FILE_PATH,
     *,
@@ -740,23 +803,12 @@ def _load_world_file(
             records, redis=redis, world_id=world_id, mysql=mysql
         )
         # **作者层还是要过那道闸。** 换掉的是容器,不是校验:一份写错了 `agents`
-        # 的世界文件照旧不许开机。而**只有带作者层的文件才查** —— 一个跑过的世界
-        # 导出来只有状态记录,拿"agents 必须是个列表"去要求它是在问错问题。
-        # **世界已经有了的话,这份文件是一次编辑,不是一个完整世界。**
-        # 要求它把名册和地图再抄一遍,等于逼作者维护一份迟早会不一致的抄件。
-        errors = (
-            _world_seed_errors(authored, complete=not _world_exists(redis, world_id))
-            if authored else []
+        # 的世界文件照旧不许开机。三道闸合在**一个函数**里
+        # (`authored_layer_errors`),`validate world` 调的就是它 —— 理由写在那个
+        # 函数上,一句话是:两条路对同一份文件必须给同一个答案。
+        errors = authored_layer_errors(
+            authored, complete=not _world_exists(redis, world_id)
         )
-        # 分档声明(`bands`)的闸也在这儿,**在动任何一张表之前**:坏声明放行的
-        # 样子是这个仓库最怕的那种 —— 世界照跑、日志干净,而她一直在报数字,
-        # 作者要到三个月后才发现自己写错了一个方括号。一次列全,所以
-        # `validate world` 和这里说的是同一批话(它调的是同一个函数)。
-        errors += visibility_band_errors(authored) if authored else []
-        # 角色卡同理,而它多一条理由:卡是**分发物里给玩家看的那一面**。写了个
-        # 相对路径的立绘,包发出去就是一张断的图;写了三百字的"一句话",通讯录
-        # 那一行在哪儿被截断由界面随手决定 —— 两样都不报错,而作者看不见。
-        errors += world_card_errors(authored) if authored else []
         if errors:
             raise WorldSeedError([f"{path}: {e}" for e in errors])
         # 拼错的键只警告(`taglien` 什么也不做,但拦下来会让新版创作台配不了老引擎)。
@@ -4845,13 +4897,81 @@ def run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+class _NothingInTheWorldYet:
+    """一个"库里什么都还没有"的替身,给**不建世界**的那条校验路用。
+
+    `_precheck_ontology` 要三样东西来解引用:库里的规律、地点、物品。创世那一刻
+    它们**本来就是空的**(种子还没落库,所以那个函数把文件里那一份并进来查)——
+    所以拿一个空替身喂它,验的正好是"这份文件自己立不立得住"。
+
+    ⚠️ 空替身只对**完整世界文件**成立。一次编辑的引用可以落在目标世界里,那时
+    空替身会把一份完全正常的编辑判成"引用了不存在的种类" —— 所以 `--edit` 那一支
+    不跑这道闸,并且**把没查的那一半说出来**。
+    """
+
+    def definitions(self) -> list[Any]:
+        return []
+
+    def all(self) -> list[Any]:
+        return []
+
+
+def _authored_ontology_errors(authored: dict[str, Any]) -> list[str]:
+    """`kinds` / `entities` / 规律那一摞闸,**不建世界地跑一遍**。
+
+    走的是 `_precheck_ontology` —— 开机那条路上**同一个函数**。量名拼错、动词没
+    声明、`me_X` 没声明、`spawn` 没写代价、能力里引用不到的物品:这一整摞此前
+    `validate world` 一条都报不出来(FOR-STUDIO §3.17 把这个缺口列成了一张表,
+    并写着"出包前那一步请是 `simulate --ticks 0`")。那句话本身是诚实的,但它把
+    一件引擎该答的事推给了每一个消费方:运维台的判包容器里没有 Redis,创作台的
+    体检跑在世界之前 —— 于是"这份文件这一版引擎装得进去吗"离线问不出答案。
+
+    **不另写一份判断**是这里唯一要守的:两份判断迟早给出不同答案,而那种不一致会
+    表现成"预检说没问题,开机还是失败"。
+    """
+    from anima_world.ontology import OntologyError
+    from anima_world.rules import RuleError
+
+    empty = _NothingInTheWorldYet()
+    try:
+        _precheck_ontology(authored, empty, empty, None, None)
+    except (OntologyError, RuleError) as exc:
+        return list(getattr(exc, "errors", None) or [str(exc)])
+    except Exception as exc:  # noqa: BLE001 - 坏声明的形状很多,一律当成一条错报出去
+        return [str(exc)]
+    return []
+
+
+def _cannot_even_look(path: str) -> str | None:
+    """**这个文件被看过没有** —— 分的是"我没答上来"和"这个引擎收不了它"。
+
+    `world check` 的退出码答的是前者,而这两件事从读文件那一侧看长得很像:
+    两条路都是"读的时候出错了"。分界不在出错没出错,在**有没有一份内容被判断过**:
+    路径打错、没权限、指着一个目录 —— 世界根本没被看过,那时说一句"装不进去"是在
+    替一个没人看过的文件下判决。而文件打得开、里头的字节这个引擎读不懂(不认识的
+    记录类型、格式版本比它新、校验和对不上),**那是一个答案**,开机也会照样拒绝。
+    """
+    try:
+        with open(path, "rb") as probe:
+            probe.read(1)
+    except OSError as exc:
+        return f"读不了 {path}:{exc}"
+    return None
+
+
 def _load_authored_layer(path: str) -> tuple[dict[str, Any], str | None]:
-    """读一个世界文件的**作者层**,聚合成 section 字典。读不了就把话说清楚。"""
+    """读一个世界文件的**作者层**,聚合成 section 字典。读不了就把话说清楚。
+
+    **流式喂进去**(不 `list()` 一份出来):一个跑过的世界导出来是十几万条状态记录,
+    而这里只挑 `author` 那几条 —— 攒一份全量列表出来纯属白背,而这条命令正是要被
+    拿去问一个真实舰队世界的(灯塔湾那份包)。`author_records_to_seed` 单趟遍历,
+    校验和那条 `WorldFileError` 照旧在迭代耗尽时抛出来,一起被下面接住。
+    """
     from anima_world.world_file import WorldFileError, author_records_to_seed, read_world_file
 
     try:
         _, records = read_world_file(path)
-        return author_records_to_seed(list(records)), None
+        return author_records_to_seed(records), None
     except WorldFileError as exc:
         return {}, str(exc)
     except OSError as exc:
@@ -4865,26 +4985,45 @@ def run_validate(args: argparse.Namespace) -> int:
     的检查办法是真开一次世界,而种子只读进空库一次,试错的代价是重建世界。
     """
     from anima_world.beats import beat_script_warnings
-    from anima_world.world_seed import world_seed_errors, world_seed_warnings
+    from anima_world.world_seed import world_seed_warnings
 
     if args.validate_command in ("world", "seed"):
-        # 世界文件:读出作者层再走既有的那套校验(**换了容器,没换闸**)。
+        # 世界文件:读出作者层再走**开机那条路上同一批闸**(`authored_layer_errors`
+        # 与 `_precheck_ontology`)。另写一份判断的话,迟早出现"validate 说没问题,
+        # 开机还是失败" —— 而 2026-08-19 舰队上撞到的是它的反面:开机说没问题
+        # (一份纯状态层的导出包),validate 却答"'agents' must be a list"。
+        edit = bool(getattr(args, "edit", False))
         authored, read_error = _load_authored_layer(args.path)
         if read_error is not None:
             return _report_validation("world", args.path, [read_error], [], args.json)
-        return _report_validation(
-            "world", args.path,
-            # 分档与角色卡的闸和加载期**同一个函数** —— 另写一份的话,迟早出现
-            # "validate 说没问题,开机还是失败"。
-            world_seed_errors(authored)
-            + visibility_band_errors(authored)
-            + world_card_errors(authored),
-            world_seed_warnings(authored)
-            + _authored_drift_warnings(authored)
-            + _authored_unreachable_requirements(authored)
-            + world_card_warnings(authored),
-            args.json,
-        )
+        errors = authored_layer_errors(authored, complete=not edit)
+        warnings: list[str] = []
+        if not authored:
+            # **作者层为空 = 没有种子,不是一个空种子。** 开机那条路一直这么判;
+            # 这里从前不是,于是任何一份导出的世界在校验器嘴里都是非法的。
+            warnings.append(
+                "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
+                "装载时直接落键、不走作者层那几道闸,所以这里没有可查的东西"
+            )
+        else:
+            warnings += (
+                world_seed_warnings(authored)
+                + _authored_drift_warnings(authored)
+                + _authored_unreachable_requirements(authored)
+                + world_card_warnings(authored)
+            )
+            if edit:
+                # **说出没查的那一半。** 一次编辑的引用可以落在目标世界里(它的名册
+                # 和地图在它自己的库里),而目标世界不在手上 —— 编一个绿灯出去,
+                # 正是这条命令要修的病本身。
+                warnings.append(
+                    "这是一次编辑(--edit),引用完整性没查:种类 / 地点 / 物品 / 规律"
+                    "可以来自目标世界,而目标世界不在手上 —— 要连着世界查,"
+                    "用 `simulate --ticks 0 --world-file …`"
+                )
+            else:
+                errors += _authored_ontology_errors(authored)
+        return _report_validation("world", args.path, errors, warnings, args.json)
 
     data, read_error = _load_json_file(args.path)
     if read_error is not None:
@@ -5396,8 +5535,128 @@ def _print_inspect_human(payload: dict[str, Any]) -> None:
     print()
 
 
+def _print_check_human(payload: dict[str, Any]) -> None:
+    path = payload["path"]
+    if payload["loadable"] is None:
+        print(onboarding.rule(f"{path} —— 问不出来"))
+    elif payload["loadable"]:
+        print(onboarding.rule(f"{path} —— {payload['engine_version']} 装得进去"))
+    else:
+        print(onboarding.rule(f"{path} —— {payload['engine_version']} 装不进去"))
+    for line in payload["errors"]:
+        print(f"  ✗ {line}")
+    for line in payload["warnings"]:
+        print(f"  {onboarding.yellow('!')} {line}")
+    if payload["loadable"] and not payload["warnings"]:
+        print("  没有发现问题。")
+
+
+def run_world_check(args: argparse.Namespace) -> int:
+    """**这一版引擎装得进这份 `.cyberworld` 吗** —— 真跑校验器,不读封皮。
+
+    ⚠️ **它和 `validate world` 是同一个判断,不是第二份。** 两条都调
+    `authored_layer_errors` + `_precheck_ontology`,也就是开机第一秒调的那两个。
+    `tests/test_validate_matches_boot.py` 把三条路的答案钉成相等 —— 判断有两份的
+    那天,它们会先给出不同的答案,再由某个人在一个坏掉的世界上发现。
+
+    **那为什么还要第二个命令?两件事,都不在"判断"上:**
+
+    ① **退出码问的是不同的问题。** `validate world` 是**作者的门**:退出码 = 我的
+    世界过没过(错误 2、提醒 0),CI 里直接当断言用。`world check` 是**宿主的门**:
+    退出码 = **这句话我答没答上来**(0 = 答上来了,`loadable` 才是答案;1 = 没答上来,
+    文件根本打不开)。运维台要的正是后者 —— "跑不了"是一个答案,不是一个异常;
+    一个把"世界坏了"和"命令挂了"报成同一个数的出口,调用方只能去猜。
+    (`start` 是人的门、`run` 是程序的门,是同一条分法。)
+
+    ⚠️ 而这条分法有一个**踩过的坑**:退出码 1 那一格一度收得太宽 —— 凡是读文件
+    出错就报"没答上来",于是**不认识的记录类型 / 平铺的 `body` / 不认识的 `author`
+    type / 格式版本比这个引擎新 / 校验和对不上**这一整摞全落进了 1。它们每一条都让
+    **开机当场失败**,`validate world` 也照实报错误 —— 而这个出口自己写着"问不出来
+    一律不拦",于是一份引擎明确拒收的文件会被下游**放行**。分界不在"读的时候出没出
+    错",在 `_cannot_even_look`:**这个文件被看过没有。** 打不开(路径错 / 没权限 /
+    指着目录)= 没被看过 = `null` + 1;打得开而这个引擎读不懂 = `false` + 0。
+
+    ② **能力探测按子命令在不在做,不比版本号。** 这条是运维台的纪律,而它决定了
+    这里必须是一个**新名字**:`validate world` 在老引擎上**也存在**,只是那时它对
+    一份纯状态层的导出包答"'agents' must be a list"——存在但答错,正是能力探测最
+    骗人的形态。而同一个 `3.2.0` 下有过七份不同的引擎,所以版本号比不出来。
+    `world check` 在老引擎上是 argparse 的 usage + 退出码 2,调用方据此回落到
+    "问不出来",而**问不出来一律不拦**。
+
+    背景:2026-08-19 舰队上灯塔湾 `815b3ae9` 在 3.3.0 上 0.57 秒退出 1
+    (`stocks[8] 'values' must be an object` ×11)—— Redis 数据完好,卷上那份
+    2.3.0 时代的 `world.cyberworld` 过不了今天的作者层。而 `world inspect` 读封皮,
+    对同一份文件答 `runnable: true`。**封皮说的是作者声称要哪个引擎,这里说的是
+    这一版引擎真的收不收它** —— 两个问题,`inspect` 那一格没有被动过。
+    """
+    from anima_world.world_package import _engine_version
+    from anima_world.world_seed import world_seed_warnings
+
+    payload: dict[str, Any] = {
+        "operation": "world check",
+        "path": str(args.package),
+        "engine_version": _engine_version(),
+        "edit": bool(getattr(args, "edit", False)),
+        "loadable": None,
+        "authored": None,
+        "errors": [],
+        "warnings": [],
+    }
+    unopenable = _cannot_even_look(args.package)
+    authored, read_error = ({}, None) if unopenable else _load_authored_layer(args.package)
+    if unopenable is not None:
+        # **文件打不开不是"装不进去",是"没答上来"。** 报成 `loadable: false` 的话,
+        # 一个路径打错的调用方会得到一句关于世界的判决 —— 而世界没有任何问题。
+        payload["errors"] = [unopenable]
+        code = 1
+    elif read_error is not None:
+        # ⚠️ **而"打得开、但这个引擎读不懂"是一个答案,不是一句"我没答上来"。**
+        # 不认识的记录类型、平铺的 `body`、不认识的 `author` type、格式版本比这个
+        # 引擎新、校验和对不上 —— 这一摞全都让**开机当场失败**,`validate world`
+        # 也照实报错误(退出码 2)。它们一度被这条命令报成 `loadable: null` + 退出
+        # 码 1,而这个出口自己写着"问不出来一律不拦" —— 于是一份引擎明确拒收的文件
+        # 会被下游**放行**。这正是这条命令要修的那种病:一个答案被当成另一个答案读。
+        # 分界因此不在"读文件出没出错",而在**这个文件被看过没有**。
+        payload["errors"] = [read_error]
+        payload["loadable"] = False
+        code = 0
+    else:
+        errors = list(authored_layer_errors(authored, complete=not payload["edit"]))
+        warnings: list[str] = []
+        payload["authored"] = bool(authored)
+        if not authored:
+            warnings.append(
+                "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
+                "装载时直接落键、不走作者层那几道闸,所以这里没有可查的东西"
+            )
+        else:
+            warnings += (
+                world_seed_warnings(authored)
+                + _authored_drift_warnings(authored)
+                + _authored_unreachable_requirements(authored)
+                + world_card_warnings(authored)
+            )
+            if payload["edit"]:
+                warnings.append(
+                    "这是一次编辑(--edit),引用完整性没查:种类 / 地点 / 物品 / 规律"
+                    "可以来自目标世界,而目标世界不在手上"
+                )
+            else:
+                errors += _authored_ontology_errors(authored)
+        payload["errors"] = errors
+        payload["warnings"] = warnings
+        payload["loadable"] = not errors
+        code = 0
+
+    if getattr(args, "as_json", False):
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        _print_check_human(payload)
+    return code
+
+
 def run_world_package(args: argparse.Namespace) -> int:
-    """`anima-world world export / import / inspect` —— `.cyberworld` v3。"""
+    """`anima-world world export / import / inspect / check` —— `.cyberworld` v3。"""
     from anima_world.api import World
     from anima_world.world_file import WorldFileError
     from anima_world.world_package import (
@@ -5406,6 +5665,9 @@ def run_world_package(args: argparse.Namespace) -> int:
         import_world_file,
         inspect_world_file,
     )
+
+    if args.world_command == "check":
+        return run_world_check(args)
 
     try:
         if args.world_command == "inspect":

@@ -1250,11 +1250,11 @@ API:`World.declare_visibility` / `place_stock` / `visibility_rules` / `perceptio
 | `[[0.4, "大"], [0.2, "小"]]` / `[[0, "a"], [0, "b"]]` | 阈值要**严格升序**(相等 = 前一档是死档,作者以为有三种雨其实只有两种) |
 | `[[0, "  "]]` / `[]` | 档词不能是空的;不分档就整个别写这一项 |
 
-⚠️ **两处声明,两条闸,覆盖面不一样**(写世界文件时要知道):`stock_visibility` 上的
-`bands` 由 `anima-world validate world` 报**同一批话**(同一个函数,所以创作台不必真开
-一次世界就能查);而写在 `kinds` 量声明里的那份走的是本体那道闸(`OntologyError`,和
-量名拼错同一条)—— 它**当场开不了机,但 `validate world` 现在报不出来**,校验它得用
-`simulate --ticks 0`。两个命令各覆盖什么,见 §9 末尾那张表。
+⚠️ **两处声明,两条闸**(写世界文件时要知道):`stock_visibility` 上的 `bands` 走
+`visibility_band_errors`,`kinds` 量声明里的那份走本体那道闸(`OntologyError`,和量名
+拼错同一条)。**两条 `anima-world validate world` 现在都跑** —— 它调的就是开机调的那
+两个函数,所以创作台不必真开一次世界。(此前只跑前一条,后一条要 `simulate --ticks 0`
+才问得出;两个命令今天各覆盖什么,见 §9 末尾那张表。)
 
 #### 2.9.5 看一眼她收到了什么(`debug_prompt` / `anima-world prompt`)
 
@@ -3328,15 +3328,23 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
   format 1 的 `by_day` 是稠密的、且不做时基区分:一条聊天记录就能把它撑成六百万行
   (放不下即 MemoryError,放得下则是 `days=6198680` 的假答案)。升到 2 修的就是这个。
 
-### 4.7 anima-world world export / import / inspect —— 打包
+### 4.7 anima-world world export / import / inspect / check —— 打包
 
 ```bash
 anima-world world export --world-id w --output my.cyberworld \
     --package-id my-world --name "我的世界" [--beats beats.json]
 anima-world world import my.cyberworld --world-id w2      # 目标必须是空世界
 anima-world world drop   --world-id w --yes               # 整个抹掉一个世界
-anima-world world inspect my.cyberworld [--json]          # 它需要什么引擎?
+anima-world world inspect my.cyberworld [--json]          # 它**声称**要什么引擎?
+anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真的**装得进去吗?
 ```
+
+⚠️ **`inspect` 和 `check` 回答的是两个问题,别互相顶替。** `inspect` 读**封皮**
+(manifest 第一行的 `engine_min`)—— 那是**作者声称**要哪个引擎,廉价、正当、
+一个 5 GB 的包也只是一次 readline。`check` 跑的是**这一版引擎的真校验器** ——
+和开机第一秒同一批闸,答的是"我收不收它"。2026-08-19 舰队上那次开不了机
+(见下)正是这两个答案分家的现场:同一份文件,`inspect` 答 `runnable: true`,
+而开机 0.57 秒退出 1。
 
 ⚠️ **两个 id 别混**:`--world-id` 是**源世界在 Redis 上的名字**,`--package-id` 是
 **包的世系 id**。1.x 里这两件事共用一个参数,2.0 拆开了 —— 因为源世界的名字是运维的
@@ -3358,6 +3366,37 @@ anima-world world inspect my.cyberworld [--json]          # 它需要什么引�
 | `export` | `operation` / `world_id` / `revision_id` / `mode` |
 | `import` | `operation` / `world_id` / `instance_id` / `path`(`instance_id == world_id`,`path` 是 `redis:{world_id}` —— 没有磁盘目录了,这两个字段留着是给镜像端不破) |
 | `inspect --json` | manifest 全字段(`world_id` / `name` / `summary` / `genre` / `setting` / `theme` / `export_mode` / `revision_id` / `created_at` / `files` / `source_engine_version` / `package_format_version` / `engine_min` / `engine_max_exclusive`)+ `current_engine_version` / `runnable` / `operation` |
+| `check --json` | `operation`(`"world check"`)/ `path` / `engine_version` / `edit` / `loadable` / `authored` / `errors` / `warnings` |
+
+#### `check` 的退出码问的是另一个问题
+
+**`world check` 的退出码不是"这个世界过没过",是"这句话我答没答上来"。**
+
+| 退出码 | `loadable` | 意思 |
+|---|---|---|
+| 0 | `true` | 这一版引擎装得进去 |
+| 0 | `false` | 装不进去,`errors` 逐条说为什么 —— **这是一个答案,不是一个异常** |
+| 1 | `null` | 没答上来:**文件打不开**(路径错 / 没权限 / 指着一个目录)。**世界没有被看过**,别把它读成一句判决 |
+| 2 | — | 这一版引擎上没有这个子命令(argparse 的 usage)—— 调用方据此回落到"问不出来" |
+
+⚠️ **退出码 1 那一格只装"文件打不开",别把它读宽了。** 打得开、而这个引擎读不懂里头
+的字节(不认识的记录类型、不认识的 `author` type、平铺的 `body`、格式版本比它新、
+校验和对不上)一律是 **`loadable: false` + 退出码 0** —— 那些文件开机同样当场失败,
+`validate world` 也照实报错误。分界是 `__main__._cannot_even_look`:**这个文件被看过
+没有。** 收宽了的后果很具体:调用方对"问不出来"的做法是**放行**,于是一份引擎明确
+拒收的文件会被放过去。(`tests/test_validate_matches_boot.py` 两条一起把这条界画完整。)
+
+⚠️ **这和 `validate world` 的退出码有意不同**,而两条命令的**判断是同一份**
+(`authored_layer_errors` + `_precheck_ontology`,也就是开机调的那两个;
+`tests/test_validate_matches_boot.py` 把三条路的答案钉成逐个相等)。
+分两个门的理由只在退出码的语义上:`validate world` 是**作者的门**(错误 2、提醒 0,
+CI 里直接当断言),`world check` 是**宿主的门**(0 = 答上来了)。这和
+"`start` 是人的门、`run` 是程序的门"是同一条分法。
+
+⚠️ **能力探测按子命令在不在做,不比版本号。** `validate world` 在 3.3.0 之前的引擎上
+**也存在**,只是那时它对一份纯状态层的导出包答 `'agents' must be a list` ——
+存在但答错,是能力探测最骗人的形态;而同一个版本号下有过多份不同的构建,所以
+版本号比不出来。`world check` 是一个新子命令,老引擎上它就是退出码 2。
 
 #### `inspect` 跑不了的包也要回答
 
@@ -3803,25 +3842,48 @@ tick 还会再试。`co_located` 用的是活黑板而**不是**投影 —— �
 **不建世界就检查**:
 
 ```bash
-anima-world validate world demo.cyberworld  [--json]
+anima-world validate world demo.cyberworld  [--edit] [--json]
 anima-world validate beats beats.json --world-file demo.cyberworld  [--json]
 ```
 
-⚠️ **`validate world` 不是"开机会不会成功"的全集,查那个用 `simulate --ticks 0`。**
-它查的是**这份文件内部就能确定是错的**那几类;而作者层里另有几道闸住在编译器里
-(规律、本体),那几道在**开机的第一秒**当场拒绝并一次列全,`--ticks 0` 因此就是它们
-的校验器(和 `ontology --check` 同一个用法)。这张表是当前的覆盖面:
+**`validate world` 问的是一句话:这份 `.cyberworld`,这一版引擎装得进去吗。**
+它走的是**开机那条路上同一批闸**,同一批函数、同一批话:
+`__main__.authored_layer_errors`(必填键与形状 / `bands` 分档 / 角色卡)加
+`__main__._precheck_ontology`(`kinds` / `entities` / 规律的编译:量名拼错、动词没
+声明、`me_X` 没声明、`spawn` 没代价、物品 id 解不开)。
+**别另写一份判断** —— 两份判断迟早给出不同答案,而那种不一致会表现成
+"校验器说没问题,开机还是失败",或者更坏的反面。
+`tests/test_validate_matches_boot.py` 是这条纪律的闸:同一批文件驱两条路,
+答案必须逐个相等;哪一侧多写一条或少写一条闸,它当场红。
+
+| 这份文件是什么 | 不给 `--edit` | 给 `--edit` |
+|---|---|---|
+| 手写的完整世界(只有 `author` 记录) | 全查 | 全查,但不要求名册/地图,引用完整性不查 |
+| 跑过的世界导出来(只有状态记录) | ✅ 收下 + 一条"这里没有可查的东西"的提醒 | 同左 |
+| 只带 `kinds` 的一层(要装进已有世界) | ❌ 缺 `agents`/`locations` | ✅ 收下 |
+
+`--edit` 说的是"**这份文件要装进一个已有的世界**"。开机那条路按目标世界空不空
+自己判(`_world_exists`);校验器手上没有目标世界,所以那一格由调用方说。
+给了 `--edit` 会多一条提醒:引用完整性没查(种类 / 地点 / 物品 / 规律可以来自
+目标世界)—— 要连着世界查,用 `simulate --ticks 0 --world-file …`。
+
+⚠️ **仍然不是"开机会不会成功"的全集。** 这条命令看不见目标世界,所以查不了
+"这个世界里有没有那个地点 / 那件物品 / 那条规律引用的种类";那一半只有连着世界
+才问得出,入口是 `simulate --ticks 0 --world-file …`(和 `ontology --check` 同一个
+用法)。⚠️ 也不查**运行期**才知道的事(Redis 连不连得上、LLM 有没有 key)。
 
 | 作者写错的东西 | `validate world` | `simulate --ticks 0` |
 |---|---|---|
-| `agents` / `locations` 的必填键 | ✅ 错误(退出码 2) | ✅ |
+| `agents` / `locations` 的必填键、`stocks` 条目的形状 | ✅ 错误(退出码 2) | ✅ |
 | `stock_visibility[].bands` 写坏(§2.9.4.2) | ✅ 错误,**同一个函数**报同一批话 | ✅ |
+| 角色卡(相对路径立绘、未知字段…,§2.9.11) | ✅ 错误 / 提醒 | ✅ |
+| `kinds` 里量声明的 `bands` 写坏 | ✅ `OntologyError` 一次列全 | ✅ |
+| 能力声明里写了 `rand()`(§2.9.3.3) | ✅ | ✅ |
+| `emit` 的 `importance` / `text` / `on` 写坏(§2.9.3.1) | ✅ `RuleError` | ✅ |
+| 量名拼错、动词没声明、`me_X` 没声明、`spawn` 没代价(§2.9.6) | ✅ | ✅ |
 | 常数步长那条 lint(§2.9.3.4) | ✅ 提醒(退出码 0) | ✅ 日志一行 |
-| 引用完整性(地点/角色对不上) | ✅ 提醒 | — |
-| `kinds` 里量声明的 `bands` 写坏 | ❌ **报不出来** | ✅ `OntologyError` |
-| 能力声明里写了 `rand()`(§2.9.3.3) | ❌ **报不出来** | ✅ `OntologyError` |
-| `emit` 的 `importance` / `text` / `on` 写坏(§2.9.3.1) | ❌ **报不出来** | ✅ `RuleError` |
-| 量名拼错、动词没声明、`me_X` 没声明…(§2.9.6) | ❌ **报不出来** | ✅ `OntologyError` |
+| 引用完整性(地点/角色/物品对不上) | ✅ 提醒(`--edit` 下不查) | ✅ 错误 |
+| **目标世界里有没有那个东西** | ❌ 看不见目标世界 | ✅ |
 
 **错误退出码 2,提醒退出码 0** —— 这个区分是有意的。引用完整性(角色/地点存不存在)
 只能是**提醒**:一个 beat 完全可以先 `agent_join` 一个新角色、后面的 beat 再对他做事,
