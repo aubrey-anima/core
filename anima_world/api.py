@@ -735,10 +735,41 @@ def _collect_player_names(value: Any, pid: str, out: set[str]) -> None:
             _collect_player_names(v, pid, out)
 
 
+def _erase_probe(value: Any, replacements: dict[str, str], *, blank: bool) -> bool:
+    """"这条载荷抹起来会不会变"—— 只答是非,不造新值。
+
+    `dry_run` 只用得着那个 bool(回执里的 `events` 就是它数出来的),而
+    `_erase_scrub` 为了给出新值要把每一层 dict/list 重建一遍。两者必须给同一个
+    答案,所以叶子那一层**照抄**下面那份的判断(替换是串起来的 —— 后一个 `old`
+    看到的是前一个替完的样子,写成"某个 old 是子串"就是另一个函数了),
+    省下的只有拷贝和**第一处命中就返回**(`_erase_scrub` 非得走完全程,
+    因为它要交出完整的新值)。
+    """
+    if isinstance(value, str):
+        fresh = value
+        for old, new in replacements.items():
+            fresh = fresh.replace(old, new)
+        return fresh != value
+    if isinstance(value, Mapping):
+        for key, v in value.items():
+            if (blank and key in _ERASE_TEXT_KEYS
+                    and isinstance(v, str) and v and v != _ERASED_TEXT):
+                return True
+            if _erase_probe(v, replacements, blank=blank):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_erase_probe(v, replacements, blank=blank) for v in value)
+    return False
+
+
 def _erase_scrub(value: Any, replacements: dict[str, str], *,
                  blank: bool) -> tuple[Any, bool]:
     """一份载荷的抹除拷贝:名字全域替换;`blank=True`(这条事件涉他)时把
-    `_ERASE_TEXT_KEYS` 里的原文字段整个抹空。返回 (新值, 改没改)。"""
+    `_ERASE_TEXT_KEYS` 里的原文字段整个抹空。返回 (新值, 改没改)。
+
+    只想知道"会不会变"就用 `_erase_probe` —— 它不造那份拷贝。
+    """
     if isinstance(value, str):
         fresh = value
         for old, new in replacements.items():
@@ -768,9 +799,13 @@ def _erase_scrub(value: Any, replacements: dict[str, str], *,
     return value, False
 
 
-def _iter_event_log(log: Any, *, page_size: int = 500) -> Any:
-    """流式过一遍事件日志 —— 抹除要看每一条,而日志没有上限,不整只端起来。"""
-    since = 0
+def _iter_event_log(log: Any, *, since: int = 0, page_size: int = 500) -> Any:
+    """流式过一遍事件日志 —— 抹除要看每一条,而日志没有上限,不整只端起来。
+
+    ⚠️ 这只有在 `page(limit=)` **真的只读那么多行**时才是流式的。`RedisEventLog`
+    从前是读完整条尾巴再切,于是这个循环整体 O(N²) —— 而它一页页翻的样子和线性
+    一模一样,没有任何一处报错。见 `RedisEventLog._rows`。
+    """
     while True:
         batch = log.page(since_seq=since, limit=page_size)
         if not batch:
@@ -5396,9 +5431,12 @@ class World:
         该拿什么去比对(第二遍),而后一遍必须看每一条:他的名字可能出现在任何一条
         事件的正文里。这个世界有多少条事件,它就读多少条,**没有上限**,也没有
         `limit` 可以给 —— "抹干净"和"只看前一页"是互斥的。一个跑了两天的世界就是
-        十几万条;宿主把它挂在一个请求上、挂在时钟那条线程上,世界当场停摆,
-        而它不会报错,只会像是卡住了。(和 `player_engagement` 那句 ⚠️ 同一族:
-        **那一条是一次 SELECT,这一条是整本账。**)真跑另外还有一遍写。
+        十几万条,一个月两百万条;宿主把它挂在一个请求上、挂在时钟那条线程上,
+        世界就停在那儿,而它不会报错,只会像是卡住了。(和 `player_engagement`
+        那句 ⚠️ 同一族:**那一条是一次 SELECT,这一条是整本账。**)真跑另外还有
+        一遍写。⚠️ 这条曲线 2026-08-19 从平方掰回了线性(`RedisEventLog.page`
+        从前不把 `limit` 交给 `LRANGE`),**但线性不是常数** —— 上面那句一个字
+        都没松,别拿那个倍数去换掉宿主那侧的墙。
 
         **这条曲线的长期解是给事件按 `player_id` 建一条索引**,让抹除只碰涉他的
         那几条;它动 `storage` 契约、要给老世界回填、镜像端要跟,所以不在这一轮里。
@@ -5429,10 +5467,14 @@ class World:
                 if row.get("player_id") == pid and row.get("player_name"):
                     names.add(str(row["player_name"]).strip())
         his_seqs: set[int] = set()
+        scanned_through = 0
         if log is not None:
             for e in _iter_event_log(log):
+                seq = int(e.seq or 0)
+                if seq > scanned_through:
+                    scanned_through = seq
                 if e.who == pid or _mentions_pid(e.payload, pid):
-                    his_seqs.add(int(e.seq or 0))
+                    his_seqs.add(seq)
                     _collect_player_names(e.payload, pid, names)
         # 占位符不是名字 —— 不滤掉的话第二次跑会把「(已注销)」当成他的又一个
         # 显示名收进来,幂等性从回执上看就破了(names 永远数出 1)。
@@ -5461,19 +5503,37 @@ class World:
         }
 
         # ── 历史:改写,不删行 ─────────────────────────────────────────────
+        # 两遍扫描是语义上必需的:名字要先收齐(第一遍)才知道拿什么去比对,
+        # 而名字可能出现在**任何一条**事件的正文里,包括收到它之前的那些 ——
+        # 所以合不成一遍。能省的只有常数:
+        # ① 第一遍已经对 seq ≤ `scanned_through` 的每一条判过 `about` 了,
+        #    直接查 `his_seqs`(载荷这期间没人动:改写它的只有抹除自己);
+        #    比它新的照旧现判 —— 那是 `forget_player` 刚追加的那条、以及别的进程
+        #    在这两遍之间写下的,漏判它们等于把抹除的边界往回缩。
+        # ② `dry_run` 只要那个 bool,别为它把每一层 dict/list 重建一遍。
+        # ③ 什么都改不动时连日志都不用翻(没有名字要替、也没有一条涉他)——
+        #    只有比第一遍更新的那几条还得看。
         if log is not None:
-            for e in _iter_event_log(log):
-                about = e.who == pid or _mentions_pid(e.payload, pid)
+            resume = 0 if (replacements or his_seqs) else scanned_through
+            for e in _iter_event_log(log, since=resume):
+                seq = int(e.seq or 0)
+                if seq <= scanned_through:
+                    about = seq in his_seqs
+                else:
+                    about = e.who == pid or _mentions_pid(e.payload, pid)
                 if not about and not replacements:
+                    continue
+                if dry_run:
+                    if _erase_probe(e.payload, replacements, blank=about):
+                        receipt["events"] += 1
                     continue
                 payload, changed = _erase_scrub(e.payload, replacements, blank=about)
                 if changed:
                     receipt["events"] += 1
-                    if not dry_run:
-                        log.rewrite(int(e.seq), {
-                            "ts": e.ts, "type": e.type, "who": e.who,
-                            "loc": e.loc, "payload": payload,
-                        })
+                    log.rewrite(seq, {
+                        "ts": e.ts, "type": e.type, "who": e.who,
+                        "loc": e.loc, "payload": payload,
+                    })
 
         # ── 转录与记忆 ─────────────────────────────────────────────────────
         chat = getattr(self, "chat_store", None)

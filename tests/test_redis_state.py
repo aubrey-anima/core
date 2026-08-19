@@ -406,6 +406,106 @@ _SCRIPT = [
 
 
 
+class _CountingRedis:
+    """记下每次 `LRANGE` 真的问了多长一段 —— 别的调用原样转发。
+
+    量的是**读回来多少行**,不是墙钟:一把会因为机器快而绿的尺子,量的从来不是
+    它说要量的那件事(压测闸那一条的同款教训)。
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.rows_read = 0
+        self.ranges: list[tuple[int, int]] = []
+
+    def lrange(self, key, start, stop):
+        rows = self._inner.lrange(key, start, stop)
+        self.ranges.append((int(start), int(stop)))
+        self.rows_read += len(rows or [])
+        return rows
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _fill_log(log, n: int, *, who: str = "夏") -> None:
+    for i in range(n):
+        log.append({"ts": i, "type": "t", "who": who, "payload": {"i": i}})
+
+
+def test_翻一页只读一页_而不是读到日志末尾再切(redis):
+    """**`limit` 要一路传进 `LRANGE`。**
+
+    `LRANGE key since -1` 是 O(尾巴长度) 的。读完再切的写法一页页翻上去整体是
+    O(N²/2),而它长得和线性一模一样:每次确实只返回 `limit` 条,没有一处报错,
+    只是世界越老越慢。13.9 万条事件上这就是线上那 80 秒
+    (`MySQLEventLog.page` 那边一直是真的 `LIMIT` —— 同一份"接口逐字相同"的
+    接口,两个后端从来不在一个复杂度上)。
+    """
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    counting = _CountingRedis(redis)
+    log = RedisEventLog(counting, events_key("paging"))
+    _fill_log(log, 1000)
+
+    counting.rows_read = 0
+    page = log.page(since_seq=0, limit=10)
+    assert [e.seq for e in page] == list(range(1, 11))
+    assert counting.rows_read == 10, (
+        f"要 10 条读回来 {counting.rows_read} 条 —— limit 没进 LRANGE"
+    )
+
+    counting.rows_read = 0
+    tail = log.page(since_seq=900, limit=10)
+    assert [e.seq for e in tail] == list(range(901, 911))
+    assert counting.rows_read == 10
+
+    # 整只端起来的那条路照旧(`replay` 没有 limit 可给)
+    counting.rows_read = 0
+    assert len(log.replay()) == 1000
+    assert counting.rows_read == 1000
+
+
+def test_从头翻到尾读的行数只跟日志一样长(redis):
+    """整条日志翻一遍 = 每条读一次,不是每条读 N/2 次。
+
+    这是抹除、导出、任何"要看每一条"的活的地基;钉的是**总量**,所以谁把
+    `_iter_event_log` 的页大小调大调小它都成立,而退回读到末尾再切当场红。
+    """
+    from anima_world.api import _iter_event_log
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    counting = _CountingRedis(redis)
+    log = RedisEventLog(counting, events_key("walk"))
+    _fill_log(log, 2000)
+
+    counting.rows_read = 0
+    seqs = [int(e.seq) for e in _iter_event_log(log, page_size=100)]
+    assert seqs == list(range(1, 2001))
+    assert counting.rows_read == 2000, (
+        f"翻一遍 2000 条读回来 {counting.rows_read} 条 —— 旧写法是 ~2 万"
+    )
+
+
+def test_按人按类型筛的那一页照旧凑得满(redis):
+    """**过滤那一支不能跟着截。**
+
+    `who`/`kind` 在客户端判(列表没有二级索引),要凑够 `limit` 条命中的就得往后
+    翻多少读多少。截在前 `limit` 条原始行上的话,一页会少给甚至空给,而调用方
+    看到的是"没有更多了" —— 一次静默的截断,比慢坏得多。
+    """
+    from anima_world.redis_state import RedisEventLog, events_key
+
+    log = RedisEventLog(redis, events_key("filtered"))
+    for i in range(500):
+        log.append({"ts": i, "type": "rare" if i % 100 == 0 else "common",
+                    "who": "她" if i % 100 == 0 else "他", "payload": {"i": i}})
+
+    assert [e.seq for e in log.page(limit=5, kind="rare")] == [1, 101, 201, 301, 401]
+    assert [e.seq for e in log.page(limit=5, who="她")] == [1, 101, 201, 301, 401]
+    assert [e.seq for e in log.page(since_seq=200, limit=5, kind="rare")] == [201, 301, 401]
+
+
 def test_two_appenders_get_unique_increasing_seqs(redis):
     """`seq` 的保序是多进程下最不能含糊的东西之一。
 

@@ -2126,6 +2126,13 @@ SELECT,这一条是整本账。** 真跑另外还有一遍写。
 (它此前一个字没说,于是下游照着"它只是数一下"建了那扇门);把它挪出请求线程是
 宿主的活。
 
+⚠️ **那 80 秒里绝大部分是一个已经修掉的 bug**:`RedisEventLog.page` 从前不把
+`limit` 交给 `LRANGE`,于是"一页页翻完整条日志"整体是 O(N²)。实测 6 万条
+19.0 s → 0.56 s(34 倍),13.9 万条外推 ~100 s → ~1.3 s。**但这一条只把曲线从
+平方掰回线性,没有把它变成常数** —— 上面那句"绝不许在 event loop / tick 线程上
+同步调"一个字都没松:线性的 1.3 秒,挂在时钟线程上就是世界停了 1.3 秒,而一个月
+两百万条时它是二十秒。**别拿这个倍数去换掉宿主那侧的墙。**
+
 **这条曲线的长期解是给事件按 `player_id` 建一条索引**,让抹除只碰涉他的那几条。
 它动 `storage` 契约、要给老世界回填、持镜像的仓库要跟,所以不在这一轮里 ——
 而常数项砍得再多它还是 O(全量事件):**十几万是一个被正常玩的世界两天的量,
@@ -2648,7 +2655,7 @@ from anima_world.api import World
 | `world.graph(agent_id=None)` | 关系图谱三元组 |
 | `world.cliques()` | 小团体(friendship 连通分量,日切重算) |
 | `world.events(since_seq=None)` | 近期事件缓冲(全量历史用下面的 `history()`) |
-| `world.history(*, since_seq=0, limit=1000, who=None, kind=None)` | **全量事件历史,分页**。事件形状与 `events()` 完全一致;`who` / `kind` 过滤。`broadcasts()` 就是它的一层壳 |
+| `world.history(*, since_seq=0, limit=1000, who=None, kind=None)` | **全量事件历史,分页**。事件形状与 `events()` 完全一致;`who` / `kind` 过滤。`broadcasts()` 就是它的一层壳。⚠️ **不带过滤时一页只读一页**(`limit` 一路进 `LRANGE` / SQL `LIMIT`);**带 `who`/`kind` 时一页是 O(游标之后的尾巴)** —— 过滤在客户端做(Redis 列表没有二级索引),要凑够 `limit` 条命中的就得往后翻多少读多少。按类型捞一个老世界的历史,请当作业跑,别挂在请求上 |
 | `world.fast_forward(ticks, *, plan_wait_cap=None)` | 无头快进,每个世界日等在途的规划落地。和 `simulate` **共用** `Scheduler.fast_forward`,免得两条快进路径长出不同行为。⚠️ 定时轮次不在快进里跑(§2.9.2) |
 | `world.report(*, ticks=None)` | 把跑出来的历史读成一份运行摘要,与 `simulate --report` **同一口径**(`report_format_version` 见 `contract`) |
 | `world.paused` | 这个世界的时钟停没停(属性,不是方法) |

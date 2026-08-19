@@ -260,6 +260,69 @@ def test_账本不动(world):
     assert replayed.balances.get(agent_id) == before.get(agent_id), "抹除动了账本"
 
 
+def test_预览走的是另一条路_数出来的却是同一批(world):
+    """`dry_run` 不再造那份拷贝(只判"会不会变"),于是它和真跑是**两条代码路径**。
+
+    两条路给同一个数这件事必须有人盯:回执正是宿主拿去写合规记录的那份,
+    而"预览说 3 条、真跑改了 5 条"不会有任何一处报错。
+    差的那一条是**文档写死的**(`forget` 追加的 `player_departed`,dry_run 时压根
+    不存在),所以这里连它一起钉 —— 只断"两个数差不多"等于什么都没断。
+    抹除的判断是递归的,所以下面每条事件**只有一处**能改,而且各藏在不同的形状里
+    (list 里的字符串 / list 套 dict / 第三层的原文字段)—— 两份递归里任何一份漏
+    一层,这个数当场差一。混在一条事件里就查不出来了:一条事件只算一次,
+    漏掉的那一层被同一条上别的命中掩护过去。
+    """
+    agent_id = next(iter(world.scheduler.agents))
+    _befriend(world, agent_id, "ghost-probe", name="阿檀")
+    _chat_once(world, agent_id, "ghost-probe", "我是阿檀,我怕黑")
+    _quiesce(world)
+    log = world.scheduler.event_log
+    log.append({"ts": 0, "type": "state_change", "who": agent_id,
+                "payload": {"kind": "gossip", "items": ["阿檀在场", 3]}})
+    log.append({"ts": 0, "type": "state_change", "who": agent_id,
+                "payload": {"kind": "gossip", "items": [{"who_said": "阿檀"}]}})
+    log.append({"ts": 0, "type": "state_change", "who": "ghost-probe",
+                "payload": {"kind": "gossip",
+                            "deep": {"inner": {"text": "一句没有名字的原文"}}}})
+
+    preview = world.erase_player("ghost-probe", reason="用户要求删除", dry_run=True)
+    done = world.erase_player("ghost-probe", reason="用户要求删除")
+    assert preview["events"] > 0
+    assert preview["events"] + 1 == done["events"], (
+        "预览和真跑数出的不是同一批(差的那一条只该是 player_departed)"
+    )
+    assert "阿檀" not in _all_payload_text(world)
+
+
+def test_两遍之间落库的那几条照旧现判(world):
+    """第二遍复用第一遍的判断,**只能复用到第一遍看见过的那一条为止**。
+
+    比它新的必须现判:`forget_player` 自己就在两遍中间追加一条 `player_departed`,
+    别的进程也可能刚好在这中间落一条。边界画错的话,那几条会被当成"和他无关"
+    放过去 —— 名字照旧躺在日志里,而回执说抹干净了,没有一处报错。
+    """
+    agent_id = next(iter(world.scheduler.agents))
+    _befriend(world, agent_id, "ghost-mid", name="阿檀")
+    _quiesce(world)
+    real_forget = world.forget_player
+
+    def forget_then_another_process_writes(pid, **kw):
+        out = real_forget(pid, **kw)
+        if not kw.get("dry_run"):
+            world.scheduler.event_log.append({
+                "ts": 0, "type": "conversation", "who": agent_id,
+                "payload": {"player_id": "ghost-mid", "player_name": "阿檀",
+                            "summary": "阿檀最后又说了一句"},
+            })
+        return out
+
+    world.forget_player = forget_then_another_process_writes
+    world.erase_player("ghost-mid", reason="用户要求删除")
+    text = _all_payload_text(world)
+    assert "阿檀" not in text, "两遍之间落的那条漏了"
+    assert "最后又说了一句" not in text, "那条的原文没抹"
+
+
 # ── CLI 出口 ────────────────────────────────────────────────────────────────
 
 

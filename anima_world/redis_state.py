@@ -461,6 +461,13 @@ class RedisEventLog:
     `who` / `kind` 过滤在客户端做:列表没有二级索引。一个世界日约 100 条事件,一年
     3.6 万条 —— `LRANGE` 全量再过滤,在这个量级上没问题,但**它不是能一直撑下去的
     形状**。真需要的时候再加按类型的索引集合,别现在就猜。
+
+    ⚠️ **上面那句话曾经把不过滤的那一支也一起遮住了。** `page()` 从前是"读到末尾
+    再切",于是**连不带 `who`/`kind` 的分页也是 O(尾巴)** —— 一页页翻完整条日志
+    整体 O(N²),而它每次确实只返回 `limit` 条,一处都不报错。13.9 万条上那是
+    100 秒(2026-08-19 线上抹除预览打停一个世界 80 秒,就是这个)。现在不过滤的
+    那一支把 `limit` 一路交给 `LRANGE`(见 `_rows`);**过滤那一支照旧 O(尾巴)**,
+    那是上面那句原本要说的账,它还在。
     """
 
     __slots__ = ("_redis", "_key")
@@ -487,10 +494,22 @@ class RedisEventLog:
         })))
         return e
 
-    def _rows(self, since_seq: int = 0) -> list[Any]:
+    def _rows(self, since_seq: int = 0, limit: int | None = None) -> list[Any]:
+        """`(since_seq, since_seq+limit]` 这一段。`limit=None` = 整条尾巴。
+
+        ⚠️ **`limit` 要一路传进 `LRANGE`,不能读完再切。** `LRANGE key since -1`
+        是 O(尾巴长度) 的:分页翻到第 k 页时它照样把第 k 页之后的全部读出来再扔掉,
+        于是"流式过一遍日志"整体是 **O(N²/2)** —— 而它长得和线性的一模一样,
+        `page(limit=500)` 每次也确实只返回 500 条。13.9 万条事件上这是 100 秒
+        (60k 条实测 19.1 s → 0.56 s,34 倍),`MySQLEventLog.page` 那边一直是
+        真的 `LIMIT`:**同一份"接口逐字相同"的接口,两个后端不在一个复杂度上。**
+        """
         from anima_world.types import Event
 
-        raw = self._redis.lrange(self._key, int(since_seq), -1) or []
+        start = int(since_seq)
+        stop = -1 if limit is None else start + int(limit) - 1
+        raw = [] if (limit is not None and int(limit) <= 0) else (
+            self._redis.lrange(self._key, start, stop) or [])
         out = []
         for offset, item in enumerate(raw):
             d = _loads(item) or {}
@@ -534,6 +553,13 @@ class RedisEventLog:
         self, *, since_seq: int = 0, limit: int = 100,
         who: str | None = None, kind: str | None = None,
     ) -> list[Any]:
+        # 不过滤时 `limit` 就是要读多少行,直接交给 `LRANGE`(见 `_rows`)。
+        # **过滤那一支不能这么走**:`who`/`kind` 在客户端判,要凑够 `limit` 条
+        # 命中的就得往后翻多少读多少 —— 截在前 `limit` 条原始行上,一页会少给
+        # 甚至空给,而调用方看到的是"没有更多了"。列表没有二级索引,这一支的
+        # O(尾巴) 是这个后端的既有账(类的说明里写着),不在这一轮里翻。
+        if who is None and kind is None:
+            return self._rows(since_seq, limit=int(limit))
         return self._match(self._rows(since_seq), who, kind)[: int(limit)]
 
     @staticmethod
