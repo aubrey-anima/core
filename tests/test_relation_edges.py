@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from anima_world.memory_store import MemoryDescriptor
@@ -181,9 +183,13 @@ def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
     读的那一侧照单全收的话,"他俩正是朋友的那一刻"仍然答"从来没有过"。
 
     ⚠️ **"读侧"是两个视图,不是一个**:`as_of` 那一支早就夹了,而
-    `include_invalid=True`(审计视图)原样交出整行 —— 于是同一行边有两个答案,
-    而那一格恰好是导出包和维护脚本读的。所以这条从头验到尾:此刻、那一刻、
-    审计视图,三个答案必须自洽,而库里的字节一个都不许被读操作改掉。
+    `include_invalid=True`(审计视图)原样交出整行 —— 于是**同一份数据、两个门、
+    两个答案,而没有一个门会报错**。所以这条从头验到尾:此刻、那一刻、审计视图,
+    三个答案必须自洽,而库里的字节一个都不许被读操作改掉。
+
+    ⚠️ 这条测试原先写着"审计视图正是导出包和维护脚本读的那一格" —— **那句是假的**
+    (2026-08-19 对账查出)。导出走的是另一条路,它读什么由
+    `test_导出包里躺的是原始字节_夹在读的入口` 钉住。
     """
     graph.add("agent:夏", "friendship", "agent:遥", created_at=100)
     field = "agent:夏\x00friendship\x00agent:遥"
@@ -199,7 +205,7 @@ def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
 
     # **审计视图给的必须是同一个答案。** 它原先原样交出 `invalid_at: 0` ——
     # 于是同一行边有两个答案:审计说"第 0 tick 作废"(它 100 才立起来),
-    # `as_of=100` 说"那一刻还立着"。而审计视图正是导出包与维护脚本读的那一格。
+    # `as_of=100` 说"那一刻还立着"。
     audited = graph.query(subject="agent:夏", include_invalid=True)[0]
     assert audited["invalid_at"] == 101, (
         f"审计视图和 as_of 对同一行给了两个答案:{audited['invalid_at']}"
@@ -207,6 +213,53 @@ def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
     assert audited["valid_from"] == 100, "夹的是上界那一格,别顺手改了别的"
     # 库里的字节留着 —— 读一次就顺手修一次库,等于让演化态多一个写入者。
     assert graph._rows.get(field)["invalid_at"] == 0
+
+
+def test_导出包里躺的是原始字节_夹在读的入口():
+    """`_edge_row_view` 那道下界**导出包吃不到** —— 而这是设计的必然结果,不是漏。
+
+    ⚠️ 这条测试的由来是一句**被写进 REFERENCE 的假话**:"审计视图恰好是导出包与
+    维护脚本读的那一格"(`redis_state._edge_row_view` 的注释、REFERENCE §2.9.9、
+    CHANGELOG 里各一份)。2026-08-19 对账查出它是假的 —— 导出走
+    `world_package.dump_world_records`,遍历 Redis 键原样吐类型化的字节,**一次
+    `query()` 都不调**;引擎里读 `include_invalid=True` 的只有 `forget_player` /
+    `erase_player`,而它们只看 `subject` / `object`。
+
+    REFERENCE 是别的仓库照着写代码的那一份,所以这条形状必须有人钉:**包里躺着
+    原始的 `invalid_at: 0`,夹发生在装回去之后的读入口。** 拿包里的字节直接做判断
+    的宿主要么自己套同一条下界,要么装进世界后经 `query()` 问 —— 而这句话只有在
+    "包里确实是原始字节"是真的时候才有意义。
+
+    要哪天改成"导出时也夹",这条会红,那时该改的是三份文档而不是这条断言。
+    """
+    import fakeredis
+
+    from anima_world.redis_state import RedisKnowledgeGraph
+    from anima_world.world_package import dump_world_records
+
+    redis = fakeredis.FakeStrictRedis(decode_responses=True)
+    graph = RedisKnowledgeGraph(redis, "t")
+    graph.add("agent:夏", "friendship", "agent:遥", created_at=100)
+    field = "agent:夏\x00friendship\x00agent:遥"
+    row = graph._rows.get(field)
+    row["invalid_at"] = 0                      # 绕过 drop(),从别的门进来的坏区间
+    graph._rows.put(field, row)
+
+    # 读的入口夹住了:世界自己问,答案是自洽的。
+    assert graph.query(subject="agent:夏", include_invalid=True)[0]["invalid_at"] == 101
+
+    # 而导出包里躺的是原始那一个 —— 它走的根本不是这条路。
+    edges = [
+        r for r in dump_world_records(redis=redis, world_id="t")
+        if r.get("kind") == "redis" and r.get("key") == "edges"
+    ]
+    assert edges, "导出里没有 edges 这一格 —— 那这条测试问的问题已经不存在了"
+    dumped = json.loads(edges[0]["value"][field])
+    assert dumped["invalid_at"] == 0, (
+        f"导出包里的 invalid_at 是 {dumped['invalid_at']} —— 如果它变成了 101,"
+        "说明导出改走 query() 了,那 REFERENCE §2.9.9 与 `_edge_row_view` 的注释"
+        "都要跟着改(它们现在写的是'包里是原始字节')"
+    )
 
 
 def test_making_up_revives_the_same_edge(graph):

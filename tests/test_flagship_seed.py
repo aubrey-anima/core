@@ -64,10 +64,9 @@ def test_橱窗点亮的每一格这个引擎都真的有(flagship):
     别的键(`economy.player_allowance` / `needs.mood_penalty_stock` / `world.start_time`)
     写错一个字照样全绿。
 
-    ⚠️ 这一条同时是 `engine_min` 假声明的病根探测器:3.3.0 加的三个键
-    (`chat.persona_anchor.enabled` / `memory.consolidation.enabled` /
-    `economy.player_allowance`)橱窗都点了,而封皮上曾经写着"2.3.0 就能跑" ——
-    拿 2.3.0 装,这三格全被静默跳过,世界照跑、日志干净、开箱不是橱窗。
+    ⚠️ **这一条查不出 `engine_min` 写低。** 它拿的是**当前**引擎的 `config_list()`,
+    所以橱窗点亮的键在今天的引擎上落不落地,和封皮上写着 2.3.0 还是 3.3.0 没有关系。
+    "写低"那半由下面 `test_橱窗封皮上那句要哪个引擎不许是假的` 钉住,理由写在那儿。
     """
     declared = _bundled_seed().get("config") or {}
     assert declared, "橱窗的 config 段空了 = 开箱回到毛坯"
@@ -86,14 +85,28 @@ def test_橱窗封皮上那句要哪个引擎不许是假的():
     "这个包能不能在这个引擎上开机"。写低了的下场不是报错,是 `runnable: true`
     然后开不了机、**而原因指错人** —— 照跑但给错东西的跨仓库版。
 
-    这里能机械验的是"不许写高":橱窗随 wheel 出厂,它自称要一个比自己所在的引擎
-    还新的版本,就是一个开箱即不可用的包。写低那一半靠上面那条(点亮的键必须落地)
-    加一条纪律:**改 `demo.cyberworld` 时用到了一个更晚的引擎特性,`engine_min`
-    跟着升** —— 量的字段白名单(`bands` / `label`)、`kind` 的 schema
-    (`participants`)、新的配置键,都算。
+    **所以这条闸是等号,不是 `<=`。** 理由是"坏声明一个字都不写":
+    这个仓库对橱窗产生过的**全部证据**只来自一个引擎 —— 它自己那个
+    (`anima_world.__version__`,测试套件跑的就是它)。`engine_min` 写成任何更低
+    的数字都是一句**没人验过**的话:没有一次 CI、没有一条测试、没有任何一次开机
+    发生在那个版本上。而它偏偏是下游唯一读得到的那句话。
+
+    2026-08-19 之前封皮上写着 2.3.0,而橱窗点着 3.3.0 才有的三个配置键
+    (`chat.persona_anchor.enabled` / `memory.consolidation.enabled` /
+    `economy.player_allowance`)—— 拿 2.3.0 装,这三格全被静默跳过,世界照跑、
+    日志干净、开箱不是橱窗。当时以为"点亮的键必须落地"那条测试能兜住这一半,
+    **那句是假的**:那条拿的是当前引擎的 `config_list()`,把封皮改回 2.3.0
+    它一样绿。这条等号是那次夸大的补偿 —— 改回 2.3.0,现在这里红。
+
+    代价说清楚:**升 `__version__` 就要顺手改 `demo.cyberworld` 第一行的两个数**。
+    这是有意的成本 —— 橱窗以纯文本进仓库正是为了这种改动能被 review。
+    要"这份文件在 3.1.0 上也跑得动"这种更松的声明,得先有一次真的在 3.1.0 上跑,
+    而这个仓库不产生那种证据(那条路的形状写在 FOR-STUDIO §3.21 ④)。
     """
     from importlib import resources
 
+    import anima_world
+    from anima_world.world_file import read_world_file
     from anima_world.world_package import inspect_world_file
 
     path = resources.files("anima_world") / "demo.cyberworld"
@@ -102,6 +115,17 @@ def test_橱窗封皮上那句要哪个引擎不许是假的():
     assert payload["runnable"] is True, (
         f"橱窗自称要 {payload['engine_min']},而它就随 "
         f"{payload['current_engine_version']} 这个 wheel 出厂"
+    )
+    assert payload["engine_min"] == anima_world.__version__, (
+        f"橱窗封皮上写着 engine_min={payload['engine_min']},而它随 "
+        f"{anima_world.__version__} 这个 wheel 出厂 —— 低的那个差是一句没人验过的话:"
+        f"这个仓库从没在 {payload['engine_min']} 上跑过它。改 `demo.cyberworld` "
+        f"第一行的 engine_min(与 source_engine_version)"
+    )
+    manifest, _ = read_world_file(str(path))
+    assert manifest.source_engine_version == anima_world.__version__, (
+        f"source_engine_version={manifest.source_engine_version} 和出厂的 "
+        f"{anima_world.__version__} 对不上 —— 这一格说的是'谁生的它'"
     )
 
 
