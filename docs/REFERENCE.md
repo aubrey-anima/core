@@ -2114,6 +2114,23 @@ anima-world config set presence.enforce_colocation true --world-id w   # ③ 再
 
 抹除自己也记一条 `player_erased` 事件(审计):载荷里只有 id 和数目,**没有任何名字**。
 
+⚠️ **`dry_run=True` 不是"数一下",它是 O(全量事件) 的两遍全表扫描 —— 绝不许在
+event loop / tick 线程上同步调。** 名字要先收齐(第一遍),才知道该拿什么去比对
+(第二遍),而后一遍必须看每一条:他的名字可能出现在任何一条事件的正文里。世界有
+多少条事件它就读多少条,**没有上限**,也没有 `limit` 可以给 —— "抹干净"和"只看
+前一页"是互斥的。和 §2.9.10.2 那句 ⚠️ 同一族,但贵一个量级:**那一条是一次
+SELECT,这一条是整本账。** 真跑另外还有一遍写。
+
+2026-08-19 线上就是这么塌的:玩家读一次抹除清单,一个 21 角色、13.9 万事件的世界
+被打停 80 秒 —— 宿主把它压在了 event loop 上。**引擎这一侧的责任是把代价说出来**
+(它此前一个字没说,于是下游照着"它只是数一下"建了那扇门);把它挪出请求线程是
+宿主的活。
+
+**这条曲线的长期解是给事件按 `player_id` 建一条索引**,让抹除只碰涉他的那几条。
+它动 `storage` 契约、要给老世界回填、持镜像的仓库要跟,所以不在这一轮里 ——
+而常数项砍得再多它还是 O(全量事件):**十几万是一个被正常玩的世界两天的量,
+一个月就是两百万条。**
+
 出口:`World.erase_player()`(§3)/ `anima-world player erase`(§4.2.3.2)。
 
 #### 2.9.10.2 他处得有多深(`player_engagement`)
@@ -2659,7 +2676,7 @@ from anima_world.api import World
 | `world.inbox_page(player_id, *, since_seq=0, limit=50)` | `inbox()` 的带游标版本,每一格语义与 `contact_requests_page()` 逐字相同(两扇门共用同一个 `_filtered_page`)。`player_id` 给 `None` 就是不过滤 |
 | `world.contact_forecast(agent_id=None)` | **此刻**每对 (角色, 玩家) 算出来是多少,含没触发的与被冷却挡下的。调 `contact.threshold` 用 —— 只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。只读:不占额度、不写冷却、不发事件,且**和真轮次共用同一个判定函数** |
 | `world.forget_player(player_id, *, reason="", dry_run=False)` | **一个人离开了这个世界**(§2.9.10)。往日志里追加一条 `player_departed` 事实,由折叠端和世界自己去响应它:关系(两个方向)、联系冷却、姿态、静音、回头找你、他教过的规则,一并作废;**历史一个字不改**(事件、记忆、转录、账本全留着 —— 她记得这个人来过,只是不再等他)。回执 `{player_id, reason, relations, edges, contact, chat_state, dry_run, seq}`(`edges` 是关系图上撤掉的边 —— 它是一张自己的表,折叠端碰不到,不显式撤的话 `cliques()` 里会坐着一个不存在的人)。**幂等**;`dry_run=True` 一个字节都不写。CLI 出口 `anima-world player forget` |
-| `world.erase_player(player_id, *, reason="", dry_run=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}`。**幂等**;`dry_run=True` 一个字节都不写。CLI 出口 `anima-world player erase` |
+| `world.erase_player(player_id, *, reason="", dry_run=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}`。**幂等**;`dry_run=True` 一个字节都不写。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账);要抹干净就没有 `limit` 可以给。长期解是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮)。CLI 出口 `anima-world player erase` |
 | `world.player_engagement(player_id)` | **他跟这个世界处得有多深**(§2.9.10.2)—— 依赖预警(第十条)要的那笔账,散在三处的数据拢到一起:`{player_id, conversations, messages, agents, first_seen, last_seen, span_days, relationships[], closest, contacts}`。**给数不给结论** —— 阈值与干预是宿主的判断(引擎不触达用户),而一个「依赖指数」会被做成进度条(同 `relationship_summary` 那条纪律)。`agents` 单独一格:只黏着一个角色和跟五个都熟是两种依赖。时间戳是**墙钟**(合规按真实时间算,世界 tick 和真实时间没有固定比率)。⚠️ 转录归 MySQL 的世界里这是一次 SELECT,别放进 tick 循环。CLI 出口 `anima-world engagement` |
 | `world.persona_drift(agent_id, *, baseline_n=None, player_id=None)` | **她还是不是她**(§2.9.12)—— 人设漂移的尺子。把她说过的话按时间排开,拿她自己最早那几条当基线,后面的走 CUSUM(单条抖动没有意义,CUSUM 专认持续的小偏移)。**纯计数、不调模型**,所以同一段转录跑一百遍给同一个答案 ——能进 CI(`anima-world drift` 漂了退 1),也能当体检。七个特征里 `sycophancy`(迎合度)单独有一格,它同时是合规项(第八条五:不得过度迎合用户)。**样本不够时 `ok=False` 并说出为什么** ——在 5 条消息上宣布「人设很稳」比不测更坏。测的是**文风**不是人格:当报警器,别当结论。CLI 出口 `anima-world drift` |
 | `world.relationship_summary(agent_id, other_id)` | **她这会儿把这个人当什么** —— 一句人话、一个粗档、和一条出处(§2.9.11)。`{agent_id, other_id, agent_name, other_name, exists, met, band, band_name, summary, axes:{sentiment,trust,affection,respect}, last_change}`。**`met` 和 `exists` 不是一回事**:`met` = 这两个说过话(联系态上有 `last_contact_tick`),`exists` = 判定折过一条 `sentiment_delta`。判定跑在对话关闭时,所以 `met=True, exists=False` 是一个真实且常见的中间态(§2.9.11 第 4 条)。`band`/`band_name` 走 `memory_triggers.band()` / `BAND_NAMES`,**和引擎自己认的是同一个函数**;⚠️ **`exists` 是 False 时这两格是 `None` / `""`,不是「不远不近」那一档** —— 空白不是一个档位,它是**还没有值**,拿 0.0 去查档表查出来的那一格是引擎自己编的(宿主自己决定画成"还没开始"还是不画)。`last_change` = 上一次改变它的那条事件 `{seq, tick, delta, direction, conversation_id, summary}`,查不到就 `conversation_id: None` + `summary: ""`(**不编**);整段关系没有来往时是 `None`。`exists` 是 False 时四个轴都是 0.0 —— 那是**没有来往**,不是敌意。玩家的 `other_name` 取的是**最近一次来往**那行记下的名字(联系态每个角色一行,而人是会改名的),所以同一个玩家在这份名单上永远只有一个称呼。CLI 出口 `anima-world relationship` |
@@ -3031,6 +3048,11 @@ anima-world player erase --world-id w --player u1 --reason 用户要求删除 --
 | `--reason` | 空 | 记进 `player_erased` 审计事件(那条载荷里没有名字) |
 | `--yes` | - | 真抹。**不带它只数**要动多少,一个字节都不写(和 `world drop` 同一个习惯) |
 | `--json` | - | 回执:`{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}` |
+
+⚠️ **不带 `--yes` 那一趟不是"数一下",它是 O(全量事件) 的两遍全表扫描**(为什么
+非扫不可,见 §2.9.10.1 那段 ⚠️)。**宿主要把它当一份作业跑,不是当一次查询** ——
+放进 HTTP 请求 / event loop / tick 线程,一个十几万条事件的世界会当场停摆,而它
+一声不吭。CLI 这条本来就是那份作业的形状(一次性进程),照它用。
 
 **幂等**(第二次起各格都是 0 —— `tests/test_erase_player.py` 跑到第五次:只跑第二次
 是不够的,`names_skipped` 曾经从第三次起永远是 1,而数据是对的、坏的是回执);
