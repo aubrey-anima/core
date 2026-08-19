@@ -164,8 +164,13 @@ def test_an_unnamed_moment_never_lands_before_the_edge_stood_up(graph):
     assert graph.drop("agent:夏", "rivalry", "agent:遥", at=5) is True
     row = [r for r in graph.query(subject="agent:夏", include_invalid=True)
            if r["predicate"] == "rivalry"][0]
-    assert row["invalid_at"] > 200
+    # **钉住那一刻本身,不只是"晚于 200"**:兜底能说的最小的真话正好是一个数
+    # (`valid_from + 1`),而 `> 200` 对 `valid_from + 10000` 一样绿 —— 那已经
+    # 是凭空编出来的一段有效期了。
+    assert row["invalid_at"] == 201
     assert [r["predicate"] for r in graph.query(subject="agent:夏", as_of=200)] == ["rivalry"]
+    # 上界:再往后一 tick 它就不在了。少了这一句,一条"永远有效"的边照样绿。
+    assert graph.query(subject="agent:夏", as_of=201) == []
 
 
 def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
@@ -174,6 +179,11 @@ def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
     边行不只经 `drop()` 落盘:装一份世界文件、维护脚本直写 `RedisRows`,
     都能带着一个不可能的区间进来(`invalid_at=0` 就是原来那个 bug 的形状)。
     读的那一侧照单全收的话,"他俩正是朋友的那一刻"仍然答"从来没有过"。
+
+    ⚠️ **"读侧"是两个视图,不是一个**:`as_of` 那一支早就夹了,而
+    `include_invalid=True`(审计视图)原样交出整行 —— 于是同一行边有两个答案,
+    而那一格恰好是导出包和维护脚本读的。所以这条从头验到尾:此刻、那一刻、
+    审计视图,三个答案必须自洽,而库里的字节一个都不许被读操作改掉。
     """
     graph.add("agent:夏", "friendship", "agent:遥", created_at=100)
     field = "agent:夏\x00friendship\x00agent:遥"
@@ -186,6 +196,17 @@ def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
         "它成立过 —— 直写进来的坏区间不该把这件事抹掉"
     )
     assert graph.query(subject="agent:夏", as_of=101) == []
+
+    # **审计视图给的必须是同一个答案。** 它原先原样交出 `invalid_at: 0` ——
+    # 于是同一行边有两个答案:审计说"第 0 tick 作废"(它 100 才立起来),
+    # `as_of=100` 说"那一刻还立着"。而审计视图正是导出包与维护脚本读的那一格。
+    audited = graph.query(subject="agent:夏", include_invalid=True)[0]
+    assert audited["invalid_at"] == 101, (
+        f"审计视图和 as_of 对同一行给了两个答案:{audited['invalid_at']}"
+    )
+    assert audited["valid_from"] == 100, "夹的是上界那一格,别顺手改了别的"
+    # 库里的字节留着 —— 读一次就顺手修一次库,等于让演化态多一个写入者。
+    assert graph._rows.get(field)["invalid_at"] == 0
 
 
 def test_making_up_revives_the_same_edge(graph):

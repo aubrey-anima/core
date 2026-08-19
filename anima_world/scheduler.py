@@ -621,11 +621,12 @@ class Scheduler:
                 summary = payload.get("summary", "")
                 importance = float(payload.get("importance", 0.5))
                 anchor = bool(payload.get("anchor", False))
-                # R3:她是怎么知道这件事的。**默认由 kind 推**(见
-                # `_provenance_of`),写事件的一方可以显式盖过它。
-                provenance = str(
-                    payload.get("provenance") or self._provenance_of(kind)
-                )
+                # R3:她是怎么知道这件事的。写事件的一方可以显式说,**没说就交给
+                # store 按 kind 判**(连转成字符串一起)—— 两个后端的 `add()` 都
+                # 已经是 `str(provenance or provenance_of(kind))`,这里再兜一次就是
+                # 同一条规则在两处各写一遍,而分叉的那一天没有任何一处会报错。
+                # (下面 `TriggerEngine` 那一支同一条,理由写在那儿。)
+                provenance = payload.get("provenance")
                 # **`memory_seed` 不过准入闸(R4)。** 它是一条**显式声明** ——
                 # 世界(作者的创世记忆、关系判定、八卦反应、反思)明说"记住这件事",
                 # 而它本来就绕开触发器,理由见上面那段注释。准入闸是对**引擎自己的
@@ -776,9 +777,10 @@ class Scheduler:
     #: `memory_store.PROVENANCE_BY_KIND`,因为两个后端的读侧也要拿它给老行补出处,
     #: 而 store 不认识 scheduler(抄一份过去 = 同一条记忆两种出处)。
     PROVENANCE_BY_KIND = memory_store_mod.PROVENANCE_BY_KIND
-
-    def _provenance_of(self, kind: str) -> str:
-        return memory_store_mod.provenance_of(kind)
+    #: ⚠️ 这里曾经还有一个 `_provenance_of()` 转发方法,两条写侧各调它兜一次
+    #: 默认值 —— 而两个 store 的 `add()` 早就在做同一件事。留着一个"想兜就兜得到"
+    #: 的转发口,等于让"没说就按 kind 判"这条规则随时可以变成两处实现,
+    #: 而它们分叉的那一天不会有任何一处报错。要判就问 `memory_store.provenance_of()`。
 
     def _admit_memory(self, agent_id: str, summary: str, kind: str,
                       importance: float, anchor: bool) -> bool:

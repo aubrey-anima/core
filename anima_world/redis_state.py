@@ -1500,6 +1500,28 @@ def _edge_invalid_at(valid_from: int, invalid_at: int) -> int:
     return max(int(invalid_at), int(valid_from) + 1)
 
 
+def _edge_row_view(row: dict[str, Any]) -> dict[str, Any]:
+    """一行边**读出来的样子**:`invalid_at` 一律过 `_edge_invalid_at` 那道下界。
+
+    上面那条纪律("写侧读侧共用同一个函数")原先只落实了一半:`query(as_of=…)`
+    那一支会夹,而 `include_invalid=True` 那一支**原样交出整行**。于是同一行边
+    在两个视图上有两个答案 —— 一条直写进来的 `invalid_at: 0`,审计视图说"它在
+    第 0 tick 就作废了"(一个不可能的值:它 `valid_from=100` 才立起来),
+    `as_of=100` 说"它那一刻还立着"。而**审计视图正是维护脚本和导出包读的那一格**,
+    世界自己读的是另一格:两份真相里没有一份会报错。
+
+    所以夹这一下放在**读的入口**,两个视图共用:`include_invalid` 要的是"整段
+    历史",不是"没经过任何解释的字节"——它要的答案和 `as_of` 必须是同一个。
+    ⚠️ **只改读出来的那一份拷贝,不回写。** 读一次就顺手修一次库,等于让"这个
+    世界是怎么变成这样的"多出一个日志之外的答案(而那正是演化态谁都不许改的理由);
+    存的字节留着,坏区间是从别的门进来的证据。
+    """
+    if row.get("invalid_at") is None:
+        return dict(row)
+    valid_from = int(row.get("valid_from") or row.get("created_at") or 0)
+    return {**row, "invalid_at": _edge_invalid_at(valid_from, row["invalid_at"])}
+
+
 class RedisKnowledgeGraph:
     """关系图的边。`(subject, predicate, object)` 唯一 —— **重复写不覆盖**
     (SQLite 那边是 `INSERT OR IGNORE`),所以第一次记下的 `source_event_seq`
@@ -1604,6 +1626,10 @@ class RedisKnowledgeGraph:
 
         `as_of=tick` 问的是**那时候**(`valid_from <= tick` 且还没作废);
         `include_invalid=True` 要的是整段历史(含已经作废的),给审计用。
+
+        **两个视图对同一行给的必须是同一个答案** —— `invalid_at` 一律经
+        `_edge_row_view()` 夹过下界,理由写在那个函数上(这里曾经只夹了 `as_of`
+        那一支,于是审计视图交出的是一个不可能的值)。
         """
         rows = []
         for r in self._rows.all().values():
@@ -1613,30 +1639,33 @@ class RedisKnowledgeGraph:
                 continue
             if object is not None and r["object"] != object:
                 continue
+            # 空区间读成"从来没有过",而那是 `hard=True` 的意思 —— 所以下界和写侧
+            # 走**同一个函数**(`_edge_invalid_at`),而且是在这里、在分支之前:
+            # 行是从别的门落进来的(装世界文件、维护脚本直写)时,闸只装在
+            # `drop()` 里挡不住,只装在 `as_of` 那一支里则挡不住审计视图。
+            row = _edge_row_view(r)
+            invalid_at = row.get("invalid_at")
             if include_invalid:
-                rows.append(r)
+                rows.append(row)
                 continue
-            invalid_at = r.get("invalid_at")
             if as_of is None:
                 if invalid_at is None:
-                    rows.append(r)
+                    rows.append(row)
                 continue
             # 那一刻:已经立起来了,而且还没作废(或作废在那之后)。
-            valid_from = int(r.get("valid_from") or r.get("created_at") or 0)
+            valid_from = int(row.get("valid_from") or row.get("created_at") or 0)
             if valid_from > int(as_of):
                 continue
-            # 空区间在这里读成"从来没有过",而那是 `hard=True` 的意思 —— 所以
-            # 下界和写侧走**同一个函数**(`_edge_invalid_at`)。行是从别的门
-            # 落进来的(装世界文件、维护脚本直写)时,闸只装在 `drop()` 里挡不住。
-            if invalid_at is not None and _edge_invalid_at(valid_from, invalid_at) <= int(as_of):
+            if invalid_at is not None and int(invalid_at) <= int(as_of):
                 continue
-            rows.append(r)
+            rows.append(row)
         rows.sort(key=lambda r: int(r.get("id") or 0))
         return rows
 
     def query_by_event(self, event_seq: int) -> list[dict[str, Any]]:
         rows = [
-            r for r in self._rows.all().values()
+            _edge_row_view(r)
+            for r in self._rows.all().values()
             if r.get("source_event_seq") == event_seq
         ]
         rows.sort(key=lambda r: int(r.get("id") or 0))

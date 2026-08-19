@@ -22,6 +22,62 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 `db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
 spot rather than silently written to.
 
+## [Unreleased]
+
+清一批"已知没修"的账。四条里三条是同一个形状:**引擎自己给出的那个答案是假的,
+而下游照着它做了判断**,没有任何一处报错。
+
+### Fixed
+
+- 🔴 **橱窗封皮上"要哪个引擎"那一格是假声明**(`demo.cyberworld` 的 `engine_min`:
+  `2.3.0` → **`3.3.0`**;`source_engine_version` 同步)。它上一次动是 2.3.0 那一版,
+  而橱窗此后跟着走了 3.0–3.3 四轮:量声明里用上了 `bands` / `label`
+  (**3.1.0 才进字段白名单**,更早的引擎 `不认识的字段` 当场拒整个世界),
+  `config` 段点亮了 `chat.persona_anchor.enabled` / `memory.consolidation.enabled` /
+  `economy.player_allowance`(**三个都是 3.3.0 加的键**)。
+  **后果是跨仓库的**:`world inspect --json` 照实报 `engine_min: 2.3.0`,
+  于是运维台的判包一次性容器对一个 3.1 或 3.2 的引擎镜像答 `runnable: true` ——
+  然后开不了机,**而报出来的原因指错人**(那是包的声明错了,不是引擎坏了)。
+  这就是"照跑但给错东西"的跨仓库版:一个下游按引擎自己的回答做了判断,而那个回答是假的。
+  **为什么钉 3.3.0 而不是 3.1.0**(硬底线是 3.1.0 —— 装得上就跑得起来):
+  `engine_min` 要答的是"哪些引擎跑得了**这个世界**",不是"哪些引擎不会当场崩"。
+  3.2.0 装得上它,但 `apply_seed_config` 会把那三个键**静默跳过**(未知键跳过而不
+  拒绝,那道宽容是给装载器的:一份更新的世界不该让老引擎整个打不开)——
+  于是开箱的"橱窗"少三件展品:她的人设不再尾部重注、夜里不固化记忆、
+  **玩家进来兜里一分钱都没有**,而世界照跑、日志干净。
+  拿一个会静默少装的引擎换一个 `runnable: true`,买到的正是这个仓库最怕的那种坏法。
+  **装载器要宽容,声明必须诚实** —— 这是两件事,不是一件。
+  两道新闸(`tests/test_flagship_seed.py`):橱窗点亮的每一个配置键都必须在这个引擎上
+  真的落地(`config_list` 的 `source` 是"世界文件",不是"默认值");橱窗自称要的引擎
+  不许比它随之出厂的那个 wheel 还新(`inspect` 的 `runnable` 必须是 `True`)。
+  ⚠️ 随之而来的纪律,写给以后改这个文件的人:**改 `demo.cyberworld` 时用上了一个
+  更晚的引擎特性,`engine_min` 跟着升** —— 量的字段白名单、`kind` 的 schema、
+  新的配置键,都算。
+- **关系边的审计视图和 `as_of` 对同一行给两个答案**(`redis_state.RedisKnowledgeGraph.query`)。
+  `invalid_at` 那道下界("永远晚于 `valid_from`",R3)本来就是**读侧写侧共用一个函数**,
+  但读侧其实是**两个视图**,而只有 `as_of` 那一支夹了:`include_invalid=True`
+  原样交出整行。于是一条从别的门直写进来的 `invalid_at: 0`(装一份世界文件、
+  维护脚本直写 `RedisRows` 都能造出它),审计视图说"它在第 0 tick 作废"——
+  一个不可能的值,它 `valid_from=100` 才立起来 —— 而 `query(as_of=100)` 说
+  "那一刻它还立着"。**审计视图恰好是导出包与维护脚本读的那一格**,世界自己读的是另一格:
+  一行数据两个答案,两边都不报错。现在夹这一下挪到读的入口、两个视图共用
+  (`_edge_row_view`)。⚠️ **只改读出来的那份拷贝,不回写**:读一次顺手修一次库,
+  等于给演化态多一个日志之外的写入者,而库里那个坏值本身是"它从别的门进来"的证据。
+- **`_apply_memory_trigger` 的 `memory_seed` 那一支自己兜了一次出处默认值**
+  (`payload.get("provenance") or self._provenance_of(kind)`),而两个 store 的
+  `add()` 早就在做同一件事。同一条规则在两处各写一遍就是给它们分叉留位置,
+  而分叉的那天没有一处会报错 —— 3.3.0 说的"写侧只有一处真相"因此略微夸大。
+  连 `Scheduler._provenance_of()` 这个转发口一起删掉(留着它就等于留一个随时可以
+  再兜一次的入口);kind → 出处的表仍在 `memory_store.PROVENANCE_BY_KIND`,
+  `Scheduler.PROVENANCE_BY_KIND` 照旧引用它。
+
+### 测试
+
+- `tests/test_relation_edges.py` 两处断言补上界:兜底那一刻钉 `== 201` 而不是
+  `> 200`(`> 200` 对一段凭空编出来的有效期一样绿),并配上 `as_of=201 == []`;
+  直写坏区间那条从头验到尾 —— 此刻 / 那一刻 / 审计视图三个答案自洽,
+  而库里的字节一个都不许被读操作改掉。
+
 ## [3.3.0] —— 我们对外声称"可测"的那几格,这一轮才真的量得准 (2026-08-19)
 
 **次版本**,判据逐条复核过:新增的全是公开方法与 CLI 出口(`drift` / `engagement` /

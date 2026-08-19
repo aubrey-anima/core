@@ -54,6 +54,57 @@ def test_out_of_the_box_the_showcase_features_are_lit(flagship):
         assert flagship.config_get(flag) is True, f"橱窗里 {flag} 没点亮"
 
 
+def test_橱窗点亮的每一格这个引擎都真的有(flagship):
+    """写下的每一格都要**落地**,不是"写了就算"。
+
+    `apply_seed_config` 对未知键的处理是**跳过而不是拒绝**(世界文件会比引擎活得久,
+    一份更新的世界不该让老引擎整个打不开)。那道宽容是给**装载器**的,不是给作者的
+    借口:橱窗和引擎同一个 wheel 出厂,它点亮一个这个引擎没有的键,结果就是开箱少
+    一件展品,而且一条日志都没有 —— 而上面那条逐个点名的测试只盯着九个开关,
+    别的键(`economy.player_allowance` / `needs.mood_penalty_stock` / `world.start_time`)
+    写错一个字照样全绿。
+
+    ⚠️ 这一条同时是 `engine_min` 假声明的病根探测器:3.3.0 加的三个键
+    (`chat.persona_anchor.enabled` / `memory.consolidation.enabled` /
+    `economy.player_allowance`)橱窗都点了,而封皮上曾经写着"2.3.0 就能跑" ——
+    拿 2.3.0 装,这三格全被静默跳过,世界照跑、日志干净、开箱不是橱窗。
+    """
+    declared = _bundled_seed().get("config") or {}
+    assert declared, "橱窗的 config 段空了 = 开箱回到毛坯"
+    rows = {row["key"]: row for row in flagship.config_list()}
+    for key in declared:
+        assert key in rows, f"橱窗点亮了一个这个引擎没有的配置键:{key}"
+        assert rows[key]["source"] == "世界文件", (
+            f"{key} 在这个引擎上没落地(source={rows[key]['source']})—— 被静默跳过了"
+        )
+
+
+def test_橱窗封皮上那句要哪个引擎不许是假的():
+    """`engine_min` 是**下游照它做判断**的那一格,不是一句自述。
+
+    `world inspect --json` 照实报它,而运维台的判包一次性容器拿 `runnable` 决定
+    "这个包能不能在这个引擎上开机"。写低了的下场不是报错,是 `runnable: true`
+    然后开不了机、**而原因指错人** —— 照跑但给错东西的跨仓库版。
+
+    这里能机械验的是"不许写高":橱窗随 wheel 出厂,它自称要一个比自己所在的引擎
+    还新的版本,就是一个开箱即不可用的包。写低那一半靠上面那条(点亮的键必须落地)
+    加一条纪律:**改 `demo.cyberworld` 时用到了一个更晚的引擎特性,`engine_min`
+    跟着升** —— 量的字段白名单(`bands` / `label`)、`kind` 的 schema
+    (`participants`)、新的配置键,都算。
+    """
+    from importlib import resources
+
+    from anima_world.world_package import inspect_world_file
+
+    path = resources.files("anima_world") / "demo.cyberworld"
+    payload = inspect_world_file(str(path))
+    assert payload["engine_min"], "封皮上没写要哪个引擎 = 谁都以为自己跑得了"
+    assert payload["runnable"] is True, (
+        f"橱窗自称要 {payload['engine_min']},而它就随 "
+        f"{payload['current_engine_version']} 这个 wheel 出厂"
+    )
+
+
 def test_橱窗里熬夜真的有代价(flagship):
     """做了却开箱看不见等于没做。这一条要三样一起在,少一样这个机制就是死的:
 
