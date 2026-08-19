@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from anima_world.chat_state import ChatStateStore as _ChatStateStore
+from anima_world.memory_store import provenance_of
 from anima_world.world_store import BTStore as _BTStore
 from anima_world.world_store import LocationStore as _LocationStore
 
@@ -852,6 +853,20 @@ class RedisVisibilityStore:
         return {str(r["owner"]): r.get("label") for r in self._places.all().values()}
 
 
+def _fill_provenance(row: dict[str, Any]) -> dict[str, Any]:
+    """老行补上出处(R3 分型)。**默认值写在读的这一侧**,才不用为了一个新字段
+    去改写一整张历史表 —— 和 MySQL 版 `_dicts()` 逐字同一条。
+
+    **按 kind 补,不是一律「亲历」。** 分型这一格是后加的,而它之前写下的行里
+    躺着 `kind='reaction'`(八卦传过来的)—— 一律读成「亲历」正是这一格要治的
+    那个病本身:她把一条传闻讲得斩钉截铁。判断走 `memory_store.provenance_of()`,
+    和引擎写新行时用的是同一个函数。
+    """
+    if not row.get("provenance"):
+        row["provenance"] = provenance_of(row.get("kind") or "")
+    return row
+
+
 class RedisMemoryStore:
     """她记得什么。**行在一个 hash 里,按角色建索引集合。**
 
@@ -952,6 +967,8 @@ class RedisMemoryStore:
             and (kind is None or r.get("kind") == kind)
             and (min_importance is None or float(r.get("importance") or 0) >= min_importance)
         ]
+        for row in rows:
+            _fill_provenance(row)
         # 和 SQLite 版同一个排序键 —— 见类的说明:不确定的次序是一次静默的分叉。
         rows.sort(key=lambda r: (int(r.get("tick") or 0), int(r.get("id") or 0)), reverse=True)
         return rows
@@ -1524,6 +1541,13 @@ class RedisKnowledgeGraph:
 
         `hard=True` 才真删行,只给法务抹除用(`forget_player` / `erase_player`:
         那不是"关系变了",是这个人不该在世界里留下痕迹)。
+
+        ⚠️ **`invalid_at` 永远不会早于 `valid_from`。** 不给 `at=` 时它落在
+        `valid_from` 上(**不是 0**):作废在成立之前的一行读出来是"这条事实从来没有
+        成立过" —— `query(as_of=他俩正是朋友的那一刻)` 答 `[]`,而这正是这一层
+        (R3 有效期)存在的理由的反面,还一条日志都不报。给了一个早于 `valid_from`
+        的时刻同样往回夹,并 warning 一声:那是调用方手里的 tick 不对,不该由
+        存储层安静地写下一个不可能的区间。
         """
         field = f"{subject}\x00{predicate}\x00{object}"
         row = self._rows.get(field)
@@ -1533,7 +1557,18 @@ class RedisKnowledgeGraph:
             return bool(self._rows.drop(field))
         if row.get("invalid_at") is not None:
             return False                # 已经作废过:幂等
-        row["invalid_at"] = int(at if at is not None else 0)
+        valid_from = int(row.get("valid_from") or row.get("created_at") or 0)
+        if at is None:
+            moment = valid_from
+        elif int(at) < valid_from:
+            logger.warning(
+                "撤边 %s -%s-> %s 给的时刻 %s 早于它成立的 %s —— 按 %s 记",
+                subject, predicate, object, int(at), valid_from, valid_from,
+            )
+            moment = valid_from
+        else:
+            moment = int(at)
+        row["invalid_at"] = moment
         self._rows.put(field, row)
         return True
 

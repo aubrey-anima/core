@@ -3411,7 +3411,12 @@ class World:
         # 所以它永远在场。给它写一条"缺席理由"就是一段假装解释的死代码 —— 而调试
         # 视图里的死代码最坏:你会照着一句永远不会出现的话去找原因。
         check("extra", "本轮没有临时插入的块(拒谈话题/loop 提示)")
-        for label, key in (("stance", "chat.stance.enabled"), ("tools", "chat.tools.enabled")):
+        # 开关管着的块**逐个都要在这儿有一行**。漏一个的下场正是这个视图存在的
+        # 理由:那一块凭空消失、零解释,而这份视图的职责就是解释缺席
+        # (`persona.anchor` 曾经漏在这张表外)。加了新的开关块就往这里加一行。
+        for label, key in (("stance", "chat.stance.enabled"),
+                           ("tools", "chat.tools.enabled"),
+                           ("persona.anchor", "chat.persona_anchor.enabled")):
             if label in present:
                 continue
             why[label] = (
@@ -5402,9 +5407,17 @@ class World:
                     _collect_player_names(e.payload, pid, names)
         # 占位符不是名字 —— 不滤掉的话第二次跑会把「(已注销)」当成他的又一个
         # 显示名收进来,幂等性从回执上看就破了(names 永远数出 1)。
-        names = {n for n in names if n and n != _ERASED_NAME}
+        # **他的 id 同样不是名字**,而且这一条要连着 `names_skipped` 一起滤:
+        # `forget_player` 写下的那条 `player_departed` 在联系态被清掉之后把
+        # `player_name` 兜底成 id(名字问不出来了),下一轮扫描于是把 id 当成他的
+        # 一个显示名收进来 —— 上一版只把它滤出 `names`、却让它落进 `skipped`,
+        # 于是第三次起 `names_skipped` 永远是 1。**数据是对的,坏的是回执**,
+        # 而宿主拿"再跑一遍各格全 0"写合规断言(文档承诺过)会当场红。
+        # id 本来也绝不该被替换:它是不透明 id,替它等于把载荷里的 `player_id`
+        # 一起绞碎(§2.9.10.1「不换假名」那一条)。
+        names = {n for n in names if n and n != _ERASED_NAME and n != pid}
         agent_names = {b.agent.name for b in scheduler.agents.values()}
-        skipped = sorted(n for n in names if len(n) < 2 or n in agent_names or n == pid)
+        skipped = sorted(n for n in names if len(n) < 2 or n in agent_names)
         names -= set(skipped)
         # 长名先换:「小明哥」比「小明」先替,免得替完短的把长的拆成两截。
         replacements = {n: _ERASED_NAME for n in sorted(names, key=len, reverse=True)}

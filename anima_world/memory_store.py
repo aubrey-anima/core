@@ -39,3 +39,24 @@ class MemoryDescriptor:
     #: 前沿的记忆系统(Hindsight 的 beliefs 网络、typed-memory 那一路)把这条
     #: 单独列出来,理由是同一个:出处丢了之后,再多的检索精度也救不回来。
     provenance: str = "experienced"
+
+
+#: kind → 她是怎么知道这件事的。**没列的一律亲历** —— 一张要求穷举的表会在作者
+#: 自造 kind 时把它悄悄判成别的东西,而作者不会知道。
+#:
+#: **住在这里,不住在 Scheduler 上**:两个后端的读侧要拿它给**老行**补出处
+#: (分型这一格是后加的,之前写下的行没有它),而 store 不认识 scheduler。
+#: 抄一份过去就是给"同一条记忆在两个后端上报出两种出处"留位置 ——
+#: 而 MySQL 侧真的这么错过一次:老的 `kind='reaction'`(八卦传过来的)被一律
+#: 归成「亲历」,于是她把一条传闻讲得斩钉截铁,正是这一格要治的那个病。
+PROVENANCE_BY_KIND: dict[str, str] = {
+    "reaction": "heard",        # 八卦传过来的
+    "hearsay": "heard",
+    "reflection": "believed",   # 她自己想出来的
+    "insight": "believed",
+}
+
+
+def provenance_of(kind: str) -> str:
+    """这个 kind 默认算哪种出处。"""
+    return PROVENANCE_BY_KIND.get(str(kind or ""), "experienced")

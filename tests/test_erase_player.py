@@ -200,10 +200,19 @@ def test_抹除是幂等的(world):
 
     first = world.erase_player("ghost-5")
     assert first["events"] >= 1
-    second = world.erase_player("ghost-5")
-    assert second["events"] == 0, "第二次不该还有可改写的事件"
-    assert second["conversations"] == 0 and second["memories_dropped"] == 0
-    assert second["names"] == 0, "名字来源在第一次就该被抹干净了"
+
+    # ⚠️ **跑到第五次。** 只跑第二次是不够的 —— 那正是这条 bug 溜过去的方式:
+    # 第 2 次各格确实全 0,而**第 3 次起 `names_skipped` 永远是 1**。
+    # 来路:`forget_player` 每次都追加一条 `player_departed`,联系态已经清空之后
+    # 名字问不出来,`player_name` 兜底成 player_id;下一轮扫描把这个 id 当成他的
+    # 一个显示名收进来,于是被判进 `skipped`。**数据是对的,坏的是回执** ——
+    # 而文档承诺的是"第二次跑各格都是 0",宿主拿它写合规断言会红。
+    counted = ("events", "conversations", "messages", "memories_dropped",
+               "memories_redacted", "names", "names_skipped")
+    for attempt in range(2, 6):
+        again = world.erase_player("ghost-5")
+        zeros = {key: again[key] for key in counted}
+        assert set(zeros.values()) == {0}, f"第 {attempt} 次跑还有非零格:{zeros}"
 
 
 def test_审计事件里只有id和数目_没有名字(world):

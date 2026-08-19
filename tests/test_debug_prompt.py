@@ -145,6 +145,9 @@ def test_absence_is_explained_not_just_omitted(bare_world):
     absent = world.debug_prompt(agent, player_id="p1")["absent"]
     assert "chat.stance.enabled" in absent["stance"]
     assert "chat.tools.enabled" in absent["tools"]
+    # **开关管着的块逐个都要有一行。** `persona.anchor`(R1 人设尾部重注)曾经漏在
+    # 这张表外:关掉开关之后那一块凭空消失、零解释 —— 而这份视图的职责就是解释缺席。
+    assert "chat.persona_anchor.enabled" in absent["persona.anchor"]
     # 没声明可见性时,要指向 declare_visibility —— 这是最容易"照跑但少一块"的一处:
     # 量都写好了、规律也在算,她就是感知不到,而默认 hidden 是故意的
     assert "declare_visibility" in absent["perception"]
@@ -155,11 +158,14 @@ def test_absence_is_explained_not_just_omitted(bare_world):
     # 打开之后,这几块就不该再出现在 absent 里
     world.config_set("chat.stance.enabled", True)
     world.config_set("chat.tools.enabled", True)
+    world.config_set("chat.persona_anchor.enabled", True)
     world.declare_visibility("world", "季节", "public")
     world.set_stock("world", "季节", 2)
     after = world.debug_prompt(agent, player_id="p1", display_name="阿檀")
     assert "stance" not in after["absent"]
     assert "tools" not in after["absent"]
+    assert "persona.anchor" not in after["absent"]
+    assert "persona.anchor" in after["order"], "开着就该真的在场,不只是不再报缺席"
     assert "perception" not in after["absent"]
 
 

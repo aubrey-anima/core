@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from anima_world import together
+from anima_world.memory_admission import DEFAULT_THRESHOLD as _ADMISSION_THRESHOLD
 from anima_world.world_time import DEFAULT_SECONDS_PER_TICK
 
 logger = logging.getLogger(__name__)
@@ -369,7 +370,14 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "memory.reflection_threshold": (3.0, "float", "memory", False, "Accumulated importance that triggers a reflection"),
     # R4 记忆准入闸:不是每句话都配成为记忆。默认关(会让世界少记东西 = 行为变更)。
     "memory.admission.enabled": (False, "bool", "memory", False, "Five-factor admission gate before a memory is written"),
-    "memory.admission.threshold": (0.35, "float", "memory", False, "Below this combined score the memory is refused"),
+    # **阈值只有一个数,而且住在算分的那一侧**(`memory_admission.DEFAULT_THRESHOLD`)。
+    # 这里曾经抄了一份 0.35 —— 而 `ConfigStore.get` 的 `default=` 只在键**没声明过**
+    # 时才轮得到,于是调用方写的 `default=DEFAULT_THRESHOLD` 永远不生效:算分那侧
+    # 校准成 0.20、文档写着 0.20、真正生效的是这一行的 0.35。后果不是算错,是
+    # **照文档开闸的世界静默丢掉正常记忆**(一条全新的 `state_change` 满分 0.35,
+    # 窗口里有一条同类就掉到 0.333 —— 拒)。抄一份默认值就是给"两份真相"留了位置,
+    # 所以这里 import 它。
+    "memory.admission.threshold": (_ADMISSION_THRESHOLD, "float", "memory", False, "Below this combined score the memory is refused"),
     # R5 夜间固化:趁她睡着的时候衰减、清扫、反思。默认关(改变留存 = 行为变更)。
     "memory.consolidation.enabled": (False, "bool", "memory", False, "Consolidate memories at each world-day rollover (decay + prune + reflect)"),
     "memory.consolidation.prune_below": (0.0, "float", "memory", False, "Strength below which a non-anchored memory is pruned during consolidation (0 = never prune)"),

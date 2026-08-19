@@ -30,6 +30,7 @@ from anima_world.beats import (
 from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.chat_service import DEFAULT_ADDRESS
 from anima_world.events import EventLog
+from anima_world import memory_store as memory_store_mod
 from anima_world.narrative import NarrativeProvider
 from anima_world.perception import why_not_perceivable
 from anima_world import together as together_mod
@@ -767,17 +768,13 @@ class Scheduler:
 
     # ── R3 记忆分型 / R4 准入闸 / R5 夜间固化 ─────────────────────────────
 
-    #: kind → 她是怎么知道这件事的。**没列的一律亲历** —— 一张要求穷举的表会在
-    #: 作者自造 kind 时把它悄悄判成别的东西,而作者不会知道。
-    PROVENANCE_BY_KIND = {
-        "reaction": "heard",        # 八卦传过来的
-        "hearsay": "heard",
-        "reflection": "believed",   # 她自己想出来的
-        "insight": "believed",
-    }
+    #: kind → 她是怎么知道这件事的。**这里只是引用**:表住在
+    #: `memory_store.PROVENANCE_BY_KIND`,因为两个后端的读侧也要拿它给老行补出处,
+    #: 而 store 不认识 scheduler(抄一份过去 = 同一条记忆两种出处)。
+    PROVENANCE_BY_KIND = memory_store_mod.PROVENANCE_BY_KIND
 
     def _provenance_of(self, kind: str) -> str:
-        return self.PROVENANCE_BY_KIND.get(str(kind or ""), "experienced")
+        return memory_store_mod.provenance_of(kind)
 
     def _admit_memory(self, agent_id: str, summary: str, kind: str,
                       importance: float, anchor: bool) -> bool:
@@ -811,14 +808,21 @@ class Scheduler:
             summary, kind=kind, importance=importance, anchor=anchor,
             existing=existing, threshold=threshold,
         )
+        self.note_subsystem("memory_admission", True, "")
         if not verdict.admit:
             logger.info(
                 "记忆准入拒了 %s 的一条 %s(%.3f):%s —— %r",
                 agent_id, kind, verdict.score, verdict.reason, summary[:40],
             )
-            self.note_subsystem("memory_admission", True, "")
-        else:
-            self.note_subsystem("memory_admission", True, "")
+            # **拒了几条要数得出来。** 档位仍是 `ok` —— 闸拦下一条复读是它在正常
+            # 工作,报 degraded 等于给 `state()` 点一盏假的红灯(而 `note_subsystem`
+            # 只在切档时发事件,那盏灯还会来回闪)。所以另加两格:拒过多少条、
+            # 最后一条是为什么被拒的。此前两支写的是同一行,于是 `state()` 上
+            # 看不出这道闸到底拦过没有 —— 而"开了闸但一条都没拦"和"拦掉了半个
+            # 世界"在读数上必须分得开。
+            health = self._subsystem_health["memory_admission"]
+            health["refused"] = int(health.get("refused") or 0) + 1
+            health["last_refusal"] = verdict.reason
         return verdict.admit
 
     def consolidate_memories(self, *, now_tick: int | None = None) -> dict[str, Any]:
@@ -834,8 +838,18 @@ class Scheduler:
         验证,而这个引擎的好处是它不必假装有"夜晚"——世界里真的有。
 
         **默认关**(`memory.consolidation.enabled`):它会改变记忆的留存,是行为变更。
-        开着的时候它**接管**日切的衰减(`_on_day_rollover` 是 if/else,不是两段都跑)——
-        `decay_pass` 不幂等,跑两遍是平方,理由见那里。
+        开着的时候它**接管**两样东西(`_on_day_rollover` 是 if/else,不是两段都跑):
+
+        - **日切的衰减** —— `decay_pass` 不幂等,跑两遍是平方,理由见那里。
+        - **反思的时刻** —— 白天那条路(`_note_memory_written`)在开着固化的世界里
+          只攒不发,越过阈值的那一次留到夜里。这正是 R5 存在的理由本身(反思是一次
+          LLM 调用,跟白天的对话一起跑会和她正在说的话抢线程),所以"挪到夜里"是
+          它的内容,不是副作用。
+
+        ⚠️ **门是 `memory.reflection_threshold`,不是"水位大于 0"。** 后者的意思是
+        "今天写过任何一条记忆的人今晚都反思一次" —— 每人每世界日一次 LLM 调用,而且
+        它把没攒够的水位**清成 0**,于是那条阈值路在开着固化的世界里等于被停掉:
+        两个机制,一个安静地废掉另一个,读数上还都对。攒不够的留着攒,明天接着攒。
         返回 `{agents, decayed, pruned, reflections}`,零成本可观测(和
         `rule_stats()` / `autonomy_stats()` 同一条:最容易的坏法是看着都对、其实一次没跑)。
         """
@@ -848,14 +862,22 @@ class Scheduler:
         if self.config_store is not None:
             floor = float(self.config_store.get(
                 "memory.consolidation.prune_below", default=0.0))
+        threshold = self._reflection_threshold()
+        # 缺 `decay_pass` 的 store 上这一轮只做清扫与反思。**判断在循环外** ——
+        # 放在里面的话每个角色都会记一条 warning,而缺的是同一个方法;更坏的是
+        # 老代码里那个 `hasattr` 一并管着 `continue`,于是清扫和反思跟着一起被跳过。
+        can_decay = hasattr(self.memory_store, "decay_pass")
+        if not can_decay:
+            logger.warning("固化:这个记忆后端没有 decay_pass,这一轮只清扫与反思")
         for agent_id in list(self.agents):
             out["agents"] += 1
-            try:
-                self.memory_store.decay_pass(agent_id, tick, ticks_per_day)
-                out["decayed"] += 1
-            except Exception:  # noqa: BLE001 - 一个角色的固化失败不该停掉整轮
-                logger.warning("固化:%s 的衰减失败", agent_id, exc_info=True)
-                continue
+            if can_decay:
+                try:
+                    self.memory_store.decay_pass(agent_id, tick, ticks_per_day)
+                    out["decayed"] += 1
+                except Exception:  # noqa: BLE001 - 一个角色的固化失败不该停掉整轮
+                    logger.warning("固化:%s 的衰减失败", agent_id, exc_info=True)
+                    continue
             if floor > 0.0:
                 # **锚定的永不清** —— 创世记忆是她是谁的一部分(和淘汰同一条纪律)。
                 for row in self.memory_store.query(agent_id=agent_id):
@@ -864,15 +886,41 @@ class Scheduler:
                     if float(row.get("strength") or 1.0) < floor:
                         if self.memory_store.forget_memory(int(row["id"])):
                             out["pruned"] += 1
-            if self._reflection_watermark.get(agent_id, 0.0) > 0.0:
-                self._reflection_watermark[agent_id] = 0.0
-                self._reflection_dirty.discard(agent_id)
-                if self.reflection_store is not None:
-                    self.reflection_store.reset(agent_id, tick)
-                self._submit_reflection(agent_id)
+            if self._watermark_of(agent_id) < threshold:
+                continue                # 还没攒够 —— 留着,明天接着攒
+            self._reflection_watermark[agent_id] = 0.0
+            self._reflection_dirty.discard(agent_id)
+            if self.reflection_store is not None:
+                self.reflection_store.reset(agent_id, tick)
+            # **只在真的交出去之后才计数**:`_submit_reflection` 在没有 reflector /
+            # 线程池 / 已停机时是空转,而报一个"反思了 3 次"的读数,正是
+            # `rule_stats()` 那条纪律要防的坏法 —— 看着都对、其实一次没跑。
+            if self._submit_reflection(agent_id):
                 out["reflections"] += 1
         self.note_subsystem("memory_consolidation", True, "")
         return out
+
+    def _reflection_threshold(self) -> float:
+        """攒到多少重要度才值一次反思。**白天与夜里读同一格** —— 两个阈值迟早
+        给出两种答案,而"她为什么这时候反思"就没有一个答案了。"""
+        threshold = 3.0
+        if self.config_store is not None:
+            threshold = float(self.config_store.get(
+                "memory.reflection_threshold", default=threshold))
+        return threshold
+
+    def _consolidation_enabled(self) -> bool:
+        return bool(
+            self.config_store is not None
+            and self.config_store.get("memory.consolidation.enabled", default=False)
+        )
+
+    def _watermark_of(self, agent_id: str) -> float:
+        """她攒到哪儿了。**没读过就先从库里取一次** —— 水位落过盘(重启接着攒),
+        而只看进程内存的版本会让一次重启把攒了半天的水位读成 0。"""
+        if agent_id not in self._reflection_watermark and self.reflection_store is not None:
+            self._reflection_watermark[agent_id] = self.reflection_store.get(agent_id)
+        return float(self._reflection_watermark.get(agent_id, 0.0))
 
     def _note_memory_written(self, agent_id: str, importance: float, kind: str) -> None:
         """Accumulate importance toward the reflection threshold (lock held).
@@ -886,6 +934,11 @@ class Scheduler:
 
         Reflections themselves don't accumulate — an insight spawning more
         insights is a storm, not thinking.
+
+        ⚠️ **开了夜间固化的世界只攒不发**(R5):越过阈值的那一次留到日切,由
+        `consolidate_memories()` 交出去。这是 R5 的内容本身 —— 它存在的理由就是
+        "反思是一次 LLM 调用,别跟她正在说的话抢线程"。阈值一个字没变,变的只是
+        它在哪一刻兑现。
         """
         if (
             kind == self.REFLECTION_KIND
@@ -894,15 +947,11 @@ class Scheduler:
             or self.event_log is None
         ):
             return
-        threshold = 3.0
-        if self.config_store is not None:
-            threshold = float(
-                self.config_store.get("memory.reflection_threshold", default=threshold)
-            )
+        threshold = self._reflection_threshold()
         if agent_id not in self._reflection_watermark:
             self._reflection_watermark[agent_id] = self.reflection_store.get(agent_id)
         total = self._reflection_watermark[agent_id] + max(0.0, importance)
-        if total < threshold:
+        if total < threshold or self._consolidation_enabled():
             self._reflection_watermark[agent_id] = total
             self._reflection_dirty.add(agent_id)
             return
@@ -1080,11 +1129,16 @@ class Scheduler:
             self._persist_reflection_watermarks()
             self._persist_clock()
 
-    def _submit_reflection(self, agent_id: str) -> None:
-        """Snapshot context under the lock, reflect on the judge pool."""
+    def _submit_reflection(self, agent_id: str) -> bool:
+        """Snapshot context under the lock, reflect on the judge pool.
+
+        返回**真的交出去了没有** —— 调用方拿它计数(见 `consolidate_memories`):
+        没有线程池、没有这个人、已经停机时这里是空转,而一个"反思了 3 次"的假读数
+        比没有读数更坏。
+        """
         brain = self.agents.get(agent_id)
         if brain is None or self.memory_store is None:
-            return
+            return False
         recent = self.memory_store.query(agent_id=agent_id)[:10]
         context = {
             "name": brain.agent.name,
@@ -1093,8 +1147,9 @@ class Scheduler:
         }
         pool = self._judge_pool
         if pool is None or self._stopped:
-            return
+            return False
         pool.submit(self._reflection_worker, agent_id, context)
+        return True
 
     def _reflection_worker(self, agent_id: str, context: dict[str, Any]) -> None:
         """Pool thread: LLM synthesizes insights; each lands as an ordinary
@@ -1160,7 +1215,12 @@ class Scheduler:
                 # 不等于反目,把它也算作撤销会让边随着数字的小幅摆动来回闪。
                 opposite = "rivalry" if predicate == "friendship" else "friendship"
                 for a, b in ((agent_id, target_id), (target_id, agent_id)):
-                    if self.knowledge_graph.drop(f"agent:{a}", opposite, f"agent:{b}"):
+                    # **作废也要说得出哪一刻**(和下面 `created_at=` 同一条)。不传的
+                    # 话默认写 0 —— 于是 `invalid_at` 早于 `valid_from`,而
+                    # `query(as_of=他俩正是朋友的那一刻)` 会答"从来没有过",
+                    # 恰好和这一层存在的理由相反,并且一条日志都不报错。
+                    if self.knowledge_graph.drop(f"agent:{a}", opposite, f"agent:{b}",
+                                                 at=int(descriptor.tick)):
                         logger.info(
                             "关系反转:撤掉 %s -%s-> %s,换上 %s", a, opposite, b, predicate
                         )
@@ -1476,9 +1536,9 @@ class Scheduler:
         # 不是多跑一点。实测一天之后强度 0.125(该是 0.35),配上
         # `prune_below` 就成了"她一觉醒来把昨天忘干净了" —— 而日志一条不错、
         # 每条记忆单看都合法。所以这里是 if/else,不是两段都跑。
-        consolidating = self.config_store is not None and self.config_store.get(
-            "memory.consolidation.enabled", default=False
-        )
+        # 固化同时接管**反思的时刻**(白天只攒不发,见 `_note_memory_written`)——
+        # 所以这一格的开关值必须两处读同一个函数。
+        consolidating = self._consolidation_enabled()
         if consolidating:
             try:
                 self.consolidate_memories(now_tick=now_tick)

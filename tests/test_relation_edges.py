@@ -101,3 +101,78 @@ def test_drifting_into_the_neutral_band_does_not_retract(open_world, bare_seed):
 
     assert {r["predicate"] for r in scheduler.knowledge_graph.query(subject="agent:夏")} \
         == {"friendship"}
+
+
+def test_a_retracted_edge_still_answers_for_the_time_it_held(open_world, bare_seed):
+    """作废要**说得出哪一刻** —— 否则"他俩正是朋友的那一刻"被答成"从来没有过"。
+
+    这是 R3(有效期)存在的理由本身:一段关系结束了是**又一件发生过的事**。
+    唯一的生产调用方(`_on_relation_shift`)一度不传 `at=`,于是 `invalid_at` 落成
+    默认的 0 —— 比 `valid_from` 还早,不报错,而 `query(as_of=250)` 返回 `[]`。
+    """
+    world = open_world(world_file=bare_seed)
+    graph = world.scheduler.knowledge_graph
+
+    _shift(world.scheduler, "夏", "遥", 0.6, tick=100, seq=1)
+    _shift(world.scheduler, "夏", "遥", -0.6, tick=400, seq=2)
+
+    dead = [r for r in graph.query(subject="agent:夏", include_invalid=True)
+            if r["predicate"] == "friendship"]
+    assert len(dead) == 1
+    assert dead[0]["valid_from"] == 100
+    assert dead[0]["invalid_at"] == 400, (
+        "作废的时刻必须是反目那一刻 —— 恒为 0 的版本让每条死边都自称"
+        "在成立之前就作废了"
+    )
+
+    at_the_time = graph.query(subject="agent:夏", as_of=250)
+    assert [r["predicate"] for r in at_the_time] == ["friendship"], (
+        "那时候他俩就是朋友,这一问必须答得出来"
+    )
+    assert [r["predicate"] for r in graph.query(subject="agent:夏")] == ["rivalry"], (
+        "此刻只剩 rivalry —— 默认视图不许把曾经是朋友当成是朋友"
+    )
+    assert graph.query(subject="agent:夏", as_of=50) == [], "还没立起来的那一刻是空的"
+
+
+def test_an_unnamed_moment_never_lands_before_the_edge_stood_up(graph):
+    """不知道哪一刻,就落在它成立的那一刻 —— **绝不写 0**。
+
+    `invalid_at < valid_from` 的一行读出来是"这条事实从来没有成立过":
+    `query(as_of=…)` 在它有效的整段区间上都答 `[]`,而没有任何一处会报错。
+    """
+    graph.add("agent:夏", "friendship", "agent:遥", created_at=100)
+    assert graph.drop("agent:夏", "friendship", "agent:遥") is True
+
+    row = graph.query(subject="agent:夏", include_invalid=True)[0]
+    assert row["invalid_at"] == row["valid_from"] == 100
+
+    graph.add("agent:夏", "rivalry", "agent:遥", created_at=200)
+    # 调用方手里的 tick 不对时也一样往回夹(并且 warning 一声)——
+    # 存储层不该安静地写下一个不可能的区间。
+    assert graph.drop("agent:夏", "rivalry", "agent:遥", at=5) is True
+    row = [r for r in graph.query(subject="agent:夏", include_invalid=True)
+           if r["predicate"] == "rivalry"][0]
+    assert row["invalid_at"] == 200
+
+
+def test_making_up_revives_the_same_edge(graph):
+    """绝交之后又和好:**同一条边复活**(id 不变,它是同一件事)。"""
+    graph.add("agent:夏", "friendship", "agent:遥", source_event_seq=1, created_at=100)
+    first_id = graph.query(subject="agent:夏")[0]["id"]
+    graph.drop("agent:夏", "friendship", "agent:遥", at=400)
+    assert graph.query(subject="agent:夏") == []
+
+    graph.add("agent:夏", "friendship", "agent:遥", source_event_seq=9, created_at=900)
+    alive = graph.query(subject="agent:夏")
+    assert len(alive) == 1, "复活是同一行,不是新加一条(死边 + 新边 = 两条)"
+    assert alive[0]["id"] == first_id
+    assert alive[0]["valid_from"] == 900, "「从什么时候起又是朋友」要答得出来"
+    assert alive[0]["invalid_at"] is None
+    # ⚠️ **一条边只有一份有效期**,所以复活会把它之前的那一段一起挪走:900 之前
+    # 的任何一刻现在都答"不是朋友",连第一段(100~400)也一样。这是有意的取舍 ——
+    # 记全整段历史要一行一段(edges 从此按时间无界增长,而它归 Redis 正是因为
+    # 上界按世界的规模封顶,见 CLAUDE.md 有界性那条)。要的是"此刻"与"刚才那一段",
+    # 不是完整的关系年鉴;完整的那份在事件日志里,重放答得出来。
+    assert graph.query(subject="agent:夏", as_of=600) == []
+    assert graph.query(subject="agent:夏", as_of=250) == []

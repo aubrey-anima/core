@@ -189,23 +189,33 @@ def analyze(messages: Sequence[str], *, baseline_n: int = BASELINE_N,
             threshold: float = CUSUM_THRESHOLD) -> dict[str, Any]:
     """一串**她说过的话**(按时间正序)→ 一份漂移报告。
 
-    返回 `{ok, reason, messages, baseline_n, drifted, score, features[], sycophancy,
-    verdict}`。`ok=False` 时 `reason` 说得出为什么(话太少 / 一条都没有),
+    返回 `{ok, reason, messages, baseline_n, drifted, score, threshold, features[],
+    sycophancy, verdict}`。`ok=False` 时 `reason` 说得出为什么(话太少 / 一条都没有),
     **不给一个假的结论** —— 这一层最容易犯的错是在 5 条消息上宣布"人设很稳"。
+
+    **每一格在三条出口上都在。** `--json` 是契约(渲染是赠品),而一个键随分支来去
+    的契约会把每个消费方逼成一串 `.get()`,再逼出各自的一份默认值 —— 那就是镜像端
+    开始猜的地方。`baseline_n` 报的是**真的取了几条**:`baseline_n` 最多取到样本的
+    一半(至少 2 条),所以 `--baseline 10` 在 14 条上会被夹到 7,读数上说得出来。
     """
     texts = [str(m or "") for m in messages]
     if not texts:
         return {"ok": False, "reason": "这个世界里她还没说过话", "messages": 0,
                 "baseline_n": 0, "drifted": False, "score": 0.0,
+                "threshold": threshold,
                 "features": [], "sycophancy": None, "verdict": "没有可测的东西"}
     if len(texts) < min_messages:
         return {"ok": False,
                 "reason": f"她只说过 {len(texts)} 条,不足 {min_messages} 条 —— "
                           "这么少的样本上算出来的是噪声,不是漂移",
                 "messages": len(texts), "baseline_n": 0, "drifted": False,
-                "score": 0.0, "features": [], "sycophancy": None,
+                "score": 0.0, "threshold": threshold,
+                "features": [], "sycophancy": None,
                 "verdict": "样本太少,不下结论"}
 
+    # 基线**最多占样本的一半**(至少 2 条):基线吃掉大半之后"后面那一段"只剩几条,
+    # CUSUM 累不出任何东西 —— 报出来的"还是她"是一盏假的绿灯,和样本不足时不下结论
+    # 是同一条纪律。夹过之后 `baseline_n` 报的是真的取了几条,不是要求的那个数。
     take = max(2, min(int(baseline_n), len(texts) // 2))
     rows = [features(t) for t in texts]
     base_rows, rest_rows = rows[:take], rows[take:]

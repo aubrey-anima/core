@@ -39,6 +39,8 @@ import json
 import logging
 from typing import Any
 
+from anima_world.memory_store import provenance_of
+
 logger = logging.getLogger(__name__)
 
 # 只有这几样进 MySQL —— 判据是"随时间无限增长"。
@@ -418,8 +420,11 @@ class MySQLMemoryStore:
             item["source_ids"] = json.loads(raw) if isinstance(raw, str) else (raw or [])
             item["anchor"] = int(item.get("anchor") or 0)
             # 老库补列之前写下的行读出来是 NULL —— 默认值写在读的这一侧,
-            # 和 Redis 版逐字同一条(见那边 `add` 里的注释)。
-            item["provenance"] = item.get("provenance") or "experienced"
+            # 和 Redis 版逐字同一条(`redis_state._fill_provenance`)。
+            # **按 kind 补,不是一律「亲历」**:老行里躺着 `kind='reaction'`
+            # (八卦传过来的),把它报成亲历正是分型要治的那个病本身。
+            if not item.get("provenance"):
+                item["provenance"] = provenance_of(item.get("kind") or "")
             out.append(item)
         return out
 
