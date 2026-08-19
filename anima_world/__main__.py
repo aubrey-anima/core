@@ -3613,7 +3613,10 @@ def run_drift(args: argparse.Namespace) -> int:
           f"前 {report['baseline_n']} 条当基线;阈值 {report['threshold']}")
     for row in report["features"]:
         mark = "漂" if row["drifted"] else "  "
-        print(f"  {mark} {row['label']:<6} 基线 {row['baseline']:>8.3f}"
+        # 标签按**显示宽度**补,不按字符个数(`_pad`)—— 中文是双宽字符,
+        # `:<6` 会让「用字丰富度」那一行比别的行宽出五格,整张表推歪。
+        # 这是这个仓库在地图那一层踩过、写进 CLAUDE.md 的同一条。
+        print(f"  {mark} {_pad(row['label'], 11)}基线 {row['baseline']:>8.3f}"
               f"  最近 {row['recent']:>8.3f}  累积 {row['cusum']:>6.2f} {row['direction']}")
     print(f"[drift] {report['verdict']}")
     if (report.get("sycophancy") or {}).get("rising"):

@@ -2119,6 +2119,64 @@ anima-world config set presence.enforce_colocation true --world-id w   # ③ 再
 时间戳一律**墙钟**:第十八条那类义务按真实时间算,而世界 tick 和真实时间之间没有
 固定比率(`start` 给新世界的是演示速度)——拿 tick 换算是那个 60 倍坑的亲戚。
 
+#### 2.9.11 一段关系的人话(`relationship_summary`)
+
+`state()["relations"]` 给出去的是这个:
+
+```json
+"wan|8f3c-…": {"sentiment": 0.668, "trust": 0.0, "affection": 0.0, "respect": 0.0}
+```
+
+四个 -1~1 的浮点数。宿主只有两条路,而两条都是坏的:**显示出来 = 把一段关系变成一根
+进度条**,而刷分是恋爱陪伴这类产品最不该长出来的东西;**不显示**又更坏 —— 玩家聊了
+两个小时,不知道有没有发生过任何事,而世界里其实发生了。
+
+引擎这一侧的责任不是"别给数字",是**给得出一句人话**。三条不变量:
+
+1. **人话是派生的,数字仍是契约。** `state()["relations"]` 一个字不动(宿主的代码在
+   读它);人话是**加**出来的一层,数字照旧住在返回值里一个显式的格子(`axes`)。
+2. **档是算出来的,不是存的。** 走 `memory_triggers.band()` / `BAND_NAMES` —— 和
+   记忆那一层认的是**同一个函数**。另写一份阈值表的下场是同一段关系在两个地方显示
+   成两档,而两处都"照跑"。
+3. **说得出出处。** 一句"你们更亲近了"如果说不出出处,和一根进度条没有区别 —— 玩家
+   学不到"我做了什么让它变的"。所以 `last_change` 带着那条事件的 `seq` / `tick` /
+   `delta` / `direction`,以及(玩家对话判出来的那种)**是哪一场对话、那场讲了什么**。
+   **查不到就明说查不到**(`conversation_id: None`、`summary: ""`),不编。
+
+出处本身是**折出来的**,不是每次去翻日志:`sentiment_delta` 落进投影时顺手写进
+`Relation.last_change`(`projection.py`),所以它和 `sentiment` 同一次重放、同一份
+事实,没有"和日志对不上"的坏法;而**翻日志要从头扫**(`events` 表只有 `ts` / `type`
+索引),这一层却是每渲染一帧问一次的。
+
+为了让出处**存在**,玩家对话的判定链上补了两个字段:`chat_session.close_conversation`
+把 `conversation_id` 与那场的摘要传给 `Scheduler.submit_user_chat_judgment()`,worker
+再把它们原样挂在落地的那条 `sentiment_delta` 上。它们**不进判定的提示词** —— 模型判
+的是这段转录,不是这场对话的编号。
+
+`exists` 是 False 的那一段是**没有来往**,不是敌意:0 不是负数,报成「交恶」的话一个
+刚进来的新玩家开局就被讨厌。
+
+4. **世界里有三种状态,别压成两种。** 关系判定跑在**对话关闭**的时候(默认静默 600 秒
+   才算关),而玩家聊完就去点关系那一屏:
+
+   ```
+   从没来往过    → 没这一行   ← 对
+   结算过        → 有一行     ← 对
+   来往过没结算  → 没这一行   ← 错,和"从没来往过"长得一模一样
+   ```
+
+   他刚跟她聊完一整场而那一屏是空的,于是他学到的是**"聊天没有用"**。所以
+   `relationship_summaries()` 的名单是「已折叠的对」**并上**「联系态里说过话的对」,
+   多出来的那些带 `met=True, exists=False`,`summary` 诚实地说「说过话了 —— 这一趟
+   来往还没在她心里落定」。**提前判不是修法**:判定要花一次 LLM 调用,而一场没关的
+   对话本来就还没讲完。**"说过话"的判据是 `last_contact_tick` 在不在**,不是"联系态
+   里有没有这一行" —— `note_fired`(她想起他了)也写行,而那种行没有 `player_name`,
+   拿它当说过话会让一串 uuid 出现在玩家的关系屏上。
+
+出口:`World.relationship_summary()` / `World.relationship_summaries()`(§3)/
+`anima-world relationship`(§4.2.3.4)。**人看的那张脸一个浮点数都不印**;要数字的
+去拿 `--json` 的 `axes`。
+
 #### 2.9.12 她还是不是她(`persona_drift`)
 
 长对话里人设会漂,这是**可测的现象而不是感觉**:人设块坐在提示词开头,而注意力随
@@ -2234,64 +2292,6 @@ kind → 分型的默认映射在 `Scheduler.PROVENANCE_BY_KIND`,**没列的一�
 ⚠️ `drop(..., hard=True)` 才真删行,**只给法务抹除用**(§2.9.10 / §2.9.10.1):
 那不是"关系变了",是这个人不该在世界里留下痕迹 —— 留一行作废的边等于 `cliques`
 看不见他而 `query(as_of=…)` 和导出仍然报得出他,告别就没告干净。
-
-#### 2.9.11 一段关系的人话(`relationship_summary`)
-
-`state()["relations"]` 给出去的是这个:
-
-```json
-"wan|8f3c-…": {"sentiment": 0.668, "trust": 0.0, "affection": 0.0, "respect": 0.0}
-```
-
-四个 -1~1 的浮点数。宿主只有两条路,而两条都是坏的:**显示出来 = 把一段关系变成一根
-进度条**,而刷分是恋爱陪伴这类产品最不该长出来的东西;**不显示**又更坏 —— 玩家聊了
-两个小时,不知道有没有发生过任何事,而世界里其实发生了。
-
-引擎这一侧的责任不是"别给数字",是**给得出一句人话**。三条不变量:
-
-1. **人话是派生的,数字仍是契约。** `state()["relations"]` 一个字不动(宿主的代码在
-   读它);人话是**加**出来的一层,数字照旧住在返回值里一个显式的格子(`axes`)。
-2. **档是算出来的,不是存的。** 走 `memory_triggers.band()` / `BAND_NAMES` —— 和
-   记忆那一层认的是**同一个函数**。另写一份阈值表的下场是同一段关系在两个地方显示
-   成两档,而两处都"照跑"。
-3. **说得出出处。** 一句"你们更亲近了"如果说不出出处,和一根进度条没有区别 —— 玩家
-   学不到"我做了什么让它变的"。所以 `last_change` 带着那条事件的 `seq` / `tick` /
-   `delta` / `direction`,以及(玩家对话判出来的那种)**是哪一场对话、那场讲了什么**。
-   **查不到就明说查不到**(`conversation_id: None`、`summary: ""`),不编。
-
-出处本身是**折出来的**,不是每次去翻日志:`sentiment_delta` 落进投影时顺手写进
-`Relation.last_change`(`projection.py`),所以它和 `sentiment` 同一次重放、同一份
-事实,没有"和日志对不上"的坏法;而**翻日志要从头扫**(`events` 表只有 `ts` / `type`
-索引),这一层却是每渲染一帧问一次的。
-
-为了让出处**存在**,玩家对话的判定链上补了两个字段:`chat_session.close_conversation`
-把 `conversation_id` 与那场的摘要传给 `Scheduler.submit_user_chat_judgment()`,worker
-再把它们原样挂在落地的那条 `sentiment_delta` 上。它们**不进判定的提示词** —— 模型判
-的是这段转录,不是这场对话的编号。
-
-`exists` 是 False 的那一段是**没有来往**,不是敌意:0 不是负数,报成「交恶」的话一个
-刚进来的新玩家开局就被讨厌。
-
-4. **世界里有三种状态,别压成两种。** 关系判定跑在**对话关闭**的时候(默认静默 600 秒
-   才算关),而玩家聊完就去点关系那一屏:
-
-   ```
-   从没来往过    → 没这一行   ← 对
-   结算过        → 有一行     ← 对
-   来往过没结算  → 没这一行   ← 错,和"从没来往过"长得一模一样
-   ```
-
-   他刚跟她聊完一整场而那一屏是空的,于是他学到的是**"聊天没有用"**。所以
-   `relationship_summaries()` 的名单是「已折叠的对」**并上**「联系态里说过话的对」,
-   多出来的那些带 `met=True, exists=False`,`summary` 诚实地说「说过话了 —— 这一趟
-   来往还没在她心里落定」。**提前判不是修法**:判定要花一次 LLM 调用,而一场没关的
-   对话本来就还没讲完。**"说过话"的判据是 `last_contact_tick` 在不在**,不是"联系态
-   里有没有这一行" —— `note_fired`(她想起他了)也写行,而那种行没有 `player_name`,
-   拿它当说过话会让一串 uuid 出现在玩家的关系屏上。
-
-出口:`World.relationship_summary()` / `World.relationship_summaries()`(§3)/
-`anima-world relationship`(§4.2.3.3)。**人看的那张脸一个浮点数都不印**;要数字的
-去拿 `--json` 的 `axes`。
 
 ### `anima-world map` —— 把地图画出来,看得见她今天去了哪儿
 
@@ -2947,7 +2947,7 @@ anima-world player options --world-id w --player u1 --json   # 契约(宿主照�
 没有位置只剩两种可能(和 `presence` 同一句):宿主没调过 `player_move`,或者他很久
 没动静已经过期。
 
-### 4.2.3.3 anima-world relationship —— 一段关系此刻的人话
+### 4.2.3.4 anima-world relationship —— 一段关系此刻的人话
 
 ```bash
 anima-world relationship --world-id w --agent 夏 --with u1          # 一段
@@ -2970,7 +2970,7 @@ anima-world relationship --world-id w                               # 全世界�
 恋爱陪伴产品最不该长出来的东西。要数字的去拿 `--json` 的 `axes` —— 渲染是赠品,
 `--json` 才是契约(和 `map` / `ontology` / `contact` 同一条)。
 
-### 4.2.3.4 anima-world drift —— 她还是不是她
+### 4.2.3.5 anima-world drift —— 她还是不是她
 
 ```bash
 anima-world drift --world-id w --agent 夏                 # 七个特征 + 一句结论
@@ -2991,7 +2991,7 @@ anima-world drift --world-id w --agent 夏 --json          # 契约(渲染是赠
 的回归闸。样本不够时退 **0** 并说出为什么(不够就是不够,那不是失败)。
 迎合度持续上升时**额外点名第八条(五)**:不得过度迎合用户、诱导情感依赖。
 
-### 4.2.3.5 anima-world engagement —— 他处得有多深
+### 4.2.3.6 anima-world engagement —— 他处得有多深
 
 ```bash
 anima-world engagement --world-id w --player u1 --json

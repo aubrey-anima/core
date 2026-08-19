@@ -1436,7 +1436,11 @@ anima-world config set economy.player_allowance 60 --world-id w
 - **`player erase` 和 `player forget` 是两个动作**:forget 是"她不再等他"(历史一个字
   不动),erase 是"他的数据从世界里消失"(转录整场删、事件里抹名抹原文,但**事件不删行**,
   改写保 seq —— 你们导出的 `.cyberworld` 里 seq 仍然连续)。
-- **三个新配置项默认关,内置橱窗里点亮了**:`chat.persona_anchor.enabled`(人设尾部
-  重注)、`memory.admission.enabled`(记忆准入闸,挡复读)、`memory.consolidation.enabled`
-  (夜间固化)。你们的世界文件要用就自己在 author `config` 段写一行 —— 和别的开关同一条
-  纪律:引擎默认值 = 没人说话时的样子,种子 = 这个世界的作者的意见。
+- **三个新配置项默认关**,你们的世界文件要用就自己在 author `config` 段写一行 ——
+  和别的开关同一条纪律:引擎默认值 = 没人说话时的样子,种子 = 这个世界的作者的意见。
+  内置橱窗点了其中两个:`chat.persona_anchor.enabled`(人设尾部重注)、
+  `memory.consolidation.enabled`(夜间固化)。
+  ⚠️ **`memory.admission.enabled`(记忆准入闸,挡复读)橱窗有意没点** —— 在橱窗那个
+  世界里实测反而更差(跑 40 天,归并出的「不同的事」从 10 件掉到 7 件:闸清干净了它
+  唯一管得到的那类事件,腾出的容量被它管不到的重复填上)。它对**状态类事件刷屏**的
+  世界才有用。**别照抄开关,自己量一遍再决定** —— 这一条引擎侧写在 REFERENCE §2.9.13。
