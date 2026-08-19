@@ -995,6 +995,19 @@ class Scheduler:
         `_projection_seq` 上写值的地方只该有三处:开机(`__init__`)、整份重折
         (`reset_projection`)、以及这两条真的折过之后。
 
+        ⚠️ **而水位只许往前,不许往回。** 这一整步是四拍("读水位 → replay → 折 →
+        写水位"),**要在 `_lock` 下调**(`state()` / `act()` 就是这么写的)。不在
+        锁下的话,tick 线程可能在第二拍和第四拍之间自己追加并折了一条 —— 于是这里
+        拿着一批**已经被折过**的 `fresh`,把水位从 tick 线程刚推到的位置**按回去**。
+        被按回去的那一段下一次 `catch_up_projection` 会再折一遍,而
+        `payment` / `item_transfer` 折两遍 = **账翻倍,零报错**。
+
+        所以这里写的是 `max(旧水位, …)`(和 `_apply_memory_trigger` 尾部同一形状)。
+        少了这个 `max`,漏掉一处锁就不只是"这一次多折一遍",而是把水位**永久**留在
+        一个偏低的位置,后面每一条都跟着再折一遍 —— 一处漏锁变成一族回拉。
+        锁是纪律,`max` 是那道兜底的闸:**它单点挡住整族**。
+        (往回倒带只有一条合法的路:`reset_projection`,它是连投影一起从头重建的。)
+
         返回补进来了多少条。没有新事件时是纯读一次 db。
         """
         if self.event_log is None:
@@ -1003,7 +1016,9 @@ class Scheduler:
         if not fresh:
             return 0
         project_events(fresh, base=self._memory_projection)
-        self._projection_seq = max(int(e.seq or 0) for e in fresh)
+        self._projection_seq = max(
+            self._projection_seq, max(int(e.seq or 0) for e in fresh)
+        )
         return len(fresh)
 
     def _clock_box(self) -> Any:

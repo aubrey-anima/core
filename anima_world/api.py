@@ -2046,8 +2046,10 @@ class World:
         with self._guard():
             # 别的进程可能刚给同一个人写过一张卡 —— 不先折进来的话,这次合并的
             # 底稿是一份过期的现在,而结果会安静地把对方那一次覆盖掉。
-            self.scheduler.catch_up_projection()
+            # **补课和读底稿在同一把 `_lock` 下**:分成两次拿锁的话,两次之间
+            # tick 线程能挤进来,而补课本身是写(见 `catch_up_projection`)。
             with self.scheduler._lock:
+                self.scheduler.catch_up_projection()
                 rows = self._view.identity_rows_locked()
             row = rows.get(agent_id)
             if row is None:
@@ -5257,8 +5259,17 @@ class World:
         scheduler = self.scheduler
         # 先补上别的进程写的 —— 不补的话预览数出来的关系条数和真跑那次对不上,
         # 而"先看一眼"正是这个参数存在的全部理由。
-        scheduler.catch_up_projection()
-        relations = sum(1 for key in scheduler._memory_projection.relations if player_id in key)
+        #
+        # **补课在 `scheduler._lock` 下**(`state()` / `act()` 同款,理由写在
+        # `catch_up_projection` 的 docstring 里):它是"读水位 → replay → 折 →
+        # 写水位"四拍,不在锁下就和 tick 线程折同一段。今天这个窗口是毫秒级的
+        # (两条线程抢一台机器),所以一直没被观测到 —— 但宿主一旦把这条路挪进
+        # 线程池,窗口就是整整一次 replay 那么长。
+        with scheduler._lock:
+            scheduler.catch_up_projection()
+            relations = sum(
+                1 for key in scheduler._memory_projection.relations if player_id in key
+            )
         graph = getattr(scheduler, "knowledge_graph", None)
         # **按整个节点比,别按子串。** `aubrey` 是 `aubrey-player` 的子串 ——
         # 子串匹配会把另一个人的边一起撤掉,而两个人的名字长得像是常态。
@@ -5295,7 +5306,11 @@ class World:
             receipt["chat_state"] = None
             return receipt
 
-        with self._guard():
+        # `_guard()` 是**跨进程**那把 RedisLock,挡的是别的进程;`scheduler._lock`
+        # 是**进程内**那把 RLock,挡的是自己的 tick 线程。两把各挡一半,谁都不是
+        # 谁的替代 —— 这里此前只有前一把。顺序和 `act()` 逐字相同(先 guard 后
+        # lock),两处不同序就是一个死锁。
+        with self._guard(), scheduler._lock:
             scheduler.catch_up_projection()
             # **先记事实,再清演化态。** 反过来的话,清到一半崩掉就留下一个
             # 没有任何解释的世界 —— 而"为什么变成这样"必须在日志里查得到。
@@ -5463,7 +5478,9 @@ class World:
             return receipt
 
         # ── 记下这件事本身(审计):载荷里只有 id 和数目,没有任何名字 ─────────
-        with self._guard():
+        # 两把锁都要(理由同 `forget_player`):`_guard()` 挡别的进程,
+        # `scheduler._lock` 挡自己的 tick 线程。
+        with self._guard(), scheduler._lock:
             scheduler.catch_up_projection()
             event = scheduler._record_and_deliver({
                 "type": "player_erased",
@@ -5518,7 +5535,11 @@ class World:
         if not pid:
             raise ValueError("player_id is required")
         scheduler = self.scheduler
-        scheduler.catch_up_projection()
+        # 补课在锁下(理由见 `catch_up_projection` 的 docstring):这条路是只读的,
+        # 但**补课本身是写**(它折进投影、挪水位),而这一层恰恰是宿主最可能挪到
+        # 慢通道上去的那一条(下面那句 ⚠️ 说的就是它有多贵)。
+        with scheduler._lock:
+            scheduler.catch_up_projection()
 
         convs: list[dict[str, Any]] = []
         for agent_id in scheduler.agents:
@@ -5742,9 +5763,13 @@ class World:
         if amount <= 0:
             return
         holder = f"player:{player_id}"
-        self.scheduler.catch_up_projection()
-        if holder in self.scheduler._memory_projection.allowances:
-            return
+        # **补课和那一问在同一把锁下** —— 这条路发的是 `payment`,而
+        # `payment` 正是"折两遍 = 账翻倍"的那一类;判据("他领过没有")读的又
+        # 恰好是投影。分两次拿锁等于给 tick 线程留一个挤进来的位置。
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            if holder in self.scheduler._memory_projection.allowances:
+                return
         self._record_and_fan({
             "type": "payment", "who": holder,
             "payload": {"from": economy.TOWN, "to": holder,

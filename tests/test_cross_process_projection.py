@@ -54,6 +54,20 @@ def _heartbeat(world) -> dict:
     })
 
 
+def _pay(world, amount: float = 7.0) -> dict:
+    """往账本上记一笔 —— **折两遍就当场看得出来**(余额翻倍)。
+
+    水位被拉回去之后,被按回去的那一段会被再折一遍,而"再折一遍"在
+    `subsystem_health` 那种事件上没有后果、在 `payment` 上就是账翻倍。
+    所以钉水位那条测试要用一笔真的钱当尺子。
+    """
+    return world.scheduler._record_event({
+        "type": "payment", "who": "player:ghost-pay",
+        "payload": {"from": "town", "to": "player:ghost-pay",
+                    "amount": amount, "reason": "test"},
+    })
+
+
 def _befriend(world, agent_id: str, player_id: str, name: str = "阿檀") -> None:
     """让世界里真的长出一段"她和这个玩家"的关系 —— 走既有的那条路,不手写投影。"""
     world.scheduler.contact_store.note_contact(
@@ -162,6 +176,111 @@ def test_水位只在折过之后才前进(two_processes):
     assert keeper.scheduler._projection_seq == keeper.scheduler.event_log.max_seq(), (
         "水位没停在日志末尾"
     )
+
+
+def test_水位不许往回拉(two_processes):
+    """**水位只许往前。** 往回一格,被按回去的那一段就会被再折一遍。
+
+    `catch_up_projection` 是四拍:读水位 → replay → 折 → 写水位。第四拍此前是
+    **直接赋值** `= max(fresh 的 seq)`,而不是 `max(旧水位, …)` —— 于是只要第二拍
+    和第四拍之间水位被别人推到了更前面(tick 线程自己追加并折了一条),这一步就把
+    它按回去。按回去的那一条下一次 `catch_up_projection` 会再折一遍,而
+    `payment` / `item_transfer` 折两遍 = **账翻倍,零报错**。
+
+    这条测试演的正是 2026-08-19 那一幕的形状:玩家那一侧的只读门
+    (`forget_player` 的 dry_run 前导、`player_engagement`)在 event loop 上不拿
+    `scheduler._lock` 就调补课,而世界的 tick 线程在同一段时间里照常发事件。今天
+    那个窗口是毫秒级的,所以没被观测到 —— 而宿主一旦把这类调用挪进线程池,窗口
+    就从毫秒变成整整一次全表扫描。
+
+    **锁是纪律,`max` 是闸**:漏一处锁只该多折一遍,不该让水位永久停在低位、
+    后面每一条都跟着再折一遍。两半都要,这条钉的是后一半。
+    """
+    keeper, admin = two_processes
+    sched = keeper.scheduler
+    sched.catch_up_projection()                  # 夹具前提:水位先对齐
+    real = sched.event_log
+
+    # admin 写一条**投影根本不认识**的事件:它被折两遍也没有后果,于是这条测试
+    # 量的只剩"水位有没有被按回去"这一件事。
+    _heartbeat(admin)
+
+    raced = {"done": False}
+
+    class _RacingLog:
+        """在 `replay()` 返回**之前**让 tick 线程往前折一步 —— 那个窗口本身。"""
+
+        def replay(self, *args, **kwargs):
+            rows = real.replay(*args, **kwargs)
+            if not raced["done"]:
+                raced["done"] = True
+                # 换回真日志再让"tick 线程"写,否则它自己的补空档会撞回这里。
+                sched.event_log = real
+                try:
+                    _pay(keeper)                 # 它自己折了,水位到了这一条
+                finally:
+                    sched.event_log = self
+            return rows
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    sched.event_log = _RacingLog()
+    try:
+        sched.catch_up_projection()
+    finally:
+        sched.event_log = real
+
+    assert sched._projection_seq == real.max_seq(), (
+        "水位被按回去了 —— 那笔钱下一次补课时会被再折一遍"
+    )
+
+    sched.catch_up_projection()                  # 后面任何一次正常补课
+    live = sched._memory_projection
+    replayed = project_events(real.replay())
+    assert live.balances == replayed.balances, "账翻倍了:那笔 payment 折了两遍"
+
+
+def test_玩家那几扇门补课时手里拿着锁(open_world, bare_seed):
+    """**补课是写,写要在 `scheduler._lock` 下。**(上一条钉的是兜底闸,这条钉纪律。)
+
+    `state()` / `act()` 一直是这么写的,而玩家那一侧的四扇门此前全漏:
+    `forget_player` 的 dry_run 前导一把锁都没有,`erase_player` 只有 `_guard()`
+    那把**跨进程** RedisLock —— 它挡得住别的进程,挡不住自己的 tick 线程,
+    而 `catch_up_projection` 的四拍正是被同进程另一条线程劈开的。
+
+    `_is_owned()` 是唯一问得出"此刻这把 RLock 在不在我手里"的东西;换成起线程去
+    撞的话,这条测试会变成一个偶尔红的测试,而偶尔红的测试等于没有测试。
+    """
+    world = open_world("guarded", world_file=bare_seed)
+    sched = world.scheduler
+    real = sched.catch_up_projection
+    held: list[tuple[str, bool]] = []
+    door = {"name": ""}
+
+    def _probe():
+        held.append((door["name"], sched._lock._is_owned()))
+        return real()
+
+    sched.catch_up_projection = _probe    # type: ignore[method-assign]
+    try:
+        for name, call in (
+            ("forget_player(dry_run)", lambda: world.forget_player("ghost-x", dry_run=True)),
+            ("forget_player", lambda: world.forget_player("ghost-x")),
+            ("erase_player(dry_run)", lambda: world.erase_player("ghost-x", dry_run=True)),
+            ("erase_player", lambda: world.erase_player("ghost-x")),
+            ("player_engagement", lambda: world.player_engagement("ghost-x")),
+            ("state", world.state),
+            ("roster", world.roster),
+        ):
+            door["name"] = name
+            call()
+    finally:
+        del sched.catch_up_projection
+
+    assert held, "一扇门都没走到 —— 夹具没验到东西"
+    naked = sorted({name for name, owned in held if not owned})
+    assert not naked, f"这几扇门补课时没拿锁:{naked}"
 
 
 def test_没有空档时不许多花一次replay(open_world, bare_seed):
