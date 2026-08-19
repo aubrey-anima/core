@@ -40,6 +40,7 @@ from anima_world.bt_nodes import (
     TimeWindow,
     default_bt,
 )
+from anima_world.media import LOCATION_IMAGE_KEYS
 from anima_world.world_time import parse_hhmm
 
 
@@ -50,7 +51,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-_LOCATION_FIELDS = ("name", "description", "kind", "parent", "x", "y", "w", "h")
+#: 一个地点的行长什么样(`id` 之外的那些)。**加一格图就必须加在这里** ——
+#: 播种是 `{f: e[f] for f in _LOCATION_FIELDS if f in e}`,漏了这一行的话作者写的
+#: 图会在**装载的第一步**被安静地筛掉:世界照跑、日志干净、图一张都没有。
+_LOCATION_FIELDS = (
+    "name", "description", "kind", "parent", "x", "y", "w", "h",
+    *LOCATION_IMAGE_KEYS,
+)
 
 # `seed_tree` 认识的全部节点类型 —— 也是 `_build_node` 能构造的全集。
 # (历史上住在 `anima_world.db` 的 CHECK 约束里;SQLite 层移除后,这里是权威。

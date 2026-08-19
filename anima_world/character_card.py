@@ -33,7 +33,12 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse
+
+from anima_world.media import (
+    MEDIA_SCHEMES,
+    PORTRAIT_MAX_BYTES as _PORTRAIT_MAX_BYTES,
+    media_uri_errors,
+)
 
 #: 主次。顺序即优先级(第一屏怎么排由宿主定,引擎只交出声明)。
 CARD_BILLINGS: tuple[str, ...] = ("lead", "supporting", "hidden")
@@ -47,7 +52,15 @@ TAGLINE_MAX_CHARS = 80
 
 #: 立绘允许的 scheme。`data:` 让一个包自足,`http(s):` 让资产另走 CDN。
 #: 相对路径不在里面 —— 理由见模块 docstring。
-PORTRAIT_SCHEMES: frozenset[str] = frozenset({"https", "http", "data"})
+#: **它就是 `media.MEDIA_SCHEMES` 这个对象**(不是一份拷贝):地点的两格图也
+#: 走同一道闸,两处各写一份 frozenset 的话,迟早只有一处跟着改。
+PORTRAIT_SCHEMES: frozenset[str] = MEDIA_SCHEMES
+
+#: 立绘这条 URI 的字节上限。**这一格此前引擎一个字节都没管过** ——
+#: 于是一张 8 MB 的图 base64 进世界文件,加载放行、导出带着走、`roster()` 每次
+#: 都把它整个吐出来,而没有任何一处会说一句话。数怎么定的、量的是什么,见
+#: `media.py` 的模块 docstring(一句话:量这条 URI 本身,上限按读出口定)。
+PORTRAIT_MAX_BYTES = _PORTRAIT_MAX_BYTES
 
 #: 引擎认得的三格。**不认识的键原样带过去**(创作台已经预告了第四样:声线、
 #: 主题色、CV)—— 引擎本来就不理解这几格,拦下来只会让新版创作台配不了老引擎。
@@ -91,24 +104,16 @@ def card_errors(card: Any, *, label: str) -> list[str]:
         elif "\n" in tagline:
             errors.append(f"{label}: card.tagline 是**一行**,不许换行")
 
-    portrait = card.get("portrait")
-    if portrait is not None:
-        if not isinstance(portrait, str):
-            errors.append(
-                f"{label}: card.portrait 必须是一个 URI 字符串,"
-                f"收到 {type(portrait).__name__}"
+    # 立绘和地点的两格图走**同一道闸**(`media.media_uri_errors`):scheme 那半条
+    # 理由逐字相同,字节那半条只是上限的数不一样(按各自的读出口定)。两处各写
+    # 一遍的话,下一次收紧只会收紧其中一处 —— 而另一处不报错,它只是继续放行。
+    if "portrait" in card:
+        errors.extend(
+            media_uri_errors(
+                card.get("portrait"), label=label, field="card.portrait",
+                max_bytes=PORTRAIT_MAX_BYTES,
             )
-        elif not portrait.strip():
-            errors.append(f"{label}: card.portrait 是空的 —— 不要这一格就别写它")
-        else:
-            scheme = urlparse(portrait.strip()).scheme.lower()
-            if scheme not in PORTRAIT_SCHEMES:
-                errors.append(
-                    f"{label}: card.portrait {portrait!r} 不是绝对 URI"
-                    f"(只认 {', '.join(sorted(PORTRAIT_SCHEMES))}:)。"
-                    "包是分发物 —— 相对路径发出去就是一张断的图,而且不报错;"
-                    "要让包自足就写 data: URI"
-                )
+        )
     return errors
 
 

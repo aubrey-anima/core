@@ -39,6 +39,11 @@ from anima_world.character_card import (
     world_card_errors,
     world_card_warnings,
 )
+from anima_world.media import (
+    LOCATION_IMAGE_KEYS,
+    world_location_media_errors,
+    world_location_media_warnings,
+)
 from anima_world.projection import project_events
 from anima_world.scheduler import Scheduler
 from anima_world.types import Event, Projection
@@ -732,6 +737,8 @@ def authored_layer_errors(
       照跑、日志干净,而她一直在报数字,作者要到三个月后才发现写错了一个方括号。
     - `world_card_errors` —— 角色卡。它多一条理由:卡是**分发物里给玩家看的那一面**,
       相对路径的立绘发出去就是一张断的图,而作者自己看不见。
+    - `world_location_media_errors` —— 地点的两格图。和上一条同一道闸、
+      同一个理由,只是上限的数按各自的读出口定(`media.py` 的模块 docstring)。
 
     两条纪律都在这个函数的**存在**上,不在它的实现里:
 
@@ -760,7 +767,20 @@ def authored_layer_errors(
         _world_seed_errors(authored, complete=complete)
         + visibility_band_errors(authored)
         + world_card_errors(authored)
+        + world_location_media_errors(authored)
     )
+
+
+def _authored_media_warnings(authored: dict[str, Any] | None) -> list[str]:
+    """拼错 / 过时的图字段,一行一条。**开机、`validate world`、`world check` 共用。**
+
+    `world_card_warnings` 管卡上那些引擎不认识的键(`taglien`),
+    `world_location_media_warnings` 管地点上那个我自己公布过又改掉的 `image` ——
+    两条都是"写了但什么也不会发生",而这类问题只有作者能改,所以三条路都得说。
+    """
+    if not authored:
+        return []
+    return world_card_warnings(authored) + world_location_media_warnings(authored)
 
 
 def _load_world_file(
@@ -814,7 +834,7 @@ def _load_world_file(
         # 拼错的键只警告(`taglien` 什么也不做,但拦下来会让新版创作台配不了老引擎)。
         # **开机也要说** —— 这条警告此前只有 `validate world` 才看得到,而托管环境里
         # 没有人会去跑那条命令。
-        for problem in (world_card_warnings(authored) if authored else []):
+        for problem in (_authored_media_warnings(authored) if authored else []):
             logger.warning("%s: %s", path, problem)
         # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
         # 跑过的世界导出来、或者从 1.x 迁过来的,里面一条 author 记录都没有 ——
@@ -833,7 +853,15 @@ def _load_world_file(
         return {}
 
 
-_LOCATION_ENTRY_FIELDS = ("id", "name", "description", "kind", "parent", "x", "y", "w", "h")
+#: 作者写的一个地点条目里,引擎收得下的那些键。**这是一路上的第一道筛子** ——
+#: 一格图从文件走到玩家眼前,每一道都得放它过:这里 →
+#: `world_store._LOCATION_FIELDS` → `RedisLocationStore.upsert` 的缺省行 →
+#: `api._LOCATION_KEYS` → `map_data()`。
+#: 漏掉任何一处的下场都一样:作者写了、引擎收了、玩家看不见,而且零报错。
+_LOCATION_ENTRY_FIELDS = (
+    "id", "name", "description", "kind", "parent", "x", "y", "w", "h",
+    *LOCATION_IMAGE_KEYS,
+)
 
 
 def _normalize_location_entry(loc: dict[str, Any], index: int, total: int) -> dict[str, Any]:
@@ -4959,18 +4987,26 @@ def _cannot_even_look(path: str) -> str | None:
     return None
 
 
-def _load_authored_layer(path: str) -> tuple[dict[str, Any], str | None]:
+def _load_authored_layer(
+    path: str, *, scan: Any = None
+) -> tuple[dict[str, Any], str | None]:
     """读一个世界文件的**作者层**,聚合成 section 字典。读不了就把话说清楚。
 
     **流式喂进去**(不 `list()` 一份出来):一个跑过的世界导出来是十几万条状态记录,
     而这里只挑 `author` 那几条 —— 攒一份全量列表出来纯属白背,而这条命令正是要被
     拿去问一个真实舰队世界的(灯塔湾那份包)。`author_records_to_seed` 单趟遍历,
     校验和那条 `WorldFileError` 照旧在迭代耗尽时抛出来,一起被下面接住。
+
+    给了 `scan`(一个 `media.MediaScan`)就在**同一趟**上顺手把图数了。为了数图再
+    读第二遍等于把上面那条纪律作废,而在同一条流上分叉是免费的。
     """
+    from anima_world.media import tee_media
     from anima_world.world_file import WorldFileError, author_records_to_seed, read_world_file
 
     try:
         _, records = read_world_file(path)
+        if scan is not None:
+            records = tee_media(records, scan)
         return author_records_to_seed(records), None
     except WorldFileError as exc:
         return {}, str(exc)
@@ -5010,7 +5046,7 @@ def run_validate(args: argparse.Namespace) -> int:
                 world_seed_warnings(authored)
                 + _authored_drift_warnings(authored)
                 + _authored_unreachable_requirements(authored)
-                + world_card_warnings(authored)
+                + _authored_media_warnings(authored)
             )
             if edit:
                 # **说出没查的那一半。** 一次编辑的引用可以落在目标世界里(它的名册
@@ -5089,13 +5125,20 @@ def contract_payload() -> dict[str, Any]:
         CARD_BILLINGS as _BILLINGS,
         CARD_KEYS,
         DEFAULT_BILLING,
+        PORTRAIT_MAX_BYTES,
         PORTRAIT_SCHEMES,
         TAGLINE_MAX_CHARS,
+    )
+    from anima_world.media import (
+        LOCATION_IMAGE_GLOSS,
+        LOCATION_IMAGE_MAX_BYTES,
+        MEDIA_SCHEMES,
     )
     from anima_world.world_seed import (
         WORLD_SEED_AGENT_KEYS,
         WORLD_SEED_AGENT_OPTIONAL_KEYS,
         WORLD_SEED_LOCATION_KEYS,
+        WORLD_SEED_LOCATION_OPTIONAL_KEYS,
     )
 
     return {
@@ -5151,6 +5194,18 @@ def contract_payload() -> dict[str, Any]:
             # 等于要求每个世界给每个角色写一张卡。
             "agent_optional_keys": sorted(WORLD_SEED_AGENT_OPTIONAL_KEYS),
             "location_keys": sorted(WORLD_SEED_LOCATION_KEYS),
+            # 地点的两格图。和 `agent_optional_keys` 同一格、同一个理由:
+            # **可选**,而且创作台要一个问得到的答案而不是按版本号猜。
+            "location_optional_keys": sorted(WORLD_SEED_LOCATION_OPTIONAL_KEYS),
+            # **哪个是哪个也在契约里。** 创作台的铁律是"问引擎,不读文档",所以
+            # 一份只报了两个键名的契约等于让它去猜哪个铺满屏幕、哪个是地图上那一格 ——
+            # 猜错了不报错,只是两张图各在错的地方。
+            "location_image_keys": dict(LOCATION_IMAGE_GLOSS),
+            "location_image_schemes": sorted(MEDIA_SCHEMES),
+            # 上限量的是**这条 URI 字符串本身**(不是原图字节;base64 之后约 4/3),
+            # 数按读出口定 —— 地点的图骑在 `state()` 上,而那道门每几秒被问一次、
+            # 一次带回全部地点,所以它比立绘那一格贵得多,数也就不一样。
+            "location_image_max_bytes": LOCATION_IMAGE_MAX_BYTES,
         },
         # 角色卡:作者写给**玩家**看的那一面。创作台照这一段决定填什么、怎么校验,
         # 而它此前只能靠版本号猜"这支引擎带不带得动" —— 猜错不报错。
@@ -5160,6 +5215,10 @@ def contract_payload() -> dict[str, Any]:
             "default_billing": DEFAULT_BILLING,
             "tagline_max_chars": TAGLINE_MAX_CHARS,
             "portrait_schemes": sorted(PORTRAIT_SCHEMES),
+            # 这一轮补上的一格。**此前引擎一个字节都没管过** —— 一张 8 MB 的图
+            # base64 进世界文件,加载放行、导出带着走、`roster()` 每次整个吐出来,
+            # 而没有任何一处会说一句话。量的是这条 URI 字符串,不是原图字节。
+            "portrait_max_bytes": PORTRAIT_MAX_BYTES,
             # 读出口。**没有出口的字段等于没有这个字段**,所以它和形状写在一起。
             "read_command": "roster",
             # 写出口。只报读出口的时候,"作者层写得进"和"一个跑着的世界改得动"
@@ -5200,12 +5259,19 @@ def run_contract(args: argparse.Namespace) -> int:
     print(f"  报表口径       {payload['report']['format_version']}   simulate --report")
     print(f"  种子 schema    agents{payload['seed']['agent_keys']} "
           f"locations{payload['seed']['location_keys']}")
-    print(f"  可选           agents{payload['seed']['agent_optional_keys']}")
+    print(f"  可选           agents{payload['seed']['agent_optional_keys']} "
+          f"locations{payload['seed']['location_optional_keys']}")
     print(f"  角色卡         {payload['character_card']['keys']}   "
           f"主次 {'/'.join(payload['character_card']['billings'])}"
           f"(缺省 {payload['character_card']['default_billing']})   "
           f"读出口 anima-world {payload['character_card']['read_command']}   "
           f"写出口 anima-world {payload['character_card']['write_command']}")
+    for key, gloss in payload["seed"]["location_image_keys"].items():
+        print(f"  地点图         {key:<12} {gloss}")
+    print(f"  图的闸         scheme {'/'.join(payload['seed']['location_image_schemes'])}   "
+          f"立绘 ≤ {payload['character_card']['portrait_max_bytes'] // 1024} KiB   "
+          f"地点每格 ≤ {payload['seed']['location_image_max_bytes'] // 1024} KiB"
+          f"(量的是 URI 本身;引擎不存字节)")
     print(f"  节拍 op        {', '.join(payload['beats']['ops'])}")
     print(f"  节拍谓词       {', '.join(payload['beats']['predicates'])}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
@@ -5547,8 +5613,33 @@ def _print_check_human(payload: dict[str, Any]) -> None:
         print(f"  ✗ {line}")
     for line in payload["warnings"]:
         print(f"  {onboarding.yellow('!')} {line}")
+    _print_check_media(payload)
     if payload["loadable"] and not payload["warnings"]:
         print("  没有发现问题。")
+
+
+def _print_check_media(payload: dict[str, Any]) -> None:
+    """图这一段。**不联网探活** —— 这里报的是"这个包挂在谁身上",不是"它们还活着吗"。
+
+    外链不是错(图床由网站自己建,世界文件里只留一条绝对链接是定下来的形状),
+    但它是一笔**看不见的依赖**:包发出去之后,这几台服务器每一台都得继续活着。
+    按 host 列出来,是让这笔账在拿到包的那一刻就能被看见。
+    """
+    external = payload.get("external_media") or []
+    inline = payload.get("inline_media_bytes") or {}
+    if not external and not inline.get("count"):
+        return
+    print(f"  {onboarding.dim('图 —— 不联网探活,只报这个包指向哪儿')}")
+    for row in external:
+        print(
+            f"    {row['count']:>4} 张  {row['scheme']}://{row['host']}"
+            f"  ({', '.join(row['fields'])})"
+        )
+    if inline.get("count"):
+        print(
+            f"    {inline['count']:>4} 张  内嵌 data:  共 "
+            f"{inline['total'] // 1024} KiB,最大一张 {inline['largest'] // 1024} KiB"
+        )
 
 
 def run_world_check(args: argparse.Namespace) -> int:
@@ -5589,9 +5680,11 @@ def run_world_check(args: argparse.Namespace) -> int:
     对同一份文件答 `runnable: true`。**封皮说的是作者声称要哪个引擎,这里说的是
     这一版引擎真的收不收它** —— 两个问题,`inspect` 那一格没有被动过。
     """
+    from anima_world.media import MediaScan
     from anima_world.world_package import _engine_version
     from anima_world.world_seed import world_seed_warnings
 
+    scan = MediaScan()
     payload: dict[str, Any] = {
         "operation": "world check",
         "path": str(args.package),
@@ -5601,9 +5694,28 @@ def run_world_check(args: argparse.Namespace) -> int:
         "authored": None,
         "errors": [],
         "warnings": [],
+        # 图这两段。**不联网探活** —— 要报的是"这个包挂在哪几台服务器
+        # 身上、自己又带了多少字节",不是"这些链接还活着吗"(那是运维的活,而且
+        # 答案每分钟都在变)。图床由网站自己建、世界里只存绝对外链是定下来的形状,
+        # 那么这条选择的**代价**就该在拿到包的那一刻看得见:发出去之后,这里列出的
+        # 每一台都得继续活着,而包自己不会因为哪一台没了就报错 —— 它只是少几张图。
+        #
+        # 作者层和状态层**都数**:一个跑过的世界导出来只有状态记录,而立绘就在
+        # `agent_join` 的载荷里。只数作者层的话,那种包会得到一句"外链 0 条"。
+        "external_media": [],
+        "inline_media_bytes": {"count": 0, "total": 0, "largest": 0},
     }
     unopenable = _cannot_even_look(args.package)
-    authored, read_error = ({}, None) if unopenable else _load_authored_layer(args.package)
+    authored, read_error = (
+        ({}, None) if unopenable else _load_authored_layer(args.package, scan=scan)
+    )
+    if unopenable is None and read_error is None:
+        # **只有整份读完了才报这两段。** 半途抛错的那趟扫描手里是一份残缺的账
+        # (读到第几条算第几条),而"12 条外链的包报出 3 条"是一个**安静的错答案**,
+        # 比一句"没数"坏得多。读不完的时候这两段留空,和上面 `loadable` 那条
+        # "问不出来"是同一个姿势。
+        payload["external_media"] = scan.external_media()
+        payload["inline_media_bytes"] = scan.inline_media_bytes()
     if unopenable is not None:
         # **文件打不开不是"装不进去",是"没答上来"。** 报成 `loadable: false` 的话,
         # 一个路径打错的调用方会得到一句关于世界的判决 —— 而世界没有任何问题。
@@ -5634,7 +5746,7 @@ def run_world_check(args: argparse.Namespace) -> int:
                 world_seed_warnings(authored)
                 + _authored_drift_warnings(authored)
                 + _authored_unreachable_requirements(authored)
-                + world_card_warnings(authored)
+                + _authored_media_warnings(authored)
             )
             if payload["edit"]:
                 warnings.append(

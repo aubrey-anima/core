@@ -2577,7 +2577,7 @@ secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的
 |---|---|
 | `billing` | `lead` / `supporting` / `hidden`,**缺省 `supporting`**。是枚举不是布尔 —— "解锁后才出现的人"是真需求,而布尔长不出第三档,等要的时候再改就是一次跨仓库破坏 |
 | `tagline` | 通讯录里名字底下那一行,≤ **80 字**、不许换行。**绝不进提示词** —— 那是写给玩家看的广告词,混进人设她就会照着念 |
-| `portrait` | 一个**带 scheme 的绝对 URI**(`https` / `http` / `data`)。引擎一个字节都不存 |
+| `portrait` | 一个**带 scheme 的绝对 URI**(`https` / `http` / `data`),**≤ 1 MiB**(量的是这条 URI 字符串本身)。引擎一个字节都不存 |
 
 四条纪律:
 
@@ -2606,6 +2606,55 @@ secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的
 `contract --json` 的 `character_card` 段自报枚举/上限/scheme 与两个出口的命令名
 (`read_command` / `write_command`),创作台照它对齐,不必再靠版本号猜"这支引擎
 带不带得动角色卡"、"改不改得动一个跑着的世界"。
+
+### 2.14 地点有图:地图上那一格,和走进去铺开的那一张
+
+**"背景"不是第三样东西 —— 它就是这个地点的图。** 玩家走到哪儿,哪儿的图铺开。
+
+作者层里每个地点多两个**可选**键(不写 = 这个世界没做过图,不是错误):
+
+```json
+{"id": "wharf", "name": "码头", "description": "海风很大",
+ "kind": "point", "x": 0.3, "y": 0.4,
+ "map_image": "https://img.example.com/t/wharf.png",
+ "scene_image": "https://cdn.example.com/scene/wharf.jpg"}
+```
+
+| 格 | 说明 |
+|---|---|
+| `map_image` | 地图上那一格的**缩略图**:小、方形、一眼认得出是哪儿 |
+| `scene_image` | 走进这个地点之后铺开的**那张大图**:要留白,压暗了还压得住正文 |
+
+**为什么是两格而不是一格。** 它们是两个用途,而一张图同时满足不了:地图上那一格要
+小、要一眼认得出;铺开的那张要大、要留白。合成一格的话,作者只能在"地图上糊成一团"
+和"正文压在人脸上"之间挑一个。
+
+四条纪律(前两条与立绘**逐字相同**,走的是同一道闸 `media.media_uri_errors`):
+
+- **必须是带 scheme 的绝对 URI**(`https` / `http` / `data`)。相对路径**开不了机** ——
+  包是分发物,`images/wharf.png` 发出去就是一张断的图,而且不报错。
+- **`data:` 不禁,但每格 ≤ 256 KiB。** 禁掉等于宣布一个 `.cyberworld` 不可能自足。
+  **上限量的是这条 URI 字符串本身**(base64 之后约是原图的 4/3),而**数按读出口定**:
+  地点的图骑在 `state()` 上,而宿主每几秒问一次这道门、一次带回**全部**地点 ——
+  同样一张图在这里比在名册里贵得多。所以它和 `portrait` 的 1 MiB **不必相等**。
+- **引擎一个字节都不存。** 没有下载、没有缩略、不联网;图床归宿主(网站的 `/media/`),
+  世界里只留一条不透明的绝对外链 —— 于是**换图不用重发世界**。
+- **一路上的筛子必须一起走通**:作者层 → `__main__._LOCATION_ENTRY_FIELDS` →
+  `world_store._LOCATION_FIELDS` → `RedisLocationStore.upsert` 的缺省行 →
+  `api._LOCATION_KEYS` → `map_data()`。每一处都是一个字典推导,漏了任何一处的下场
+  都一样:作者写了、引擎收了、玩家看不见,**而且零报错**。`tests/test_location_media.py`
+  钉在链的出口上,不钉中间。
+
+读出口是 [`world.state()`](#读世界) 的 `locations[]`(没写图的地点这两格是 `None`)与
+[`world.map_data()`](#读世界) 的 `places[]`(**写了才出现**,和 `w`/`h` 同一个安排);
+`contract --json` 的 `seed.location_optional_keys` / `location_image_keys`(**哪个是哪个
+也在里面**)/ `location_image_schemes` / `location_image_max_bytes` 自报形状。
+
+⚠️ **写口还欠着。** 作者层合并是"只填缺、不覆盖",而覆盖粒度是**整行** —— 一个地点
+只要已经在世界里,拿一份补了图的世界文件装回去**不生效**(整行合并会把这个世界跑
+出来的名字和描述倒带回创世那天)。这是角色卡那一课的同一个形状,眼下的处置是
+**不许它安静**:合并跳过一个"文件里有图、库里没有"的地点时当场 `logger.warning`。
+一个像 `agent set-card` 那样的写口(`location set-image`)是下一步,还没定。
 
 ---
 
@@ -2642,7 +2691,7 @@ from anima_world.api import World
 
 | 函数 | 说明 |
 |---|---|
-| `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/LLM 诊断,`runtime.llm.degraded_reason` 常驻)。**`players` 与 agents 那一半同形**:每行带 `location` / `in_transit`,在路上时还带 `transit: {from, to, eta_minutes}`(与 agents 的 `activity.transit` 出自同一个换算)。⚠️ 这一格从前只有 agents 有,于是一个正在赶路的玩家在快照里报的是他的**出发地**且毫无标记 —— 界面把他画在原处,而同一秒 `player_options` 正拿「你在路上」把他能干的事全挡了。位置**不抹成空串**是有意的:调用方要分得开"他在路上"和"世界不知道他在哪"。这扇只读门顺带**先把到站的人放下**(暂停的世界不会自愈) |
+| `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行:`id`/`name`/`description`/`kind`/`parent`/`x`/`y`/`w`/`h` + `map_image`/`scene_image`,后两格没写就是 `None`,见 §2.14)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/LLM 诊断,`runtime.llm.degraded_reason` 常驻)。**`players` 与 agents 那一半同形**:每行带 `location` / `in_transit`,在路上时还带 `transit: {from, to, eta_minutes}`(与 agents 的 `activity.transit` 出自同一个换算)。⚠️ 这一格从前只有 agents 有,于是一个正在赶路的玩家在快照里报的是他的**出发地**且毫无标记 —— 界面把他画在原处,而同一秒 `player_options` 正拿「你在路上」把他能干的事全挡了。位置**不抹成空串**是有意的:调用方要分得开"他在路上"和"世界不知道他在哪"。这扇只读门顺带**先把到站的人放下**(暂停的世界不会自愈) |
 | `world.roster()` | **这个世界里有谁**(§2.13):`{"agents": [{agent_id, name, tagline, portrait, billing, location, location_name, state, away, card}]}`。前**九栏是冻结的线格式**(运维台 `world_server.py` 的 `_ROSTER_FIELDS` 照它写),第十栏 `card` 是作者那张卡的原样(没写 = `None`)——引擎**不理解**这几格,只原样带过去,所以创作台预告的第四样(声线/主题色/CV)不会在这道门上被悄悄扔掉。三条:`billing` 缺省 **`supporting`** 不是 `lead`(把主角说成配角只是排版难看,把还没出场的人说成主角是**剧透**);**`hidden` 的人照出**(引擎是"有谁"的权威,筛掉是宿主那一层的事——泄露的边界在进程上,不在浏览器里);**顺序跟世界自己的名册走**(事件日志序),不按字母重排。名字/地名取不到就**原样回落 id**,不编。位置口径与 `state()` **共用同一个函数**(`identity_rows_locked`):在场读黑板的此刻,不在场读投影。CLI 出口 `anima-world roster` |
 | `world.set_card(agent_id, card=None, *, clear=False, dry_run=False)` | **改一个已经在这个世界里的人的角色卡**(§2.13)—— `roster()` 的写那一侧。存在的理由是那一层的三个写点**全在 `agent_join` 上**,而已经在册的角色不会再 join:拿一份世界文件补卡只对 `newcomers` 生效,于是整层特性对**唯一一个有真人的世界等于没做**(线上 20 个角色一张卡都装不进去,而作者写得进、校验放行、包也导得出——照跑但给错东西)。四条判断:**① 这是一次明示的编辑,所以它覆盖**——和作者层合并的"只填缺不覆盖"**有意相反**(那一条手里捏着一份文件,覆盖等于把这个世界的现在倒带回创世;这一条是一个人指名道姓说"这个人是主角",只填缺的话一个已经写着 `supporting` 的角色**永远**改不成 `lead`)。⚠️ 两条语义相反是对的,**别把其中一条"修"成另一条**。**② 部分更新合并进现有的卡**,不是替换整张卡(只给 `tagline` 不许把作者写了几周的 `billing` 和立绘顺手抹掉);要抹掉**某一格**把它给成空串。**③ `clear=True` 是单独一格**,不是"把 billing 设回 `supporting`"——那是一句声明,不是收回声明;给了它就不许再给值。**④ 合并后逐字相同就一个字都不写**(`changed: false`)——事件溯源里追加一条毫无差别的 `persona_update` 只是给历史添噪音。校验用 `character_card` **那一份**判断,对**合并后**的卡、在**写之前**跑;坏卡抛 `ValueError`(一次列全),不认识的人抛 `KeyError` **并把这个世界里有谁说出来**(编一个空结果出去 = 运维以为改成功了),两种拒绝都一个字都不写。走 `persona_update` 那条现成的路,**不就地改历史**;**卡不上黑板**(`tagline` 是广告词,上了黑板她会照着念)。返回 `{agent_id, name, before, after, changed, cleared, dry_run, warnings}`;`dry_run=True` 一个字节都不写。CLI:`anima-world agent set-card --agent X [--billing] [--tagline] [--portrait] [--clear] [--dry-run] [--json]`(§4.2.7) |
 | `world.world_time()` | 世界日历(day/hour/minute/minute_of_day) |
@@ -2700,7 +2749,7 @@ from anima_world.api import World
 | `World.open(world_id, *, redis, mysql=None, …)` | 给了 `mysql`,**她带不进上下文的那几样搬去 MySQL**:`events` / `memories` / `conversations` / `messages`。判据是**进不进得了提示词** —— Redis 装她此刻要带进提示词的东西,而 LLM 的上下文本来就有上限,两个"有上限"是同一个;进不了提示词的可以无限,要用时按 k 取回来。分对了的话**提示词不随世界变老而涨**(实测 60 世界日:后端涨 61 倍,提示词 2251→2272 字;`tests/test_bounded.py` 是闸)。⚠️ `edges` **不在这里**:它有 `UNIQUE(subject,predicate,object)` 且谓词是闭集,上界 2×N²,按世界的规模封顶 —— 实测一个三人世界跑 20 天,Redis 内存增量的九成是 events + memories(每世界日 13 KB;一千个世界跑一年 **4.6 GB 常驻**,永不回落),而黑板/地图/行为树随**世界的规模**有界。分家后同一份负载:20→40 世界日 Redis **一个字节没涨**,三十个聊天回合(60 条消息)Redis +0 KB。可以只给 `mysql` 不给 `redis`。⚠️ **传一个工厂,不要传裸连接**:`mysql=lambda: pymysql.connect(...)`(引擎自动包成每线程一条)。`pymysql` 的 threadsafety 是 1 而引擎有线程池 —— 共用一条连接会让协议帧交叉、连接当场作废,症状是 `InterfaceError (0, '')` 或 `read of closed file`,**而且不是必现**(大多数 tick 相安无事,某次在负载下才炸,报错离原因很远)。给裸连接照旧能开,但开机时会点名 |
 | — | `events.seq` 的**连续性**在 MySQL 上不成立(自增在事务回滚后留空洞),Redis 版靠 `RPUSH` 返回长度是连续的。`since_seq` 分页照旧正确(它问的是"比这个大的"),但任何依赖 seq 连续的代码会悄悄错 —— 目前没有,写新代码时别引入 |
 | — | **一个动作横跨两个后端,而崩溃不挑时候**。写序是 Redis 先、MySQL 后,所以中间死掉的样子是:在途状态写下了,而历史里没有这趟。伤面是**历史少一条**(从事件重折的东西从此少算一次,不会自愈),不是"她卡在路上"——在途带着到达 tick,时钟一到照样落地。`tests/test_mysql_state.py` 把这个伤面钉住了,判据变了会当场红 |
-| `world.map_data(from_tick=None, to_tick=None, agents=None)` | **地图 + 此刻谁在哪 + 这段时间里谁去了哪儿。** `anima-world map` 与任何宿主渲染器共用这一份 —— 观察窗另写一遍取数就会撒谎。四块:`places`(`id`/`name`/`kind`/`x`/`y`,region 另带 `w`/`h`)、`standing`(`{地点: [角色…]}`)、`travelling`(此刻在路上的人,`from`/`to`/`arrive_at`)、`tracks`(`[{agent, points:[{tick, place}]}]`)。⚠️ **几何是绝对画布坐标**(0~1),已换算好:库里存的是**相对父级**的(`w=0.55` 是父级宽度的 55%),照原始值画出来的图每个东西都在错的地方而且什么都不报错(实测 workshop 原始 `x=0.78`,绝对 `0.482`)。⚠️ **在路上的人不站在任何地方** —— 只看 `standing` 会让她在图上凭空消失半段路。`tracks` 只认**到达**(`location_join`),起程不算:她可能走到一半被打断,而画一条没走完的线等于说她到了。给了 `from_tick` 时,每条轨迹的第一个点是**窗口之前她在哪**(带 `before: true`)—— 不带的话起点在窗口之前的人只剩一个孤点、画不出线,看上去像「她这天没动」(实测第 2 天,三个人里两个是这样) |
+| `world.map_data(from_tick=None, to_tick=None, agents=None)` | **地图 + 此刻谁在哪 + 这段时间里谁去了哪儿。** `anima-world map` 与任何宿主渲染器共用这一份 —— 观察窗另写一遍取数就会撒谎。四块:`places`(`id`/`name`/`kind`/`x`/`y`,region 另带 `w`/`h`,写了图的另带 `map_image`/`scene_image` —— **写了才出现**,见 §2.14)、`standing`(`{地点: [角色…]}`)、`travelling`(此刻在路上的人,`from`/`to`/`arrive_at`)、`tracks`(`[{agent, points:[{tick, place}]}]`)。⚠️ **几何是绝对画布坐标**(0~1),已换算好:库里存的是**相对父级**的(`w=0.55` 是父级宽度的 55%),照原始值画出来的图每个东西都在错的地方而且什么都不报错(实测 workshop 原始 `x=0.78`,绝对 `0.482`)。⚠️ **在路上的人不站在任何地方** —— 只看 `standing` 会让她在图上凭空消失半段路。`tracks` 只认**到达**(`location_join`),起程不算:她可能走到一半被打断,而画一条没走完的线等于说她到了。给了 `from_tick` 时,每条轨迹的第一个点是**窗口之前她在哪**(带 `before: true`)—— 不带的话起点在窗口之前的人只剩一个孤点、画不出线,看上去像「她这天没动」(实测第 2 天,三个人里两个是这样) |
 | `world.durability_warning()` | 这个世界的存储会不会在重启后忘掉它,不会就是 `None`。**Redis 主要活在内存里**,持久化是配置选项而默认 AOF 是关的 —— 忘掉的样子不是报错,是世界悄悄退回创世那一刻然后接着跑(实测:跑完一天 104 条事件,重启后 50 条)。探不到就沉默(`CONFIG GET` 可能被禁用) |
 | `world.intend(agent_id, steps)` | **告诉她接下来打算做什么** —— 一串过日子的动作(`[{"verb","params"}]`),世界替她走完脚步。传 `None` / `[]` 取消。**调用即设定意图,不是执行到底**:立刻返回,之后每个 tick 由仲裁器在 [身体 → 她刚决定的 → 排班 → 空闲规划 → 兜底] 之间挑,所以饿到紧急线她会**先去吃再回来接着走**,路上被叫住也能被打断。一步真生效了队列才往前走一格 |
 | `world.intent(agent_id)` | 她此刻还打算做的事(队首是下一步) |
@@ -3395,7 +3444,15 @@ anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真
 | `export` | `operation` / `world_id` / `revision_id` / `mode` |
 | `import` | `operation` / `world_id` / `instance_id` / `path`(`instance_id == world_id`,`path` 是 `redis:{world_id}` —— 没有磁盘目录了,这两个字段留着是给镜像端不破) |
 | `inspect --json` | manifest 全字段(`world_id` / `name` / `summary` / `genre` / `setting` / `theme` / `export_mode` / `revision_id` / `created_at` / `files` / `source_engine_version` / `package_format_version` / `engine_min` / `engine_max_exclusive`)+ `current_engine_version` / `runnable` / `operation` |
-| `check --json` | `operation`(`"world check"`)/ `path` / `engine_version` / `edit` / `loadable` / `authored` / `errors` / `warnings` |
+| `check --json` | `operation`(`"world check"`)/ `path` / `engine_version` / `edit` / `loadable` / `authored` / `errors` / `warnings` / `external_media` / `inline_media_bytes` |
+
+`external_media` 是**按 host 列的外链**(`[{host, scheme, count, fields}]`),
+`inline_media_bytes` 是内嵌 `data:` 的账(`{count, total, largest}`,同一条 URI
+只算一次 —— 出生证明里抄着一份作者层,按出现次数数会把一张图报成三张)。
+两段都**不联网探活**:要报的是"这个包挂在哪几台服务器身上、自己又带了多少字节",
+不是"这些链接还活着吗"(那是运维的活,而且答案每分钟都在变)。图床由宿主自己建、
+世界里只存绝对外链是定下来的形状,那么这条选择的**代价**就该在拿到包的那一刻看得见。
+⚠️ 文件读不完时这两段**留空**(半份账是个安静的错答案,和 `loadable: null` 同一个姿势)。
 
 #### `check` 的退出码问的是另一个问题
 
@@ -3682,7 +3739,7 @@ stance / tools / intent / autonomy / contact / 人设尾部重注 / 夜间固化
 | 字段 | 内容 |
 |---|---|
 | `agents[]` | **必填** `id` / `name` / `location` / `personality`;可选 `duties`(职责窗口)、`goals`、`money`、`inventory`、`card`(角色卡:`billing`/`tagline`/`portrait`,见 §2.13 —— ⚠️ **它是这里唯一一个"写坏了当场开不了机"的可选键**,理由是立绘写成相对路径发出去就是一张断的图) |
-| `locations[]` | **必填** `id` / `name` / `description`;可选 `kind` / `parent` / `x` / `y` / `w` / `h`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、`stock` |
+| `locations[]` | **必填** `id` / `name` / `description`;可选 `kind` / `parent` / `x` / `y` / `w` / `h`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、`stock`、`map_image` / `scene_image`(见 §2.14 —— ⚠️ 和 `card` 一样是"写坏了当场开不了机"的可选键:相对路径的图发出去就是一张断的图) |
 | `relations[]` | `a` / `b` / `sentiment` / `r_type` / `r_type_back`,双向播种 |
 | `memories[]` | 创世记忆 |
 | `world_setting` | 世界观,**一段文本**(一条 `author` 记录,`body` 就是那段话),首启写进 `world.setting` 提示词;之后 `prompt_set` 的热改是权威,重启不覆盖 |
@@ -3906,6 +3963,7 @@ anima-world validate beats beats.json --world-file demo.cyberworld  [--json]
 | `agents` / `locations` 的必填键、`stocks` 条目的形状 | ✅ 错误(退出码 2) | ✅ |
 | `stock_visibility[].bands` 写坏(§2.9.4.2) | ✅ 错误,**同一个函数**报同一批话 | ✅ |
 | 角色卡(相对路径立绘、未知字段…,§2.9.11) | ✅ 错误 / 提醒 | ✅ |
+| 地点的图(相对路径、超上限、老文档里那个 `image`,§2.14) | ✅ 错误 / 提醒 | ✅ |
 | `kinds` 里量声明的 `bands` 写坏 | ✅ `OntologyError` 一次列全 | ✅ |
 | 能力声明里写了 `rand()`(§2.9.3.3) | ✅ | ✅ |
 | `emit` 的 `importance` / `text` / `on` 写坏(§2.9.3.1) | ✅ `RuleError` | ✅ |

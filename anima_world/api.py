@@ -64,6 +64,7 @@ from anima_world.llm_client import (
     create_llm_client_from_env,
 )
 from anima_world.locations import DEFAULT_POINTS
+from anima_world.media import LOCATION_IMAGE_KEYS
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
 from anima_world.redis_state import RedisPlayerPresence
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
@@ -90,7 +91,13 @@ _HISTORY_MAX_PAGE = 5000
 _PLAYER_TTL_SECONDS = 15 * 60
 
 # Map row fields exposed in state(); consumers assemble the tree from them.
-_LOCATION_KEYS = ("id", "name", "description", "kind", "parent", "x", "y", "w", "h")
+# 两格图也在这里出去 —— **`state()` 是它们唯一的读出口**,而网站每几秒
+# 问一次这道门。漏了这一行,作者写的图会一路存进 Redis 却永远到不了玩家眼前,
+# 全程零报错;而那正是角色卡那一次的病本身。没写图的地点这两格是 `None`。
+_LOCATION_KEYS = (
+    "id", "name", "description", "kind", "parent", "x", "y", "w", "h",
+    *LOCATION_IMAGE_KEYS,
+)
 
 _ACTIVITY_LABELS = {
     "sleep": "在睡觉", "work": "在工作", "chat": "在和人聊天",
@@ -4835,6 +4842,12 @@ class World:
                 box = store.absolute_box(loc_id)
                 if box is not None:
                     entry["w"], entry["h"] = box[2], box[3]
+                # 两格图**写了才出现**(和 `w`/`h` 同一个安排):一张没有图的地图
+                # 的 `--json` 因此和从前逐字节相同,而画图的人拿到的是"有没有这一格",
+                # 不是一堆 `null`。谁是谁见 `media.LOCATION_IMAGE_GLOSS`。
+                for key in LOCATION_IMAGE_KEYS:
+                    if row.get(key):
+                        entry[key] = str(row[key])
                 places.append(entry)
 
         standing: dict[str, list[str]] = {}

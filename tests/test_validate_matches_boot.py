@@ -196,6 +196,21 @@ def test_坏角色卡_校验器和开机都拦(tmp_path, fresh_redis):
     assert any("portrait" in e or "立绘" in e or "头像" in e for e in errors), errors
 
 
+def test_坏地点图_校验器和开机都拦(tmp_path, fresh_redis):
+    """地点的两格图和立绘走同一道闸 —— 所以它也得在这条"三路一致"的账上。
+
+    新加一道闸最容易漏的正是这件事:闸挂在 `authored_layer_errors` 上就三条路
+    都有,挂在开机那一侧就只有开机有,而校验器会替一份开不了机的文件发绿灯。
+    """
+    yard = dict(_YARD["body"], map_image="images/yard.png")
+    path = _write(tmp_path / "locimg.cyberworld", [
+        _MANIFEST, {"kind": "author", "type": "location", "body": yard}, _JIA,
+    ])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, "一张相对路径的地点图必须三条路一起拦"
+    assert any("map_image" in e for e in errors), errors
+
+
 # ── 三、本体那一摞闸:校验器从前一条都跑不到 ─────────────────────────────────
 
 def test_量名拼错_校验器和开机都拦(tmp_path, fresh_redis):

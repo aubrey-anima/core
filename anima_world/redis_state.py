@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from anima_world.chat_state import ChatStateStore as _ChatStateStore
+from anima_world.media import LOCATION_IMAGE_KEYS
 from anima_world.memory_store import provenance_of
 from anima_world.world_store import BTStore as _BTStore
 from anima_world.world_store import LocationStore as _LocationStore
@@ -1115,6 +1116,30 @@ class RedisMemoryStore:
         return changed
 
 
+def _warn_skipped_location_media(
+    loc_id: str, entry: dict[str, Any], stored: dict[str, Any]
+) -> None:
+    """合并时跳过的这个地点,文件里给了图而库里没有 —— **点名一次**。
+
+    只在"文件有、库里空"这一种情况下说话:两边都写了(作者改图)按"只增不改"的
+    语义本来就该以世界为准,那不是错;两边都没有当然没什么好说。
+    """
+    from anima_world.media import LOCATION_IMAGE_KEYS
+
+    missing = [
+        key for key in LOCATION_IMAGE_KEYS
+        if entry.get(key) and not stored.get(key)
+    ]
+    if not missing:
+        return
+    logger.warning(
+        "地点 %r 已经在这个世界里了,所以文件里的 %s 这次**没有装进去** —— "
+        "作者层是「只填缺,不覆盖」,而覆盖粒度是整行(整行合并会把这个世界跑出来的"
+        "名字和描述倒带回创世那天)。要给一个已经在跑的世界补图,眼下只能重建它",
+        loc_id, " / ".join(missing),
+    )
+
+
 class RedisLocationStore(_LocationStore):
     """地图。**只换存储,算出来的东西继承复用。**
 
@@ -1146,6 +1171,10 @@ class RedisLocationStore(_LocationStore):
         row = self._rows_store.get(loc_id) or {
             "id": loc_id, "name": loc_id, "description": "", "kind": "point",
             "parent": None, "x": None, "y": None, "w": None, "h": None,
+            # 两格图缺省是 None,不是不存在这一格:调用方拿到的是整行 dict,
+            # 少一个键会在某条路上变成 KeyError 或一个说不清是"没写"还是"没这个
+            # 字段"的 None(和上面 `updated_at` 那条注释同一个理由)。
+            **{key: None for key in LOCATION_IMAGE_KEYS},
         }
         row.update({k: v for k, v in fields.items()})
         row["id"] = loc_id
@@ -1168,14 +1197,24 @@ class RedisLocationStore(_LocationStore):
         """
         from anima_world.world_store import _LOCATION_FIELDS, _parents_first
 
-        have = {str(row.get("id")) for row in self.all()}
+        rows = {str(row.get("id")): row for row in self.all()}
+        have = set(rows)
         if have and not merge:
             return []
         written: list[str] = []
         for entry in _parents_first(entries):
             loc_id = str(entry["id"])
             if merge and loc_id in have:
-                continue          # 只增不改:这个地点已经有了,它的描述归这个世界自己
+                # 只增不改:这个地点已经有了,它的描述归这个世界自己。
+                # **但不许安静地什么也不做。** 作者往一份世界文件里补了两格图,
+                # 再把文件装回一个已经在跑的世界 —— 他要的是"图补上了",而这条
+                # `continue` 给他的是"世界照跑、日志干净、图一张没有"。整行合并
+                # 会把这个世界跑出来的名字和描述倒带回创世那天,所以这里仍然不改;
+                # 但**它是一次没生效的编辑,得说出来**(真正的修法是一扇
+                # `location set-image` 写门,形状对着 `agent set-card` ——
+                # 记在 REFERENCE §2.14 与 FOR-STUDIO §3.22,还没做)。
+                _warn_skipped_location_media(loc_id, entry, rows.get(loc_id) or {})
+                continue
             self.upsert(loc_id, **{f: entry[f] for f in _LOCATION_FIELDS if f in entry})
             written.append(loc_id)
         return written

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from anima_world.media import LOCATION_IMAGE_KEYS
+
 WORLD_SEED_AGENT_KEYS = frozenset({"id", "name", "location", "personality"})
 WORLD_SEED_LOCATION_KEYS = frozenset({"id", "name", "description"})
 
@@ -26,6 +28,13 @@ WORLD_SEED_LOCATION_KEYS = frozenset({"id", "name", "description"})
 #: 的答案:"这支引擎带不带得动角色卡"。此前它只能靠版本号猜,而猜错不报错 ——
 #: 一个 dev tag 会让它安静地停在"不带"那一支上,作者填的卡照旧到不了玩家眼前。
 WORLD_SEED_AGENT_OPTIONAL_KEYS = frozenset({"card"})
+
+#: 地点这一侧的同一格。两张图(`map_image` / `scene_image`,哪个是哪个见
+#: `media.LOCATION_IMAGE_GLOSS`)都是**可选**的:一个没有图的世界不是坏世界,
+#: 而把它们加进 `WORLD_SEED_LOCATION_KEYS` 等于要求每个已经存在的世界现在就配齐图,
+#: 一个都开不了机。它同样进 `contract --json`(`seed.location_optional_keys`),
+#: 理由和 `card` 那一格逐字相同:创作台要一个**问得到**的答案,而不是按版本号猜。
+WORLD_SEED_LOCATION_OPTIONAL_KEYS = frozenset(LOCATION_IMAGE_KEYS)
 
 # 种子可以在创世时点亮的开关(`"config": {...}`)。**密文键一律不许**:种子是要
 # 分发的东西(`.cyberworld` 里就带着它),一个能携带 `llm.api_key` 的种子等于把
