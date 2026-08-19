@@ -136,16 +136,27 @@ def test_a_retracted_edge_still_answers_for_the_time_it_held(open_world, bare_se
 
 
 def test_an_unnamed_moment_never_lands_before_the_edge_stood_up(graph):
-    """不知道哪一刻,就落在它成立的那一刻 —— **绝不写 0**。
+    """不知道哪一刻,兜底也得留下一段**读得出来**的有效期 —— 绝不是空区间。
 
-    `invalid_at < valid_from` 的一行读出来是"这条事实从来没有成立过":
-    `query(as_of=…)` 在它有效的整段区间上都答 `[]`,而没有任何一处会报错。
+    ⚠️ **这一条的断言改过一次,原因写在这里。** 它原先钉的是
+    `invalid_at == valid_from`,而那正是它自己的说明里描述的那个失败:有效区间
+    是半开的 `[valid_from, invalid_at)`,零长区间在 `query(as_of=…)` 上**任何
+    一刻**都答 `[]` —— 和 `invalid_at=0` 逐位同一个读数,只是把"从来没有过"
+    从 0 挪到了 `valid_from`。而"从来没有过"是 `hard=True` 的意思,
+    soft drop 的意思是"它成立过、现在不成立了",两件事必须分得开。
+
+    兜底能说的最小的一句真话是:**她至少在成立的那一刻是成立的**
+    (`add()` 写下 `valid_from` 就是因为那一刻它立住了)。
     """
     graph.add("agent:夏", "friendship", "agent:遥", created_at=100)
     assert graph.drop("agent:夏", "friendship", "agent:遥") is True
 
     row = graph.query(subject="agent:夏", include_invalid=True)[0]
-    assert row["invalid_at"] == row["valid_from"] == 100
+    assert row["invalid_at"] > row["valid_from"] == 100, "空区间 = 从来没有过"
+    assert graph.query(subject="agent:夏", as_of=100), (
+        "她成立的那一刻必须还答得出来 —— 否则这一层和 hard drop 没有区别"
+    )
+    assert graph.query(subject="agent:夏", as_of=101) == []
 
     graph.add("agent:夏", "rivalry", "agent:遥", created_at=200)
     # 调用方手里的 tick 不对时也一样往回夹(并且 warning 一声)——
@@ -153,7 +164,28 @@ def test_an_unnamed_moment_never_lands_before_the_edge_stood_up(graph):
     assert graph.drop("agent:夏", "rivalry", "agent:遥", at=5) is True
     row = [r for r in graph.query(subject="agent:夏", include_invalid=True)
            if r["predicate"] == "rivalry"][0]
-    assert row["invalid_at"] == 200
+    assert row["invalid_at"] > 200
+    assert [r["predicate"] for r in graph.query(subject="agent:夏", as_of=200)] == ["rivalry"]
+
+
+def test_a_row_that_came_in_through_another_door_is_read_the_same_way(graph):
+    """闸装在 `drop()` 里挡不住别的门 —— 所以**读侧走同一个函数**。
+
+    边行不只经 `drop()` 落盘:装一份世界文件、维护脚本直写 `RedisRows`,
+    都能带着一个不可能的区间进来(`invalid_at=0` 就是原来那个 bug 的形状)。
+    读的那一侧照单全收的话,"他俩正是朋友的那一刻"仍然答"从来没有过"。
+    """
+    graph.add("agent:夏", "friendship", "agent:遥", created_at=100)
+    field = "agent:夏\x00friendship\x00agent:遥"
+    row = graph._rows.get(field)
+    row["invalid_at"] = 0                      # 绕过 drop(),直写
+    graph._rows.put(field, row)
+
+    assert graph.query(subject="agent:夏") == [], "此刻它确实已经作废了"
+    assert graph.query(subject="agent:夏", as_of=100), (
+        "它成立过 —— 直写进来的坏区间不该把这件事抹掉"
+    )
+    assert graph.query(subject="agent:夏", as_of=101) == []
 
 
 def test_making_up_revives_the_same_edge(graph):

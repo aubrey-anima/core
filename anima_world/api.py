@@ -5592,17 +5592,29 @@ class World:
         agent_id = str(agent_id or "").strip()
         if agent_id not in self.scheduler.agents:
             raise KeyError(f"agent {agent_id} not found")
-        said: list[tuple[int, str]] = []
+        said: list[tuple[int, int, int, str]] = []
         for conv in self.chat_store.list_conversations(agent_id):
             if player_id is not None and (conv.get("player_id") or "user") != player_id:
                 continue
-            for msg in self.chat_store.messages_for(int(conv["id"])):
+            conv_id = int(conv["id"])
+            for seat, msg in enumerate(self.chat_store.messages_for(conv_id)):
                 if str(msg.get("role") or "") in drift_mod.HER_ROLES:
-                    said.append((int(msg.get("created_at") or 0), str(msg.get("content") or "")))
-        # 按时间正序 —— 漂移问的是"后来的和当初的比",次序错了整个结论就反了。
-        said.sort(key=lambda pair: pair[0])
+                    said.append((
+                        int(msg.get("created_at") or 0), conv_id, seat,
+                        str(msg.get("content") or ""),
+                    ))
+        # 按时间正序 —— 漂移问的是"后来的和当初的比",次序错了**整个结论就反了**。
+        #
+        # ⚠️ **`created_at` 是墙钟的秒,不足以定序。** 只拿它当键的话,同一秒里的
+        # 消息保持**取出来的次序**(稳定排序),而 `list_conversations` 两个后端
+        # 都是**倒序**给的(Redis 版 `rows.reverse()`、MySQL 版 `ORDER BY id DESC`)——
+        # 于是一段"先不迎合、后极度迎合"的转录被读成"先迎合、后不迎合",
+        # `rising` 报成 False,退出码照样 0,日志干净。而 CI 里喂一段转录进去
+        # **正是同秒批量落库这个形状**(REFERENCE 承诺它能进 CI),所以这不是边角。
+        # 补上的两个键都是单调的:会话 id 按开场次序发,座次是同一场里的追加次序。
+        said.sort(key=lambda row: row[:3])
         report = drift_mod.analyze(
-            [text for _, text in said],
+            [text for *_, text in said],
             baseline_n=drift_mod.BASELINE_N if baseline_n is None else int(baseline_n),
         )
         report["agent_id"] = agent_id

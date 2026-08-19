@@ -70,22 +70,22 @@ def test_eviction_removes_weakest_not_oldest(tmp_path):
     assert "新但没人记得" not in summaries
 
 
-def test_reflection_emerges_from_accumulated_importance(tmp_path):
+def test_reflection_emerges_from_accumulated_importance(tmp_path, bare_seed):
     """重要度累计过阈值 → mock 反思器产出洞察 → 以 memory_seed(kind=reflection)
     事件落地 —— LLM 只提案,事件日志记录,重放可重建。
 
     ⚠️ **这一条测的是引擎默认的节律**(反思在跨过阈值的那一刻当场发起),所以它
-    显式关掉夜间固化:这个世界起在**内置橱窗**上,而橱窗点亮了
-    `memory.consolidation.enabled`,而固化**接管反思的时刻**(白天只攒不发,
-    越过阈值的那一次留到夜里,理由见 `Scheduler.consolidate_memories`)。
-    不写这一行,测的就是橱窗的布置而不是引擎的默认值 —— CLAUDE.md 里
-    `bare_seed` 那条纪律的同一件事。夜里那一半由
-    `tests/test_memory_consolidation.py` 钉着。
+    起在 `bare_seed` 上:内置橱窗点亮了 `memory.consolidation.enabled`,而固化
+    **接管反思的时刻**(白天只攒不发,越过阈值的那一次留到夜里,理由见
+    `Scheduler.consolidate_memories`)。起在橱窗上测的就是橱窗的布置而不是引擎
+    的默认值 —— CLAUDE.md 里点名的正是这个夹具。(这里曾经改成就地关掉那个
+    开关:管用,但每多点亮一个开关就要多关一行,而漏掉的那一行不会报错。)
+    夜里那一半由 `tests/test_memory_consolidation.py` 钉着。
     """
     from anima_world.api import World
 
-    with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
-        world.config_set("memory.consolidation.enabled", False)
+    with open_world_at(str(tmp_path / "w.db"), world_file=bare_seed,
+                       force_mock_llm=True) as world:
         world.config_set("memory.reflection_threshold", 2.0)
         for i in range(3):
             world.scheduler._record_event({

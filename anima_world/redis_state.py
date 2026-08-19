@@ -922,7 +922,7 @@ class RedisMemoryStore:
             importance: float = 0.5, anchor: bool = False,
             event_seq: int | None = None, created_at: int | None = None,
             source_ids: list[int] | None = None,
-            provenance: str = "experienced") -> int:
+            provenance: str | None = None) -> int:
         memory_id = self._next_id()
         self._rows.put(str(memory_id), {
             "id": memory_id, "agent_id": agent_id, "tick": int(tick), "kind": kind,
@@ -930,10 +930,12 @@ class RedisMemoryStore:
             "event_seq": event_seq, "created_at": int(tick if created_at is None else created_at),
             "source_ids": list(source_ids or []), "strength": 1.0,
             "last_access": None, "access_count": 0,
-            # R3 记忆分型。**老行读出来没有这一格**,所以读的地方一律
-            # `row.get("provenance") or "experienced"` —— 默认值写在读的那一侧,
-            # 才不用为了一个新字段去改写一整张历史表。
-            "provenance": str(provenance or "experienced"),
+            # R3 记忆分型。**没说就按 kind 判**,走 `provenance_of()` —— 和读侧
+            # 给老行补出处、和 MySQL 版写新行,是**同一个函数**。这里原先硬写
+            # `or "experienced"`:于是 `add(kind="reaction")` 落下的**新**行读作
+            # 亲历,而同一个 kind 的**老**行(没有这一格,读侧按 kind 补)读作听说 ——
+            # 同一格数据两个答案,只差在行的岁数上,两边都不报错。
+            "provenance": str(provenance or provenance_of(kind)),
         })
         self._evict_if_over_capacity(agent_id)
         return memory_id
@@ -1479,6 +1481,25 @@ class RedisChatStateStore(_ChatStateStore):
         return dropped
 
 
+def _edge_invalid_at(valid_from: int, invalid_at: int) -> int:
+    """一条边**不再成立**的那一刻,永远**晚于**它成立的那一刻(R3 有效期)。
+
+    为什么要有这么一条下界:有效区间是半开的 `[valid_from, invalid_at)`,而
+    `invalid_at == valid_from` 是一个**空区间** —— `query(as_of=…)` 对它在
+    任何一刻都答 `[]`,和"这条事实从来没有成立过"**逐位相同**。而 soft drop 的
+    全部意思正是"它成立过、现在不成立了";"从来没有过"是 `hard=True` 的意思。
+    两件必须分得开的事读出同一个答案,还一条日志都不报,是这一层最坏的坏法。
+
+    所以最小的真话是:**她至少在成立的那一刻是成立的** —— `add()` 写下
+    `valid_from` 就是因为那一刻它立住了。于是区间至少一个 tick 长。
+
+    **写侧读侧共用这一个函数。** 闸只装在 `drop()` 里的话,任何一条从别的门
+    进来的边(装一份世界文件、维护脚本直写 `RedisRows`)都能带着一个不可能的
+    区间落盘,而读的那一侧会照单全收 —— 抄一份判断过去就是给"两份真相"留位置。
+    """
+    return max(int(invalid_at), int(valid_from) + 1)
+
+
 class RedisKnowledgeGraph:
     """关系图的边。`(subject, predicate, object)` 唯一 —— **重复写不覆盖**
     (SQLite 那边是 `INSERT OR IGNORE`),所以第一次记下的 `source_event_seq`
@@ -1542,12 +1563,16 @@ class RedisKnowledgeGraph:
         `hard=True` 才真删行,只给法务抹除用(`forget_player` / `erase_player`:
         那不是"关系变了",是这个人不该在世界里留下痕迹)。
 
-        ⚠️ **`invalid_at` 永远不会早于 `valid_from`。** 不给 `at=` 时它落在
-        `valid_from` 上(**不是 0**):作废在成立之前的一行读出来是"这条事实从来没有
-        成立过" —— `query(as_of=他俩正是朋友的那一刻)` 答 `[]`,而这正是这一层
-        (R3 有效期)存在的理由的反面,还一条日志都不报。给了一个早于 `valid_from`
-        的时刻同样往回夹,并 warning 一声:那是调用方手里的 tick 不对,不该由
-        存储层安静地写下一个不可能的区间。
+        ⚠️ **`invalid_at` 永远晚于 `valid_from`**(`_edge_invalid_at`,写侧读侧
+        共用)。不给 `at=` 时落在 `valid_from + 1`:落在 `valid_from` 上是个**空
+        区间**,`query(as_of=他俩正是朋友的那一刻)` 照样答 `[]` —— 和 `invalid_at=0`
+        那个 bug 逐位同一个读数,只是把"从来没有过"从 0 挪到了 `valid_from`。
+        给了一个早于 `valid_from` 的时刻同样往回夹,并 warning 一声:那是调用方
+        手里的 tick 不对,不该由存储层安静地写下一个不可能的区间。
+
+        **`at=` 该传就传。** 兜底给的是"她至少在成立的那一刻是成立的"这句最小的
+        真话,不是一个正确的时刻 —— 生产上唯一的软撤点(`_on_relation_shift`)
+        传的是 `descriptor.tick`。
         """
         field = f"{subject}\x00{predicate}\x00{object}"
         row = self._rows.get(field)
@@ -1558,16 +1583,12 @@ class RedisKnowledgeGraph:
         if row.get("invalid_at") is not None:
             return False                # 已经作废过:幂等
         valid_from = int(row.get("valid_from") or row.get("created_at") or 0)
-        if at is None:
-            moment = valid_from
-        elif int(at) < valid_from:
+        moment = _edge_invalid_at(valid_from, valid_from if at is None else int(at))
+        if at is not None and int(at) < valid_from:
             logger.warning(
                 "撤边 %s -%s-> %s 给的时刻 %s 早于它成立的 %s —— 按 %s 记",
-                subject, predicate, object, int(at), valid_from, valid_from,
+                subject, predicate, object, int(at), valid_from, moment,
             )
-            moment = valid_from
-        else:
-            moment = int(at)
         row["invalid_at"] = moment
         self._rows.put(field, row)
         return True
@@ -1601,9 +1622,13 @@ class RedisKnowledgeGraph:
                     rows.append(r)
                 continue
             # 那一刻:已经立起来了,而且还没作废(或作废在那之后)。
-            if int(r.get("valid_from") or r.get("created_at") or 0) > int(as_of):
+            valid_from = int(r.get("valid_from") or r.get("created_at") or 0)
+            if valid_from > int(as_of):
                 continue
-            if invalid_at is not None and int(invalid_at) <= int(as_of):
+            # 空区间在这里读成"从来没有过",而那是 `hard=True` 的意思 —— 所以
+            # 下界和写侧走**同一个函数**(`_edge_invalid_at`)。行是从别的门
+            # 落进来的(装世界文件、维护脚本直写)时,闸只装在 `drop()` 里挡不住。
+            if invalid_at is not None and _edge_invalid_at(valid_from, invalid_at) <= int(as_of):
                 continue
             rows.append(r)
         rows.sort(key=lambda r: int(r.get("id") or 0))

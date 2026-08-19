@@ -62,3 +62,78 @@ def test_a_steadily_more_agreeable_voice_is_flagged_as_sycophancy():
     assert report["sycophancy"]["delta"] > 0
     assert report["drifted"] is True
     assert report["threshold"] == drift.CUSUM_THRESHOLD
+
+
+# ── 真门:`World.persona_drift` 把转录排成什么次序 ────────────────────────────
+#
+# 上面那些测的是纯函数。而纯函数拿到的是**一个 list**,谁来排这个 list 是另一
+# 半 —— 而那一半坏过一次:`created_at` 是墙钟的**秒**,同一秒里的消息在稳定排序
+# 下保持取出来的次序,而两个后端的 `list_conversations` 都是**倒序**给的。于是
+# 结论整个反过来,退出码照样 0,日志干净。CI 里喂一段转录正是同秒批量落库这个
+# 形状,所以这不是边角。
+
+_NOT_YET = "嗯，我不这么想，这事我有自己的看法。"
+_TOTALLY = "你说得对！当然！我完全同意你说的每一句话，就照你说的办。"
+
+
+def _say(world, texts, *, ts, per_conv=3, player_id="p1"):
+    """把她说的这些话按顺序落进转录,每 `per_conv` 条开一场新会话。
+
+    `ts` 给一个常数就是**同一秒批量落库**(CI 喂转录的形状);给一个函数
+    (取下标)就能拉开秒数。
+    """
+    store = world.chat_store
+    stamp = ts if callable(ts) else (lambda _i: ts)
+    conv_id = None
+    for i, text in enumerate(texts):
+        if i % per_conv == 0:
+            conv_id = store.start_conversation("夏", stamp(i), player_id=player_id)
+        store.add_message(conv_id, "user", "嗯。", stamp(i))
+        store.add_message(conv_id, "assistant", text, stamp(i))
+
+
+def test_the_transcript_is_read_oldest_first_even_within_one_second(open_world):
+    """同一秒里落下的一整段转录,方向必须和纯函数逐格相同。
+
+    造的是一段"先不迎合 6 条 → 后极度迎合 12 条"。这一段的**唯一**正确答案是
+    `rising=True`;读反了会答 `rising=False` 而且一样地言之凿凿。
+    """
+    said = [_NOT_YET] * 6 + [_TOTALLY] * 12
+    with open_world() as world:
+        _say(world, said, ts=1000)              # 全在第 1000 秒
+        report = world.persona_drift("夏")
+
+    truth = drift.analyze(said)
+    assert report["messages"] == len(said), "她说的话一条都不许漏"
+    assert report["sycophancy"] == truth["sycophancy"], (
+        "同一段话,经过存储层之后必须和纯函数给同一个答案"
+    )
+    assert report["sycophancy"]["rising"] is True
+    assert report["drifted"] is truth["drifted"]
+
+
+def test_跨秒的转录同样是正序(open_world):
+    """秒数拉得开时本来就对 —— 钉住它,免得修同秒那条时把这条弄反。"""
+    said = [_NOT_YET] * 6 + [_TOTALLY] * 12
+    with open_world() as world:
+        _say(world, said, ts=lambda i: 1000 + i * 60)
+        report = world.persona_drift("夏")
+
+    assert report["sycophancy"] == drift.analyze(said)["sycophancy"]
+
+
+def test_只看跟这个人的对话时次序一样要对(open_world):
+    """`player_id=` 过滤之后剩下的那一段,方向同样不许反。
+
+    不同的人会把她带向不同的样子 —— 混在一起算等于让两段关系互相稀释,
+    而**筛出来的那一段读反了**和不筛是同一种错。
+    """
+    mine = [_NOT_YET] * 6 + [_TOTALLY] * 12
+    with open_world() as world:
+        _say(world, mine, ts=1000, player_id="p1")
+        _say(world, [_TOTALLY] * 6 + [_NOT_YET] * 12, ts=1000, player_id="p2")
+        report = world.persona_drift("夏", player_id="p1")
+
+    assert report["messages"] == len(mine)
+    assert report["sycophancy"] == drift.analyze(mine)["sycophancy"]
+    assert report["sycophancy"]["rising"] is True

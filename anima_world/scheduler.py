@@ -666,8 +666,12 @@ class Scheduler:
                         importance=descriptor.importance,
                         anchor=descriptor.anchor,
                         event_seq=descriptor.event_seq,
-                        provenance=getattr(descriptor, "provenance", None)
-                        or self._provenance_of(descriptor.kind),
+                        # **触发器没说就交给 store 按 kind 判**,这里不再自己兜
+                        # 一次:同一条规则在两处各写一遍,就是给它们分叉留位置。
+                        # (原先这里写着 `or self._provenance_of(...)`,而
+                        # `MemoryDescriptor.provenance` 那时默认 `"experienced"`
+                        # —— 一个真值,于是那个 `or` 一次都没有生效过。)
+                        provenance=descriptor.provenance,
                     )
                     self._note_memory_written(
                         descriptor.agent_id, float(descriptor.importance), descriptor.kind

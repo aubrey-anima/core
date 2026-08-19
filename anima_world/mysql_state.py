@@ -395,7 +395,10 @@ class MySQLMemoryStore:
             importance: float = 0.5, anchor: bool = False,
             event_seq: int | None = None, created_at: int | None = None,
             source_ids: list[int] | None = None,
-            provenance: str = "experienced") -> int:
+            provenance: str | None = None) -> int:
+        # **没说就按 kind 判**(`provenance_of`)—— 和 Redis 版写新行、和两个
+        # 后端的读侧给老行补出处,是同一个函数。硬写一个 `"experienced"` 就是
+        # 给"同一个 kind、新行读亲历、老行读听说"留位置。
         with self._conn.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {self._table}"
@@ -406,7 +409,7 @@ class MySQLMemoryStore:
                  1 if anchor else 0, event_seq,
                  int(tick if created_at is None else created_at),
                  json.dumps(list(source_ids or []), ensure_ascii=False),
-                 str(provenance or "experienced")),
+                 str(provenance or provenance_of(kind))),
             )
             new_id = int(cur.lastrowid)
         self._conn.commit()

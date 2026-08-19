@@ -27,18 +27,25 @@ class MemoryDescriptor:
     importance: float = 0.5
     anchor: bool = False
     event_seq: int | None = None
-    #: **她是怎么知道这件事的**(R3:记忆分型)。三种存在方式,默认「亲历」。
+    #: **她是怎么知道这件事的**(R3:记忆分型)。三种存在方式:
     #:
     #: - `experienced` 她在场,这件事发生在她身上
     #: - `heard`       别人告诉她的(八卦传过来的那条)
     #: - `believed`    她自己想出来的(反思、推断)
+    #:
+    #: **`None` = 触发器没说,按 kind 判**(`provenance_of`),不是「亲历」。
+    #: 这里原先默认 `"experienced"`,而那是一份**抄过来的默认值**:同一个
+    #: `kind='reaction'`,触发器写下的**新**行读作亲历、`_fill_provenance` 补的
+    #: **老**行读作听说 —— 一格数据两个答案,只差在行的岁数上,而且两边都不报错。
+    #: 而 `Scheduler` 那句 `descriptor.provenance or self._provenance_of(kind)`
+    #: 因为这个默认值是**真值**,一次都没有生效过。
     #:
     #: 为什么要分:**这三种记忆的可靠性不一样,而她说出口时的语气也该不一样。**
     #: 不分型的下场是她把一条听来的传闻当亲眼所见讲出去 —— 而八卦系统每传一手
     #: 就多一层失真,传到第三个人那里已经和事实无关了,她却仍然说得斩钉截铁。
     #: 前沿的记忆系统(Hindsight 的 beliefs 网络、typed-memory 那一路)把这条
     #: 单独列出来,理由是同一个:出处丢了之后,再多的检索精度也救不回来。
-    provenance: str = "experienced"
+    provenance: str | None = None
 
 
 #: kind → 她是怎么知道这件事的。**没列的一律亲历** —— 一张要求穷举的表会在作者
@@ -58,5 +65,5 @@ PROVENANCE_BY_KIND: dict[str, str] = {
 
 
 def provenance_of(kind: str) -> str:
-    """这个 kind 默认算哪种出处。"""
+    """这个 kind 默认算哪种出处。**读侧、写侧、两个后端只有这一张表。**"""
     return PROVENANCE_BY_KIND.get(str(kind or ""), "experienced")
