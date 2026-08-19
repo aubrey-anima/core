@@ -550,7 +550,7 @@ def _build_parser() -> argparse.ArgumentParser:
     set_card.add_argument(
         "--clear", action="store_true",
         help="把整张卡删掉 —— 「作者说他是背景」和「作者什么也没说」是两件事,"
-             "所以它单独一格,而且不许和上面三个一起给",
+             "所以它单独一格,而且不许和上面几个一起给",
     )
     set_card.add_argument(
         "--dry-run", action="store_true", help="只报要改成什么,不动库"
