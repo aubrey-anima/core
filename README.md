@@ -394,5 +394,9 @@ anima-world drift --world-id w --agent 夏 --json    # 七个文风特征 + 迎�
 [GNU AGPL-3.0](https://github.com/aubrey-anima/core/blob/main/LICENSE)。**用了它,
 你的东西也得开源** —— 包括把它跑成网络服务:AGPL 与 GPL 的差别正在这一条,
 世界引擎最常见的用法是被服务包着,GPL 管不到那种用法,AGPL 管得到。
-修改与衍生同样必须以 AGPL 开源。1.3.0 及更早版本曾以 Apache-2.0 发布,
-那些版本维持原许可;自本版本起为 AGPL-3.0-or-later。
+修改与衍生同样必须以 AGPL 开源。
+
+⚠️ **一句要说清的:直到 1.4.0,PyPI 上发出的每一个版本都是 Apache-2.0** ——
+换许可是 2.0 那一版做的,而 2.0.0 到 3.2.0 一版都没上过索引(理由见
+[CHANGELOG](https://github.com/aubrey-anima/core/blob/main/CHANGELOG.md) 的 3.3.0 那一节)。
+已发出的那些维持原许可;**本仓库自 2.0 起是 AGPL-3.0-or-later**,3.3.0 是照它发的第一版。

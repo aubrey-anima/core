@@ -22,17 +22,85 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 `db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
 spot rather than silently written to.
 
-## [Unreleased]
+## [3.3.0] —— 我们对外声称"可测"的那几格,这一轮才真的量得准 (2026-08-19)
 
-**建议发 3.3.0**(次版本:新公开方法 + 新 CLI 出口,存储格式与包格式一个字没改)——
-**但定版与发版是用户那边的决定**,这里只给建议,`__version__` 与 tag 都没动。
-⚠️ 给拍板的人一句话:下面 Changed 里的 **`edges` 语义变更**是"同一个版本号两套行为"
-(3.2.0 已经在线上跑着,它不认识 `invalid_at`)。按本仓的定版纪律那不到主版本
-(世界照样挂得上),但它是这次发版**必须让人看见**的那一条。
+**次版本**,判据逐条复核过:新增的全是公开方法与 CLI 出口(`drift` / `engagement` /
+`player erase`);`world_file.py`、`world_package.py`、`world_seed.py` 自 3.2.0 起**一行没动**,
+`PACKAGE_FORMAT_VERSION` 仍是 3,`contract --json` 的 `storage` 段逐格未变(`key_prefix`、
+四张 `mysql_tables`、`volatile_keys`、`presence` 全同)。唯一的存储形状变动是
+`memories.provenance` 一列,走 `ADD COLUMN … NOT NULL DEFAULT 'experienced'` 的加法式迁移 ——
+按本仓开头那条规则,加法式修订属于次版本。
 
-这一段并了四批(新的在前)—— 最早两批各是一次真人试玩之后的收尾,共同点是**把设计
-主张变成可测的东西**,以及**引擎的返回值有两个读者**:她,和一个人;后两批是它们
-过独立验收时被打回的那些。
+⚠️ **发版前必须让人看见的一条:`edges` 的语义在同一个版本号上换过。** 见下面 Changed。
+`drop()` 从删行改成写 `invalid_at`,而 **3.2.0 的构建不认识这一格** ——
+它把作废的边当成有效:绝交过的关系在 `cliques()` 里复活、在提示词里复活,
+而三方的日志全是干净的,退出码全是 0。按本仓的定版纪律这不到主版本(世界照样挂得上,
+不是"读不了"),所以它不会有版本号替你喊一声 —— **同时跑着 3.2.0 和 3.3.0 的部署,
+两个引擎会对同一份 `edges` 给出不同的社交图**。要么两侧一起换,要么接受旧的那侧看到
+一个多出了几段死关系的世界。
+
+⚠️ **PyPI 上一个版本是 1.4.0,所以这一版对装包的人是从 1.4 一步跨到 3.3。**
+2.0.0–3.2.0 从来没发上索引(v3.0.0 那次 Release 死在冒烟步骤上,原因见下面 Fixed)。
+跨过来的破坏性变更是 2.0 那一批,不是这一批:`World.open(world_id, redis=…)`
+(world.db 整体退役,世界住 Redis)、CLI 的 `--db-path` → `--redis` + `--world-id`、
+`--seed` → `--world-file`、许可从 Apache-2.0 换成 **AGPL-3.0-or-later**。
+详情各见 2.0.0 那一节。
+
+这一版并了五批(新的在前)—— 头一批是发版这条路本身;中间两批各是一次真人试玩之后的
+收尾,共同点是**把设计主张变成可测的东西**,以及**引擎的返回值有两个读者**:她,和
+一个人;末两批是它们过独立验收时被打回的那些。
+
+### 定版:发版这条路自己坏了七个月,而它坏的方式和我们一直在修的那些一模一样(2026-08-19)
+
+#### Fixed
+
+- 🔴 **`release.yml` 的冒烟步骤还在用 1.x 的签名,于是 2.x/3.x 一次都没发上 PyPI。**
+  `build` 那一步写的是 `World.open('rel.db', force_mock_llm=True)` —— v3.0.0 那次
+  Release(run `31467060331`)就死在这一行上:
+  `TypeError: World.open() missing 1 required keyword-only argument: 'redis'`。
+  往后每一版都会死在同一行,因为**没人会去改一条从没跑绿过的路**。
+  `smoke` 那一步同病,还多两处:`World.open('smoke.db', …)` 与
+  `anima-world simulate --db-path /tmp/smoke2.db`(2.0 就改成 `--redis` + `--world-id` 了)。
+  改成 3.x 的形状:两个 job 各起一个 `services: redis`(和 `ci.yml` 的 `package` job
+  **逐字同一个形状** —— 那个 job 每次推 main 都跑绿,所以它是这个仓库里唯一被真 runner
+  证过的写法),`World.open(world_id, redis=…, force_mock_llm=True)` 且
+  **`decode_responses=True`**(裸 bytes 客户端下量名变成 `b'树高'`,规律静默失配),
+  CLI 那半改 `--redis` + `--world-id` 并补一条 `contract --json`。
+  ⚠️ **为什么不拿 fakeredis 顶**:它是 dev extra,索引上装回来的那个 wheel 里没有它;
+  更要紧的是**它喂不进 CLI**(CLI 只收 URL),于是这一步会安静地缩成一次 import ——
+  而"从索引装回来的那个 wheel 真的跑得动"正是这个 job 存在的全部理由。
+  ⚠️ **这一条的形状和这一版修的那些是同一个**:照跑、日志干净、每一格读数都对 ——
+  `ci.yml` 一路绿、README 上的 PyPI 徽章一直亮着,而**徽章指着的那个索引停在 1.4.0**。
+  许可从 2.0 起是 AGPL-3.0-or-later("用了必须开源,含网络服务"),而**索引上那个 1.4.0
+  是 Apache-2.0** —— 换许可的那一版从没发出去,所以此刻 PyPI 上一个 AGPL 的 anima-world
+  都没有。**对外承诺与实际发布物脱节了七个月,而没有任何一处会报错**:
+  一条测不到自己的发布管线,和一把把上升报成下降的尺子是同一类东西。
+- 🟠 **四份文档都把"Apache 到哪一版为止"写错了一版。** README、CLAUDE.md、FOR-STUDIO
+  与 2.0.0 那节 CHANGELOG 都写"1.3.0 及以前是 Apache-2.0",而 **`v1.4.0` 也是 Apache-2.0
+  并且真的上了 PyPI**(2026-08-04,那次 Release 跑成功了)—— 换许可是 2.0 做的,
+  而 2.0 从没发出去。查出来的方式很笨也很有效:`git show v1.4.0:pyproject.toml`
+  说 `license = "Apache-2.0"`。**许可这种事不能靠约等于**,尤其是当"错的那一版"恰好
+  就是此刻用户 `pip install anima-world` 装到的那一版:照文档以为自己拿的是 AGPL
+  的下游,拿到的其实是 Apache 的。四处都改成"到 1.4.0 为止",2.0.0 那节留一条更正
+  而不是改掉原句(发布历史不该被悄悄重写)。
+- 顺带清掉同一个文件里三处已经变成假话的注释:tag 校验那步说"一次发版冻结 db format"
+  (world.db 2.0 整体退役了,冻的是存储形状 + 包格式)、`--extra-index-url` 那条说
+  TestPyPI 上缺 `cryptography`(Fernet 随 SQLite 一起退役,现在三个运行时依赖是
+  redis / openai / httpx)、重启那条断言的说明还在讲"证明文件写下去了"
+  (键前缀时代它证的是另一件更要紧的事:重开一个活着的世界是**只填缺**,不是拿创世
+  快照盖回去)。
+
+⚠️ **这一步没法在本机验完 —— 它要真跑一次 Actions,所以这里不声称验过。**
+本机走到的地方:`python -m build` → `anima_world-3.3.0-py3-none-any.whl`(`twine check` 双双
+PASSED)→ 装进一个干净 venv(`import anima_world` 报 3.3.0)→ **两个 job 的冒烟脚本逐字
+跑过那个 wheel + 一台真 Redis,退出码 0**(`build` 那段答"wheel works, clock persists",
+`smoke` 那段答"ran a world: 3.3.0"),`anima-world simulate --redis … --world-id … --ticks 20
+--llm mock`、`--help`、`contract --json`(`engine_version: 3.3.0`)逐条敲过;
+每个 `run:` 块过 `bash -n`,整份 YAML 解析过并确认两个 job 都挂上了 redis service。
+**没验的只剩两样**:GitHub Actions `services:` 那条 localhost 网络(由 `ci.yml` 的
+`package` job 一路绿背书 —— 同一个写法),以及 TestPyPI 上传再装回来那一段。
+所以顺序仍然是**先看一次 CI 绿,再打 tag**:`v*` 一推就是发版,而 PyPI 拒绝重复上传
+同一个版本号 —— 第一次尝试就是唯一的一次尝试。
 
 ### 收尾之二:一把在最常见的输入上把上升报成下降的尺子(2026-08-19)
 
@@ -143,11 +211,21 @@ CLAUDE.md 里点名的就是这个夹具,而"每多点亮一个开关就多关�
 
 #### Changed
 
-- ⚠️ **`edges` 的语义在一个已经在线上跑着的版本(3.2.0)上变了**,发版前必须让人看见:
-  `drop()` 从删行改成写 `invalid_at`、`query()` 默认过滤作废的边。**旧的 3.2.0 构建
-  不认识 `invalid_at`**,读新引擎导出的包时会把作废的边当成有效 —— 绝交过的关系在
-  `cliques()` 里复活,日志干净。这是"同一个版本号两套行为",不是加法式变更那种
-  "老引擎只是读不到新表"。
+- 🔴 ⚠️ **`edges` 的语义在一个已经在线上跑着的版本(3.2.0)上变了 —— 这是 3.3.0 这次
+  发版最需要被看见的一条,请先读完它再升。**
+  `drop()` 从删行改成写 `invalid_at`、`query()` 默认过滤作废的边。
+  **旧的 3.2.0 构建根本不认识 `invalid_at`**:它读新引擎写下 / 导出的 `edges` 时,
+  把**作废的边一律当成有效** —— 绝交过的关系在 `cliques()` 里复活、在她的提示词里复活,
+  于是她会继续把一个已经和她断了的人当朋友讲话。
+  **三方的日志全是干净的,退出码全是 0,`edges` 的行数看上去也完全正常**(作废是写一格,
+  不是少一行)—— 没有任何一处会告诉你读数错了。
+  这是**"同一个版本号两套行为"**,不是加法式变更那种"老引擎只是读不到新表",
+  所以它也不会被 `contract --json` 或包格式版本挡下来:**版本号不会替你喊这一声。**
+  按本仓的定版纪律它仍不到主版本(世界照样挂得上,不是"读不了"),而这恰恰是它危险的
+  地方 —— 一次读起来无害的次版本升级。
+  **要做的两件**:(1)同一份 Redis / 同一批包,**两侧引擎一起换**,别让 3.2.0 和 3.3.0
+  同时读同一个世界;(2)已经在 3.2.0 上跑过"绝交"的世界,那些边**当时是被删掉的**,
+  升上来之后不会凭空冒出来 —— 这个方向是安全的,坏的只有"新引擎写、旧引擎读"。
 - 文档跟上四处:REFERENCE 橱窗清单里"`chat.loop.enabled` 是唯一没点亮的"**已经是假话**
   (准入闸也没点,而且是有意的,理由不同,现在是一张两行的表);新增 **§2.9.12.1**
   人设尾部重注 —— 这个特性此前**全仓只在配置表里存在**,而那张表的交叉引用指向的
@@ -2643,6 +2721,12 @@ markdown 链接原样交给玩家。ASCII 的闭括号还要避开 JSON 里的 `
 
 1.3.0 及更早版本以 Apache-2.0 发布并维持原许可;自本版本起是 **AGPL-3.0-or-later**。
 
+> ⚠️ **2026-08-19 更正**:上面那句写错了一版 —— **1.4.0 也已经以 Apache-2.0 发出**
+> (tag `v1.4.0`,2026-08-04 上了 PyPI),写这段时它就在索引上了。所以"维持原许可"
+> 的范围是**到 1.4.0 为止**,而"自本版本起是 AGPL"这半句在**索引上从来没有生效过**:
+> 2.0.0 到 3.2.0 一版都没发出去(理由见 3.3.0 那一节),第一个真的以 AGPL 发出的版本
+> 会是 3.3.0。许可这种事不能靠约等于,所以留更正而不是改掉原句。
+
 
 ### Added —— 世界里有哪些**种类**的东西(本体层,`anima-world ontology`)
 
@@ -4557,8 +4641,12 @@ so there is nothing to migrate.
   versions at once.
 - The `story` subcommand, an M2-era leftover that no documentation mentioned.
 
-[Unreleased]: https://github.com/aubrey-anima/core/compare/v1.2.0...HEAD
-[1.2.0]: https://github.com/aubrey-anima/core/releases/tag/v1.2.0
+⚠️ 下面这张链接表只覆盖真的**打过 tag** 的版本。**2.0.0 到 3.2.0 一个都没打过 tag、
+一个都没上过 PyPI**(理由见 3.3.0 那一节的第一条 Fixed),`1.2.0` 同样从来没有 tag ——
+所以它们的标题在这份文档里就是纯文本,不是坏链接。`v3.3.0` 的 tag 留给发版那一下。
+
+[Unreleased]: https://github.com/aubrey-anima/core/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/aubrey-anima/core/releases/tag/v3.3.0
 [1.1.1]: https://github.com/aubrey-anima/core/releases/tag/v1.1.1
 [1.1.0]: https://github.com/aubrey-anima/core/releases/tag/v1.1.0
 [1.0.2]: https://github.com/aubrey-anima/core/releases/tag/v1.0.2

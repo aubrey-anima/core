@@ -51,10 +51,11 @@ jobs:
           cache: pip
 
       - name: The tag must match the version the package reports
-        # Version is contract here: one release freezes (engine code, db format,
-        # package format) together, and `__init__.py` is the single source. A tag
-        # that disagrees with it would publish a version nobody can reproduce from
-        # the repository. `__init__.py` imports nothing, so this needs no install.
+        # Version is contract here: one release freezes engine code, storage shape
+        # (Redis key prefix / MySQL tables — world.db retired in 2.0) and package
+        # format together, and `__init__.py` is the single source. A tag that
+        # disagrees with it would publish a version nobody can reproduce from the
+        # repository. `__init__.py` imports nothing, so this needs no install.
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -76,6 +77,16 @@ jobs:
     # about what users actually download.
     needs: verify
     runs-on: ubuntu-latest
+    services:
+      # 2.0: the world lives on Redis. A real server, not fakeredis, on purpose —
+      # this step exercises the artifact the way a host does, and a host brings a
+      # real Redis. It also proves the wheel's redis-py pin actually satisfies the
+      # client the engine uses, and that the CLI (which can only be handed a URL,
+      # never an injected client) reaches a world at all.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -103,20 +114,36 @@ jobs:
         # `verify` ran against the working tree; a wheel can still differ from
         # it — a missing package-data entry is invisible until something
         # installs the artifact and finds the file gone.
+        #
+        # This is deliberately the same shape as ci.yml's `package` job, which is
+        # green on every push to main. It was NOT, for a long time: it still called
+        # the 1.x `World.open('rel.db', force_mock_llm=True)`, so the v3.0.0 release
+        # died right here with `World.open() missing 1 required keyword-only
+        # argument: 'redis'` — and 2.x/3.x therefore never reached PyPI at all
+        # while the README kept flying a PyPI badge. Keep the two jobs in step:
+        # a release gate that lags the engine is worse than no gate, because it
+        # fails on itself instead of on the package.
         run: |
           python -m venv /tmp/clean
           /tmp/clean/bin/pip install dist/*.whl
           cd /tmp
           /tmp/clean/bin/python -c "
+          import redis
           from anima_world.api import World
-          with World.open('rel.db', force_mock_llm=True) as w:
+          # decode_responses=True is part of the contract: a raw-bytes client
+          # turns quantity names into b'树高' and rules mis-key in silence.
+          def conn():
+              return redis.Redis.from_url('redis://127.0.0.1:6379/0', decode_responses=True)
+          with World.open('rel', redis=conn(), force_mock_llm=True) as w:
               before = w.tick(50)
               assert len(w.state()['agents']) == 3
-          with World.open('rel.db', force_mock_llm=True) as w:
+          with World.open('rel', redis=conn(), force_mock_llm=True) as w:
               assert w.state()['world_time']['tick'] == before, 'clock must survive a restart'
           print('wheel works, clock persists')
           "
           /tmp/clean/bin/anima-world --help > /dev/null
+          /tmp/clean/bin/anima-world simulate --redis redis://127.0.0.1:6379/0 \
+              --world-id rel2 --ticks 20 --llm mock
 
       - uses: actions/upload-artifact@v7
         with:
@@ -150,6 +177,18 @@ jobs:
     # files sitting on the runner's disk.
     needs: [build, testpypi]
     runs-on: ubuntu-latest
+    services:
+      # Same reasoning as `build`, one step further out: what a user installs is
+      # a package with `redis` as a hard dependency and no server of its own, so
+      # the only honest rehearsal is a real Redis. fakeredis would be cheaper and
+      # is what the suite runs on — but it is a *dev* extra, absent from what came
+      # back off the index, and it cannot be handed to the CLI at all (the CLI
+      # takes a URL). Reaching for it here would quietly shrink this job to an
+      # import check, which is exactly the thing it exists to be more than.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/setup-python@v7
         with:
@@ -159,8 +198,9 @@ jobs:
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          # --extra-index-url is not optional: cryptography, openai and httpx do
-          # not exist on TestPyPI, so a bare --index-url cannot resolve them.
+          # --extra-index-url is not optional: the three runtime dependencies
+          # (redis, openai, httpx) do not exist on TestPyPI, so a bare
+          # --index-url cannot resolve them.
           # --no-cache-dir keeps a previously cached wheel from standing in for
           # the one that was just uploaded.
           #
@@ -181,23 +221,39 @@ jobs:
           cd /tmp
           python -c "
           import anima_world
+          import redis
           from anima_world.api import World
           assert anima_world.__version__ == '${VERSION}', anima_world.__version__
 
-          # The bundled seed is the package's only package-data file, and the
+          # decode_responses=True is part of the contract, not a nicety: a
+          # raw-bytes client turns quantity names into b'树高' and world rules
+          # mis-key against them in silence.
+          def conn():
+              return redis.Redis.from_url('redis://127.0.0.1:6379/0', decode_responses=True)
+
+          # demo.cyberworld is the package's only package-data file, and the
           # failure mode it guards against is silent: without it a world still
           # boots, just with hardcoded defaults instead of the authored roster.
-          with World.open('smoke.db', force_mock_llm=True) as w:
+          with World.open('smoke', redis=conn(), force_mock_llm=True) as w:
               agents = w.state()['agents']
               assert len(agents) == 3, agents
               tick = w.tick(100)
               assert w.memories(next(iter(agents))), 'memory subsystem produced nothing'
-          with World.open('smoke.db', force_mock_llm=True) as w:
+          # A restart against the same key prefix. Under world.db this proved the
+          # file was written; under Redis it proves something the engine cares
+          # about more — that reopening a live world fills gaps instead of
+          # replaying genesis over the top of it.
+          with World.open('smoke', redis=conn(), force_mock_llm=True) as w:
               assert w.state()['world_time']['tick'] == tick, 'clock did not survive a restart'
           print('installed from TestPyPI and ran a world:', anima_world.__version__)
           "
           anima-world --help > /dev/null
-          anima-world simulate --db-path /tmp/smoke2.db --ticks 20 --llm mock
+          # The CLI half, and the only path that goes through argument parsing:
+          # the 2.0 renames (--db-path → --redis + --world-id) broke every
+          # consumer, and a wheel whose CLI cannot reach a world is not a release.
+          anima-world simulate --redis redis://127.0.0.1:6379/0 \
+              --world-id smoke2 --ticks 20 --llm mock
+          anima-world contract --json > /dev/null
 
       - name: Report what a user would see
         run: |

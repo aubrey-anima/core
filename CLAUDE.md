@@ -30,7 +30,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   实体名一律中文(和橱窗种子一致:`体力`/`树高`/`照料`),别在文档里写一套
   `stamina`/`height` 的平行英文示例 —— 两套示例迟早只有一套跟着代码走。API 标识符
   照旧英文(`World.open`)。英文世界靠 `label` 机制与英文种子,不靠引擎换语言。
-- **许可是 AGPL-3.0-or-later**(2.0 起;1.3.0 及以前已按 Apache-2.0 发出,收不回来)。
+- **许可是 AGPL-3.0-or-later**(仓库自 2.0 起;⚠️ **但已经发出去的最后一版是 1.4.0,
+  它是 Apache-2.0** —— 换许可那一版从没上过索引,所以此刻 PyPI 上一个 AGPL 的
+  anima-world 都没有,收不回来的那些全是 Apache 的。3.3.0 会是第一个)。
   选 AGPL 而不是 GPL 是因为世界引擎最常见的用法是被网络服务包着不分发,GPL 管不到
   那种用法。改依赖、vendor 代码时注意许可兼容(AGPL 项目里不能收 GPL 不兼容的东西)。
 
@@ -107,7 +109,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 687 项(fakeredis,无需真 Redis);addopts 已屏蔽 ROS 插件
+python3.13 -m pytest -q               # 1628 passed / 18 skipped(fakeredis,无需真 Redis,约 5–6 分钟);addopts 已屏蔽 ROS 插件
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 
@@ -324,9 +326,19 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
 
 ## 当前状态
 
-**2.0 改造完成(未发版):world.db 整体退役,世界只住 Redis(+可选 MySQL)。**
-PyPI 上已发布到 1.3.0(tag `v1.3.0`);`__version__` 还停在 1.4.0,发版前要定版本号
-(按硬钉版纪律这是主版本级变更 —— World.open 签名、包格式、CLI 参数全破)。
+**`__version__` = 3.3.0(2026-08-19 定版)。world.db 整体退役,世界只住 Redis(+可选 MySQL)。**
+⚠️ **PyPI 上最新是 1.4.0(tag `v1.4.0`,2026-08-04 发出并成功)** —— 2.0.0 到 3.2.0
+**一版都没上过索引**:v3.0.0 那次 Release(run `31467060331`)死在 `release.yml` 的
+冒烟步骤上,那一步还在用 1.x 的 `World.open('rel.db', force_mock_llm=True)`,
+而**没人会去改一条从没跑绿过的路**,所以往后每一版都会死在同一行。
+那条路 3.3.0 这一轮修了(两个 job 各起一个真 Redis service,形状照 `ci.yml` 的
+`package` job —— 那个每次推 main 都跑绿,是这仓里唯一被真 runner 证过的写法)。
+**tag 留给用户打**:`v*` 的 tag 就是发版扣动扳机,而 **PyPI 拒绝重复上传同一个版本号,
+第一次尝试就是唯一的一次尝试**(那个 workflow 自己的注释写的)—— 所以顺序是
+先看一次 CI 绿,再打 tag。
+教训记在这儿而不是只记在 CHANGELOG:**一条测不到自己的发布管线,和一把把上升报成
+下降的尺子是同一类东西** —— README 的 PyPI 徽章一直亮着、CI 一路绿、许可从 2.0 起
+写着 AGPL,而徽章指着的那个索引停在 Apache 时代的 1.4.0,七个月没有一处报错。
 
 这一轮删掉的:`db.py`、`small_stores.py`、`graph.py`、全部 SQLite store 实现、
 Fernet/keyfile、db 格式联锁、`--db-path`。补上的:`RedisChatStore`(无 MySQL 时
@@ -335,7 +347,7 @@ Fernet/keyfile、db 格式联锁、`--db-path`。补上的:`RedisChatStore`(无 
 锚定不衰减(删的时候测试逮出来两处 Redis 版行为缺口)。`.cyberworld` 升 v2:
 `world.db` 成员换成 `world_state.json`(Redis 键的类型化 dump + 可选 MySQL 段),
 template 模式删除,导入只进空 world_id。创世 = 种子直写各 Redis store,空 store
-才播;测试套件全量跑在 fakeredis 上(687 项,无需真 Redis 服务)。
+才播;测试套件全量跑在 fakeredis 上(**当时** 687 项,无需真 Redis 服务;今天的数见上面「常用命令」)。
 
 同一轮加进来的是**本体层**(`ontology.py` / `RedisOntologyStore` / `anima-world ontology`
 / `World.kinds()` / `World.entities()` / `StockCondition` BT 叶子),纪律见上。
