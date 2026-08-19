@@ -22,6 +22,11 @@ from anima_world.planner import _DEFAULT_PROMPT as _PLANNER_FREETIME
 from anima_world.chat_service import (
     _DEFAULT_SYSTEM_PERSONA_TEMPLATE as _CHAT_SYSTEM_PERSONA,
 )
+# R1 人设尾部重注。**引用,不复制** —— 这个文件里每个模板都是从 `chat_service`
+# 引过来的别名,理由就是不许有第二份:两份逐字相同的默认模板,改一份就静默分叉。
+from anima_world.chat_service import (
+    _DEFAULT_PERSONA_ANCHOR_TEMPLATE as _CHAT_PERSONA_ANCHOR,
+)
 from anima_world.chat_service import (
     _DEFAULT_PRESENCE_TEMPLATE as _CHAT_PRESENCE,
 )
@@ -82,6 +87,7 @@ _SAMPLE_VARS: dict[str, dict[str, Any]] = {
     "chat.system_persona": {"name": "夏", "personality": "开朗热情"},
     "chat.memory_block": {"summaries": "- 上次聊了咖啡馆的事"},
     "chat.response_format": {"name": "夏"},
+    "chat.persona_anchor": {"name": "夏", "personality": "开朗热情"},
     "chat.session_summary": {},
     "narrative.describe": {},
     "world.setting": {},
@@ -200,6 +206,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "chat.system_persona": (
         _CHAT_SYSTEM_PERSONA,
         "Chat 系统人设模板（末句定下人设优先于通则，作者才写得出言听计从的角色）",
+    ),
+    "chat.persona_anchor": (
+        _CHAT_PERSONA_ANCHOR,
+        "Chat 人设尾部重注——整段提示词最后一块，把她按回原样"
+        "（R1，默认关，chat.persona_anchor.enabled 点亮）",
     ),
     "chat.memory_block": (
         "你和对方过去的对话回顾：\n{summaries}",

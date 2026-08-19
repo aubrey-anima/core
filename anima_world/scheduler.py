@@ -617,33 +617,63 @@ class Scheduler:
                 logger.warning("memory_seed event has no agent_id; skipping")
             else:
                 kind = payload.get("kind", "seed")
+                summary = payload.get("summary", "")
+                importance = float(payload.get("importance", 0.5))
+                anchor = bool(payload.get("anchor", False))
+                # R3:她是怎么知道这件事的。**默认由 kind 推**(见
+                # `_provenance_of`),写事件的一方可以显式盖过它。
+                provenance = str(
+                    payload.get("provenance") or self._provenance_of(kind)
+                )
+                # **`memory_seed` 不过准入闸(R4)。** 它是一条**显式声明** ——
+                # 世界(作者的创世记忆、关系判定、八卦反应、反思)明说"记住这件事",
+                # 而它本来就绕开触发器,理由见上面那段注释。准入闸是对**引擎自己的
+                # 推断**的一次再判断("这类事件值得记" → "这一条值得吗");一条声明
+                # 上面没有可以再判的推断。
+                #
+                # 更要紧的是后果:世界明说要记而引擎悄悄不记,日志里有 `memory_seed`
+                # 事件、记忆表里没有那一行、没有任何一处报错 —— 正是这个仓库最怕的
+                # 那种坏法。`test_verb_writes` 当场逮到了它(`talk_to` 声明会写记忆,
+                # 而两条 seed 都被拒了)。重复的八卦要治,治在它的源头(`_maybe_gossip`
+                # 本来就有每日一次的闸),不是在落库这一下把一条声明吞掉。
                 self.memory_store.add(
                     agent_id=agent_id,
                     tick=int(event.get("ts") or 0),
                     kind=kind,
-                    summary=payload.get("summary", ""),
-                    importance=payload.get("importance", 0.5),
-                    anchor=bool(payload.get("anchor", False)),
+                    summary=summary,
+                    importance=importance,
+                    anchor=anchor,
                     event_seq=event.get("seq"),
                     source_ids=payload.get("source_ids"),
+                    provenance=provenance,
                 )
-                self._note_memory_written(agent_id, float(payload.get("importance", 0.5)), kind)
+                self._note_memory_written(agent_id, importance, kind)
             return
         if self.trigger_engine is not None and self.memory_store is not None:
             descriptor = self.trigger_engine.process(event, self._memory_projection)
             if descriptor is not None:
-                self.memory_store.add(
-                    agent_id=descriptor.agent_id,
-                    tick=descriptor.tick,
-                    kind=descriptor.kind,
-                    summary=descriptor.summary,
-                    importance=descriptor.importance,
-                    anchor=descriptor.anchor,
-                    event_seq=descriptor.event_seq,
+                admitted = self._admit_memory(
+                    descriptor.agent_id, descriptor.summary, descriptor.kind,
+                    float(descriptor.importance), descriptor.anchor,
                 )
-                self._note_memory_written(
-                    descriptor.agent_id, float(descriptor.importance), descriptor.kind
-                )
+                if admitted:
+                    self.memory_store.add(
+                        agent_id=descriptor.agent_id,
+                        tick=descriptor.tick,
+                        kind=descriptor.kind,
+                        summary=descriptor.summary,
+                        importance=descriptor.importance,
+                        anchor=descriptor.anchor,
+                        event_seq=descriptor.event_seq,
+                        provenance=getattr(descriptor, "provenance", None)
+                        or self._provenance_of(descriptor.kind),
+                    )
+                    self._note_memory_written(
+                        descriptor.agent_id, float(descriptor.importance), descriptor.kind
+                    )
+                # **关系跃迁不受准入闸管。** 准入管的是"记不记得住",而这一步动的是
+                # 关系图和 r_type —— 那是世界的状态,不是她的记忆。拒了一条摘要就
+                # 顺手把关系也拒掉,是把两件事绑在一起,而绑错的那一次没有任何报错。
                 if descriptor.kind == "relation_shift":
                     self._on_relation_shift(event, descriptor)
 
@@ -734,6 +764,115 @@ class Scheduler:
     def subsystem_health(self) -> dict[str, dict[str, Any]]:
         """各子系统的当前档位与累计计数(给 `World.state()` 用)。"""
         return {name: dict(data) for name, data in self._subsystem_health.items()}
+
+    # ── R3 记忆分型 / R4 准入闸 / R5 夜间固化 ─────────────────────────────
+
+    #: kind → 她是怎么知道这件事的。**没列的一律亲历** —— 一张要求穷举的表会在
+    #: 作者自造 kind 时把它悄悄判成别的东西,而作者不会知道。
+    PROVENANCE_BY_KIND = {
+        "reaction": "heard",        # 八卦传过来的
+        "hearsay": "heard",
+        "reflection": "believed",   # 她自己想出来的
+        "insight": "believed",
+    }
+
+    def _provenance_of(self, kind: str) -> str:
+        return self.PROVENANCE_BY_KIND.get(str(kind or ""), "experienced")
+
+    def _admit_memory(self, agent_id: str, summary: str, kind: str,
+                      importance: float, anchor: bool) -> bool:
+        """这一条该不该进她的记忆(R4)。**开关关着时一律放行** —— 逐位退回从前。
+
+        闸在这里而不在触发器里:触发器答的是"这类事件配不配",这一层答的是
+        "**这一条**配不配"(第七次「在吗」不配)。拒了要**说出来**:一条静默丢掉的
+        记忆查不了,作者只会看到"她怎么不记得这件事",而日志里什么都没有。
+
+        ⚠️ **只管引擎自己推断出来的那条路**(`TriggerEngine`),不管 `memory_seed` ——
+        那是世界的**显式声明**,理由见 `_apply_memory_trigger` 里那一段。
+        """
+        if self.memory_store is None:
+            return False
+        if self.config_store is None or not self.config_store.get(
+            "memory.admission.enabled", default=False
+        ):
+            return True
+        from anima_world import memory_admission
+
+        threshold = float(self.config_store.get(
+            "memory.admission.threshold",
+            default=memory_admission.DEFAULT_THRESHOLD,
+        ))
+        try:
+            existing = self.memory_store.query(agent_id=agent_id)
+        except Exception:  # noqa: BLE001 - 读不到已有记忆不该让这条丢掉
+            logger.warning("准入闸读不到 %s 的已有记忆,这一条放行", agent_id, exc_info=True)
+            return True
+        verdict = memory_admission.judge(
+            summary, kind=kind, importance=importance, anchor=anchor,
+            existing=existing, threshold=threshold,
+        )
+        if not verdict.admit:
+            logger.info(
+                "记忆准入拒了 %s 的一条 %s(%.3f):%s —— %r",
+                agent_id, kind, verdict.score, verdict.reason, summary[:40],
+            )
+            self.note_subsystem("memory_admission", True, "")
+        else:
+            self.note_subsystem("memory_admission", True, "")
+        return verdict.admit
+
+    def consolidate_memories(self, *, now_tick: int | None = None) -> dict[str, Any]:
+        """夜间固化(R5):**趁她睡着的时候整理记忆。**
+
+        做三件事,每个角色各做一遍:衰减一轮(该淡的淡下去)、把弱到看不见的行清掉、
+        然后让攒够的那些去反思。这三样引擎本来就有,缺的只是**一个该做这件事的时刻** ——
+        而这个世界自己有夜晚,那正是它。
+
+        为什么挂在夜里而不是每 tick 做:遗忘曲线是按世界日算的,每 tick 跑一遍
+        既贵又没有意义;更要紧的是**反思是一次 LLM 调用**,跟着白天的对话一起跑会
+        和她正在说的话抢线程。离线固化(sleep-time compute)这条在外面已经被反复
+        验证,而这个引擎的好处是它不必假装有"夜晚"——世界里真的有。
+
+        **默认关**(`memory.consolidation.enabled`):它会改变记忆的留存,是行为变更。
+        开着的时候它**接管**日切的衰减(`_on_day_rollover` 是 if/else,不是两段都跑)——
+        `decay_pass` 不幂等,跑两遍是平方,理由见那里。
+        返回 `{agents, decayed, pruned, reflections}`,零成本可观测(和
+        `rule_stats()` / `autonomy_stats()` 同一条:最容易的坏法是看着都对、其实一次没跑)。
+        """
+        out = {"agents": 0, "decayed": 0, "pruned": 0, "reflections": 0}
+        if self.memory_store is None:
+            return out
+        tick = int(self.clock if now_tick is None else now_tick)
+        ticks_per_day = max(1, 1440 // self._minutes_per_tick())
+        floor = 0.0
+        if self.config_store is not None:
+            floor = float(self.config_store.get(
+                "memory.consolidation.prune_below", default=0.0))
+        for agent_id in list(self.agents):
+            out["agents"] += 1
+            try:
+                self.memory_store.decay_pass(agent_id, tick, ticks_per_day)
+                out["decayed"] += 1
+            except Exception:  # noqa: BLE001 - 一个角色的固化失败不该停掉整轮
+                logger.warning("固化:%s 的衰减失败", agent_id, exc_info=True)
+                continue
+            if floor > 0.0:
+                # **锚定的永不清** —— 创世记忆是她是谁的一部分(和淘汰同一条纪律)。
+                for row in self.memory_store.query(agent_id=agent_id):
+                    if row.get("anchor"):
+                        continue
+                    if float(row.get("strength") or 1.0) < floor:
+                        if self.memory_store.forget_memory(int(row["id"])):
+                            out["pruned"] += 1
+            if self._reflection_watermark.get(agent_id, 0.0) > 0.0:
+                self._reflection_watermark[agent_id] = 0.0
+                self._reflection_dirty.discard(agent_id)
+                if self.reflection_store is not None:
+                    self.reflection_store.reset(agent_id, tick)
+                self._submit_reflection(agent_id)
+                out["reflections"] += 1
+        self.note_subsystem("memory_consolidation", True, "")
+        return out
 
     def _note_memory_written(self, agent_id: str, importance: float, kind: str) -> None:
         """Accumulate importance toward the reflection threshold (lock held).
@@ -983,6 +1122,8 @@ class Scheduler:
                     "payload": {
                         "agent_id": agent_id,
                         "kind": self.REFLECTION_KIND,
+                        # R3:反思是她**自己想出来的**,不是发生过的事。
+                        "provenance": "believed",
                         "summary": text,
                         "importance": 0.8,
                         "source_ids": source_ids,
@@ -1325,7 +1466,25 @@ class Scheduler:
         Everything here must be pure arithmetic/SQL — the same no-LLM rule as
         the rest of the tick frame. Per-day cost, not per-tick."""
         now_tick = self.clock
-        if self.memory_store is not None and hasattr(self.memory_store, "decay_pass"):
+        # R5 夜间固化。**挂在日切,不是每 tick** —— 遗忘曲线按世界日算,而反思是
+        # 一次 LLM 调用,跟着白天的对话跑会和她正在说的话抢线程。
+        #
+        # ⚠️ **固化接管衰减,不是叠加在它上面。** 这是实装当天用真世界演出来的:
+        # 固化自己会跑一遍 `decay_pass`,而下面那段日切的衰减照旧也跑一遍 ——
+        # 于是**开了固化的世界,记忆一天衰减两遍**。而 `decay_pass` 不是幂等的:
+        # 它按"距上次回想的完整空档"从**当前**强度再衰减一次,所以跑两遍是平方,
+        # 不是多跑一点。实测一天之后强度 0.125(该是 0.35),配上
+        # `prune_below` 就成了"她一觉醒来把昨天忘干净了" —— 而日志一条不错、
+        # 每条记忆单看都合法。所以这里是 if/else,不是两段都跑。
+        consolidating = self.config_store is not None and self.config_store.get(
+            "memory.consolidation.enabled", default=False
+        )
+        if consolidating:
+            try:
+                self.consolidate_memories(now_tick=now_tick)
+            except Exception:  # noqa: BLE001 - 固化失败不该停掉日切的其余部分
+                logger.warning("夜间固化失败", exc_info=True)
+        elif self.memory_store is not None and hasattr(self.memory_store, "decay_pass"):
             ticks_per_day = max(1, 1440 // self._minutes_per_tick())
             for agent_id in list(self.agents):
                 try:
@@ -1695,6 +1854,10 @@ class Scheduler:
                     # 新八卦,传出去再引发一次判定,而转手数从 0 重新开始 ——
                     # 一句闲话可以就这么永远活下去。
                     "kind": "reaction",
+                    # R3:这条是**听来的**。她转述时该带着"听说"的分量,而不是
+                    # 说得像自己在场 —— 八卦每传一手就多一层失真,出处丢了之后
+                    # 再高的检索精度也救不回来。
+                    "provenance": "heard",
                     "summary": verdict.summary,
                     "importance": round(
                         min(0.9, 0.5 + max(abs(r.delta) for r in verdict.reactions)), 3

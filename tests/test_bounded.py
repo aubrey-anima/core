@@ -77,8 +77,17 @@ def test_the_prompt_does_not_grow_as_the_world_ages(tmp_path, redis):
         assert world.scheduler.event_log.count() > 1000, (
             "世界没怎么跑,这条测试是空的"
         )
-        # 记忆有容量淘汰(memory.capacity=50,按强度逐出)—— 涨满即证明后端在写。
-        assert len(world.scheduler.memory_store.query(agent)) >= 50, "记忆没涨"
+        # 记忆确实在写。**判据不能是"涨满 50"** —— 内置橱窗点亮了记忆准入闸
+        # (`memory.admission.enabled`),它的全部作用就是不让重复行占满容量:
+        # 实测同一个世界跑 40 天,不开闸的 50 条归并后只有 11 件不同的事(同一场雨
+        # 8 遍),开闸后留下 11 条、一件不少。拿"涨满"当后端在写的证据,等于要求
+        # 那 39 个重复行必须存在 —— 那正是这道闸要消灭的东西。
+        aged_memories = len(world.scheduler.memory_store.query(agent))
+        # 阈值要留**真余量**:世界逐次不确定,而这条只是个「后端在写」的前提,
+        # 不是记忆条数的契约。贴着实测值写(比如 > 3,而实测就在 3~4 之间抖)
+        # 会得到一条时绿时红的测试 —— 那比没有这条断言更坏。
+        assert aged_memories >= 2, f"记忆没涨(只有 {aged_memories} 条)"
+
 
         # 而提示词没有。留 1.5 倍的余量:允许波动,不允许随年龄线性涨。
         assert aged <= fresh * 1.5, (

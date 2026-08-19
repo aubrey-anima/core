@@ -382,6 +382,43 @@ def _build_parser() -> argparse.ArgumentParser:
     player_options.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
     )
+    player_erase = player_commands.add_parser(
+        "erase",
+        help="法务抹除:删他的转录与记忆、事件里抹名抹原文(用户行使删除权时用;"
+             "先 forget 再抹历史)",
+    )
+    _add_world_args(player_erase)
+    player_erase.add_argument("--player", required=True, help="他的 player_id")
+    player_erase.add_argument("--reason", default="", help="为什么(会写进审计事件)")
+    player_erase.add_argument(
+        "--yes", action="store_true",
+        help="真抹。不带它只数要动多少(和 world drop 同一个习惯)",
+    )
+    player_erase.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+
+    drift_cmd = sub.add_parser(
+        "drift",
+        help="她还是不是她:人设漂移的尺子(纯计数,不调模型;含迎合度这一格)",
+    )
+    _add_world_args(drift_cmd)
+    drift_cmd.add_argument("--agent", required=True, help="看谁")
+    drift_cmd.add_argument("--player", default=None,
+                           help="只看跟这个人的对话(不同的人会把她带向不同的样子)")
+    drift_cmd.add_argument("--baseline", type=int, default=None,
+                           help="基线取她最早的几条(默认 6)")
+    drift_cmd.add_argument("--json", action="store_true", dest="as_json",
+                           help="机器可读输出(契约)")
+
+    engagement_cmd = sub.add_parser(
+        "engagement",
+        help="他跟这个世界处得有多深:会话/消息/跨几个角色/关系/世界主动想起他几次",
+    )
+    _add_world_args(engagement_cmd)
+    engagement_cmd.add_argument("--player", required=True, help="看谁")
+    engagement_cmd.add_argument("--json", action="store_true", dest="as_json",
+                                help="机器可读输出(契约)")
 
     presence_cmd = sub.add_parser(
         "presence",
@@ -3536,6 +3573,94 @@ def run_roster(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_drift(args: argparse.Namespace) -> int:
+    """`anima-world drift` —— 人设漂移的尺子(R2)。**只读。**
+
+    渲染是赠品,`--json` 才是契约(和 `map` / `ontology` 同一条)。
+    退出码有意义:**漂了退 1**,所以它能进 CI —— 一个"人设一致性"的回归闸
+    和 `ontology --check` 是同一个用法。样本不够时退 0 并说出为什么
+    (不够就是不够,那不是失败)。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "drift"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[drift] {exc}", file=sys.stderr)
+        return 2
+    try:
+        report = world.persona_drift(
+            args.agent, baseline_n=args.baseline, player_id=args.player,
+        )
+    except KeyError as exc:
+        print(f"[drift] {exc}", file=sys.stderr)
+        return 2
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        return 1 if report.get("drifted") else 0
+
+    who = report.get("agent_name") or report["agent_id"]
+    if not report["ok"]:
+        print(f"[drift] {who}:{report['reason']}")
+        return 0
+    print(f"[drift] {who} —— 她说过 {report['messages']} 条,"
+          f"前 {report['baseline_n']} 条当基线;阈值 {report['threshold']}")
+    for row in report["features"]:
+        mark = "漂" if row["drifted"] else "  "
+        print(f"  {mark} {row['label']:<6} 基线 {row['baseline']:>8.3f}"
+              f"  最近 {row['recent']:>8.3f}  累积 {row['cusum']:>6.2f} {row['direction']}")
+    print(f"[drift] {report['verdict']}")
+    if (report.get("sycophancy") or {}).get("rising"):
+        print("[drift] ⚠️ 迎合度在持续上升 —— 《拟人化互动办法》第八条(五)"
+              "禁止过度迎合用户、诱导情感依赖")
+    return 1 if report["drifted"] else 0
+
+
+def run_engagement(args: argparse.Namespace) -> int:
+    """`anima-world engagement` —— 他跟这个世界处得有多深(E2)。**只读。**
+
+    给数不给结论:依赖预警的阈值与干预是宿主的判断(引擎不触达用户),
+    这一层只把散在三处的账拢到一起。理由见 `World.player_engagement`。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "engagement"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[engagement] {exc}", file=sys.stderr)
+        return 2
+    try:
+        report = world.player_engagement(args.player)
+    except ValueError as exc:
+        print(f"[engagement] {exc}", file=sys.stderr)
+        return 2
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        return 0
+    print(f"[engagement] {report['player_id']} —— "
+          f"{report['conversations']} 场对话、{report['messages']} 条消息、"
+          f"跨 {report['agents']} 个角色、{report['span_days']} 天;"
+          f"世界主动想起他 {report['contacts']} 次")
+    for row in report["relationships"]:
+        print(f"  {row['other_name'] or row['other_id']} ← {row['agent_name']}:"
+              f"{row['summary']}")
+    if not report["relationships"]:
+        print("  —— 还没有任何一个角色和他有来往")
+    return 0
+
+
 def run_presence(args: argparse.Namespace) -> int:
     """`anima-world presence` —— 开 `presence.enforce_colocation` 之前的体检。
 
@@ -4523,11 +4648,15 @@ def run_agent_set_card(args: argparse.Namespace) -> int:
 
 
 def run_player(args: argparse.Namespace) -> int:
-    """`anima-world player forget` / `player options` —— 玩家那一份数据的两个出口。
+    """`player forget` / `player options` / `player erase` —— 玩家数据的三个出口。
 
     **forget 不是一次删除,是往日志里追加一条事实**(`player_departed`);理由写在
     `World.forget_player` 的 docstring 里,一句话:关系是投影,手删投影下一次重放
     自己长回来。所以这条命令改的是世界的历史**加了一条**,而不是少了一条。
+
+    **erase 是法务抹除**(用户行使删除权,《拟人化互动办法》第十六条):先 forget,
+    再删转录与记忆、把事件里他的名字与原文改写掉 —— 设计与边界在
+    `World.erase_player` 的 docstring 里。不带 `--yes` 只数,和 `world drop` 同款。
 
     **options 是只读的**:这个人此时此地点得动什么。它存在的理由是宿主那侧 ——
     `player_tools()` 说得出"有 interact 这个按钮",说不出"这会儿有什么可以 interact"。
@@ -4538,8 +4667,8 @@ def run_player(args: argparse.Namespace) -> int:
     from anima_world.api import World
 
     command = getattr(args, "player_command", None)
-    if command not in {"forget", "options"}:
-        print("[player] 只有 forget / options 两个子命令", file=sys.stderr)
+    if command not in {"forget", "options", "erase"}:
+        print("[player] 只有 forget / options / erase 三个子命令", file=sys.stderr)
         return 2
 
     redis, world_id, mysql = _world_args(args)
@@ -4556,6 +4685,31 @@ def run_player(args: argparse.Namespace) -> int:
         finally:
             world.close()
         return _print_player_options(args, menu)
+    if command == "erase":
+        try:
+            receipt = world.erase_player(
+                args.player, reason=args.reason, dry_run=not args.yes,
+            )
+        except ValueError as exc:
+            print(f"[player] {exc}", file=sys.stderr)
+            return 2
+        finally:
+            world.close()
+        if args.as_json:
+            print(json.dumps(receipt, ensure_ascii=False, indent=2, default=str))
+            return 0
+        verb = "抹了" if args.yes else "要抹"
+        print(f"[player] {receipt['player_id']} —— {verb}:"
+              f"事件改写 {receipt['events']} 条、"
+              f"会话 {receipt['conversations']} 场 {receipt['messages']} 条消息、"
+              f"记忆删 {receipt['memories_dropped']} 行改 {receipt['memories_redacted']} 行"
+              f"(显示名 {receipt['names']} 个,跳过 {receipt['names_skipped']} 个)。")
+        if not args.yes:
+            print("[player] (没带 --yes:世界一个字节都没动)")
+        else:
+            print(f"[player] 已记下 player_erased(seq={receipt['seq']})——"
+                  "账本没动;别的进程的内存窗口重启后干净。")
+        return 0
     try:
         receipt = world.forget_player(
             args.player, reason=args.reason, dry_run=bool(args.dry_run),
@@ -5418,6 +5572,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_relationship(args)
     if args.command == "presence":
         return run_presence(args)
+    if args.command == "drift":
+        return run_drift(args)
+    if args.command == "engagement":
+        return run_engagement(args)
     if args.command == "chat":
         return run_chat(args)
     if args.command == "run":

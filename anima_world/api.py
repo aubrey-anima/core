@@ -686,6 +686,99 @@ _WORLD_SAID_NO = frozenset({
 })
 
 
+# ── 法务抹除(`World.erase_player`)的纯文本部分 ─────────────────────────────
+# 涉他事件里要抹空的原文字段。加了会带**玩家原文**的新事件字段,把键名登进来 ——
+# 抹除认的是这张表,不认识的键只做名字替换,漏登等于给原文留一条静默的活路。
+_ERASE_TEXT_KEYS = frozenset({
+    "summary", "conversation_summary", "note", "text", "content", "transcript",
+})
+_ERASED_TEXT = "(已抹除)"
+_ERASED_NAME = "(已注销)"
+# id 键 → 名字键的配对:`player_id`→`player_name` 这类按 `_id`→`_name` 推,
+# 判定事件的 `as`/`target` 与账本的 `from`/`to` 是仅有的四个不带后缀的。
+_ERASE_ID_KEYS = frozenset({"as", "target", "from", "to"})
+
+
+def _mentions_pid(value: Any, pid: str) -> bool:
+    """载荷的任何深度上有没有一个字符串值**恰等于**这个 id。恰等于,不是包含 ——
+    子串匹配会把 `aubrey-player` 认成 `aubrey`(`forget_player` 那条同款教训)。"""
+    if isinstance(value, str):
+        return value == pid
+    if isinstance(value, Mapping):
+        return any(_mentions_pid(v, pid) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_mentions_pid(v, pid) for v in value)
+    return False
+
+
+def _collect_player_names(value: Any, pid: str, out: set[str]) -> None:
+    """从载荷里收他的显示名:某个 id 键的值是他,就收它配对的名字键。
+
+    **配对收,不是见名就收**:hail 的载荷里 `player_id` 旁边坐着 `agent_name` ——
+    把同一个 dict 里所有 `*name*` 都当成他的名字,就会把她的名字也抹成「已注销」。
+    """
+    if isinstance(value, Mapping):
+        for key, v in value.items():
+            if isinstance(v, str) and v == pid:
+                name_key = None
+                if isinstance(key, str) and key.endswith("_id"):
+                    name_key = key[:-3] + "_name"
+                elif key in _ERASE_ID_KEYS:
+                    name_key = f"{key}_name"
+                if name_key:
+                    name = value.get(name_key)
+                    if isinstance(name, str) and name.strip():
+                        out.add(name.strip())
+            _collect_player_names(v, pid, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _collect_player_names(v, pid, out)
+
+
+def _erase_scrub(value: Any, replacements: dict[str, str], *,
+                 blank: bool) -> tuple[Any, bool]:
+    """一份载荷的抹除拷贝:名字全域替换;`blank=True`(这条事件涉他)时把
+    `_ERASE_TEXT_KEYS` 里的原文字段整个抹空。返回 (新值, 改没改)。"""
+    if isinstance(value, str):
+        fresh = value
+        for old, new in replacements.items():
+            fresh = fresh.replace(old, new)
+        return fresh, fresh != value
+    if isinstance(value, Mapping):
+        changed = False
+        out: dict[str, Any] = {}
+        for key, v in value.items():
+            if (blank and key in _ERASE_TEXT_KEYS
+                    and isinstance(v, str) and v and v != _ERASED_TEXT):
+                out[key] = _ERASED_TEXT
+                changed = True
+                continue
+            fresh, hit = _erase_scrub(v, replacements, blank=blank)
+            out[key] = fresh
+            changed = changed or hit
+        return (out, True) if changed else (dict(value), False)
+    if isinstance(value, (list, tuple)):
+        changed = False
+        items = []
+        for v in value:
+            fresh, hit = _erase_scrub(v, replacements, blank=blank)
+            items.append(fresh)
+            changed = changed or hit
+        return (items, changed)
+    return value, False
+
+
+def _iter_event_log(log: Any, *, page_size: int = 500) -> Any:
+    """流式过一遍事件日志 —— 抹除要看每一条,而日志没有上限,不整只端起来。"""
+    since = 0
+    while True:
+        batch = log.page(since_seq=since, limit=page_size)
+        if not batch:
+            return
+        yield from batch
+        since = int(batch[-1].seq or 0)
+
+
 class _ToolRuntime:
     """工具与 director 能碰到的世界(`tools.base.ToolRuntime` 的实现)。
 
@@ -5168,7 +5261,7 @@ class World:
         edge_rows: list[dict[str, Any]] = []
         if graph is not None:
             edge_rows = [
-                row for row in graph.query()
+                row for row in graph.query(include_invalid=True)
                 if row.get("subject") == node or row.get("object") == node
             ]
         contact_store = getattr(scheduler, "contact_store", None)
@@ -5215,9 +5308,14 @@ class World:
                 # 拿锁之后重数一遍 —— 上面那次是给 dry_run 用的,而两次之间
                 # 别的进程可能又立了一条边。
                 dropped = 0
-                for row in graph.query():
+                for row in graph.query(include_invalid=True):
                     if row.get("subject") == node or row.get("object") == node:
-                        if graph.drop(row["subject"], row["predicate"], row["object"]):
+                        # **hard=True**:R3 之后 `drop()` 默认是"作废"(写 invalid_at,
+                        # 保留历史)—— 那对"他俩绝交了"是对的,对"这个人离开了这个
+                        # 世界"是错的。留一行作废的边等于 `cliques` 看不见他、而
+                        # `query(as_of=…)` 和导出仍然报得出他,告别就没告干净。
+                        if graph.drop(row["subject"], row["predicate"], row["object"],
+                                      hard=True):
                             dropped += 1
                 receipt["edges"] = dropped
             if contact_store is not None:
@@ -5242,6 +5340,262 @@ class World:
                 if row.get("player_id") == player_id and row.get("player_name"):
                     return str(row["player_name"])
         return player_id
+
+    def erase_player(
+        self, player_id: str, *, reason: str = "", dry_run: bool = False
+    ) -> dict[str, Any]:
+        """**法务抹除:把这个人的交互数据从世界里抹掉。** 和 `forget_player`(告别,
+        历史一个字不动)是两个动作 —— 这个是用户行使删除权时宿主要调的那一个,
+        《拟人化互动办法》第十六条的引擎侧出口。
+
+        内部先走一遍 `forget_player`(朝前看的先断:关系、回访、在场),再动历史:
+
+        - **转录整场删**(两后端,`ChatStore.erase_player`):会话行、消息行、
+          逐轮观测量一起走。
+        - **由他而起的记忆删行**(`event_seq` 指向涉他事件的);**旁及他的记忆只
+          换名字**(别人的反思提了他一句,删整行等于把别人的记忆也抹掉一角)。
+        - **事件不删行,原地改写**:`seq` 在 Redis 后端是列表下标,删一行后面全错位,
+          「对账即重放」当场碎掉。改写做两件事:他的显示名全域换成「(已注销)」,
+          涉他事件的原文字段(`_ERASE_TEXT_KEYS`)抹成「(已抹除)」。
+        - **不透明 id 保留,不换假名。** 换假名曾是第一版设计,被跨进程折叠否决:
+          落后的进程折了真名 delta、再折到假名 `player_departed`,真名关系成了
+          没人清得掉的幽灵 —— 而假名映射一旦落库(哪怕落在事件里)就等于没抹。
+          保留 id 则折叠语义零改动、无竞态;id 与人的关联在宿主的账号表里,
+          账号一删它就只是一串指向虚空的字符。**宿主应以不透明 id 作 player_id**,
+          拿邮箱/昵称当 id 的宿主要自己承担这一条的后果。
+        - **账本不动**(钱、物品):守恒不许破,那是世界的账,不是他的话。
+
+        三条边界,都是明说的:**名字太短(单字)或与某个角色重名的不替换**(替换
+        会把她们的名字和世界的文本一起绞碎,回执里的 `names_skipped` 数着);
+        **别的进程的内存事件窗口(≤200 条)不归这里管**,重启或滑出后消失;
+        **抹除后落库的新事件不在扫描范围里** —— 先让宿主停掉他的会话再抹,
+        或者过后再跑一次(**幂等**:第二次只会数出 0)。
+
+        返回回执 `{player_id, reason, forget, events, conversations, messages,
+        memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}`;
+        `dry_run=True` 一个字节都不写(所以数不出 `forget.chat_state`,并且比真跑
+        少数一条 —— 真跑会把 `forget` 刚追加的那条 `player_departed` 里的名字也抹掉)。
+        CLI 出口:`anima-world player erase`(不带 `--yes` 只数)。
+        """
+        pid = str(player_id or "").strip()
+        if not pid:
+            raise ValueError("player_id is required")
+        scheduler = self.scheduler
+        log = scheduler.event_log
+
+        # ── 名字先收:forget 会清联系态,而联系态正是名字的来源之一 ──────────
+        names: set[str] = set()
+        info = self.players.get(pid) or {}
+        display = str(info.get("display_name") or "").strip()
+        if display:
+            names.add(display)
+        contact_store = getattr(scheduler, "contact_store", None)
+        if contact_store is not None:
+            for row in contact_store.all():
+                if row.get("player_id") == pid and row.get("player_name"):
+                    names.add(str(row["player_name"]).strip())
+        his_seqs: set[int] = set()
+        if log is not None:
+            for e in _iter_event_log(log):
+                if e.who == pid or _mentions_pid(e.payload, pid):
+                    his_seqs.add(int(e.seq or 0))
+                    _collect_player_names(e.payload, pid, names)
+        # 占位符不是名字 —— 不滤掉的话第二次跑会把「(已注销)」当成他的又一个
+        # 显示名收进来,幂等性从回执上看就破了(names 永远数出 1)。
+        names = {n for n in names if n and n != _ERASED_NAME}
+        agent_names = {b.agent.name for b in scheduler.agents.values()}
+        skipped = sorted(n for n in names if len(n) < 2 or n in agent_names or n == pid)
+        names -= set(skipped)
+        # 长名先换:「小明哥」比「小明」先替,免得替完短的把长的拆成两截。
+        replacements = {n: _ERASED_NAME for n in sorted(names, key=len, reverse=True)}
+
+        receipt: dict[str, Any] = {
+            "player_id": pid, "reason": reason,
+            "forget": self.forget_player(pid, reason=reason, dry_run=dry_run),
+            "events": 0, "conversations": 0, "messages": 0,
+            "memories_dropped": 0, "memories_redacted": 0,
+            "names": len(names), "names_skipped": len(skipped),
+            "dry_run": bool(dry_run), "seq": None,
+        }
+
+        # ── 历史:改写,不删行 ─────────────────────────────────────────────
+        if log is not None:
+            for e in _iter_event_log(log):
+                about = e.who == pid or _mentions_pid(e.payload, pid)
+                if not about and not replacements:
+                    continue
+                payload, changed = _erase_scrub(e.payload, replacements, blank=about)
+                if changed:
+                    receipt["events"] += 1
+                    if not dry_run:
+                        log.rewrite(int(e.seq), {
+                            "ts": e.ts, "type": e.type, "who": e.who,
+                            "loc": e.loc, "payload": payload,
+                        })
+
+        # ── 转录与记忆 ─────────────────────────────────────────────────────
+        chat = getattr(self, "chat_store", None)
+        if chat is not None and hasattr(chat, "erase_player"):
+            wiped = chat.erase_player(pid, dry_run=dry_run)
+            receipt["conversations"] = wiped["conversations"]
+            receipt["messages"] = wiped["messages"]
+        memory = scheduler.memory_store
+        if memory is not None and hasattr(memory, "erase_for_event_seqs"):
+            receipt["memories_dropped"] = memory.erase_for_event_seqs(
+                his_seqs, dry_run=dry_run)
+            receipt["memories_redacted"] = memory.redact_summaries(
+                replacements, dry_run=dry_run)
+
+        if dry_run:
+            return receipt
+
+        # ── 记下这件事本身(审计):载荷里只有 id 和数目,没有任何名字 ─────────
+        with self._guard():
+            scheduler.catch_up_projection()
+            event = scheduler._record_and_deliver({
+                "type": "player_erased",
+                "who": None,
+                "payload": {
+                    "player_id": pid, "reason": reason,
+                    "events": receipt["events"],
+                    "conversations": receipt["conversations"],
+                    "messages": receipt["messages"],
+                    "memories_dropped": receipt["memories_dropped"],
+                    "memories_redacted": receipt["memories_redacted"],
+                },
+            })
+            receipt["seq"] = (event or {}).get("seq")
+
+        # ── 本进程的内存事件窗口跟着改 —— 只读门不该还端着抹掉之前的原文 ──────
+        with scheduler._lock:
+            window = scheduler.recent_events
+            for i, ev in enumerate(window):
+                about = ev.get("who") == pid or _mentions_pid(ev, pid)
+                fresh, changed = _erase_scrub(dict(ev), replacements, blank=about)
+                if changed:
+                    window[i] = fresh
+        return receipt
+
+    def player_engagement(self, player_id: str) -> dict[str, Any]:
+        """**他跟这个世界处得有多深** —— 依赖预警要的那笔账(E2)。
+
+        《人工智能拟人化互动服务管理暂行办法》第十条要求服务方具备"过度依赖风险
+        预警、情感边界引导"的能力。判断和干预是宿主的事(引擎不触达用户),
+        但**判断要的原始数据在世界里**,而宿主今天只能自己去 join 三张表:
+        会话在转录里、关系在投影里、"上次想起他"在联系态里。
+
+        所以这一层是**聚合出口,不是评分**。它给数,不给结论 ——
+        `relationship_summary` 那条纪律在这里同样成立:一个"依赖指数"会被产品做成
+        进度条,而**刷分是这类产品最不该长出来的东西**。宿主要什么阈值、怎么提示,
+        是宿主的判断。
+
+        返回 `{player_id, conversations, messages, agents, first_seen, last_seen,
+        span_days, relationships:[…], closest, contacts}`:
+
+        - `conversations` / `messages` —— 他和这个世界说过多少话(墙钟,按秒记)
+        - `agents` —— 他和几个角色说过话。**1 和 5 是两种依赖**,合成一个数就分不开了
+        - `span_days` —— 从第一次到最近一次跨了多少天(墙钟)
+        - `relationships` —— 每个角色对他的那一行(`relationship_summary` 的形状)
+        - `closest` —— 其中最亲的那一段的 `sentiment`,方便宿主一眼看
+        - `contacts` —— 世界**主动**想起他的次数(她找他,不是他找她)
+
+        ⚠️ **转录归 MySQL 的世界里这是一次 SELECT**,别放进 tick 循环里调。
+        """
+        pid = str(player_id or "").strip()
+        if not pid:
+            raise ValueError("player_id is required")
+        scheduler = self.scheduler
+        scheduler.catch_up_projection()
+
+        convs: list[dict[str, Any]] = []
+        for agent_id in scheduler.agents:
+            for row in self.chat_store.list_conversations(agent_id):
+                if (row.get("player_id") or "user") == pid:
+                    convs.append(row)
+        stamps = [int(r.get("started_at") or 0) for r in convs if r.get("started_at")]
+        last_stamps = [
+            int(r.get("last_activity_at") or r.get("started_at") or 0) for r in convs
+        ]
+        first_seen = min(stamps) if stamps else None
+        last_seen = max(last_stamps) if last_stamps else None
+        # 墙钟,不是 tick:这条账是给**合规**看的,而第十八条那类义务(连续使用
+        # 时长)按真实时间算 —— 世界 tick 和真实时间没有固定比率。
+        span_days = (
+            round((last_seen - first_seen) / 86400.0, 2)
+            if first_seen and last_seen else 0.0
+        )
+
+        rows = []
+        for agent_id in scheduler.agents:
+            row = self._relationship_row(agent_id, pid)
+            if row["exists"] or row["met"]:
+                rows.append(row)
+        closest = max((r["axes"]["sentiment"] for r in rows), default=0.0)
+
+        contacts = 0
+        store = getattr(scheduler, "contact_store", None)
+        if store is not None:
+            for row in store.all():
+                if row.get("player_id") == pid:
+                    contacts += int(row.get("fired_today") or 0)
+
+        return {
+            "player_id": pid,
+            "conversations": len(convs),
+            "messages": sum(int(r.get("message_count") or 0) for r in convs),
+            "agents": len({r.get("agent_id") for r in convs if r.get("agent_id")}),
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "span_days": span_days,
+            "relationships": rows,
+            "closest": round(float(closest), 4),
+            "contacts": contacts,
+        }
+
+    def persona_drift(self, agent_id: str, *, baseline_n: int | None = None,
+                      player_id: str | None = None) -> dict[str, Any]:
+        """**她还是不是她** —— 人设漂移的尺子(R2)。
+
+        长对话里人设会漂,这是可测的:人设块坐在提示词开头,而注意力随窗口填满而
+        衰减,八轮内就测得出显著偏移(arxiv 2402.10962)。这一层把她说过的话按时间
+        排开,拿**她自己最早那几条**当基线,后面的每一条走 CUSUM ——
+        单条消息的抖动没有意义,而 CUSUM 是专门在噪声里认持续小偏移的。
+
+        **不调模型**(纯计数),所以同一段转录跑一百遍给同一个答案:它能进 CI,
+        也能当一条体检。代价是它测的是**文风**不是人格 —— 拿它当报警器,别当结论。
+        判据与七个特征见 `anima_world.drift`。
+
+        `player_id` 只看跟这个人的对话(不同的人会把她带向不同的样子,混在一起
+        算等于让两段关系互相稀释);`baseline_n` 改基线取几条。
+
+        返回见 `drift.analyze()`。**样本不够时 `ok=False` 并说出为什么** ——
+        在 5 条消息上宣布"人设很稳"比不测更坏。里面单独有一格 `sycophancy`:
+        它同时是合规项(第八条五:不得过度迎合用户)。
+
+        CLI 出口:`anima-world drift --agent 夏`。
+        """
+        from anima_world import drift as drift_mod
+
+        agent_id = str(agent_id or "").strip()
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        said: list[tuple[int, str]] = []
+        for conv in self.chat_store.list_conversations(agent_id):
+            if player_id is not None and (conv.get("player_id") or "user") != player_id:
+                continue
+            for msg in self.chat_store.messages_for(int(conv["id"])):
+                if str(msg.get("role") or "") in drift_mod.HER_ROLES:
+                    said.append((int(msg.get("created_at") or 0), str(msg.get("content") or "")))
+        # 按时间正序 —— 漂移问的是"后来的和当初的比",次序错了整个结论就反了。
+        said.sort(key=lambda pair: pair[0])
+        report = drift_mod.analyze(
+            [text for _, text in said],
+            baseline_n=drift_mod.BASELINE_N if baseline_n is None else int(baseline_n),
+        )
+        report["agent_id"] = agent_id
+        report["agent_name"] = self.scheduler.agent_display_name(agent_id)
+        report["player_id"] = player_id
+        return report
 
     def inbox(self, player_id: str, *, since_seq: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         """有谁来找过你 —— 角色主动搭话的收件箱(issue #13)。

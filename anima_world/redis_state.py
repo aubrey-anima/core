@@ -503,6 +503,24 @@ class RedisEventLog:
     def replay(self, since_seq: int = 0) -> list[Any]:
         return self._rows(since_seq)
 
+    def rewrite(self, seq: int, event: dict) -> None:
+        """原地改写一条已有事件(LSET,**seq 不变**)。只给法务抹除用。
+
+        这个后端的 `seq` 是列表下标 + 1(见类的说明),所以抹除**不许删行** ——
+        删一行,它后面每一条的 seq 都错一位,投影、分页、`since_seq` 全部跟着错,
+        而且不报错。改写保形状:同一个位置、同一个 seq、同一套字段。
+
+        越界(seq 不存在)让 Redis 自己报错 —— 调用方改写的本来就是它刚读出来的行。
+        """
+        idx = int(seq) - 1
+        if idx < 0:
+            raise ValueError("seq 从 1 起")
+        self._redis.lset(self._key, idx, _dumps({
+            "ts": event.get("ts"), "type": event.get("type"),
+            "who": event.get("who"), "loc": event.get("loc"),
+            "payload": event.get("payload", {}),
+        }))
+
     def max_seq(self) -> int:
         return int(self._redis.llen(self._key) or 0)
 
@@ -888,7 +906,8 @@ class RedisMemoryStore:
     def add(self, agent_id: str, tick: int, kind: str, summary: str,
             importance: float = 0.5, anchor: bool = False,
             event_seq: int | None = None, created_at: int | None = None,
-            source_ids: list[int] | None = None) -> int:
+            source_ids: list[int] | None = None,
+            provenance: str = "experienced") -> int:
         memory_id = self._next_id()
         self._rows.put(str(memory_id), {
             "id": memory_id, "agent_id": agent_id, "tick": int(tick), "kind": kind,
@@ -896,6 +915,10 @@ class RedisMemoryStore:
             "event_seq": event_seq, "created_at": int(tick if created_at is None else created_at),
             "source_ids": list(source_ids or []), "strength": 1.0,
             "last_access": None, "access_count": 0,
+            # R3 记忆分型。**老行读出来没有这一格**,所以读的地方一律
+            # `row.get("provenance") or "experienced"` —— 默认值写在读的那一侧,
+            # 才不用为了一个新字段去改写一整张历史表。
+            "provenance": str(provenance or "experienced"),
         })
         self._evict_if_over_capacity(agent_id)
         return memory_id
@@ -972,6 +995,16 @@ class RedisMemoryStore:
                 row["strength"] = fresh
                 self._rows.put(str(row["id"]), row)
 
+    def forget_memory(self, memory_id: int) -> bool:
+        """真的删掉一条记忆行。返回它本来在不在。
+
+        **和"遗忘"不是一回事**:遗忘(`decay_pass`)只是把强度调低,那条记忆还在,
+        被想起一次就会重新变清晰 —— 那是这个引擎对遗忘的定义,不该改。这一条是
+        夜间固化(R5)清扫用的:强度已经低到永远召不回来的行,留着只是占容量,
+        而容量是**别的记忆的位置**。锚定的永不清,判断在调用方。
+        """
+        return bool(self._rows.drop(str(int(memory_id))))
+
     def retick(self, memory_id: int, tick: int, created_at: int | None = None) -> bool:
         """把一条记忆的 `tick` 改掉。**只给迁移用**(`World.repair_memory_ticks`)。
 
@@ -996,6 +1029,45 @@ class RedisMemoryStore:
 
     def anchors(self, agent_id: str) -> list[dict[str, Any]]:
         return [r for r in self.query(agent_id) if int(r.get("anchor") or 0)]
+
+    # ── 法务抹除(`World.erase_player`)────────────────────────────────────
+
+    def erase_for_event_seqs(self, seqs: set[int], *, dry_run: bool = False) -> int:
+        """删掉**由这些事件而起**的记忆行(`event_seq` ∈ seqs),返回删了几行。
+
+        判据是出处不是文本:一条从他的对话里长出来的记忆整条都是他的交互数据,
+        哪怕摘要里一个名字都没提。文本层面的旁及(别人的反思里提了他一句)走
+        `redact_summaries` —— 那种只改名字不删行,删了等于把别人的记忆也抹掉一角。
+        """
+        if not seqs:
+            return 0
+        wanted = {int(s) for s in seqs}
+        hit = [
+            r for r in self._rows.all().values()
+            if r.get("event_seq") is not None and int(r["event_seq"]) in wanted
+        ]
+        if not dry_run:
+            for row in hit:
+                self._rows.drop(str(row["id"]))
+        return len(hit)
+
+    def redact_summaries(self, replacements: dict[str, str], *,
+                         dry_run: bool = False) -> int:
+        """把摘要里出现的这些名字换掉,返回改了几行。只改文本,行还是那一行。"""
+        if not replacements:
+            return 0
+        changed = 0
+        for field, row in self._rows.all().items():
+            summary = str(row.get("summary") or "")
+            fresh = summary
+            for old, new in replacements.items():
+                fresh = fresh.replace(old, new)
+            if fresh != summary:
+                changed += 1
+                if not dry_run:
+                    row["summary"] = fresh
+                    self._rows.put(field, row)
+        return changed
 
 
 class RedisLocationStore(_LocationStore):
@@ -1411,33 +1483,94 @@ class RedisKnowledgeGraph:
 
     def add(self, subject: str, predicate: str, object: str,  # noqa: A002 - 对齐既有签名
             source_event_seq: int | None = None, created_at: int = 0) -> None:
+        """立一条边。已经**有效**就一动不动(INSERT OR IGNORE:先到的那条说了算);
+        曾经作废过的**复活**(R3:时间有效期)。
+
+        复活这一支是有意的:两个人绝交之后又和好,那不该是"一条永远死着的边加一条
+        新边",而是同一条事实**又成立了**。复活时清掉 `invalid_at` 并把
+        `valid_from` 挪到今天 —— 于是"从什么时候起又是朋友"这个问题答得出来。
+        """
         field = f"{subject}\x00{predicate}\x00{object}"
-        if self._rows.get(field) is not None:
-            return                      # INSERT OR IGNORE:先到的那条说了算
+        row = self._rows.get(field)
+        if row is not None and row.get("invalid_at") is None:
+            return                      # 还有效:先到的那条说了算
+        if row is not None:             # 作废过的复活,id 保留(它是同一件事)
+            row["invalid_at"] = None
+            row["valid_from"] = int(created_at)
+            row["source_event_seq"] = source_event_seq
+            self._rows.put(field, row)
+            return
         self._rows.put(field, {
             "id": int(self._redis.incr(f"{KEY_PREFIX}:{self._world}:edges:id")),
             "subject": subject, "predicate": predicate, "object": object,
             "source_event_seq": source_event_seq, "created_at": int(created_at),
+            # R3 时间有效期(Graphiti 那一路):一条事实**什么时候起成立、什么时候
+            # 不再成立**。`invalid_at is None` = 此刻有效。
+            "valid_from": int(created_at), "invalid_at": None,
         })
 
-    def drop(self, subject: str, predicate: str, object: str) -> bool:  # noqa: A002 - 对齐 add
-        """撤销一条边。返回它本来在不在。
+    def drop(self, subject: str, predicate: str, object: str,  # noqa: A002 - 对齐 add
+             *, at: int | None = None, hard: bool = False) -> bool:
+        """撤销一条边。返回它本来在不在(**已经作废的返回 False**,所以幂等)。
 
         存在的理由:边只增不减的话,一对从「亲近」跌进「交恶」的人身上会**同时**
         挂着 friendship 和 rivalry,而且永远。`cliques.compute_cliques` 只看
         friendship 的连通分量,于是那个小团体里坐着两个此刻互相看不顺眼的人 ——
         算得出来、画得出来、一条日志都不会报错。
+
+        **R3 起这是"作废"而不是"删行"**:写下 `invalid_at`,`query()` 从此看不见它,
+        而 `query(as_of=…)` 仍然答得出"那时候他俩是朋友吗"。理由和事件不删行是同一条 ——
+        一段关系结束了是**又一件发生过的事**,不是"从来没有过"。
+
+        `hard=True` 才真删行,只给法务抹除用(`forget_player` / `erase_player`:
+        那不是"关系变了",是这个人不该在世界里留下痕迹)。
         """
-        return bool(self._rows.drop(f"{subject}\x00{predicate}\x00{object}"))
+        field = f"{subject}\x00{predicate}\x00{object}"
+        row = self._rows.get(field)
+        if row is None:
+            return False
+        if hard:
+            return bool(self._rows.drop(field))
+        if row.get("invalid_at") is not None:
+            return False                # 已经作废过:幂等
+        row["invalid_at"] = int(at if at is not None else 0)
+        self._rows.put(field, row)
+        return True
 
     def query(self, subject: str | None = None, predicate: str | None = None,
-              object: str | None = None) -> list[dict[str, Any]]:  # noqa: A002
-        rows = [
-            r for r in self._rows.all().values()
-            if (subject is None or r["subject"] == subject)
-            and (predicate is None or r["predicate"] == predicate)
-            and (object is None or r["object"] == object)
-        ]
+              object: str | None = None, *,  # noqa: A002
+              as_of: int | None = None,
+              include_invalid: bool = False) -> list[dict[str, Any]]:
+        """**默认只给此刻有效的边。**
+
+        这是承重的:`compute_cliques` / `World.graph()` / 关系那一路读的都是它,
+        默认带上作废的边等于把"他们曾经是朋友"当成"他们是朋友"。
+
+        `as_of=tick` 问的是**那时候**(`valid_from <= tick` 且还没作废);
+        `include_invalid=True` 要的是整段历史(含已经作废的),给审计用。
+        """
+        rows = []
+        for r in self._rows.all().values():
+            if subject is not None and r["subject"] != subject:
+                continue
+            if predicate is not None and r["predicate"] != predicate:
+                continue
+            if object is not None and r["object"] != object:
+                continue
+            if include_invalid:
+                rows.append(r)
+                continue
+            invalid_at = r.get("invalid_at")
+            if as_of is None:
+                if invalid_at is None:
+                    rows.append(r)
+                continue
+            # 那一刻:已经立起来了,而且还没作废(或作废在那之后)。
+            if int(r.get("valid_from") or r.get("created_at") or 0) > int(as_of):
+                continue
+            if invalid_at is not None and int(invalid_at) <= int(as_of):
+                continue
+            rows.append(r)
         rows.sort(key=lambda r: int(r.get("id") or 0))
         return rows
 
@@ -2231,6 +2364,38 @@ class RedisChatStore:
         from anima_world.chat_store import summarize_annotations
 
         return summarize_annotations(self.annotation_rows(conversation_id))
+
+    def erase_player(self, player_id: str, *, dry_run: bool = False) -> dict[str, int]:
+        """删掉这个玩家的**全部转录**(会话行 + 消息行 + 索引列表)。法务抹除的一环。
+
+        整场删,不是逐条挑:一场会话里她说的那半也是**对他说的**,单删他那半留下的
+        是一段自言自语 —— 看上去完整,读起来是假的。逐轮观测量(stance/intent/
+        tool_calls)住在消息行上,和消息同生共死(那条老纪律),跟着一起走。
+
+        `_pid` 的缺省语义照旧:`player_id` 为空的老会话读作 'user' ——
+        `erase_player("user")` 因此会把没记玩家 id 的那批全删掉,这是明说的行为。
+        """
+        pid = str(player_id or "").strip()
+        out = {"conversations": 0, "messages": 0}
+        if not pid:
+            return out
+        with self._lock:
+            for row in self._conversations():
+                if self._pid(row) != pid:
+                    continue
+                conv_id = int(row["id"])
+                key = self._conv_msgs_key(conv_id)
+                ids = self._redis.lrange(key, 0, -1) or []
+                out["conversations"] += 1
+                out["messages"] += len(ids)
+                if dry_run:
+                    continue
+                for raw in ids:
+                    mid = raw.decode() if isinstance(raw, bytes) else str(raw)
+                    self._msgs.drop(mid)
+                self._redis.delete(key)
+                self._convs.drop(str(conv_id))
+        return out
 
 
 # ── 在场玩家(3.2.0:从进程内存搬进 Redis)──────────────────────────────────

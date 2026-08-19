@@ -340,6 +340,9 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "chat.loop.enabled": (False, "bool", "chat", False, "chat_burst keeps generating until the NPC yields (#17)"),
     "chat.loop.max_messages": (8, "int", "chat", False, "Hard cap on messages in one autonomous loop"),
     "chat.loop.max_tool_calls": (15, "int", "chat", False, "Hard cap on tool calls in one autonomous loop"),
+    # R1 人设尾部重注。**默认关** —— 它改变她说话的形状,而引擎默认值是"没人说话
+    # 时的样子"。理由与证据见 `chat_service._DEFAULT_PERSONA_ANCHOR_TEMPLATE`。
+    "chat.persona_anchor.enabled": (False, "bool", "chat", False, "Re-anchor the persona at the tail of the prompt (attention decay / persona drift)"),
     # autonomy:没人跟她说话时的定时轮次。要 chat.tools.enabled 一起点亮 ——
     # 没有能力可挑的轮次是一次白花的 LLM 调用。
     "autonomy.enabled": (False, "bool", "autonomy", False, "Ask each character every N ticks whether she wants to do something on her own"),
@@ -364,6 +367,12 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "memory.sentiment_threshold": (0.3, "float", "memory", False, "Relationship-shift memory trigger threshold"),
     "memory.half_life_days": (3.0, "float", "memory", False, "Recency half-life for memory retrieval (world days)"),
     "memory.reflection_threshold": (3.0, "float", "memory", False, "Accumulated importance that triggers a reflection"),
+    # R4 记忆准入闸:不是每句话都配成为记忆。默认关(会让世界少记东西 = 行为变更)。
+    "memory.admission.enabled": (False, "bool", "memory", False, "Five-factor admission gate before a memory is written"),
+    "memory.admission.threshold": (0.35, "float", "memory", False, "Below this combined score the memory is refused"),
+    # R5 夜间固化:趁她睡着的时候衰减、清扫、反思。默认关(改变留存 = 行为变更)。
+    "memory.consolidation.enabled": (False, "bool", "memory", False, "Consolidate memories at each world-day rollover (decay + prune + reflect)"),
+    "memory.consolidation.prune_below": (0.0, "float", "memory", False, "Strength below which a non-anchored memory is pruned during consolidation (0 = never prune)"),
     "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
     "economy.enabled": (False, "bool", "economy", False, "Items, money, shops and price drift"),
     "economy.daily_wage": (20.0, "float", "economy", False, "Per-agent daily wage from the town treasury"),

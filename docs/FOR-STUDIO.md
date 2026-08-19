@@ -1414,3 +1414,29 @@ anima-world config set economy.player_allowance 60 --world-id w
 | 给一个世界定见面礼 | `config set economy.player_allowance <n>` / 世界文件 author `config` 段 | ✅ 新增 |
 | 看一屏货架 + 钱包 + 随身物品 | `World.player_shop(player_id)`(Python 宿主)| ✅ 新增 |
 | 让玩家买 | `World.player_buy(player_id, location_id, item_id)`,**人得站在那儿** | ✅ 加了在场闸 |
+
+## 合规与人设:四个新出口(2026-08-18)
+
+《人工智能拟人化互动服务管理暂行办法》**2026-07-15 已施行**。创作台不面向终端用户,
+所以那份办法里的义务没有一条落在你们身上 —— 但下面四个出口和你们做世界有关。
+
+| 你们可能要做的事 | 出口 | 状态 |
+|---|---|---|
+| 抹掉一个玩家在世界里的全部痕迹(试玩账号、送审前清场) | `anima-world player erase --player X --yes`(不带 `--yes` 只数) | ✅ 新增 |
+| 看一眼这个角色说话有没有跑偏 / 是不是越来越顺着玩家 | `anima-world drift --agent X`(`--json` 是契约;**漂了退 1**) | ✅ 新增 |
+| 看一个玩家和这个世界处得有多深 | `anima-world engagement --player X` | ✅ 新增 |
+| 让她的人设在长对话里更稳 | 世界文件 author `config` 段写 `"chat.persona_anchor.enabled": true` | ✅ 新增 |
+
+三件值得你们知道的:
+
+- **`drift` 是纯计数,不调模型** —— 不花钱、可复现,所以它能进你们的"试炼"那一步当
+  一道自动闸:同一段转录跑一百遍给同一个答案。它测的是**文风**不是人格
+  (「她把温柔演成了顺从」看得见,「她的爱好换了个人」看不见),当报警器用。
+  样本不足 12 条时它**明说测不了**,不会给一个假的绿灯。
+- **`player erase` 和 `player forget` 是两个动作**:forget 是"她不再等他"(历史一个字
+  不动),erase 是"他的数据从世界里消失"(转录整场删、事件里抹名抹原文,但**事件不删行**,
+  改写保 seq —— 你们导出的 `.cyberworld` 里 seq 仍然连续)。
+- **三个新配置项默认关,内置橱窗里点亮了**:`chat.persona_anchor.enabled`(人设尾部
+  重注)、`memory.admission.enabled`(记忆准入闸,挡复读)、`memory.consolidation.enabled`
+  (夜间固化)。你们的世界文件要用就自己在 author `config` 段写一行 —— 和别的开关同一条
+  纪律:引擎默认值 = 没人说话时的样子,种子 = 这个世界的作者的意见。

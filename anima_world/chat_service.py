@@ -92,6 +92,25 @@ _DEFAULT_RESPONSE_FORMAT_TEMPLATE = (
     "正确示例：（{name}放下手里的抹布，从吧台后绕出来。）昭阳，你终于来了。\n"
     "错误示例：（放下手里的抹布）昭阳，你终于来了。"
 )
+#: R1:人设的**尾部重注**。整段 system prompt 的最后一块,一句话把她按回原样。
+#:
+#: 为什么要重说一遍(而且是这么短的一遍):人设块坐在提示词开头,而注意力随窗口
+#: 填满而衰减 —— 开头那段被读得越来越少,八轮内就测得出人设开始漂
+#: (arxiv 2402.10962;社区管这叫 Standard Persona Syndrome)。2026 年的后续工作
+#: 进一步说,长对话会收敛到一个"什么都同意的助手"那种吸引子态,而**定期重申指令
+#: 有效但只是温和改善**。这个引擎握着提示词的拼装权,所以这一手是零成本的:
+#: 不换模型、不加调用,只是把"她是谁"挪一份到她最后读到的地方。
+#:
+#: 短是有意的。这一块的作用是**锚**,不是第二份人设:整段复述一遍会挤掉别的块,
+#: 而且和开头那份逐字重复的东西模型会当成一段话读两遍。同一条位置纪律见
+#: `_choice_blocks`(stance / 能力菜单为什么必须在最后)——「长提示词里位置就是权重」。
+_DEFAULT_PERSONA_ANCHOR_TEMPLATE = (
+    "最后再确认一次:你是{name}，不是一个助手。"
+    "{personality}\n"
+    "按{name}的性格、语气和边界回话——该拒绝就拒绝，该沉默就沉默，"
+    "不必迎合对方，也不必把每句话都接住。"
+)
+
 # 用真模型跑过一局之后改的措辞:原来只写了"有哪些能力、怎么写",于是八轮里(包括
 # 两句明显越界的话)她一次也没用过 —— 她把话接得很漂亮,而那正是 issue #15 要修的
 # "100% 响应率"。缺的不是能力,是**什么时候用它是在角色里的**这句许可。
@@ -219,6 +238,7 @@ PROMPT_BLOCK_ORDER = (
     "overrides",          # 这位玩家教过她的对话规则
     "identity",           # 认证对话身份(最高优先级事实)
     "extra",              # 本轮临时插入(拒谈话题、loop 的续说/插话提示)
+    "persona.anchor",     # 她是谁 —— 再说一遍(R1),紧挨着"你要不要做点什么"之前
     "stance",             # 关系性意图
     "tools",              # 她可以做的事
 )
@@ -893,9 +913,39 @@ class ChatService:
         for block in extra_system or ():
             if block:
                 blocks.append(PromptBlock("extra", block))
-        # 最后才是"你要不要做点什么"(见 `_choice_blocks` 的位置说明)。
+        # R1:先把"你是谁"再压一遍,紧接着才问"你要不要做点什么"。
+        #
+        # **为什么不是压在最末。** 末尾只有一个位置,而 stance / 能力菜单坐在那里是
+        # 拿真模型跑一局换来的(见 `_choice_blocks`:它们夹在中间时,八轮里 stance
+        # 只声明了两轮、能力一次没用)。人设锚同样想要末尾 —— 但拿一个没有真模型
+        # 验过的猜测去挤掉一个验过的结论,是拿证据换直觉。放在它们**紧前面**:
+        # 离尾巴只差两块,注意力衰减那半照样解决,而"她是谁"正好读在"她要不要做点
+        # 什么"之前,顺序上也讲得通。`test_debug_prompt` 钉着这个决定。
+        anchor_block = self._persona_anchor_block(agent_id)
+        if anchor_block:
+            blocks.append(PromptBlock("persona.anchor", anchor_block))
         blocks.extend(self._choice_blocks(agent_id, interlocutor_id))
         return blocks
+
+    def _persona_anchor_block(self, agent_id: str) -> str:
+        """R1:把"她是谁"再压一份在最尾。**默认关**(`chat.persona_anchor.enabled`)。
+
+        默认关的理由和别的开关一条不差:引擎默认值 = 没人说话时的样子,而这一块
+        会改变她说话的形状。内置种子(橱窗)里点亮它 —— 做了却开箱看不见等于没做。
+        """
+        if not self._flag("chat.persona_anchor.enabled", False):
+            return ""
+        persona = self._persona_provider(agent_id) or {}
+        name = persona.get("name") or agent_id
+        personality = str(persona.get("personality") or "").strip()
+        # 性格太长就只取第一句:这一块是**锚**不是第二份人设,整段复述会挤掉别的块。
+        if len(personality) > 60:
+            head = re.split(r"[。！？!?\n]", personality)[0].strip()
+            personality = (head + "。") if head else ""
+        template = self._template(
+            "chat.persona_anchor", _DEFAULT_PERSONA_ANCHOR_TEMPLATE
+        )
+        return template.format(name=name, personality=personality).strip()
 
     def _prompt_for(
         self,

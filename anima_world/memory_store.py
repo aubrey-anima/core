@@ -27,3 +27,15 @@ class MemoryDescriptor:
     importance: float = 0.5
     anchor: bool = False
     event_seq: int | None = None
+    #: **她是怎么知道这件事的**(R3:记忆分型)。三种存在方式,默认「亲历」。
+    #:
+    #: - `experienced` 她在场,这件事发生在她身上
+    #: - `heard`       别人告诉她的(八卦传过来的那条)
+    #: - `believed`    她自己想出来的(反思、推断)
+    #:
+    #: 为什么要分:**这三种记忆的可靠性不一样,而她说出口时的语气也该不一样。**
+    #: 不分型的下场是她把一条听来的传闻当亲眼所见讲出去 —— 而八卦系统每传一手
+    #: 就多一层失真,传到第三个人那里已经和事实无关了,她却仍然说得斩钉截铁。
+    #: 前沿的记忆系统(Hindsight 的 beliefs 网络、typed-memory 那一路)把这条
+    #: 单独列出来,理由是同一个:出处丢了之后,再多的检索精度也救不回来。
+    provenance: str = "experienced"

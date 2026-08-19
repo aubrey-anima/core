@@ -349,10 +349,30 @@ anima-world report         # 只读地出一份运行摘要,不跑世界
 anima-world events         # 事件流导出成 JSONL
 anima-world contact        # 谁想起过玩家、由头是什么(--why 连没触发的;--inbox 看敲门)
 anima-world relationship   # 一段关系此刻的人话:当什么、哪一档、上一次是什么改变了它
-anima-world player         # 玩家那一侧:options 看他点得动什么;forget 跟走掉的人告别
+anima-world player         # 玩家那一侧:options 点得动什么;forget 告别;erase 法务抹除
+anima-world drift          # 她还是不是她:人设漂移与迎合度(纯计数;漂了退 1,可进 CI)
+anima-world engagement     # 他跟这个世界处得有多深(依赖预警要的那笔账)
 anima-world presence       # 谁在谁跟前(开同处一地那道闸之前的体检)
 anima-world memory / agent # 老世界的数据修补(记忆 tick、被拆碎的 goals)
 ```
+
+## 换一个模型
+
+LLM 客户端是注入的,所以换模型不用改引擎 —— `config set llm.api_key` / `llm.base_url`
+指到哪儿就是哪儿(OpenAI 兼容端点即可)。
+
+**自托管想要更稳的角色扮演**,可以看一眼 [CoSER](https://github.com/Neph0s/CoSER)
+(MIT,LLaMA-3.1 底,8B / 70B 两档):它拿 771 本书里 17,966 个角色训过,评测上
+追平 GPT-4o 那一档。许可和本项目(AGPL-3.0-or-later)兼容。
+
+要判断换了到底有没有变好,别靠感觉 —— 世界里就有尺子:
+
+```bash
+anima-world drift --world-id w --agent 夏 --json    # 七个文风特征 + 迎合度,漂了退 1
+```
+
+它是纯计数、不调模型的,所以同一段转录跑一百遍给同一个答案。**它测的是文风不是人格**,
+当报警器用,别当结论(见 docs/REFERENCE.md §2.9.12)。
 
 ## 文档
 

@@ -80,6 +80,7 @@ SCHEMA = {
           last_access  BIGINT,
           access_count INT NOT NULL DEFAULT 0,
           source_ids   JSON,
+          provenance   VARCHAR(16) NOT NULL DEFAULT 'experienced',
           KEY idx_agent (agent_id)
         ) CHARACTER SET utf8mb4
     """,
@@ -191,11 +192,35 @@ def as_connection(mysql: Any) -> Any:
     return mysql
 
 
+#: 加法式迁移:`(表, 列, 列定义)`。**`CREATE TABLE IF NOT EXISTS` 对已经存在的表
+#: 一个字都不会改** —— 新加的列在老库上永远不出现,而代码照读它、读到 None、
+#: 然后静默走默认分支。这是"照跑但给错东西"的标准形状,所以补列要显式做。
+#:
+#: 只收**加法**(可空列 / 带默认值的列):改列、删列会让老引擎打不开这个库,
+#: 那是主版本级的事,不该藏在一次 `ensure_schema` 里。
+_ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # R3 记忆分型:她是亲历的、听说的、还是自己想出来的。
+    ("memories", "provenance", "VARCHAR(16) NOT NULL DEFAULT 'experienced'"),
+)
+
+
 def ensure_schema(conn: Any, prefix: str = "") -> None:
-    """建表。`prefix` 让一个库上跑多个世界 —— 撞表的后果是两个世界共用一段历史。"""
+    """建表,并把加法式迁移补上。
+
+    `prefix` 让一个库上跑多个世界 —— 撞表的后果是两个世界共用一段历史。
+    """
     with conn.cursor() as cur:
         for ddl in SCHEMA.values():
             cur.execute(ddl.format(prefix=prefix))
+        for table, column, ddl in _ADDITIVE_COLUMNS:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS"
+                " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s"
+                " AND COLUMN_NAME = %s",
+                (f"{prefix}{table}", column),
+            )
+            if int(cur.fetchone()[0]) == 0:
+                cur.execute(f"ALTER TABLE `{prefix}{table}` ADD COLUMN `{column}` {ddl}")
     conn.commit()
 
 
@@ -298,6 +323,20 @@ class MySQLEventLog:
         where, params = self._filter(who, kind, since_seq)
         return self._rows(where, params, limit)
 
+    def rewrite(self, seq: int, event: dict) -> None:
+        """原地改写一条已有事件(**seq 不变**)。只给法务抹除用 ——
+        和 `RedisEventLog.rewrite` 同一份契约:不增删行,只换内容。"""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {self._table} SET ts=%s, type=%s, who=%s, loc=%s, payload=%s"
+                " WHERE seq=%s",
+                (int(event.get("ts") or 0), str(event.get("type") or ""),
+                 event.get("who"), event.get("loc"),
+                 json.dumps(event.get("payload", {}), ensure_ascii=False, default=str),
+                 int(seq)),
+            )
+        self._conn.commit()
+
 
 class MySQLMemoryStore:
     """她记得什么。**第二快的增长源** —— 一个角色的记忆只增不减(遗忘只是把强度调低)。
@@ -319,7 +358,7 @@ class MySQLMemoryStore:
 
     _COLS = ("id", "agent_id", "tick", "kind", "summary", "importance", "anchor",
              "event_seq", "created_at", "strength", "last_access", "access_count",
-             "source_ids")
+             "source_ids", "provenance")
 
     def count(self) -> int:
         with self._conn.cursor() as cur:
@@ -353,16 +392,19 @@ class MySQLMemoryStore:
     def add(self, agent_id: str, tick: int, kind: str, summary: str,
             importance: float = 0.5, anchor: bool = False,
             event_seq: int | None = None, created_at: int | None = None,
-            source_ids: list[int] | None = None) -> int:
+            source_ids: list[int] | None = None,
+            provenance: str = "experienced") -> int:
         with self._conn.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {self._table}"
                 " (agent_id, tick, kind, summary, importance, anchor, event_seq,"
-                "  created_at, source_ids) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "  created_at, source_ids, provenance)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (agent_id, int(tick), kind, summary, float(importance),
                  1 if anchor else 0, event_seq,
                  int(tick if created_at is None else created_at),
-                 json.dumps(list(source_ids or []), ensure_ascii=False)),
+                 json.dumps(list(source_ids or []), ensure_ascii=False),
+                 str(provenance or "experienced")),
             )
             new_id = int(cur.lastrowid)
         self._conn.commit()
@@ -375,6 +417,9 @@ class MySQLMemoryStore:
             raw = item.get("source_ids")
             item["source_ids"] = json.loads(raw) if isinstance(raw, str) else (raw or [])
             item["anchor"] = int(item.get("anchor") or 0)
+            # 老库补列之前写下的行读出来是 NULL —— 默认值写在读的这一侧,
+            # 和 Redis 版逐字同一条(见那边 `add` 里的注释)。
+            item["provenance"] = item.get("provenance") or "experienced"
             out.append(item)
         return out
 
@@ -440,6 +485,14 @@ class MySQLMemoryStore:
                 )
             self._conn.commit()
 
+    def forget_memory(self, memory_id: int) -> bool:
+        """真的删掉一条记忆行(夜间固化清扫用)。语义与 Redis 版逐字相同。"""
+        with self._conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {self._table} WHERE id = %s", (int(memory_id),))
+            dropped = int(cur.rowcount or 0)
+        self._conn.commit()
+        return dropped > 0
+
     def retick(self, memory_id: int, tick: int, created_at: int | None = None) -> bool:
         """见 `RedisMemoryStore.retick`。**两个后端都要有** —— 只修得动 Redis 世界
         的迁移,等于让接了 MySQL 的世界永远带着那批脏 tick。"""
@@ -463,6 +516,58 @@ class MySQLMemoryStore:
     def anchors(self, agent_id: str) -> list[dict[str, Any]]:
         return [r for r in self.query(agent_id) if int(r.get("anchor") or 0)]
 
+    # ── 法务抹除(`World.erase_player`)——语义与 Redis 版逐字相同 ─────────
+
+    def erase_for_event_seqs(self, seqs: set[int], *, dry_run: bool = False) -> int:
+        """删掉由这些事件而起的记忆行,返回删了几行。判据与理由见 Redis 版。"""
+        if not seqs:
+            return 0
+        wanted = sorted({int(s) for s in seqs})
+        total = 0
+        for i in range(0, len(wanted), 500):
+            chunk = wanted[i:i + 500]
+            marks = ",".join(["%s"] * len(chunk))
+            with self._conn.cursor() as cur:
+                if dry_run:
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {self._table}"
+                        f" WHERE event_seq IN ({marks})", chunk)
+                    total += int(cur.fetchone()[0])
+                else:
+                    cur.execute(
+                        f"DELETE FROM {self._table}"
+                        f" WHERE event_seq IN ({marks})", chunk)
+                    total += int(cur.rowcount or 0)
+        if not dry_run:
+            self._conn.commit()
+        return total
+
+    def redact_summaries(self, replacements: dict[str, str], *,
+                         dry_run: bool = False) -> int:
+        """把摘要里出现的这些名字换掉,返回改了几行。替换在 Python 里做 ——
+        和检索打分同一条理由:文本规则是世界的,不是存储的。"""
+        if not replacements:
+            return 0
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT id, summary FROM {self._table}")
+            rows = cur.fetchall()
+        changed = 0
+        for row_id, summary in rows:
+            text = str(summary or "")
+            fresh = text
+            for old, new in replacements.items():
+                fresh = fresh.replace(old, new)
+            if fresh != text:
+                changed += 1
+                if not dry_run:
+                    with self._conn.cursor() as cur:
+                        cur.execute(
+                            f"UPDATE {self._table} SET summary=%s WHERE id=%s",
+                            (fresh, int(row_id)))
+        if changed and not dry_run:
+            self._conn.commit()
+        return changed
+
 
 class MySQLChatStore:
     """转录:`conversations` + `messages`。**用户点名要在这儿的那一样。**
@@ -476,7 +581,11 @@ class MySQLChatStore:
     否则宿主拿到的一会儿是 list 一会儿是 str。`_dicts` 统一在这儿抹平。
     """
 
-    __slots__ = ("_conn", "_prefix", "_lock")
+    # `content_filter`:落库前的最后一道(`chat_store.filter_message_content`),
+    # World 装的。⚠️ 这一格曾经不在 __slots__ 里 —— 于是 `World.open(mysql=…)`
+    # 在装闸那一行当场 AttributeError,**任何带 MySQL 的世界都开不起来**;而
+    # MySQL 测试没有服务就整体 skip,这条在本机永远是绿的。真 MySQL 一接就现形。
+    __slots__ = ("_conn", "_prefix", "_lock", "content_filter")
 
     def __init__(self, conn: Any, prefix: str = "", lock: Any | None = None) -> None:
         import threading
@@ -484,6 +593,7 @@ class MySQLChatStore:
         self._conn = conn
         self._prefix = prefix
         self._lock = lock if lock is not None else threading.RLock()
+        self.content_filter: Any | None = None
 
     def _t(self, name: str) -> str:
         return f"`{self._prefix}{name}`"
@@ -660,3 +770,35 @@ class MySQLChatStore:
         from anima_world.chat_store import summarize_annotations
 
         return summarize_annotations(self.annotation_rows(conversation_id))
+
+    def erase_player(self, player_id: str, *, dry_run: bool = False) -> dict[str, int]:
+        """删掉这个玩家的全部转录。语义与 `RedisChatStore.erase_player` 逐字相同
+        (整场删、观测量随消息走、空 player_id 读作 'user')。"""
+        pid = str(player_id or "").strip()
+        out = {"conversations": 0, "messages": 0}
+        if not pid:
+            return out
+        with self._lock:
+            rows = self._query(
+                f"SELECT id FROM {self._t('conversations')}"
+                " WHERE COALESCE(player_id, 'user') = %s", (pid,))
+            conv_ids = [int(r["id"]) for r in rows]
+            out["conversations"] = len(conv_ids)
+            if not conv_ids:
+                return out
+            marks = ",".join(["%s"] * len(conv_ids))
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {self._t('messages')}"
+                    f" WHERE conversation_id IN ({marks})", conv_ids)
+                out["messages"] = int(cur.fetchone()[0])
+                if not dry_run:
+                    cur.execute(
+                        f"DELETE FROM {self._t('messages')}"
+                        f" WHERE conversation_id IN ({marks})", conv_ids)
+                    cur.execute(
+                        f"DELETE FROM {self._t('conversations')}"
+                        f" WHERE id IN ({marks})", conv_ids)
+            if not dry_run:
+                self._conn.commit()
+        return out
