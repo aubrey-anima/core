@@ -325,6 +325,51 @@ def test_a_rule_reading_an_unreachable_name_is_named_at_boot(tmp_path, caplog):
     assert "good" not in warned[0], "写对了的那条被误报了"
 
 
+class _CountingStocks:
+    """数一遍这一轮往量存储上打了多少次往返。**代理,不是替身** —— 答案照旧由真
+    store 给,这里只在旁边记账,所以世界跑的仍然是真路。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls: dict[str, int] = {}
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def counted(*args, **kwargs):
+            self.calls[name] = self.calls.get(name, 0) + 1
+            return attr(*args, **kwargs)
+
+        return counted
+
+
+def _rule_round_trips(tmp_path, trees: int, tag: str) -> tuple[dict[str, int], dict]:
+    """建 `trees` 棵树的世界,跑 120 tick,报"存储被打了几次"与规律仪表。
+
+    记账从**建完树之后**才开始 —— 准备阶段那 `trees` 次 `set_stocks` 是测试自己
+    打的,把它算进来就等于让这条尺子随实体数涨,而那正是它要否证的事。
+    """
+    rule = {"id": "g", "every": {"ticks": 12}, "for_each": {"kind": "tree"},
+            "set": {"size": "min(size + rate * dt, cap)"}}
+    path = _seed(tmp_path, stocks=[], rules=[rule], name=f"{tag}.json")
+    with open_world_at(str(tmp_path / f"{tag}.db"), seed_path=path,
+                       force_mock_llm=True) as world:
+        for index in range(trees):
+            world.set_stocks(f"tree:t{index}", {"size": 0.5, "rate": 0.01, "cap": 20})
+
+        spy = _CountingStocks(world.scheduler.stock_store)
+        world.scheduler.stock_store = spy
+        world.tick(120)          # 10 次求值 × trees 棵
+        calls = dict(spy.calls)
+
+        assert world.stock("tree:t0", "size") > 0.5, "前提:树得真的长了"
+        stats = world.rule_stats()
+        assert stats["skipped"] == 0
+        return calls, stats
+
+
 def test_the_engine_scales_to_many_entities(tmp_path):
     """"一万棵树也扛得住"是这一层写在文档里的承诺 —— 这条测的就是那句话。
 
@@ -332,43 +377,41 @@ def test_the_engine_scales_to_many_entities(tmp_path):
     就涨到 72ms/tick(快进一年要两小时),而文档里已经写着"能 scale"。改成按类批量
     快照 + 整轮一次 commit 之后是 1.1ms/tick,66 倍。
 
-    阈值取得很松(比实测宽一个数量级),因为这条要在别人的机器和 CI 上也稳 ——
-    它防的是**回归到逐个 commit** 那种量级的退化,不是守着某个具体毫秒数。
+    **量的是往返次数,不是墙钟**(2026-08-19 换的机制)。这一层的承诺本来就是一个
+    计数:`snapshot_kind` **每类一次**、`write_round` **整轮一次**(`rules.py` 第 2
+    条),于是 1000 棵树和 10 棵树打给存储的往返**逐格相同** —— 那就是"scale"这个
+    词在这里的全部意思,而它是确定的、与机器无关的。
 
-    ⚠️ **上面那句"宽一个数量级"曾经是假的**(2026-08-19 修):阈值写的是 3.0s,而
-    GitHub 的共享 runner 上这段实测就是 3.0s —— 于是它挡的不是退化,是 runner 的抖动。
-    实证:定版 3.3.0 那次推送(run `32229122851`)3.11 和 3.13 过了,**3.12 以
-    `assert 3.0219326039999714 < 3.0` 红了**,而那次改动只动了一个版本号字符串和几份
-    文档。一条会因为快了 0.7% 而绿、慢了 0.7% 而红的尺子,量的不是它说要量的那件事;
-    更坏的是它坐在 `release.yml` 的 `verify` job 上 —— **发版那一下有一定概率被自己的
-    压测掀翻**,而"第一次尝试就是唯一的一次尝试"。
-    现在按本机(约 1.3s,含建 1000 棵树的准备)与 CI(约 3.0s)之上再留一个数量级取 30s:
-    它仍然远在"逐个 commit"那一版(约 66 倍 ≈ 200s)之下,而这两侧各差一个数量级
-    才是文档里那句话本来的意思。
-    ⚠️ **更该做的是别用墙钟**:这一层的承诺是个**计数** —— `snapshot_kind` 每类一次、
-    `write_round` 整轮一次(见 `rules.py` 第 2 条)。数调用次数是确定的、与机器无关的,
-    墙钟只是它的影子。留作后续,没顺手改是因为这一版正在收尾发版,
-    改测试机制的风险不该压在发版那一下上。
+    ⚠️ **为什么非换不可**:此前这里是一句 `elapsed < 3.0`,而 GitHub 共享 runner 上
+    这段实测就是 3.0s —— 它挡的不是退化,是 runner 的抖动。实证:定版 3.3.0 那次推送
+    (run `32229122851`)3.11 和 3.13 过了,**3.12 以 `assert 3.0219326039999714 < 3.0`
+    红了**,而那次改动只动了一个版本号字符串和几份文档。上一轮把阈值放宽到 30s 止了
+    血(本机约 1.3s、CI 约 3.0s、"逐个 commit"那一版约 200s),但一把会因为快了
+    0.7% 而绿的尺子,量的从来不是它说要量的那件事 —— 而它坐在 `release.yml` 的
+    `verify` job 上,**发版那一下有概率被自己的压测掀翻**,而"第一次尝试就是唯一的
+    一次尝试"。计数没有这个毛病:退回逐个 owner 的那一版,`snapshot`/`set_many`
+    会当场出现在账上,而且是每轮 1000 次。
     """
-    import time
+    few, few_stats = _rule_round_trips(tmp_path, 10, "few")
+    many, many_stats = _rule_round_trips(tmp_path, 1000, "many")
 
-    rule = {"id": "g", "every": {"ticks": 12}, "for_each": {"kind": "tree"},
-            "set": {"size": "min(size + rate * dt, cap)"}}
-    path = _seed(tmp_path, stocks=[], rules=[rule])
-    with open_world_at(str(tmp_path / "w.db"), seed_path=path, force_mock_llm=True) as world:
-        for index in range(1000):
-            world.set_stocks(f"tree:t{index}", {"size": 0.5, "rate": 0.01, "cap": 20})
-
-        started = time.monotonic()
-        world.tick(120)          # 10 次求值 × 1000 棵
-        elapsed = time.monotonic() - started
-
-        assert world.stock("tree:t0", "size") > 0.5, "前提:树得真的长了"
-        assert world.rule_stats()["skipped"] == 0
-        assert elapsed < 30.0, (
-            f"1000 棵树 120 tick 花了 {elapsed:.1f}s —— 大概退回到"
-            "逐个 owner 查询/提交了(那一版是这个数的几十倍)"
+    assert many == few, (
+        f"往存储上的往返次数随实体数涨了:10 棵 {few} vs 1000 棵 {many} —— "
+        "这正是逐个 owner 查询/提交那一版的形状"
+    )
+    # 10 = 120 tick / `every.ticks: 12`。**每轮一次,不是每棵一次。**
+    assert many["snapshot_kind"] == 10, many
+    assert many["write_round"] == 10, many
+    # 逐个 owner 的那几个门,这一整段 tick 里一次都不该被走到。⚠️ 哨子架在整个
+    # store 上,所以将来**别的**子系统若真需要在 tick 上逐个 owner 写,这张名单
+    # 就是该改的地方 —— 那时上面那句"逐格相同"仍然是承重的那一条。
+    for per_owner in ("snapshot", "snapshot_many", "set", "set_many"):
+        assert per_owner not in many, (
+            f"tick 里出现了逐个 owner 的 {per_owner}:{many}"
         )
+    # 干的活当然要随实体数涨 —— 涨的该是求值次数,不是往返次数。这两个数分得开,
+    # 这条尺子才算量对了东西。
+    assert (few_stats["evaluated"], many_stats["evaluated"]) == (10 * 10, 1000 * 10)
 
 
 def test_batching_did_not_change_the_numbers(tmp_path):

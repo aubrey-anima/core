@@ -109,7 +109,14 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 1628 passed / 18 skipped(fakeredis,无需真 Redis,约 5–6 分钟);addopts 已屏蔽 ROS 插件
+python3.13 -m pytest -q               # 1630 passed / 19 skipped(fakeredis,无需真 Redis,约 5–6 分钟);addopts 已屏蔽 ROS 插件
+
+# 要真 MySQL 的那些(默认 skip)。**`mysql=` 那条路的替身只有真 MySQL** ——
+# store 级三方互验全绿而真 MySQL 上一开就炸,已经吃过一次(`MySQLChatStore.__slots__`)。
+docker run -d --rm --name tmp-mysql -p 127.0.0.1:13499:3306 \
+    -e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_DATABASE=anima_test mysql:8.4
+ANIMA_TEST_MYSQL=127.0.0.1:13499 python3.13 -m pytest -q    # 那道门在 tests/_realmysql.py
+docker rm -f tmp-mysql
 python -m build                       # → dist/*.whl + dist/*.tar.gz
 python -m twine upload dist/*         # 发布
 

@@ -10,6 +10,10 @@
 """
 from __future__ import annotations
 
+import _realmysql
+
+import pytest
+
 from anima_world import drift
 
 _KEYS = {"ok", "reason", "messages", "baseline_n", "drifted", "score",
@@ -137,3 +141,83 @@ def test_只看跟这个人的对话时次序一样要对(open_world):
     assert report["messages"] == len(mine)
     assert report["sycophancy"] == drift.analyze(mine)["sycophancy"]
     assert report["sycophancy"]["rising"] is True
+
+
+# ── 真 MySQL:上面那三条只跑 fakeredis,而转录的第二个家在 MySQL ───────────────
+#
+# 两个后端倒序的方式不一样(Redis 版 `rows.reverse()`,MySQL 版 `ORDER BY id DESC`),
+# 补的那两个排序键"对两边同样成立"此前是**推断**。而 2026-08-19 这一天正是替身掩护
+# 真路咬了两次的日子:`MySQLChatStore.__slots__` 那条 bug 在 store 级三方互验里全绿,
+# 真 MySQL 上一开就炸;网站那侧在真 MySQL 上又逮到三条。所以这一半要实证。
+
+
+@pytest.fixture()
+def mysql_world(fresh_redis):
+    """转录住**真 MySQL** 的世界(Redis 那一半照旧,换的只是转录的家)。
+
+    每个世界自己一套 `{world_id}_` 表,**在开它之前清一次**(不是用完之后):
+    引擎的 MySQL 连接是每线程一条,而 `world.close()` 按设计只关本线程那条 ——
+    线程池里那几条要等进程退出。用完就删的话,`DROP TABLE` 会去等一把元数据锁,
+    而它的默认等待是一年(见 `_realmysql.drop_world_tables`)。开之前清同样干净:
+    上一次跑剩下的行,这一次开工第一件事就是抹掉。
+    """
+    from anima_world.api import World
+
+    opened = []
+
+    def _open(world_id: str):
+        from anima_world.mysql_state import MySQLChatStore
+
+        conn = _realmysql.connect()
+        try:
+            _realmysql.drop_world_tables(conn, f"{world_id}_")
+        finally:
+            conn.close()
+        world = World.open(world_id, redis=fresh_redis, mysql=_realmysql.connect,
+                           force_mock_llm=True)
+        opened.append(world)
+        # **先确认这真是 MySQL 那条路。** 不确认的话,哪天 `mysql=` 静默失效,
+        # 这几条测试会在 Redis 上照样全绿 —— 那就又是一次替身掩护真路。
+        assert isinstance(world.chat_store, MySQLChatStore), (
+            f"给了 mysql= 而转录落在 {type(world.chat_store).__name__} 上"
+        )
+        return world
+
+    yield _open
+    for world in opened:
+        world.close()
+
+
+@_realmysql.requires_mysql
+def test_转录住真MySQL时次序同样是正序(mysql_world):
+    """`ORDER BY id DESC` 那一半:三种形状逐个在真 MySQL 上过一遍。
+
+    同一秒批量落库是 CI 喂转录的形状(REFERENCE 承诺 `drift` 能进 CI),也是唯一
+    会让结论**整个反过来**的那一种:读反了答 `rising=False`,退出码照样 0,
+    日志干净。
+    """
+    said = [_NOT_YET] * 6 + [_TOTALLY] * 12
+    truth = drift.analyze(said)
+    assert truth["sycophancy"]["rising"] is True, "前提:这段话本身就是越来越迎合"
+
+    same_second = mysql_world("driftsamesec")
+    _say(same_second, said, ts=1000)
+    report = same_second.persona_drift("夏")
+    assert report["messages"] == len(said), "她说的话一条都不许漏"
+    assert report["sycophancy"] == truth["sycophancy"], (
+        "同一段话经过 MySQL 之后必须和纯函数给同一个答案"
+    )
+    assert report["drifted"] is truth["drifted"]
+
+    spread = mysql_world("driftspread")
+    _say(spread, said, ts=lambda i: 1000 + i * 60)
+    assert spread.persona_drift("夏")["sycophancy"] == truth["sycophancy"], (
+        "秒数拉得开时本来就该对 —— 钉住它,免得修同秒那条时把这条弄反"
+    )
+
+    filtered = mysql_world("driftfiltered")
+    _say(filtered, said, ts=1000, player_id="p1")
+    _say(filtered, [_TOTALLY] * 6 + [_NOT_YET] * 12, ts=1000, player_id="p2")
+    mine = filtered.persona_drift("夏", player_id="p1")
+    assert mine["messages"] == len(said), "筛出来的那一段不许掺进另一个人的话"
+    assert mine["sycophancy"] == truth["sycophancy"]

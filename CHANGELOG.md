@@ -71,8 +71,34 @@ spot rather than silently written to.
   再兜一次的入口);kind → 出处的表仍在 `memory_store.PROVENANCE_BY_KIND`,
   `Scheduler.PROVENANCE_BY_KIND` 照旧引用它。
 
+### Changed
+
+- **规律引擎的压测闸从墙钟换成计数**(`tests/test_world_rules.py`)。这一层的承诺
+  ("一万棵树也扛得住")本来就是一个计数:`snapshot_kind` 每类一次、`write_round`
+  整轮一次。现在测的正是它 —— **1000 棵树和 10 棵树打给存储的往返次数逐格相同**
+  (`{'snapshot_kind': 10, 'write_round': 10, 'of': 370, 'get': 15}`),而求值次数
+  该涨的照涨(100 → 10000)。上一轮只把假阈值 3.0s 放宽到 30s 止了血
+  (CI 上实测就是 3.0s,3.3.0 定版那次推送 3.12 以 `assert 3.0219… < 3.0` 红了,
+  而那次只改了一个版本号字符串和几份文档);但一把会因为快了 0.7% 而绿的尺子,
+  量的从来不是它说要量的那件事,而它坐在 `release.yml` 的 `verify` job 上。
+  计数是确定的、与机器无关的,墙钟只是它的影子。
+
 ### 测试
 
+- **真 MySQL 上的漂移次序,从推断变成实证**(`tests/test_drift.py`)。三条新 drift
+  测试此前只跑 fakeredis,而两个后端倒序的方式不一样(Redis 版 `rows.reverse()`,
+  MySQL 版 `ORDER BY id DESC`)——"补的两个排序键对两边同样成立"是一句推断。
+  起一个一次性 `mysql:8.4` 容器验过:三种形状(同秒批量落库 / 跨秒 / 按 `player_id`
+  筛)在真 MySQL 上全绿,而把排序键退回只按 `created_at` 时**这条当场红**。
+  同一天有两笔账正是替身掩护真路:`MySQLChatStore.__slots__` 那条 bug 在 store 级
+  互验里全绿、真 MySQL 上一开就炸;网站那侧在真 MySQL 上又逮到三条。
+- **怎么连真 MySQL 只此一处**(新 `tests/_realmysql.py`:`ANIMA_TEST_MYSQL` 那道门、
+  `connect()`、`drop_world_tables()`)。抄第二份 `_connect()` 出去的两份猜测,
+  **只在有 MySQL 的机器上才会同时跑** —— 也就是最不常跑的那种机器上。
+  连带一条踩出来的:`DROP TABLE` 要元数据锁,而 MySQL 的默认 `lock_wait_timeout`
+  是 31536000 秒(**一年**),而引擎的 `ThreadLocalConnection` 按设计只在
+  `close()` 时关**本线程**那条 —— 用完就删表会挂住不动,而挂一年和挂死没有区别。
+  所以 `drop_world_tables()` 先把等待压到 5 秒(挂改成报错),而清表放在**开世界之前**。
 - `tests/test_relation_edges.py` 两处断言补上界:兜底那一刻钉 `== 201` 而不是
   `> 200`(`> 200` 对一段凭空编出来的有效期一样绿),并配上 `as_of=201 == []`;
   直写坏区间那条从头验到尾 —— 此刻 / 那一刻 / 审计视图三个答案自洽,

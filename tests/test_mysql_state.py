@@ -27,29 +27,13 @@
 """
 from __future__ import annotations
 
-import os
+import _realmysql
 
 import pytest
 
-pymysql = pytest.importorskip("pymysql")
-
-_DSN = os.environ.get("ANIMA_TEST_MYSQL")
-pytestmark = pytest.mark.skipif(
-    not _DSN, reason="没有 ANIMA_TEST_MYSQL(形如 unix:///tmp/my.sock 或 host:port)"
-)
-
-
-def _connect():
-    if _DSN.startswith("unix://"):
-        return pymysql.connect(
-            unix_socket=_DSN[len("unix://"):], user="root",
-            database="anima_test", charset="utf8mb4",
-        )
-    host, _, port = _DSN.partition(":")
-    return pymysql.connect(
-        host=host, port=int(port or 3306), user="root",
-        database="anima_test", charset="utf8mb4",
-    )
+# **怎么连 MySQL 只此一处**(`tests/_realmysql.py`)—— 抄一份出去的两份猜测,
+# 只在有 MySQL 的那种机器上才会同时跑,也就是最不常跑的那种。
+pytestmark = _realmysql.requires_mysql
 
 
 @pytest.fixture()
@@ -60,25 +44,19 @@ def mysql_factory():
     某次在负载下炸成 `read of closed file` —— 一个离原因很远、看不出是并发的报错。
     这条 fixture 存在就是为了不让测试自己踩那个坑,然后把竞态当成"偶发"。
     """
-    return _connect
+    return _realmysql.connect
 
 
 @pytest.fixture()
 def mysql(request):
     from anima_world.mysql_state import ensure_schema
 
-    conn = _connect()
+    conn = _realmysql.connect()
     prefix = f"t{abs(hash(request.node.name)) % 100000}_"
-    with conn.cursor() as cur:
-        for table in ("events", "memories", "conversations", "messages"):
-            cur.execute(f"DROP TABLE IF EXISTS `{prefix}{table}`")
-    conn.commit()
+    _realmysql.drop_world_tables(conn, prefix)
     ensure_schema(conn, prefix)
     yield conn, prefix
-    with conn.cursor() as cur:
-        for table in ("events", "memories", "conversations", "messages"):
-            cur.execute(f"DROP TABLE IF EXISTS `{prefix}{table}`")
-    conn.commit()
+    _realmysql.drop_world_tables(conn, prefix)
     conn.close()
 
 
@@ -353,7 +331,7 @@ def test_one_connection_per_thread(mysql):
     from anima_world.mysql_state import MySQLEventLog, ThreadLocalConnection, ensure_schema
 
     _conn, prefix = mysql
-    pool = ThreadLocalConnection(_connect)
+    pool = ThreadLocalConnection(_realmysql.connect)
     ensure_schema(pool, prefix)
     log = MySQLEventLog(pool, prefix)
     seen: dict[int, int] = {}
