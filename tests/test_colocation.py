@@ -242,6 +242,49 @@ def test_两扇门上同一件事必须是同一句话(world):
     assert "咖啡店" in refusal and "cafe" not in refusal, refusal
 
 
+def test_四句话里从前没人守的那两句(world):
+    """`_colocation_error` 会说**四**句话,而 2026-08-20 第七轮逐句反打补丁量出来:
+    **只有两句塌了会红**。做法是把四句话一句一句改坏、每次只改一句,跑遍十个提到
+    「当面 / colocation」的测试文件(基线 287 项):
+
+    | 那一句 | 改坏之后 |
+    |---|---|
+    | 没说是替哪个玩家(`not player_id`) | **287 全绿** ← 没人守 |
+    | 世界不知道你在哪(`not where`) | 2 failed |
+    | 她这会儿在路上(`here == where`) | **287 全绿** ← 没人守 |
+    | 你在 X、她在 Y(两地不同) | 1 failed |
+
+    这一轮改的正好是这四句话的措辞(拿掉框里那个动词名),而其中两句**没有任何
+    东西拦得住它们悄悄改回去**。所以这条把那两句补上,守的是同一件事:玩家读到
+    的句子里不出现动词名,而动词名照旧在 `result["tool"]` 里交给宿主。
+
+    ⚠️ **第四句的账不在这里**:她在 `cafe → yard` 的路上、玩家站在 yard 时,
+    它会报出她的**出发地**(「苏晚夏在咖啡店」)—— 那是一句假话,**有意不钉**。
+    钉住一句假话,那句假话就再也改不动了(这份文件上面那条测试就被这么钉过一次)。
+    逐支的账在 `api._where_unknown_line()` 的 docstring 里。
+    """
+    world.config_set("presence.enforce_colocation", True)
+    world.config_set("chat.tools.enabled", True)
+
+    # ① 这次调用压根没说是替哪个玩家 —— 这句话是给宿主排障的,不是给玩家看的。
+    result = world.act("夏", "reach_out", {"player_id": "p1"}, surface="autonomy")
+    assert result["ok"] is False
+    assert result["error"] == "这件事要当面才办得到,而这次调用没说是替哪个玩家", result
+    assert "reach_out" not in result["error"], result["error"]
+
+    # ③ 她在赶路,而玩家正好站在她的出发地 —— 这一支说的话是对的(她确实在路上),
+    #   两处地名相同却不是面对面,只可能是这一种。
+    world.player_move("p1", "cafe")
+    world.scheduler._transit["夏"] = {"from": "cafe", "to": "yard", "arrive_at": 999}
+    result = world.act("夏", "reach_out", {"player_id": "p1"},
+                       player_id="p1", surface="autonomy")
+    assert result["error"] == (
+        "这件事要当面才办得到,而苏晚夏这会儿在路上,不在任何地方"
+    ), result
+    assert result["tool"] == "reach_out", result
+    assert "reach_out" not in result["error"], result["error"]
+
+
 def test_一份打算里排不进要当面的动词(world):
     """一份打算是给未来几个 tick 的,那时候谁在她跟前没有人知道 —— 放进去的话,
     它会在某个说不清的时刻静默地做不成。"""

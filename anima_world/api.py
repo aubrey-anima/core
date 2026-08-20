@@ -5459,8 +5459,11 @@ class World:
         """这个能力要不要玩家真的在她跟前 —— 办不到就返回那句回执,办得到是空串。
 
         **只有 `act()` 走这一句**(⚠️ 这里从前写着「`act()` 和 `intend()` 共用」,
-        第七轮 2026-08-20 自查逮到:`git grep -nE 'self\._colocation_error\(' -- anima_world/`
-        只答得出**一行**(转义同下,免得这行自己被数进去)。
+        第七轮 2026-08-20 自查逮到:`git grep -nE 'self[.]_colocation_error[(]' -- anima_world/`
+        只答得出**一行**(⚠️ 用 `[.]` `[(]` 而不是反斜杠转义,两个理由:这行自己
+        因此不被数进去;docstring 不是 raw 串,反斜杠转义写在这儿会让**整个包在
+        导入时报 SyntaxWarning** —— 这条注意事项本身就是第七轮当场踩出来的,
+        全量跑那一行末尾多出来的「1 warning」就是它)。
         `intend()` 那半边是另一件事、另一句话 —— 它在排队时
         就把这种动词整个挡回去(「排不进打算」),而且是**抛 `ValueError`,不是回执**。
         把两条路写成一条,读的人会去 `intend()` 里找一句根本不存在的话)。
@@ -5516,11 +5519,12 @@ class World:
         也不给它套「」:框的只有**数据里来的那一截**(和 `_PLAYER_FALLBACK_DISPLAY`
         同一条),「这件事」是引擎自己的话。宿主/作者面那几处**一处没动**,判据:
 
-            git grep -cE 'verb.r\}' -- anima_world/
+            git grep -cE 'verb.r[}]' -- anima_world/
 
-        今天答 `api.py:4` + `ontology.py:2`。**pattern 写成转义的那一版是有意的** ——
-        写成没转义的字面量,这一行自己就会被数进去,判据当场从 4 变 5
-        (第七轮真踩过,而且是同一天里第二次)。
+        今天答 `api.py:4` + `ontology.py:2`。**pattern 拐这个弯是有意的** ——
+        写成没拐弯的字面量,这一行自己就会被数进去,判据当场从 4 变 5
+        (第七轮真踩过,而且是同一天里第二次);拐弯用 `[}]` 而不是反斜杠,
+        理由见 `_colocation_error` 那条同样的注意事项(docstring 不是 raw 串)。
         """
         if not self.config_get("presence.enforce_colocation", False):
             return ""
