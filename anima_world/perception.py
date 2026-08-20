@@ -120,6 +120,11 @@ class Perception:
     glosses: dict[str, str] = field(default_factory=dict)
     verbs: dict[str, list[str]] = field(default_factory=dict)
     units: dict[str, dict[str, str]] = field(default_factory=dict)
+    # 这儿的**人**此刻在做什么(`agent:齐` → `在陪一次夜播`)。闲着的人不在里面 ——
+    # 没有那一句本身就是闲着。措辞由调用方给(`World._activities_now`),这一层只负责
+    # 把它印在对的那一行上:同一个世界里"某某在做什么"只能有一种说法,而这一层要是
+    # 自己再拼一遍,她说话时看到的和她做决定时看到的就是两个世界。
+    activities: dict[str, str] = field(default_factory=dict)
     # 这里还有多少样东西没带进来。**必须说出来** —— 截断了却不吭声,等于让她在一个
     # "她以为只有三棵树"的世界里做决定,而她永远不会知道自己被骗了。
     overflow: int = 0
@@ -162,7 +167,10 @@ class Perception:
                 # 读到 KeyError,而这一格从来只加不改。
                 "units": {k: dict(v) for k, v in self.units.items()},
                 "own_units": dict(self.own_units),
-                "public_units": dict(self.public_units)}
+                "public_units": dict(self.public_units),
+                # 只加不改的又一格:宿主那一屏上"这儿的人此刻在做什么"此前问不出来,
+                # 只能自己去猜 —— 而猜出来的和她读到的不是同一句话。
+                "activities": dict(self.activities)}
 
     def describe_own(self) -> str:
         """`功力 120点、体力 有点累` —— 她自己那一行的正文。"""
@@ -178,6 +186,10 @@ class Perception:
 
         一行里有**两种名字**,各归各的:`老橡树` 是这个东西的名字(`labels`),
         `树高` 是它身上那个量的名字(`here_labels`)。
+
+        这儿的人还多一段:`齐老板,在陪一次夜播:体力 87`。它**另占一个逗号**,不并进
+        `gloss` 那对括号 —— 括号里是这个人一直是什么样,逗号后面是他这一刻在做什么,
+        合起来会让一件转瞬的事读着像身份。
         """
         name = self.labels.get(owner) or owner
         gloss = self.glosses.get(owner)
@@ -191,6 +203,8 @@ class Perception:
         # 还会诱她去调一个必然被拒的调用。
         line = f"{name}[{owner}]" if verbs and name != owner else name
         line = f"{line}({gloss})" if gloss else line
+        doing = self.activities.get(owner)
+        line = f"{line},{doing}" if doing else line
         line = f"{line}:{body}" if body else line
         # 能力放在最后,因为它是**她下一步能做的事** —— 属性她只会念,动词她会用。
         return f"{line}。可以{'、'.join(verbs)}" if verbs else line
@@ -470,6 +484,7 @@ def perceive(
     world_owner: str = "world",
     ontology: Any = None,
     default_budget: int = 5,
+    activities: dict[str, str] | None = None,
 ) -> Perception:
     """这个角色此刻感知到什么。纯读,无 LLM。
 
@@ -486,6 +501,11 @@ def perceive(
     名字与分档同理,而且互相独立:写过 `label` 的量额外带一个人话名字(`*_labels`),
     声明过 `bands` 的量额外带一个词(`*_words`),**量名与数字照旧原样在**。
     两样都没写的世界这一半整个不存在,和从前逐位相同。
+
+    `activities` 是**可选**的一份"谁此刻在做什么"(`{owner: 一句人话}`,由
+    `World._activities_now()` 给)。不给就是这一层从前的样子。措辞有意不在这儿算:
+    同一个世界里"某某在做什么"只能有一种说法,而这里另拼一遍就会和提示词的
+    presence 块分叉 —— 分叉了不报错。
     """
     rules = visibility.rules_map()
     result = Perception()
@@ -570,6 +590,13 @@ def perceive(
                     if units:
                         result.units[owner] = units
             result.overflow += max(0, len(members) - budget)
+        # 只留这儿真的看得见的那几个。整份带过来的话,一个隔着半个地图的人在做的事
+        # 会被 `to_dict()` 报给宿主 —— 而这一层的默认值定死是"没声明 = 感知不到",
+        # 一份旁路的名单会从背面把它拆掉。
+        if activities:
+            result.activities = {
+                owner: text for owner, text in activities.items() if owner in result.here
+            }
 
     world_units = ontology.units_of(world_owner) if ontology is not None else {}
     for key, value in stock_store.of(world_owner).items():

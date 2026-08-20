@@ -103,10 +103,18 @@ _LOCATION_KEYS = (
     *LOCATION_IMAGE_KEYS,
 )
 
+# 动作 → 她读到的那句话。**这张表要盖住 `ActionTable.default()` 的每一种**,
+# 漏一种的样子不是报错,是一个正在干活的人被写成「闲着」:`interact` 与 `eat`
+# 从前都不在表里,于是排班让她去"照料那棵树"、去吃饭的那一个钟头,同屋的人和她
+# 自己的自主上下文里读到的都是「闲着」—— 而「闲着」正是"可以打扰"的意思。
 _ACTIVITY_LABELS = {
     "sleep": "在睡觉", "work": "在工作", "chat": "在和人聊天",
-    "walk": "正准备出门", "idle_wander": "闲着", "idle_social": "闲着",
+    "walk": "正准备出门", "eat": "在吃饭", "interact": "在忙手上的事",
+    "idle_wander": "闲着", "idle_social": "闲着",
 }
+# 闲着不算"在做什么"。别人眼里的那一行只在她**真的**在做点什么时才多出一句 ——
+# 给每个人都缀一句「闲着」是提示词噪音,而**没有那句话本身就是闲着**。
+_IDLE_KINDS = frozenset({"idle_wander", "idle_social"})
 
 
 class _PlayerRow(MutableMapping):
@@ -3757,16 +3765,53 @@ class World:
         return max(0, int(self.config_get("autonomy.max_per_day", autonomy.DEFAULT_MAX_PER_DAY) or 0))
 
     def _autonomy_context(self, agent_id: str, now: Any) -> Any:
-        """锁内一次快照(只读、无 LLM、无 IO)。worker 之后只碰这个对象。"""
-        brain = self.scheduler.agents.get(agent_id)
+        """锁内一次快照(只读、无 LLM、无 IO)。worker 之后只碰这个对象。
+
+        ⚠️ **在场名单里从前只有玩家。** 于是一个站在三个同事中间的角色,提示词第一句
+        写的是「这会儿你身边没有别人」,而下面 `interact` 的参数说明正让她用 `with`
+        点名跟她一起做的人 —— 名单从来没给过她。晚潮那 11 个标着「得有人一起」的
+        动词因此 238 天、161648 条事件里一次都没被发出去过:机制全在(同意、
+        `joint_gate`、共同经历都写好了),缺的只是**她不知道身边有谁**。
+        """
+        scheduler = self.scheduler
+        brain = scheduler.agents.get(agent_id)
         if brain is None:
             return None
         agent = brain.agent
         here = str(agent.blackboard.read("loc") or agent.location or "")
         activity = self._view._agent_activity(agent_id)
         label = _ACTIVITY_LABELS.get(activity.get("kind"), "闲着")
+        doing = self._activities_now()
+
+        def _person(person_id: str, actor: str, name: str, kind: str) -> dict[str, str]:
+            """名单上的一个人。
+
+            `person_id` 是她要写进 `with` / `player_id` 的那个 id(`_resolve_party`
+            两种都收),`actor` 是同一个人在量那张表里的 id —— **一个人两个命名空间**
+            是这个仓库既有的事实(`stock_owner_of`),不是这一波新造的分支。
+            `kind` 让宿主与菜单分得清人和玩家;`doing` 那一句与 presence 块、感知块
+            共用同一份措辞(`_activities_now`)。
+            """
+            row = {"id": person_id, "name": name, "kind": kind}
+            said = doing.get(scheduler.stock_owner_of(actor))
+            if said:
+                row["doing"] = said
+            return row
+
+        # 同地的角色。`_agent_locations()` 已经跳过在途的人 —— 在途不算在场,只比
+        # 地点的话一个正在赶路的人会被判成和她面对面。按 id 排,要的是**确定**。
         present = [
-            {"id": pid, "name": str((self.players.get(pid) or {}).get("display_name") or pid)}
+            _person(aid, aid, scheduler.agents[aid].agent.name or aid, "agent")
+            for aid, loc in sorted(scheduler._agent_locations().items())
+            if loc == here and aid != agent_id
+        ]
+        present += [
+            _person(
+                pid,
+                f"{scheduler.PLAYER_PREFIX}{pid}",
+                str((self.players.get(pid) or {}).get("display_name") or pid),
+                "player",
+            )
             for pid in self.who_is_present()
             if str((self.players.get(pid) or {}).get("location") or "") == here
         ]
@@ -3775,7 +3820,12 @@ class World:
         if mood is not None:
             notes.append(f"你此刻的心气儿:{float(mood):.2f}(0~1)")
         for person in present:
-            rel = self.scheduler._memory_projection.relations.get((agent_id, person["id"]))
+            # 关系表的键**两边同形**(`_relation_id` 对玩家剥 `player:` 前缀,对角色
+            # 是恒等)。走它而不是直接拿 `person["id"]`,是为了名单上哪天换成带前缀
+            # 的 id 时这一行不会静默查空 —— 查空不报错,只是她忽然谁都不认识了。
+            rel = scheduler._memory_projection.relations.get(
+                (agent_id, scheduler._relation_id(person["id"]))
+            )
             if rel is not None:
                 notes.append(f"{person['name']} 在你眼中:{rel.r_type}")
         # 她**感知到**的世界的量也进决定 —— 否则"矿富了所以我去挖"这种事永远不会
@@ -3838,11 +3888,20 @@ class World:
 
         两道闸都是声明出来的,这里不认识任何一个能力的名字:多一个自主能力时,
         它自己说它要什么,而不是回来改这个函数。
+
+        ⚠️ **`requires_colocation` 数的是在场的玩家,不是在场的人。** 那格声明逐字写着
+        「这个能力要**玩家**真的在她跟前」,而 AUTONOMY 面上唯一带它的 `reach_out`
+        只收玩家 id(处理器上那句是 `present_player_ids`)。`present` 这一轮补进了同地
+        的角色,若照单全收去数,一个身边只有三个同事的人就会被摆上 `reach_out` ——
+        然后必然收到「这会儿她身边没有人」。那正是这段注释开头那个 bug 本身,只是
+        换了个由头。**联合动词不靠这道闸**:`interact` 声明的是 `requires_target_entity`,
+        它要的是"手边有东西",而同伴的名字现在从 `present` 里读得到了。
         """
+        players_here = [p for p in ctx.present if p.get("kind", "player") == "player"]
         return [
             spec
             for spec in tools_mod.tools_for(ctx.agent_id, surface=tools_mod.AUTONOMY)
-            if not (spec.requires_colocation and not ctx.present)
+            if not (spec.requires_colocation and not players_here)
             and not (spec.requires_target_entity and not ctx.targets)
         ]
 
@@ -6706,7 +6765,9 @@ class World:
             )
         return name
 
-    def _players_here(self, location: str, *, exclude: str = "") -> list[str]:
+    def _players_here(
+        self, location: str, *, exclude: str = "", doing: dict[str, str] | None = None
+    ) -> list[str]:
         """和这个地方同处一室的**别的玩家**该怎么称呼。
 
         在场块的 `others` 从前只从 `scheduler.agents` 里拼,于是一个三个人的房间
@@ -6721,14 +6782,23 @@ class World:
 
         没报过名字的用 `访客`,不是他的 id —— 她读到什么就说什么(`_place_name`
         那一课),把一个 uuid 放进提示词就是让她把 uuid 念出口。
+
+        `doing` 是 `_activities_now()` 那一份(可选)。给了就在名字后面缀上他此刻在
+        做的事 —— **和同屋角色那一半走的是同一份措辞、同一个括号**:少了这一句,
+        提示词里的他就是一个"站在那儿什么也没做的人",而世界里他刚花了体力干完活。
         """
         out: list[str] = []
+        doing = doing or {}
         for pid, info in self._present_roster().items():
             if pid == exclude or info.get("in_transit"):
                 continue
             if str(info.get("location") or "") != location:
                 continue
-            out.append(str(info.get("display_name") or chat_service_mod.DEFAULT_ADDRESS))
+            name = str(info.get("display_name") or chat_service_mod.DEFAULT_ADDRESS)
+            said = doing.get(
+                self.scheduler.stock_owner_of(f"{self.scheduler.PLAYER_PREFIX}{pid}")
+            )
+            out.append(f"{name}({said})" if said else name)
         return out
 
     def world_context(self, agent_id: str, interlocutor_id: str) -> dict[str, Any]:
@@ -6789,12 +6859,23 @@ class World:
                 label = f"正在去{to_name or '别处'}的路上"
             else:
                 label = _ACTIVITY_LABELS.get(activity.get("kind"), "闲着")
+            # 同屋的人各带一句"此刻在做什么"。措辞取自 `_activities_now()`,和自主
+            # 上下文的在场名单、感知块那一行是同一份 —— 各拼一遍必然分叉,而分叉
+            # 那天不报错:一边说他在擦窗,另一边把他写成闲着,两句话进同一份提示词。
+            # 齐老板在线上对一个正在做事的玩家说「我没见你动过手」,病就在这儿:
+            # 世界里那个人一直在动,只是提示词里从没写过。
+            doing = self._activities_now()
+
+            def _busy(actor: str, name: str) -> str:
+                said = doing.get(scheduler.stock_owner_of(actor))
+                return f"{name}({said})" if said else name
+
             others = [
-                scheduler.agents[aid].agent.name
+                _busy(aid, scheduler.agents[aid].agent.name)
                 for aid, loc in scheduler._agent_locations().items()
                 if loc == loc_id and aid != agent_id
             ]
-            others += self._players_here(loc_id, exclude=interlocutor_id)
+            others += self._players_here(loc_id, exclude=interlocutor_id, doing=doing)
             # **她去得了哪儿,得由世界告诉她。** `walk` 的 `location` 是必填,而在这
             # 之前整份提示词里没有一处列过这个世界有哪些地方 —— 她于是只能编一个
             # (线上现场:「回声后面有个小阁楼」,而世界里没有这个地方),然后整件事
@@ -6856,10 +6937,44 @@ class World:
 
         try:
             return perceive(agent_id=agent_id, here=here, stock_store=store,
-                            visibility=visibility, ontology=self.scheduler.ontology)
+                            visibility=visibility, ontology=self.scheduler.ontology,
+                            activities=self._activities_now())
         except Exception:  # noqa: BLE001 - 读不到感知不该让聊天告吹
             logger.warning("读 perception 失败", exc_info=True)
             return None
+
+    def _activities_now(self) -> dict[str, str]:
+        """此刻每个人在做的那件事,渲染成一句人话 —— `{"agent:齐": "在陪一次夜播"}`。
+
+        **这个仓库里"某某此刻在做什么"只有这一句措辞。** 三个读者共用它:聊天提示词的
+        presence 块(`presence.others`)、自主上下文的在场名单(`AutonomyContext.present`)、
+        以及感知块里那一行(`Perception.activities` → `describe_here`)。各写一遍的话
+        它们必然分叉,而分叉那天不报错:一边说她在工作,另一边把她写成闲着,两句话
+        进同一份提示词。
+
+        **人和玩家一处分支都没有。** 两个来源都是全场一问:`actions_now()`(她的来自
+        行为树、他的来自每 tick 的玩家动作快照,合并点只有那一处)与
+        `occupations_now()`(谁被一件长过程占着,以及那件事叫什么)。两边的 id 都经
+        `stock_owner_of` 落进同一个命名空间,所以"她看得见他擦窗"和"他看得见她擦窗"
+        是同一段代码。
+
+        **长过程盖过动作名**:它更具体(「在陪一次夜播」而不是「在忙手上的事」),
+        而且它是这两条路唯一都答得出的那一格 —— 一个用 `World.act` 起了长过程的
+        角色根本不经过行为树,只有 `:engaged` 记着她。
+
+        闲着的人不在这份表里(见 `_IDLE_KINDS`)。
+        """
+        scheduler = self.scheduler
+        doing: dict[str, str] = {}
+        for owner, kind in scheduler.actions_now().items():
+            if kind in _IDLE_KINDS:
+                continue
+            label = _ACTIVITY_LABELS.get(kind)
+            if label:
+                doing[owner] = label
+        for owner, said in scheduler.occupations_now().items():
+            doing[owner] = f"在{said}"
+        return doing
 
     def perception(self, agent_id: str) -> dict[str, Any]:
         """这个角色此刻**感知到**什么(不是世界有什么)。

@@ -89,10 +89,19 @@ class AutonomyContext:
     """
 
     def present_block(self) -> str:
+        """`这会儿在你身边的人:齐老板(qi,在陪一次夜播)、沈遥(p1)。`
+
+        括号里的 id 是**要用的东西**,不是装饰:`interact` 那些标着「得有人一起」的
+        动词要靠 `with` 点名,而她只能从这一行里读到名字。第二格是他此刻在做什么
+        (闲着的人没有那一格 —— 没有那句话本身就是闲着);措辞与聊天提示词的
+        presence 块、感知块共用一份(`World._activities_now`),各拼一遍就会分叉。
+        """
         if not self.present:
             return _NOBODY_TEMPLATE
         names = "、".join(
-            f"{person.get('name') or person['id']}({person['id']})"
+            f"{person.get('name') or person['id']}({person['id']}"
+            + (f",{person['doing']}" if person.get("doing") else "")
+            + ")"
             for person in self.present
         )
         return _PRESENT_TEMPLATE.format(names=names)

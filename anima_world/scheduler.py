@@ -3030,6 +3030,28 @@ class Scheduler:
                 return record
         return None
 
+    def occupations_now(self) -> dict[str, str]:
+        """此刻被长过程占着的每个人 → **那件事叫什么**(`{"agent:齐": "陪一次夜播"}`)。
+
+        `_occupying` 是一次一个人的问法,这是一次问全场的问法 —— 提示词里"这屋里
+        谁在忙什么"要一次答完,挨个去问等于把 `:engaged` 扫 N 遍。
+
+        **人和玩家一处分支都没有**:记录上的 `agent` 两边同形(`齐` / `player:p1`),
+        `stock_owner_of` 把它们送进同一个命名空间。少了这一条的话,一个用
+        `World.act` 起了长过程的角色会被写成「闲着」(她的 `_current_action` 是行为树
+        写的,而这条路根本不经过行为树),而做同一件事的玩家却是「在陪一次夜播」——
+        同一件事在两个人身上有两种说法,且不报错。
+        """
+        out: dict[str, str] = {}
+        for _, record in self._engaged.items():
+            if not record.get("occupies"):
+                continue
+            who = str(record.get("agent") or "")
+            said = str(record.get("label") or record.get("verb") or "")
+            if who and said:
+                out[self.stock_owner_of(who)] = said
+        return out
+
     def _busy_refusal(
         self, agent_id: str, target: str, verb: str, affordance: Any
     ) -> str | None:
@@ -4108,6 +4130,38 @@ class Scheduler:
                     str(action.params.get("verb") or ""),
                 )
                 if not outcome.get("ok"):
+                    if outcome.get("reason") == "participants_missing":
+                        # **行为树发不出「一起做」的事,而这件事从前一声不吭。**
+                        # 排班里写了一个标着 participants 的动词,树每 tick 都去
+                        # 试一次、每次都被同一句话拒回来,`logger.debug` 一行,
+                        # 世界的历史上一个字都没有 —— 作者看到的是"这个动词从来
+                        # 没发生过",看不到"她一直在试"。
+                        #
+                        # **不替她挑同伴。** 找同伴要先征得同意,征同意要走网络,
+                        # 而这里跑在 tick 线程的锁里 —— 时钟永不等网络。她要叫人
+                        # 一起做,走自主轮次那条路(在场名单现在给得出名字了)。
+                        # 这里只负责让这件事**说得出来**。
+                        #
+                        # ⚠️ 只在**档位切换**那一刻刷日志,理由和 `note_subsystem`
+                        # 自己那条一样:树每 tick 都会再试一次,每次都 info 的话,
+                        # 这条通知会把日志淹掉,而淹掉等于又看不见了。持续的那一半
+                        # 由计数器与 `World.state()` 的 `subsystem_health` 承担。
+                        was = (self._subsystem_health.get("joint_from_tree") or {}).get(
+                            "status"
+                        )
+                        self.note_subsystem(
+                            "joint_from_tree", False,
+                            f"{agent.id}: {outcome.get('refusal') or 'participants_missing'}",
+                        )
+                        if was != "degraded":
+                            logger.info(
+                                "%s 的排班让她去 %s %s,而那是件得有人一起做的事 —— "
+                                "行为树叫不上人(叫人要先征得同意,征同意要走网络,"
+                                "而这里是时钟线程)。她要一起做,得走自主轮次那条路。%s",
+                                agent.id, action.params.get("verb"),
+                                action.params.get("target"), outcome.get("refusal"),
+                            )
+                        return False
                     # 和 chat 找不到人同一条:不是失败,是世界说"还不行"。不记成
                     # 当前动作,下一 tick 再试;条件一满足它自己就发生了。
                     logger.debug(
@@ -4420,6 +4474,26 @@ class Scheduler:
                 return str(location)
         return None
 
+    def actions_now(self) -> dict[str, str]:
+        """此刻每个人正在做的那个动作 —— `{"agent:<id>": "work", …}`,**人和玩家一份**。
+
+        两个来源合成一份:她的来自行为树写下的 `_current_action`,他的来自
+        `_settle_player_actions` 每 tick 取的那份快照。合并点只有这一处,凡是要问
+        "这个人此刻在干嘛"的地方都从这里取 —— `_agents_doing` 的规律侧、感知块里
+        那句「此刻在做什么」、自主轮的在场名单,共用同一份事实。
+
+        分两处各算一次的话必然会岔开,而岔开的那天不会报错:一边说她在工作,另一边
+        把她写成闲着,两句话进同一份提示词。
+        """
+        now: dict[str, str] = {}
+        for agent_id, action in self._current_action.items():
+            if action is not None:
+                now[self.stock_owner_of(agent_id)] = str(action.kind)
+        for player_id, kind in self._player_action_now.items():
+            if kind:
+                now[self.stock_owner_of(f"{self.PLAYER_PREFIX}{player_id}")] = str(kind)
+        return now
+
     def _agents_doing(self, action_kind: str) -> list[str]:
         """此刻正在做某个动作的**人**,按 `agent:<id>` 返回 —— 供 `for_each.action` 用。
 
@@ -4427,20 +4501,13 @@ class Scheduler:
         行为者自己的量决定。
 
         **玩家也在这份名单里。** 她的来源是行为树写下的 `_current_action`,他的是
-        `_settle_player_actions` 每 tick 取的那份快照 —— 两个来源,一份名单。少了
-        后一半的话,`{"action": …}` 那半边规律对人整个缺席,而互补的
-        `{"not_action": …}` 却算得到他:他只吃得到往下拖的那一条。
+        `_settle_player_actions` 每 tick 取的那份快照 —— 两个来源,一份名单(见
+        `actions_now`)。少了后一半的话,`{"action": …}` 那半边规律对人整个缺席,而
+        互补的 `{"not_action": …}` 却算得到他:他只吃得到往下拖的那一条。
         """
-        owners: list[str] = []
-        for agent_id, action in self._current_action.items():
-            if action is not None and action.kind == action_kind:
-                owners.append(self.stock_owner_of(agent_id))
-        owners.extend(
-            self.stock_owner_of(f"{self.PLAYER_PREFIX}{player_id}")
-            for player_id, kind in self._player_action_now.items()
-            if kind == action_kind
-        )
-        return owners
+        return [
+            owner for owner, kind in self.actions_now().items() if kind == action_kind
+        ]
 
     def _maybe_run_autonomy(self, now: WorldTime) -> None:
         """到点了就喊一声"该问问她们了",然后**立刻返回**(autonomy)。
