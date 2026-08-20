@@ -77,12 +77,17 @@ anima-world chat --world-id w --agent 昀 --message "十九年前那份报告是
 
 ---
 
-## 1. 现在 CLI 上有什么(22 个子命令)
+## 1. 现在 CLI 上有什么(**25 个顶层子命令 / 37 条叶子命令**,3.5.0 实测)
 
 ```
 start  config  doctor  chat  prompt  map  ontology  roster  contact  relationship  player
-presence  run  simulate  events  memory  agent  report  validate  play  contract  world
+drift  engagement  presence  run  simulate  events  memory  agent  location  report
+validate  play  contract  world
 ```
+
+> 这个数**此前停在"22 个"很久**(那时还没有 drift / engagement / location,`player`
+> 也只有两条叶子)。**照文档默写的数字迟早和 `--help` 分叉**,而分叉的那天没人会发现 ——
+> 要准确的一份就 `anima-world <cmd> --help` 现问,别抄这里。
 
 按你们用得上的顺序:
 
@@ -684,6 +689,7 @@ social / stance / tools / intent / autonomy,并播了关系、创世记忆、钱
 | 定时轮次行动率偏稀(约三四天一次) | 提示词是热改模板,可自己调;结构性改法(情境触发)排 1.4.0 |
 | **`validate world` 不是"开得起来吗"的全集** —— `kinds` 里的 `bands`、`emit` 三字段、能力里的 `rand()` 它一个都报不出来 | 已认(§3.17)。今天的解法是出包前跑 `simulate --ticks 0`;要不要把规律/本体那两道闸也接进 `validate`,等你们提 issue 说清卡在哪一步 |
 | 能力(affordance)层没有骰子 —— "这一次采摘有三成掉空"写不出来 | 已认。要先给它一组自己的坐标(世界 / 种类+动词 / 施动者 / 对象 / tick),在那之前写了 `rand()` 会**开不了机**而不是静默给 0 |
+| **法务抹除:预演的 `memories_redacted` 可能偏大** | 已认,而且**3.4.0 就有,不是 3.5.0 的回归**。真跑时 `erase_for_event_seqs` 先把由他而起的那些记忆整行删掉,`redact_summaries` 就数不到它们了;预演不真删,于是同一批被数第二遍(实测预演 3 / 真跑 0)。**方向是偏大不是偏小**,拿它当上界安全。修法另立小单 —— 判「抹干净了」看 `conversations` / `messages` / `memories_dropped`,别拿 `memories_redacted` 写断言 |
 
 ---
 
@@ -2141,6 +2147,11 @@ anima-world player erase --world-id w --player u1 --json            # 预演,照
 | `--since-seq N` | 从 seq > N 接着抹(给上一趟回执里的 `resume_seq`)。真抹时**不许越过已完成的水位** —— 越过去就是在日志里留一个洞,而下一趟从更高的水位接着做,没有一处会报错;越了**退 2**。预演不受这条管(它不写,造不出洞) |
 | `--resume` | **只续,不新开**:没有未完成的就什么都不做(各格全 0、`phase="not_started"`)。⚠️ 不带它的普通重跑**照旧会自动续上**,所以站点的重试循环一个字都不用改 |
 
+⚠️ **空跑那一趟的 `forget` 是 `null`,不是一份全 0 的回执**(3.4.0 起它恒是 dict)。
+`null` 在这儿是有意义的一格:**这一趟压根没跑 forget**。壳的 `_erase_counts` 让 `None`
+原样过,所以它到得了站点 —— 判「世界那侧抹干净了」照旧看 `conversations` / `messages` /
+`memories_*`,**别对 `forget` 解引用**。
+
 回执多两格,**它们答的是两个不同的问题**:
 
 - **`phase`** —— `not_started` / `partial` / `done`。它说的是**这个人在这个世界里的
@@ -2169,12 +2180,30 @@ anima-world player erase --world-id w --player u1 --json            # 预演,照
 
 ```bash
 anima-world contract --json | jq '.erasure.resume_command'
-# "player erase --resume"   ← 3.5.0 起;3.4.0 及更早这一段整个不存在
+# "player erase --yes --resume"   ← 3.5.0 起;3.4.0 及更早这一段整个不存在
 ```
 
 和 `location_image_write_command` 逐字同一个用法:**这一段在不在、`resume_command`
 是不是 `null`,决定你们敢不敢把抹除切成片、敢不敢在部署时把它杀掉**。
 比版本号会给出一个安静的错答案 —— 同一个号下真的有过好几份不同的引擎。
+
+⚠️ **那三格命令里的 `--yes` 一个都不能少,照它原样敲。** 这条命令**默认是预演**
+(和 `world drop` 同款),所以少了 `--yes` 的续跑是一次 `dry_run: true` 的空转:
+退出码 0、回执好看、水位一格不动 —— 而拿它驱动重试队列的宿主会**永远** partial
+下去。这一格发出去的第一版就少了 `--yes`,验收当场逮住了。
+
+**八格全在这儿**(镜像照它抄,别只抄我正文里提到的那几个):
+
+| 格 | 值 |
+|---|---|
+| `read_command` | `player erase`(不带 `--yes` 就是只数) |
+| `write_command` | `player erase --yes` |
+| `resume_command` | `player erase --yes --resume` |
+| `shard_params` | `["since_seq", "limit"]` |
+| `phases` | `["not_started", "partial", "done"]` |
+| `progress_key` | `anima:{world_id}:erasure:{player_id}` |
+| `progress_ttl_seconds` | `86400` |
+| `gloss` | 一段人话(会随版本长,别拿它做判断) |
 
 ### 定版 3.5.0
 

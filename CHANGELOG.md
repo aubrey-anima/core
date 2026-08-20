@@ -53,9 +53,14 @@ seq 走,而他的名字的来源之一就是日志自己(`*_id`/`*_name` 配对)
   的抹除处在哪一步**,不是"他被抹干净了没有";一次**预演**也答得出 `partial`,
   而那正是宿主今天问不出来、只能把"被墙挡在门外"和"抹到一半"混成同一个 503 的
   那一格)与 `resume_seq`(下一趟从哪儿接着看)。
-- `contract --json` 新增 `erasure` 段(`resume_command` / `shard_params` / `phases` /
-  `progress_key` / `progress_ttl_seconds` / `gloss`)。**消费方按出口在不在探测,
-  不比版本号** —— 照 `location_image_write_command` 那条先例。
+- `contract --json` 新增 `erasure` 段,**八格**:`read_command`(`player erase`)/
+  `write_command`(`player erase --yes`)/ `resume_command`(`player erase --yes --resume`)/
+  `shard_params` / `phases` / `progress_key` / `progress_ttl_seconds` / `gloss`。
+  **消费方按出口在不在探测,不比版本号** —— 照 `location_image_write_command` 那条先例。
+  ⚠️ **那三格命令里的 `--yes` 一个都不能少**:这条命令默认是预演,`resume_command`
+  发出去的第一版少了它(验收当场逮住),而照它原样敲的续跑是一次 `dry_run: true`
+  的空转 —— 退出码 0、水位一格不动,宿主拿它驱动重试会**永远** partial 下去。
+  报一条照着敲会静默什么都不做的命令,比不报这一格还坏。
 
 ### Changed
 
@@ -76,6 +81,30 @@ seq 走,而他的名字的来源之一就是日志自己(`*_id`/`*_name` 配对)
   又是这条链上最私密的一份 —— 放在循环后面,第一片被杀在循环里就留下"转录一条
   没动";放在前面,被杀留下的是"最要紧的已经没了、剩下的是改写"。代价不对称,
   所以顺序不对称。续跑不重做它们,计数从进度键带过来。
+
+### Fixed
+
+- **拒绝路径不许先写世界再拒绝。** `since_seq` 越水位那一句原先排在 `forget_player`
+  **后面**:一条被拒的命令 rc=2、stdout 零字节,而世界已经被改了(在场与联系态清掉、
+  日志多一条 `player_departed`)—— 连敲三次 `max_seq` 54→57。三条校验现在一律排在
+  任何一次写之前。**一次拒绝在调用方那儿的意思就是"什么都没发生"**,而这条路上
+  没有比这更容易被信以为真的一句话。
+- **`phase` 与 `resume_seq` 不再自相矛盾。** 两条硬不变量:`partial` ⇔ 进度键在
+  (真跑被截断时**一定**留下一个,哪怕这一趟什么都不用改);`not_started` ⇒ 这一趟
+  一个字都没写且 `resume_seq` 必然是 `None`。从前"没什么可抹 + `--limit` + 循环期间
+  落了别人的新事件"会报 `{"phase": "not_started", "resume_seq": 55}` —— 而那一趟
+  已经跑过 forget;宿主照 `not_started` 判"还没开始"、照 `resume_seq` 去续,而
+  `--resume` 又回它"没有未完成的":三句话互相打架,没有一句是对的。
+- 导入侧也跳过 `lock` 与进度键(`_is_volatile_key` 两头共用)——
+  手改过的包能装进一把永不过期的死锁,而这支路此前零覆盖。
+
+### Known
+
+- **预演的 `memories_redacted` 可能偏大**(实测预演 3 / 真跑 0)。真跑时
+  `erase_for_event_seqs` 先把由他而起的记忆整行删掉,`redact_summaries` 就数不到
+  它们了;预演不真删,于是同一批被数第二遍。**3.4.0 就有,不是这一轮的回归**,
+  方向是偏大不是偏小(当上界安全),修法另立小单。判"抹干净了"看
+  `conversations` / `messages` / `memories_dropped`。
 
 ⚠️ **这一版仍然没有打 tag、没有发 PyPI**(发布那条路的账见 3.3.0 那一节),
 上线只走镜像。`engine_min` 的地板**一格没抬**:纯加法,已发布的世界一个都不受影响。

@@ -5727,12 +5727,23 @@ class World:
         # 被杀在半路之后低 seq 那半的配对已经是「(已注销)」,重跑的第一遍**收不到
         # 他的名字**,于是尾巴上那些只在自由文本里提过他的句子再也抹不掉,
         # 而且一处不报错。所以续跑绝不重新推断名字。
+        # **拒绝必须零副作用,所以水位校验排在任何一次写之前。**
+        # 这一行曾经排在 `forget_player` **后面**:一条被拒的命令 rc=2、stdout 零字节,
+        # 而世界已经被改了(在场与联系态清掉、日志多一条 `player_departed`)——
+        # 连敲三次 `max_seq` 54→57。一次拒绝在调用方那儿的意思是"什么都没发生",
+        # 这是这条路上最容易被信以为真的一句话。校验读进度键(只读),不写。
+        cursor = int((carried or {}).get("cursor") or 0)
+        if not dry_run and since_seq is not None and int(since_seq) > cursor:
+            raise ValueError(
+                f"since_seq={int(since_seq)} 越过了这趟抹除已完成的水位 {cursor}:"
+                "中间那一段再也不会有人回来抹,而且一处不报错"
+            )
+
         if carried is not None:
             names = {str(n) for n in (carried.get("names") or [])}
             skipped = [str(n) for n in (carried.get("skipped") or [])]
             his_seqs = {int(s) for s in (carried.get("seqs") or [])}
             scanned_through = int(carried.get("scanned_through") or 0)
-            cursor = int(carried.get("cursor") or 0)
             carried_counts = dict(carried.get("counts") or {})
             forget_receipt = carried.get("forget")
             reason = reason or str(carried.get("reason") or "")
@@ -5750,18 +5761,9 @@ class World:
             }
         else:
             names, skipped, his_seqs, scanned_through = self._erase_survey(pid)
-            cursor = 0
             carried_counts = {}
             forget_receipt = self.forget_player(pid, reason=reason, dry_run=dry_run)
 
-        # **`since_seq` 不许越过水位。** 越过去就是在日志里留一个洞:中间那一段
-        # 再也不会有人回来抹(下一趟从更高的水位接着做),而一处不报错。预演不受
-        # 这条管 —— 它一个字节都不写,翻到哪儿都造不出洞。
-        if not dry_run and since_seq is not None and int(since_seq) > cursor:
-            raise ValueError(
-                f"since_seq={int(since_seq)} 越过了这趟抹除已完成的水位 {cursor}:"
-                "中间那一段再也不会有人回来抹,而且一处不报错"
-            )
         # 长名先换:「小明哥」比「小明」先替,免得替完短的把长的拆成两截。
         replacements = {n: _ERASED_NAME for n in sorted(names, key=len, reverse=True)}
 
@@ -5800,15 +5802,18 @@ class World:
         floor = scanned_through if nothing_to_change else 0
         start_at = max(cursor if since_seq is None else int(since_seq), floor)
 
+        def _full_progress_row(at: int) -> dict[str, Any]:
+            return {
+                "names": sorted(names), "skipped": list(skipped),
+                "seqs": sorted(his_seqs), "scanned_through": scanned_through,
+                "cursor": int(at), "counts": _counts(), "forget": forget_receipt,
+                "reason": reason, "started_at": time.time(),
+            }
+
         # **名字先落盘,再动日志的第一个字节。** 顺序反过来就是上面那个死角。
         live = not dry_run and not nothing_to_change
         if live and carried is None:
-            progress.save(pid, {
-                "names": sorted(names), "skipped": list(skipped),
-                "seqs": sorted(his_seqs), "scanned_through": scanned_through,
-                "cursor": 0, "counts": {}, "forget": forget_receipt,
-                "reason": reason, "started_at": time.time(),
-            })
+            progress.save(pid, _full_progress_row(0))
 
         # ── 转录与记忆:**第一趟就做完,而且早于那个长循环** ────────────────────
         # 它们便宜、有界,而且是这条链上最私密的那一份。放在改写循环**后面**的话,
@@ -5865,21 +5870,37 @@ class World:
         # `phase` 说的是**这个人在这个世界里的抹除处在哪一步**,不是"这一趟做了
         # 什么",也不是"他被抹干净了没有"(后者看计数)。所以一次预演也答得出
         # 「上一趟死在半路了」—— 而那正是宿主最需要、今天却问不出来的一格。
-        outstanding = _ERASE_PHASE_PARTIAL if carried is not None else _ERASE_PHASE_NOT_STARTED
-
+        #
+        # ⚠️ **两条硬不变量,宿主按 `phase` 分支时靠它们**:
+        # ① `partial` ⇔ 进度键在(**唯一的判据只有一个**,不是两处各判各的);
+        # ② `not_started` ⇒ 这一趟一个字都没写,而且 `resume_seq` 必然是 `None`。
+        # 从前不是这样:一趟真跑在"没什么可抹 + `--limit` 截断"时会报
+        # `{"phase": "not_started", "resume_seq": 55}` —— 而那一趟已经跑过
+        # `forget_player` 了。宿主照着 `not_started` 判"还没开始",照着 `resume_seq`
+        # 去续,而 `--resume` 又回它"没有未完成的":三句话互相打架,没有一句是对的。
         if dry_run:
-            receipt["phase"] = outstanding
-            if not exhausted:
+            # 预演不写,所以它报的永远是**世界**的状态,和这一趟翻到哪儿无关。
+            receipt["phase"] = (
+                _ERASE_PHASE_PARTIAL if carried is not None else _ERASE_PHASE_NOT_STARTED
+            )
+            if not exhausted and carried is not None:
                 receipt["resume_seq"] = resume_from
             return receipt
 
         if not exhausted:
             # 这一片做完了,日志还没到头:**不写审计事件**(它的意思是"抹完了"),
             # 进度键留着,回执告诉宿主从哪儿接着做。
+            #
+            # **真跑截断了就一定留下一个进度键**,哪怕这一趟什么都不用改
+            # (`nothing_to_change`,于是循环前那次没建)。不建的话 `--resume`
+            # 会回"没有未完成的",而 `phase` 说 `partial` —— 上面那条不变量①
+            # 正是为了不许出现这种两处各判各的。
+            progress.save(pid, (
+                {"cursor": resume_from, "counts": _counts()} if live
+                else _full_progress_row(resume_from)
+            ))
             receipt["resume_seq"] = resume_from
-            receipt["phase"] = _ERASE_PHASE_PARTIAL if live else outstanding
-            if live:
-                progress.save(pid, {"cursor": resume_from, "counts": _counts()})
+            receipt["phase"] = _ERASE_PHASE_PARTIAL
             self._erase_recent_window(pid, replacements)
             return receipt
 

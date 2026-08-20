@@ -5589,7 +5589,13 @@ def contract_payload() -> dict[str, Any]:
             # `null` = 这支引擎的抹除**一趟被杀就回不来**(3.4.0 及更早);
             # 命令名 = 可续,而且续跑不会重新推断名字。宿主的作业调度按这一格
             # 决定敢不敢把抹除切成片、敢不敢在部署时把它杀掉。
-            "resume_command": "player erase --resume",
+            #
+            # ⚠️ **`--yes` 一个都不能少**,理由和 `write_command` 逐字相同:
+            # 这条命令**默认是预演**(和 `world drop` 同款)。少了它,照这一格
+            # 原样敲出来的续跑是一次 `dry_run: true` 的空转 —— 退出码 0、回执好看、
+            # 水位一格不动,而宿主拿它驱动重试就会**永远** partial 下去。
+            # 报一条"照着敲会静默什么都不做"的命令,比不报这一格还坏。
+            "resume_command": "player erase --yes --resume",
             "shard_params": ["since_seq", "limit"],
             "phases": [_ERASE_PHASE_NOT_STARTED, _ERASE_PHASE_PARTIAL, _ERASE_PHASE_DONE],
             # 进度键的形状。**镜像端要跟的是这一格加 `storage.volatile_keys`**:

@@ -109,7 +109,7 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 ```bash
 pip install -e ".[dev]"
 
-python3.13 -m pytest -q               # 1630 passed / 19 skipped(fakeredis,无需真 Redis,约 5–6 分钟);addopts 已屏蔽 ROS 插件
+python3.13 -m pytest -q               # 1706 passed / 19 skipped(3.5.0 实跑;fakeredis,无需真 Redis,约 6 分钟);addopts 已屏蔽 ROS 插件
 
 # 要真 MySQL 的那些(默认 skip)。**`mysql=` 那条路的替身只有真 MySQL** ——
 # store 级三方互验全绿而真 MySQL 上一开就炸,已经吃过一次(`MySQLChatStore.__slots__`)。
@@ -333,7 +333,13 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
 
 ## 当前状态
 
-**`__version__` = 3.3.0(2026-08-19 定版)。world.db 整体退役,世界只住 Redis(+可选 MySQL)。**
+**`__version__` = 3.5.0(2026-08-20 定版)。world.db 整体退役,世界只住 Redis(+可选 MySQL)。**
+定版历史:3.3.0(08-19)→ **3.4.0**(同日第二轮:地点两格图 `map_image`/`scene_image`、
+图的字节闸、`world check`、`agent set-card --portrait-file`、`location set-image`)→
+**3.5.0**(08-20:**法务抹除可续可分片**,见 CHANGELOG)。
+⚠️ **3.4.0 与 3.5.0 都没打 tag、没发 PyPI,上线只走镜像** —— 下面这段"发布管线"的账
+一个字都没销。**这一节此前停在 3.3.0 整整两个版本**:一份说着旧版本号的不变量文档,
+和它自己批评的那把"把上升报成下降的尺子"是同一类东西,所以定版时顺手改它。
 ⚠️ **PyPI 上最新是 1.4.0(tag `v1.4.0`,2026-08-04 发出并成功)** —— 2.0.0 到 3.2.0
 **一版都没上过索引**:v3.0.0 那次 Release(run `31467060331`)死在 `release.yml` 的
 冒烟步骤上,那一步还在用 1.x 的 `World.open('rel.db', force_mock_llm=True)`,

@@ -377,6 +377,12 @@ def test_cli_对不存在的世界一律拒绝(tmp_path):
 
 PID = "ghost-shard"
 
+from anima_world.api import (  # noqa: E402 —— 挨着用到它们的那一节放
+    _ERASE_PHASE_DONE as _DONE,
+    _ERASE_PHASE_NOT_STARTED as _NOT_STARTED,
+    _ERASE_PHASE_PARTIAL as _PARTIAL,
+)
+
 
 def _bare_event(world, payload: dict) -> int:
     """直接往日志里放一条,payload 由测试完全控制。"""
@@ -452,6 +458,115 @@ def test_since_seq_不许越过水位(world):
         world.erase_player(PID, since_seq=paired + 5)
     # 预演造不出洞,所以它不受这条管。
     world.erase_player(PID, dry_run=True, since_seq=paired + 5)
+
+
+def _world_fingerprint(world) -> tuple:
+    """一个世界此刻的样子 —— 拒绝路径跑前跑后必须逐字节相同。"""
+    log = world.scheduler.event_log
+    return (
+        log.max_seq(),
+        _all_payload_text(world),
+        sorted(world.presence_store.ids()),
+        json.dumps(sorted(
+            (r.get("player_id"), r.get("player_name"))
+            for r in (world.scheduler.contact_store.all() or [])
+        ), ensure_ascii=False),
+    )
+
+
+def test_被拒的那一趟一个字都不许写(world):
+    """**拒绝必须零副作用。**
+
+    这一条钉的是一个真发生过的坏法:水位校验排在 `forget_player` **后面**,于是
+    一条被拒的命令 rc=2、stdout 零字节,而世界已经被改了(在场与联系态清掉、
+    日志多一条 `player_departed`)—— 连敲三次 `max_seq` 54→57。一次拒绝在调用方
+    那儿的意思就是"什么都没发生",而这条路上没有比这更容易被信以为真的一句话。
+    """
+    _dead_corner(world)
+    before = _world_fingerprint(world)
+
+    for _ in range(3):
+        with pytest.raises(ValueError, match="水位"):
+            world.erase_player(PID, since_seq=9999)
+    assert _world_fingerprint(world) == before, "被拒的那一趟动了世界"
+
+    # 另两条校验同一水位:它们本来就在任何写之前,一起钉住免得将来被挪下去。
+    for kwargs in ({"limit": 0}, {"since_seq": -1}):
+        with pytest.raises(ValueError):
+            world.erase_player(PID, **kwargs)
+    assert _world_fingerprint(world) == before
+    assert world.erasure_progress.load(PID) is None, "被拒的那一趟建了进度键"
+
+
+def test_phase与resume_seq不许自相矛盾(world):
+    """`not_started` ⇒ 一个字都没写,而且不带 `resume_seq`;`partial` ⇔ 进度键在。
+
+    从前:「没什么可抹 + `--limit` + 循环期间落了别人的新事件」会回
+    `{"phase": "not_started", "resume_seq": 55}` —— 而那一趟已经跑过 `forget_player`。
+    宿主照 `not_started` 判"还没开始"、照 `resume_seq` 去续,而 `--resume` 又回它
+    "没有未完成的":三句话互相打架,没有一句是对的。而 platform 的抹除门正要按
+    这一格分「被墙挡在门外 vs 抹到一半」。
+    """
+    # 复现那个窗口:一个没在这个世界里留下任何痕迹的 id(收名字收不到、涉他事件
+    # 一条都没有 → `nothing_to_change`),而**别的进程在两遍之间落了新事件**。
+    # 那个"之间"就是 `forget_player` 跑的那一刻,所以拿它当注入点最贴真相。
+    ghost = "never-here"
+    real_forget = world.forget_player
+
+    def forget_then_someone_else_writes(*args, **kwargs):
+        receipt = real_forget(*args, **kwargs)
+        for _ in range(3):
+            _bare_event(world, {"kind": "narration", "text": "别人的事"})
+        return receipt
+
+    world.forget_player = forget_then_someone_else_writes
+    try:
+        receipt = world.erase_player(ghost, limit=1)
+    finally:
+        del world.forget_player
+
+    assert receipt["phase"] != _NOT_STARTED, "跑过 forget 了还报没开始"
+    assert receipt["phase"] == _PARTIAL and receipt["resume_seq"] is not None
+    assert world.erasure_progress.load(ghost) is not None, \
+        "报了 partial 却没有进度键 —— --resume 会回「没有未完成的」"
+    # 不变量①的另一半:报了 partial,`--resume` 就必须真的接得上。
+    done = world.erase_player(ghost, resume=True)
+    assert done["phase"] == _DONE and done["seq"] is not None
+    assert done["resume_seq"] is None
+
+    # `not_started` 只剩一条路能走到:`--resume` 空跑。它一个字都不写。
+    idle = world.erase_player("nobody-at-all", resume=True)
+    assert idle["phase"] == _NOT_STARTED
+    assert idle["resume_seq"] is None
+    assert idle["forget"] is None, "空跑跑了 forget"
+
+
+def test_导入侧也跳过带TTL的键(tmp_path):
+    """`lock` 与进度键在**装包**那一侧也要拦下 —— 手改过的包会带着它们。
+
+    导出早就跳过 `lock`,而导入没有:一份手改过的包能装进一把**永不过期的死锁**,
+    新世界第一次 `act()` 就撞上它;进度键则会让那边的下一趟抹除从一个跟它毫无
+    关系的水位接着做。两条都不报错。
+    """
+    import redis as redis_mod
+
+    from anima_world.world_package import install_world_records
+
+    client = redis_for(tmp_path / "target.db")
+    assert isinstance(client, redis_mod.Redis) or client is not None
+    install_world_records(
+        [
+            {"kind": "redis", "key": "lock", "type": "string", "value": "someone-else"},
+            {"kind": "redis", "key": "erasure:u1", "type": "hash",
+             "value": {"names": '["阿檀"]', "cursor": "7"}},
+            {"kind": "redis", "key": "clock", "type": "string", "value": "42"},
+        ],
+        redis=client, world_id="target",
+    )
+    keys = {k for k in client.scan_iter("anima:target:*")}
+    assert "anima:target:clock" in keys, "正常的键被误伤了"
+    assert "anima:target:lock" not in keys, "装进了一把永不过期的死锁"
+    assert "anima:target:erasure:u1" not in keys, "装进了别人的一份待抹名单"
 
 
 def test_resume_没有未完成的就什么都不做(world):
