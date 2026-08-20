@@ -577,6 +577,34 @@ def test_加不平就说出来_不许压成一行绿勾(capsys):
     assert "加不平" not in out and "1 件还在做" in out
 
 
+def test_收不了尾也不许挂绿勾(capsys):
+    """**同一条纪律的第二处 —— 上一轮只治了一处。**
+
+    `gone > 0` 而 `dropped == 0` 时走的是 `elif not dropped:` 那一支,印**绿勾**,
+    而同一行里明写着「N 件收不了尾(东西没了,代价一样不退)」。上一轮为
+    `max(0, …)` 写下「一行绿勾说出不可能的话,比一行红字更贵」的那句话就在这个
+    函数自己的 docstring 里,而隔壁这一支的绿勾没人动:**一条只在一个地方被执行
+    的纪律,等于没有这条纪律。**
+
+    **只改脸色,不改数**(3.6.0 第六轮 2026-08-20):`gone` 算不算"这个世界需要
+    处理的一项"是产品/运维的判断(看板 D25),所以退出码与项数一个字不动 ——
+    改了会让别人的 CI 无声地变色。
+    """
+    from anima_world.__main__ import _report_engagements_kept
+
+    # 加得平、没人被带走,只是有 1 件收不了尾。**退出码照旧 0,脸色不许是绿的。**
+    assert _report_engagements_kept(3, [], finished=1, gone=1) == 0
+    out = capsys.readouterr().out
+    assert "1 件收不了尾" in out
+    assert onboarding.OK not in out, f"一行里带着「收不了尾」不许挂绿勾:{out!r}"
+    assert onboarding.WARN in out, out
+
+    # 对照组:一件都没丢的世界照旧是绿的 —— 别把这一格吵成黄的。
+    assert _report_engagements_kept(3, [], finished=1) == 0
+    out = capsys.readouterr().out
+    assert onboarding.OK in out and onboarding.WARN not in out, out
+
+
 # ── 那句话是给玩家读的 ────────────────────────────────────────────────────────
 
 

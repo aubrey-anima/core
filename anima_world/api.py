@@ -134,6 +134,28 @@ _INVITE_GONE_UNKNOWN = "这份邀请已经不在了 —— 它有了结局,只�
 _PLAYER_FALLBACK_DISPLAY = "这位玩家"
 
 
+def _where_unknown_line(name: str, here_name: str) -> str:
+    """「世界这会儿不知道你在哪」那一句 —— **两扇门共用的那一份**。
+
+    `World._invite_absence`(他按「好」那扇)和 `World._colocation_error`
+    (他直接动手那扇)都会走到这一支,而同一个玩家两扇门都撞得上。
+
+    ⚠️ **这个函数存在的理由是"逐字同一句"曾经被人手抄着维持,然后塌了**
+    (2026-08-20 第六轮):第五轮在 `_colocation_error` 头上写下「措辞现在和
+    `_invite_absence` 那一支逐字同一句」,而那时它俩已经不一样了 —— 一处拼的是
+    人话地名、一处拼的是裸 id(`苏晚夏在咖啡店` vs `苏晚夏在 cafe`),还差一个
+    空格。**抄两遍来维持"逐字相同",正是塌掉的那个机制**;句子收在这里之后,
+    "两扇门说同一句话"这件事由调用点保证,不再由谁读没读全那段注释保证。
+
+    `here_name` 收的是**过了 `Scheduler.place_name()` 的人话地名**,不是 id ——
+    拼给人看的句子里出现地点变量,先问一句「过 `place_name()` 了吗」。
+    """
+    return (
+        f"世界这会儿不知道你在哪 —— 你可能已经离开这个世界了,"
+        f"也可能是这一程还没把落脚处告诉世界。{name}在{here_name}"
+    )
+
+
 class _PlayerRow(MutableMapping):
     """一个在场玩家的那一行 —— **写穿到 Redis**。
 
@@ -5060,9 +5082,7 @@ class World:
                     f"世界这会儿不知道{name}在哪 —— 不是你没到场。"
                     f"等她落了脚再问一次")
         if not where:
-            return ("unknown",
-                    f"世界这会儿不知道你在哪 —— 你可能已经离开这个世界了,"
-                    f"也可能是这一程还没把落脚处告诉世界。{name}在{here_name}")
+            return ("unknown", _where_unknown_line(name, here_name))
         asked = str(row.get("loc") or "")
         if not asked:
             return ("unknown",
@@ -5425,8 +5445,17 @@ class World:
         改掉,2026-08-20):那一支至少有三种来路 —— 他 `player_leave` 过、在场记录
         过了 `_PLAYER_TTL_SECONDS`(15 分钟)没续上、宿主确实没落过位置。**前两种
         里宿主刚刚才调过**,而那句话对着一个接得好好的宿主说它没接(站点 2026-08-13
-        前后已接上)。措辞现在和 `_invite_absence` 那一支**逐字同一句**:同一件事在
-        两扇门上不该有两种说法,而这两扇门玩家都会撞上。
+        前后已接上)。那一支的句子和 `_invite_absence` 收在**同一个函数**里
+        (`_where_unknown_line`):同一件事在两扇门上不该有两种说法,而这两扇门玩家
+        都会撞上。
+
+        ⚠️ **第五轮在这儿写下的"逐字同一句"是假的,而且假在两处**(第六轮
+        2026-08-20 修):裸 id vs 人话地名(`在 cafe` / `在咖啡店`),外加一个空格。
+        **这个病治过一次** —— CHANGELOG 3.6.0 有一条专门的
+        `### Fixed —— 她读到的地名一半是人话、一半是 id`,而它在这个函数里原样长
+        回来了,因为改这个函数的人没读全。它不报错、测试也不红,只是出戏,所以专挑
+        「改了这个函数但没读全」的轮次复发。**长期判据:凡是拼给玩家/角色看的句子
+        里出现地点变量,一律问一句「过 `scheduler.place_name()` 了吗」。**
         """
         if not self.config_get("presence.enforce_colocation", False):
             return ""
@@ -5437,27 +5466,26 @@ class World:
         if not spec.requires_colocation:
             return ""
         if not player_id:
-            return f"{verb!r} 要当面才办得到,而这次调用没说是替哪个玩家"
+            return f"「{verb}」要当面才办得到,而这次调用没说是替哪个玩家"
         if self._tool_runtime.face_to_face(agent_id, player_id):
             return ""
         here = self._tool_runtime.agent_location(agent_id)
         where = self._tool_runtime.player_location(player_id)
         name = self._tool_runtime.agent_names().get(agent_id, agent_id)
+        # **地名一律过 `place_name()`**:玩家读到的是「咖啡店」,不是 `cafe`。
+        here_name = self.scheduler.place_name(here) or "别处"
+        where_name = self.scheduler.place_name(where) or "别处"
         if not where:
-            # **不指认宿主**(`_invite_absence` 里那一支逐字同一句):这里走到的
-            # 三种来路里,有两种宿主刚刚才调过 `player_move`。
-            return (
-                f"{verb!r} 要当面才办得到,而世界这会儿不知道你在哪 —— "
-                f"你可能已经离开这个世界了,也可能是这一程还没把落脚处告诉世界。"
-                f"{name}在 {here or '别处'}"
-            )
+            # **不指认宿主**(和 `_invite_absence` 那一支共用 `_where_unknown_line`):
+            # 这里走到的三种来路里,有两种宿主刚刚才调过 `player_move`。
+            return f"「{verb}」要当面才办得到,而" + _where_unknown_line(name, here_name)
         if not here or here == where:
             # 两处地名一样却不是面对面 —— 只可能是她在赶路(`face_to_face` 与
             # `_where_is` 同一条:在途即不在任何地方)。照 `agent_location` 那份
             # 直说会写出"你在 cafe,她在 cafe —— 这件事得当面",一句读起来是谎的话。
-            return f"{verb!r} 要当面才办得到,而{name}这会儿在路上,不在任何地方"
+            return f"「{verb}」要当面才办得到,而{name}这会儿在路上,不在任何地方"
         return (
-            f"{verb!r} 要当面才办得到 —— 你在 {where},{name}在 {here}。"
+            f"「{verb}」要当面才办得到 —— 你在{where_name},{name}在{here_name}。"
             f"隔着这么远,你只能跟她说话"
         )
 

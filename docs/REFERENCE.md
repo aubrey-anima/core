@@ -506,15 +506,18 @@ judge_hearsay` 恒为 `None`)。理由和 `relabel` 同一条,而且更硬:好�
   够,于是永远不会有人拦住他 —— 这是三种代价里唯一没有拦路人的那种。格式化走
   `Scheduler.human_span()`,和拒绝里那句「还要多久」**共用一个函数**(§2.9.6.3),
   `tick` 一个字不出现。
-  ⚠️ **空菜单要说出原因**(`blocked`):`unknown_player_location`(宿主没调过
-  `player_move` —— 玩家做什么都改不了)/ `in_transit` / `no_ontology`。空表加一句
-  沉默读起来像"这儿什么也没有",而那是三件完全不同的事(和 `presence` 的 `known`
-  同一课)。**枚举旁边永远配一句人话**(`blocked_text`,3.3.0 起):`blocked` 是给
-  代码分支用的,`blocked_text` 是直接印在屏幕上的那句(「你还没进这个世界」/
-  「你在路上」/「这个世界还没声明任何东西」)—— 两格同时给,是因为只给枚举时每个
-  宿主都要自己编一遍措辞,编出来的那份和引擎改口之后就对不上了。⚠️ 读的人**别只
-  读 `own` 判断有没有东西**:被 `blocked` 挡住时 `own` 本来就是空的,而原因就写在
-  旁边那两格里。CLI 出口是 `anima-world player options`。
+  ⚠️ **空菜单要说出原因**(`blocked`):`unknown_player_location`(世界这会儿不知道
+  他在哪 —— 他 `player_leave` 过 / 在场记录过了 15 分钟没续上 / 宿主确实没落过
+  `player_move`,三种)/ `in_transit` / `no_ontology`。空表加一句沉默读起来像
+  "这儿什么也没有",而那是三件完全不同的事(和 `presence` 的 `known` 同一课)。
+  **枚举旁边永远配一句人话**(`blocked_text`,3.3.0 起):`blocked` 是给代码分支用的,
+  `blocked_text` 是**直接印在屏幕上**的那句 —— 照 `World._BLOCKED_WORDS` 印,
+  取法 `git grep -n -A 4 '_BLOCKED_WORDS = {' anima_world/api.py`(空货架那份是
+  `_SHOP_WORDS`,同一条纪律)。⚠️ **这里有意不抄原文**:2026-08-20 一次对账发现
+  这三句在文档里全是错的 —— 抄一遍就是再造一份会烂的副本,而且烂的时候一处都不报错。
+  两格同时给,是因为只给枚举时每个宿主都要自己编一遍措辞,编出来的那份和引擎改口
+  之后就对不上了。⚠️ 读的人**别只读 `own` 判断有没有东西**:被 `blocked` 挡住时
+  `own` 本来就是空的,而原因就写在旁边那两格里。CLI 出口是 `anima-world player options`。
 - **人走路和她走路花一样的时间。** `World.player_walk(player_id, location)` 与
   `player_move` 分工明确:后者是宿主**把他放在这儿**(进世界、换场景),瞬时;前者是
   **他自己走**,共用 `Scheduler._travel_minutes`,发同一种 `travel` 事件,途中干不了

@@ -166,21 +166,55 @@ def test_act_的回执也要说得出是三种里的哪一种(world):
     至少有三种来路(他下线了 / 在场记录过了 15 分钟 / 宿主确实没落过位置),
     前两种里宿主刚刚才调过。测试钉住一句假话,那句假话就再也改不动了。
     现在钉的是**这句话不许指认宿主**,加上它和邀请门那半边说的是同一句。
+
+    ⚠️ **比整句,不比子串**(3.6.0 第六轮 2026-08-20 换的第二次)。上一版这里写的
+    是 `"你在 yard" in result["error"]` —— 而 `yard` 是**裸 id**:玩家在这扇门上
+    读到「你在 yard」,在隔壁那扇邀请门上读到的却是「你在后院」。只认子串的断言
+    对两种写法**同时成立**,于是这条治过一次的病(CHANGELOG 3.6.0
+    `### Fixed —— 她读到的地名一半是人话、一半是 id`)在这个函数里原样长回来时,
+    测试一条都没红。
     """
     world.config_set("presence.enforce_colocation", True)
     world.config_set("chat.tools.enabled", True)
     world.player_move("p1", "yard")
     result = world.act("夏", "reach_out", {"player_id": "p1"},
                        player_id="p1", surface="autonomy")
-    assert result["ok"] is False and "你在 yard" in result["error"]
+    assert result["ok"] is False
+    assert result["error"] == (
+        "「reach_out」要当面才办得到 —— 你在后院,苏晚夏在咖啡店。"
+        "隔着这么远,你只能跟她说话"
+    ), result["error"]
 
     world.players["p1"].pop("location")
     result = world.act("夏", "reach_out", {"player_id": "p1"},
                        player_id="p1", surface="autonomy")
-    assert "世界这会儿不知道你在哪" in result["error"]
+    assert result["error"] == (
+        "「reach_out」要当面才办得到,而世界这会儿不知道你在哪 —— "
+        "你可能已经离开这个世界了,也可能是这一程还没把落脚处告诉世界。苏晚夏在咖啡店"
+    ), result["error"]
     assert "player_move" not in result["error"], result["error"]
-    # 两扇门一句话:`api._invite_absence` 那一支逐字同样的措辞。
-    assert "你可能已经离开这个世界了" in result["error"]
+
+
+def test_两扇门上同一件事必须是同一句话(world):
+    """「世界不知道你在哪」在**两扇门**上都会撞见:他直接动手那扇
+    (`World._colocation_error`)和他按「好」那扇(`World._invite_absence`)。
+
+    守的不是措辞本身,是**"逐字同一句"由谁保证**。第五轮在 `_colocation_error`
+    头上写下「和 `_invite_absence` 那一支逐字同一句」,而那时它俩已经不一样了
+    (裸 id vs 人话地名,外加一个空格)—— **靠人手抄两遍来维持"逐字相同",正是
+    那一轮塌掉的机制**。现在句子收在 `api._where_unknown_line()` 里,这条守住
+    两扇门都还在调它。
+    """
+    world.config_set("presence.enforce_colocation", True)
+    world.config_set("chat.tools.enabled", True)
+    # p1 从没被 `player_move` 过 —— 两扇门都走"世界不知道你在哪"那一支。
+    result = world.act("夏", "reach_out", {"player_id": "p1"},
+                       player_id="p1", surface="autonomy")
+    absent, refusal = world._invite_absence({"agent_id": "夏", "loc": "cafe"}, "p1")
+    assert absent == "unknown"
+    assert result["error"] == "「reach_out」要当面才办得到,而" + refusal, (
+        result["error"], refusal)
+    assert "咖啡店" in refusal and "cafe" not in refusal, refusal
 
 
 def test_一份打算里排不进要当面的动词(world):

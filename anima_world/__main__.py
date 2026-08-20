@@ -885,7 +885,7 @@ def _edit_location_media_warnings(authored: dict[str, Any] | None) -> list[str]:
     return [
         f"这是一次编辑(--edit),而其中 {len(named)} 个地点写了图"
         f"({'、'.join(named[:5])}{'…' if len(named) > 5 else ''})—— "
-        "**目标世界里已经有的那些地点,这几格装不进去**:作者层合并按地点 id 整条"
+        "「目标世界里已经有的那些地点,这几格装不进去」:作者层合并按地点 id 整条"
         "跳过已有地点(整行合并会把这个世界跑出来的名字和描述倒带回创世那天)。"
         "只有目标世界里还没有的地点才会带着图落地;给一个已经在册的地点补图走 "
         "`anima-world location set-image --location <id> --map-image <URI>`"
@@ -1719,9 +1719,9 @@ def build_serve_scheduler(
         # 只说"不覆盖",他又会以为改一条写错的规律得把世界抹掉重建(而那要连玩家
         # 的进度一起抹)。
         logger.info(
-            "--world-file %s 装进了一个**已有**的世界 %r(%d 条事件)—— 这是一次编辑:"
-            "同名的**声明**(kinds / rules)照文件里这份重写,"
-            "而**状态**(名册、量、钱、位置、记忆)只填缺不覆盖 —— "
+            "--world-file %s 装进了一个「已有」的世界 %r(%d 条事件)—— 这是一次编辑:"
+            "同名的「声明」(kinds / rules)照文件里这份重写,"
+            "而「状态」(名册、量、钱、位置、记忆)只填缺不覆盖 —— "
             "这个世界跑出来的现在不会被倒带回创世那一刻。",
             world_file, world_id, len(persisted),
         )
@@ -3919,7 +3919,8 @@ def run_presence(args: argparse.Namespace) -> int:
     # 糊成一坨 —— 只有 `p1`/`cli` 那种短名字才看着是对的。
     pad = max([20] + [len(r["player_id"]) + 2 for r in report["players"]])
     for row in report["players"]:
-        where = row["location"] or "✗ 世界不知道(没调过 player_move,或者他已经不在场)"
+        # 同一条纪律的第二处:**三种来路,别只说宿主那一种**(下面那段说明逐字同理)。
+        where = row["location"] or "✗ 世界不知道(他走了 / 在场记录过期 / 宿主没落过 player_move)"
         face = "、".join(row["face_to_face"]) or "没有人"
         print(f"  {row['player_id']:<{pad}}{where}")
         print(f"  {'':<{pad}}此刻面对面:{face}"
@@ -3929,16 +3930,21 @@ def run_presence(args: argparse.Namespace) -> int:
     # 进程里";现在在场落 Redis 带 TTL,于是要说的是**为什么会没位置** ——
     # 没人调过 `player_move`,或者他很久没动静、TTL 过了。不说的话,读的人会
     # 照着一个假警报去改宿主。
+    # ⚠️ **是三种,不是两种**(3.6.0 第六轮 2026-08-20 补上第三种):`api.py` 那两扇
+    # 门与 `docs/REFERENCE.md` 的 `player_where_unknown` 第五轮就改成三种了,只剩
+    # 这一处停在两种上。漏掉的那种是 `player_leave` —— 他自己走了,而这一句会让
+    # 读的人跑去查一个接得好好的宿主。
     print("说明:在场与位置住在 Redis 上(`anima:{world_id}:player:*`),带过期时间 ——"
-          "跨进程、扛重启。这里没有位置只有两种可能:宿主没调过 player_move,"
-          "或者他很久没动静已经过期。名单是从落库的联系态补齐的。")
+          "跨进程、扛重启。这里没有位置有三种可能:① 他 player_leave 过,自己走了;"
+          "② 他很久没动静,在场记录过了 15 分钟没续上;③ 宿主确实没落过 player_move。"
+          "前两种里宿主刚刚才调过。名单是从落库的联系态补齐的。")
     if report["unplaced"]:
         # **不许只报数字。** 这一句是这道命令唯一真正的产出:读的人要知道下一步
         # 该改哪儿,而不是知道有几个玩家没位置。
         tail = (
             "这道闸正在拒绝调用 —— 确认跑世界的那个进程每轮都调 player_move。"
             if report["enforced"] else
-            "开 presence.enforce_colocation 之前,先让**跑世界的那个进程**每轮调一次 "
+            "开 presence.enforce_colocation 之前,先让「跑世界的那个进程」每轮调一次 "
             "player_move,否则一开就是 give / 一起做事全线拒绝。"
         )
         print(f"\n⚠ {report['unplaced']} 个玩家在世界里没有位置。{tail}")
@@ -5842,6 +5848,16 @@ def _report_engagements_kept(
     不可能的话。**一行绿勾说出不可能的话,比一行红字更贵 —— 看的人会信它。**
     加不平只改脸色和多说一句,**不进退出码**:退出码是"这个世界需要处理几项",
     而算不平是引擎的 bug 不是这个世界的毛病,混进去会让人去改自己的世界。
+
+    ⚠️ **隔壁那一支的绿勾也说过不可能的话**(3.6.0 第六轮 2026-08-20 补):
+    `gone > 0` 而 `dropped == 0` 时走的是 `elif not dropped:`,印**绿勾**,而同一行
+    里明写着「N 件收不了尾(东西没了,代价一样不退)」。上一轮写下上面那句
+    「一行绿勾说出不可能的话,比一行红字更贵」时,只治了 `max(0, …)` 那一支 ——
+    **一条只在一个地方被执行的纪律,等于没有这条纪律。**
+
+    **只改脸色,不改数**:`gone` 非零 → 黄 WARN,`return 0` 一个字不动。理由和
+    上面那条同构但不同源 —— `gone` 算不算"这个世界需要处理的一项"是产品/运维的
+    判断(看板 D25),而**颜色不改会让人信一行假话,退出码改了会让别人的 CI 变色**。
     """
     if not started:
         print(f"  {onboarding.dim('这个世界还没有起过要花时间的长过程(duration)')}")
@@ -5864,7 +5880,12 @@ def _report_engagements_kept(
         if not dropped:
             return 0
     elif not dropped:
-        print(f"  {onboarding.green(onboarding.OK)} {line}")
+        # `gone` 非零时这一行里带着「N 件收不了尾」—— 绿勾配这句话是不可能的组合。
+        # **只换脸色,数与退出码一个字不动**(见 docstring 末段)。
+        if gone:
+            print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+        else:
+            print(f"  {onboarding.green(onboarding.OK)} {line}")
         return 0
     else:
         print(f"  {onboarding.yellow(onboarding.WARN)} {line}")

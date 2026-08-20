@@ -892,8 +892,23 @@ def test_闸和面对面必须逐位同构(world):
     脆:`agent_location()` 对在途的人仍报着**出发前那个地名**,先看地名的话
     "两处相同"会得出一个和 `face_to_face()` 相反的结论。所以这里按**状态 ×
     (她, 他)** 铺开来对,不是挑一个样本点。
+
+    ⚠️ **这里从前有一句永远不会失败的断言**(3.6.0 第六轮 2026-08-20 认账):
+    第五轮写下的 `assert gate == "" or gate in COLOCATION_GATES` 摆在
+    `assert gate == expected` 的下一行,而 `expected` 已经把值逐字钉死了 ——
+    上一句成立时下一句必然成立,它一年也红不了一次。**认账 + 补实,不悄悄删掉**:
+    它本来想守的是"整族闸都被演过",那件事真守得住的形状是把这一趟见过的闸
+    攒起来,收尾时和 `COLOCATION_GATES` 的全集对一次(见函数末尾)。
+    这么一改,往族里加第五条闸而不写用例,**这里当场红**。
     """
     runtime = world._tool_runtime
+    seen: set[str] = set()
+
+    def gate_of(agent_id, player_id="p1"):
+        """问一次闸,顺手记一笔 —— 末尾拿 `seen` 对整族的全集。"""
+        gate = runtime._colocation_gate(agent_id, player_id)
+        seen.add(gate)
+        return gate
 
     def blackboard(agent_id):
         return world.scheduler.agents[agent_id].agent.blackboard
@@ -909,29 +924,34 @@ def test_闸和面对面必须逐位同构(world):
     for name, arrange, expected in states():
         arrange()
         for agent_id in ("夏", "遥"):
-            gate = world._tool_runtime._colocation_gate(agent_id, "p1")
+            gate = gate_of(agent_id)
             assert gate == expected, f"{name}:{agent_id} 的闸是 {gate!r}"
             assert runtime.face_to_face(agent_id, "p1") is (gate == ""), name
-            assert gate == "" or gate in together.COLOCATION_GATES, gate
 
     # 她在赶路 —— `agent_location()` 这时报的还是「cafe」,和他一模一样。
     runtime.move_agent("夏", "yard")
     assert "夏" in world.scheduler._transit
     assert runtime.agent_location("夏") == "cafe", "前提:在途的人还挂着出发前那个地名"
-    assert runtime._colocation_gate("夏", "p1") == "inviter_in_transit"
+    assert gate_of("夏") == "inviter_in_transit"
     assert runtime.face_to_face("夏", "p1") is False
-    assert runtime._colocation_gate("遥", "p1") == "", "对照组:没赶路的那个照旧当得成面"
+    assert gate_of("遥") == "", "对照组:没赶路的那个照旧当得成面"
 
     # 世界说不上来**她**在哪(黑板还没写过、名册上也没有地名)。
     blackboard("遥").write("loc", "")
     world.scheduler.agents["遥"].agent.location = ""
-    assert runtime._colocation_gate("遥", "p1") == "inviter_where_unknown"
+    assert gate_of("遥") == "inviter_where_unknown"
     assert runtime.face_to_face("遥", "p1") is False
 
     # 世界从没见过这个人:两头都说不上来,而**先答的是她那一头**。
-    assert runtime._colocation_gate("柔", "ghost") == "player_where_unknown"
+    assert gate_of("柔", "ghost") == "player_where_unknown"
     assert runtime.face_to_face("柔", "ghost") is False
-    assert runtime._colocation_gate("遥", "ghost") == "inviter_where_unknown"
+    assert gate_of("遥", "ghost") == "inviter_where_unknown"
+
+    # 收尾:整族一条都不许没演过(见 docstring 末段)。`{""}` 是"当得成面"那一格,
+    # 它不属于这一族 —— 减掉它剩下的必须**正好**是 `COLOCATION_GATES`,多一条少
+    # 一条都红:少 = 新闸没人演,多 = 演出了一个不在族里的闸名(下游按族分支,
+    # 那种闸会静默漏过 `answer_invitation` 的点名那一支)。
+    assert seen - {""} == set(together.COLOCATION_GATES), sorted(seen)
 
 
 def test_他按好时她在赶路_答话那扇门也得点她的名(world):

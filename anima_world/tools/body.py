@@ -70,7 +70,10 @@ def _do(ctx: ToolContext, kind: str, params: dict[str, Any]) -> ToolResult:
     # 这一条**三个面共用**(CHAT / BODY / PLAYER),所以主语不能写「她」——
     # PLAYER 面上它是玩家自己那个按钮的说明,一句「途中她在路上」说的是别人。
     # 同一份清单两个读者那条的又一处,只是这回漏在文案上。
-    description="走到某个地方去。**要花时间**,途中人在路上(不是瞬移)",
+    # ⚠️ **强调不许写成 `**…**`**(3.6.0 第六轮 2026-08-20 改):这一条上了 PLAYER
+    # 面,那四个星号会**原样印在玩家的按钮说明上**;她的提示词里也一样是噪音。
+    # 记号统一用「」(`Scheduler._named` 同一个:终端、提示词、玩家屏幕上都长得一样)。
+    description="走到某个地方去。「要花时间」,途中人在路上(不是瞬移)",
     params={"location": {"type": "string", "description": "去哪儿", "required": True}},
     surfaces=(CHAT, BODY, PLAYER),
 )
@@ -117,7 +120,9 @@ def work(ctx: ToolContext, params: dict) -> ToolResult:
     id="eat",
     writes=("events:agent_action", "events:item_consume"),
     kind="eat",
-    description="吃东西。**付钱是副作用**:没货没钱就降级成吃随身干粮,不会卡住",
+    # 只在 BODY 面上(不上玩家屏幕),但一样不写星号 —— 它进的是她的提示词,
+    # 而 `**` 在提示词里同样是噪音,她还得照着它行动。
+    description="吃东西。「付钱是副作用」:没货没钱就降级成吃随身干粮,不会卡住",
     params={},
     surfaces=(BODY,),
 )

@@ -260,28 +260,45 @@ def test_屏幕上不许出现裸markdown星号():
 
     强调改用「」(和 `Scheduler._named` 同一个记号:它在终端、在提示词、在玩家
     屏幕上都长得一样)。
+
+    ⚠️ **上一句话它自己违反过一次**(3.6.0 第六轮 2026-08-20 修):写下"一条只在
+    一个地方被执行的纪律等于没有这条纪律"的**同一个 commit** 里,这条测试写死了
+    `__main__.py` 一个文件。扫描面扩到 `anima_world/` 整棵树,当场逮出
+    `tools/body.py` 两条 —— 而它们用的正是这里要扫的那个 `description=` 关键字,
+    只是换了个文件。`walk` 那条尤其贵:`surfaces=(CHAT, BODY, PLAYER)`,
+    `**要花时间**` 会**原样印在玩家的按钮说明上**(`World.player_tools()`)。
+
+    ⚠️ **它看不见什么** —— 别把它读成"屏幕上再也没有星号了"。字符串先落进一个
+    变量、再拼进 `print()`(或者走 `logger`、或者攒进一个 `warnings` 列表由别处印)
+    的那几条路,这个扫描一条都过不去。同一轮手工查出三条这样的,已经改掉:
+    `presence` 那句 `tail`、`--edit` 的图警告(`_edit_location_media_warnings`)、
+    装载那条 `logger.info`。要拦住它们得做数据流分析,而**说清楚它守不住什么,
+    比假装它守得住便宜** —— 上一版正是死在"读的人以为它守住了全部"。
     """
     import ast
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "anima_world" / "__main__.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
-    bad: list[tuple[int, str]] = []
+    root = pathlib.Path(__file__).resolve().parents[1] / "anima_world"
+    bad: list[tuple[str, int, str]] = []
 
-    def scan(node):
-        for n in ast.walk(node):
-            if isinstance(n, ast.Constant) and isinstance(n.value, str) and "**" in n.value:
-                bad.append((n.lineno, n.value[:60]))
+    for src in sorted(root.rglob("*.py")):
+        rel = src.relative_to(root.parent).as_posix()
+        tree = ast.parse(src.read_text(encoding="utf-8"))
 
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        if name == "print":
-            for arg in node.args:
-                scan(arg)
-        for kw in node.keywords:
-            if kw.arg in {"help", "description", "epilog"}:
-                scan(kw.value)
+        def scan(node, rel=rel):
+            for n in ast.walk(node):
+                if isinstance(n, ast.Constant) and isinstance(n.value, str) and "**" in n.value:
+                    bad.append((rel, n.lineno, n.value[:60]))
 
-    assert not bad, f"这些字会原样印到终端上:{bad}"
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "print":
+                for arg in node.args:
+                    scan(arg)
+            for kw in node.keywords:
+                if kw.arg in {"help", "description", "epilog"}:
+                    scan(kw.value)
+
+    assert not bad, f"这些字会原样印到终端 / 玩家屏幕上:{bad}"
