@@ -22,7 +22,55 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 `db.py` enforces it again at runtime: mounting an incompatible world file is refused on the
 spot rather than silently written to.
 
-## [Unreleased]
+⚠️ **A released heading here does not mean a released artifact.** 3.4.0 through 3.6.0 were
+never tagged and never went to PyPI — they ship as container images only, so the newest
+thing on the index is still **1.4.0** (Apache-2.0, 2026-08-04). A section under a version
+heading means "this version's engine, as built from this repo"; whether that build ever
+left the building is a separate question, answered in `CLAUDE.md` §当前状态.
+There is deliberately **no `[Unreleased]` section**: hosts read this file to answer "is the
+thing I'm running described here?", and everything under a version heading is in the
+running image the day it's built. A change parked under `[Unreleased]` is a change that
+already shipped while telling the reader it hadn't — see 第五轮 below, which is where that
+particular lie got caught.
+
+## [3.6.0] —— 她点你的名时,你得自己答 (2026-08-20)
+
+### 第五轮:上一轮自己也犯了它要治的病
+
+第四轮的题目是「说出来的那句话得是真的」,而它一边写这句话一边犯了三次同一个错 ——
+**这不是巧合,是这种病的形状**:每一处假话都是在"顺手交代一下"的时候写下的,而正是
+那种时候没有人会去核。三条都被第四轮的验收员当场逮住。
+
+- 🔴 **`doctor` 那笔账仍然加不平,而它是绿的。** 上一轮把"做完了几件"从减法改成四样
+  各数各的,可 `_destroy_entity` 给**每条**在做的记录都发了一条 `entity_disengage`
+  —— 包括参与者;而数"起了几件"那一头**有意不数参与者**。分子分母不是同一个单位,
+  于是一个"一件事起了头、东西被抹掉"的世界算出 `1-0-0-2 = -1`,被 `max(0,…)` 压成
+  0,屏幕上是一行**绿勾**说着「起了 1 件,做完 0 件,2 件收不了尾」——
+  **一行绿勾说出算术上不可能的话,比一行红字更贵:看的人会信它。** 两处一起改:
+  修在源头(一起做的事在日志上只记一次,由发起人那条记;人照样放开)、以及**加不平
+  就说出来**(黄色 `!` + 两行说明,并点明"这是引擎自己的账错了,不是这个世界的毛病")。
+  **退出码一个字没动** —— 加不平只改脸色。
+- 🔴 **上一轮自己新写了两句假话。** FOR-STUDIO 的闸那一格写「四个取值,见下」,而
+  `GATE_LABELS` 有十六个(四个只是**当面那一族**);`_colocation_gate` 的 docstring
+  写着这条同构「钉着」,而当时 `tests/` 里一处都没提过这个函数名 ——
+  **一句"有测试守着"比没有测试更坏,读的人会照着它省下自己那一次检查。**
+  前者改文档,后者补上真测试(按**状态 ×(她, 他)**铺开对,不是挑一个样本点)。
+- 🟡 **`answer_invitation` 宣称"五选一"而门只吐得出四种**:`INVITE_OUTCOMES` 里的
+  `cancelled` 只有她自己收回才产得出,这扇门一次都不会返回它。下游照着写的那个
+  `match` 会有一支永远进不去,而它看上去像是在防守。
+- 🟡 **权威标了日期,镜像没标。** 上一轮给会过期的断言补日期时只改了代码那一份,
+  REFERENCE 里对着同一句话的那一格还光着 —— 而**镜像不标日期,那句话就会以"现状"
+  的身份被一直引用下去**,这正是那条不变量要治的病。这一轮扫平了五处同型的。
+- 🟡 **`[Unreleased]` 在对宿主撒谎**:上面那几轮全都已经进了正在跑的镜像,而这份
+  文档把它们放在一个写着"还没发"的标题下面。并入 `[3.6.0]`,并在版本约定那一段
+  就地写明"这里没有 `[Unreleased]` 这一节"以及为什么。
+- **顺手项八条**(grep 示范少一个空格、「这位玩家」被套成「「这位玩家」」、
+  `Consent.explain()` 那句"单独看也成立"、doctor 那段手写的示范输出、`--help` 屏幕上
+  的裸 markdown 星号、`engine_version 是唯一权威`缺一个指向例外的指针、答话那扇门整族
+  四个闸只有一条测试、`_colocation_error` 把原因写死成「宿主没调过 `player_move`」)。
+  最后一条上一轮记成了欠账,理由是"改它要动一条测试断言" —— 而**那条断言本身就是
+  病**:它把一句 3.2.0 的实况焊成了这扇门的契约,于是那句假话再也改不动了。现在两扇
+  门(`act()` 与 `answer_invitation()`)对同一件事说同一句;`reason` 的枚举名没动。
 
 ### 第四轮:说出来的那句话得是真的(三个验收员从三条路撞上同一句)
 
@@ -62,10 +110,10 @@ spot rather than silently written to.
   一个想弄明白"这道闸为什么默认关"的人,四个最可能落脚的地方全是那句过期的话,而
   已经改好的三处他多半不会去看。这一遍一并标了日期;`mysql_state.py` 的
   「目前没有这种代码」也补上了复核日期。
-  **仍然欠一笔**:`_colocation_error`(`presence.enforce_colocation` 那扇门,默认关)
-  的回执还把原因写死成「宿主没调过 `player_move`」,而**下线**与**在场行过期**走的是
-  同一支 —— 那两种情形里宿主刚刚才调过。它的措辞被 `test_colocation.py:168` 钉着,
-  改它要动断言,留给下一轮;代码与 REFERENCE 两处都已就地标注这笔欠账。
+  **当时欠了一笔,第五轮补掉了**:`_colocation_error`(`presence.enforce_colocation`
+  那扇门,默认关)的回执还把原因写死成「宿主没调过 `player_move`」,而**下线**与
+  **在场行过期**走的是同一支 —— 那两种情形里宿主刚刚才调过。当时判断"它的措辞被
+  `test_colocation.py:168` 钉着,改它要动断言",而那条断言正是病本身。见 第五轮。
 - **`doctor` 的"做完了几件"从前是减出来的**(`起了 - 被带走`),而那个减法把三样东西
   一起算成了"做完":东西没了收不了尾的(`gone`,代价一样不退)、条件没过的、以及
   **此刻还在做的**。一个刚起了三件长活的世界会被报成「做完了 3 件」—— 一句听起来最像
@@ -94,8 +142,6 @@ spot rather than silently written to.
 - **`[3.6.0]` 补上了它最贵的一句话**:写了 `importance` 的世界文件**在 3.5.0 上开不了机**
   (`✗ 不认识的字段`,退 2),`engine_min` 必须写 3.6.0。此前它只在 FOR-STUDIO 里,
   而读 CHANGELOG 的正是不看那份文档的那批人。
-
-## [3.6.0] —— 她点你的名时,你得自己答 (2026-08-20)
 
 ### 第三轮:她走开的时候,那句话不许说成他不在
 
