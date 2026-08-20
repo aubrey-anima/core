@@ -2047,3 +2047,144 @@ anima-world contract --json | jq '.seed.location_image_write_command'
 ⚠️ **这一版没有打 tag、没有发 PyPI**(那条路的账见 CHANGELOG 3.3.0 那一节,
 tag 留给仓库主人扣扳机)。你们拿到它的方式仍然是**从工作树 / 镜像装 venv**,
 而不是 `pip install anima-world==3.4.0`。
+
+## 3.24 新增:法务抹除**被杀在半路之后还能续,而且名字不丢**(3.5.0,本轮)
+
+> **这一节主要是给运维台的**(回执板只有一块,见总图纪律 2)。创作台那边**一件都不用改** ——
+> 抹除不在创作那条路上;要看的只有最后那条"定版"。
+
+### 先说它**不**解决什么(照着假承诺设计宿主的代价太大)
+
+晚潮(21 角色 / 13.9 万事件)的抹除门 8 次跨 67 分钟全 503、站点队列永不收敛。
+**那个不收敛不是这一版修的** —— 它的根因是三个数字错位(壳的答复预算 5 秒 ≪ 一趟
+188 秒;寄存 TTL 300 秒 < 站点重试 600 秒,于是寄存的回执**总是恰好在下一次重试前
+过期**),那三个数归运维台与站点。
+
+**分片不会让任何一发请求变快。** 分的是改写那一遍;收名字那一遍永远
+O(全量事件),而且一趟 188 秒里绝大部分是 `World.open` 那次重放,它分不动。
+收名字分不动是个**语义**结论,不是没优化过:他的名字可能出现在**任何一条事件的
+自由文本里**,而那种句子不带他的 id —— 任何按 `player_id` 建的索引都覆盖不到
+(这也正是那条索引不是完整解的原因)。想让它变便宜,只有放弃"自由文本里的名字
+也抹",而那是法务范围的判断,不是引擎的判断。
+
+### 它解决的那件事(是正确性,不是性能)
+
+**3.4.0 及更早,一趟抹除被杀在半路就再也补不齐了,而且一处不报错。**
+
+改写从低 seq 往高 seq 走,而他的名字的来源之一就是日志自己(`*_id`/`*_name` 配对);
+`erase_player` 又在第一遍之后就调 `forget_player`,把在场与联系态这两个名字来源清掉。
+于是半路被杀之后:
+
+```
+低 seq:  {"target": "u1", "target_name": "(已注销)"}   ← 已经改写过
+高 seq:  {"text": "阿檀昨天说她怕黑"}                   ← 还没轮到,而且不带他的 id
+```
+
+重跑的第一遍去收名字 —— **收到的是空集**(配对那一格已经被自己抹掉了),
+于是 `replacements` 是空的,高 seq 那句**再也抹不掉**。世界照跑、日志干净、
+回执上每一格都对。这一段是在真 Redis 上实打实演过的,不是推演。
+
+3.5.0 把解析好的名字与水位在**动日志的第一个字节之前**落进一个进度键,
+续跑一律读它,**绝不重新推断**。
+
+### ⚠️ 运维台要跟的三格
+
+**① `storage.volatile_keys` 多了一格 —— `test/contract.test.js` 的 deepEqual 会当场红。**
+
+```jsonc
+"volatile_keys": ["lock", "players", "player:{player_id}", "erasure:{player_id}"]
+```
+
+⚠️ **这一次和图片层那次不一样,别照着上一条经验判。** 上一轮我报过"新增的三格会让
+你们的 deepEqual 红",而调度台跑了一遍**是绿的** —— 因为 `STORAGE_CONTRACT` 镜的
+只有 `storage` 那一段,不镜 `seed.*`。这一次改的**正是** `storage.volatile_keys`,
+所以它真的会红,而且**红得对**:镜像本该是这个样子。
+
+**这句话我跑过了,不是推的**(上一轮那条假回执的教训):
+
+```console
+$ cd src/platform && PATH=…/core/.venv/bin:$PATH ANIMA_REQUIRE_ENGINE=1 \
+      node --test test/contract.test.js
+…  volatile_keys: [ 'lock', 'players', 'player:{player_id}',
+  -                  'erasure:{player_id}' ]        ← 只红这一条,diff 只差这一格
+```
+
+修法是 `lib/worldPackage.js:91` 那个 `Object.freeze([...])` 加一格,别的一个字不用动。
+
+**② 打包与装包两侧都要跳过 `erasure:*`。** 和 `lock` / 在场同一类,理由更硬:
+它装着**正要被抹掉的那些名字**。一份"这个人叫什么、我们正要抹他"的清单进了分发物,
+比不抹还糟。(引擎这一侧两个入口都收进了一个 `_is_volatile_key`,顺带把 `lock`
+在导入侧也拦住了 —— 导出早就跳过它,而导入没有,一个手改过的包能装进一把
+永不过期的死锁。)
+
+**③ 进度键的精确形状**(镜像照这个写,别照文档默写):
+
+| | |
+|---|---|
+| 键 | `anima:{world_id}:erasure:{player_id}` |
+| 类型 | HASH,**字段值是 JSON**(和在场那一行同款) |
+| TTL | 24 小时(`contract --json` 的 `erasure.progress_ttl_seconds` 报它) |
+| 字段 | `names`(list[str],**就是待抹的显示名**)、`skipped`(list[str])、`seqs`(list[int],涉他事件)、`scanned_through`(int)、`cursor`(int,已改写到哪一条)、`counts`(dict,跨片累加的五格计数)、`forget`(dict,第一片那次 `forget_player` 的回执)、`reason`(str)、`started_at`(float,墙钟,给人看) |
+| 平时 | **不存在**。键在 = 有一趟停在半路 |
+
+### 新的 CLI 面与回执两格
+
+```bash
+anima-world player erase --world-id w --player u1 --yes --limit 5000 --json
+anima-world player erase --world-id w --player u1 --yes --resume --json
+anima-world player erase --world-id w --player u1 --json            # 预演,照旧不写一个字节
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--limit K` | 这一趟最多看 K **条事件**(不是 seq 跨度) |
+| `--since-seq N` | 从 seq > N 接着抹(给上一趟回执里的 `resume_seq`)。真抹时**不许越过已完成的水位** —— 越过去就是在日志里留一个洞,而下一趟从更高的水位接着做,没有一处会报错;越了**退 2**。预演不受这条管(它不写,造不出洞) |
+| `--resume` | **只续,不新开**:没有未完成的就什么都不做(各格全 0、`phase="not_started"`)。⚠️ 不带它的普通重跑**照旧会自动续上**,所以站点的重试循环一个字都不用改 |
+
+回执多两格,**它们答的是两个不同的问题**:
+
+- **`phase`** —— `not_started` / `partial` / `done`。它说的是**这个人在这个世界里的
+  抹除处在哪一步**,⚠️ **不是"他被抹干净了没有"**(后者看计数)。
+  **一次预演也答得出 `partial`** —— 而那正是你们今天问不出来、只能把"被墙挡在门外
+  压根没开始"和"抹到一半"混成同一个 503 的那一格。
+- **`resume_seq`** —— 还没看完时下一趟从哪儿接着看;看到头了是 `null`。
+
+转录与记忆**在第一片就删掉,而且早于那个长循环**(最私密的一份先走);续跑不重做,
+计数从进度键带过来 —— 所以**续跑那次回执里的 `forget` 是第一片那次的原件**。
+
+`seq`(审计事件 `player_erased`)**有值 = 走到了日志尽头**。停在半路时**不写**审计
+事件(它的意思就是"抹完了"),CLI 也不印它,改印一行"还没到日志尽头"。
+
+⚠️ **世界壳那侧有一格要顺手改**:`_erase_counts` 按类型过滤,`phase` 是**字符串**,
+今天会被它拦下 —— 数字的 `resume_seq` 过得去。要让 `phase` 到得了站点,得把它加进
+`_ERASE_ECHO_KEYS`(或者按裁决里那条,翻成 503 上的一个响应头)。**这一格不改,
+上面那个"预演也答得出半途"就到不了需要它的那一端。**
+
+⚠️ **引擎这一侧的拼法是下划线**:`not_started` / `partial` / `done`
+(`contract --json` 的 `erasure.phases` 逐字报它们)。你们要在响应头上用
+`X-Erasure-Phase: not-started` 这种连字符拼法**是你们线格式的选择,引擎不产出它** ——
+**那一次翻译要写在一处**,别让两种拼法在壳里各长一半。
+
+### `contract --json` 新增 `erasure` 段(按出口探测,别比版本号)
+
+```bash
+anima-world contract --json | jq '.erasure.resume_command'
+# "player erase --resume"   ← 3.5.0 起;3.4.0 及更早这一段整个不存在
+```
+
+和 `location_image_write_command` 逐字同一个用法:**这一段在不在、`resume_command`
+是不是 `null`,决定你们敢不敢把抹除切成片、敢不敢在部署时把它杀掉**。
+比版本号会给出一个安静的错答案 —— 同一个号下真的有过好几份不同的引擎。
+
+### 定版 3.5.0
+
+`__version__` = **3.5.0**;`demo.cyberworld` 的 `engine_min` / `source_engine_version`
+跟着到 3.5.0。
+
+⚠️ **这两个数只说橱窗自己**,别读成"引擎抬高了地板"。`test_flagship_seed` 的那条
+等号闸要求橱窗封皮上写的就是**产它的那一版**(写低了是一句没人验过的话)。
+**已发布世界的 `engine_min` 一格没动** —— 它们各自封皮上写什么就是什么,
+3.5.0 是纯加法,一个都不受影响。
+
+⚠️ **仍然没有打 tag、没有发 PyPI**(那条路的账见 CHANGELOG 3.3.0 那一节)。
+拿到它的方式是从工作树 / 镜像装 venv,不是 `pip install anima-world==3.5.0`。

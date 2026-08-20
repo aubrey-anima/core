@@ -403,6 +403,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="真抹。不带它只数要动多少(和 world drop 同一个习惯)",
     )
     player_erase.add_argument(
+        "--since-seq", type=int, default=None, dest="since_seq",
+        help="从这条 seq 之后接着抹(续跑给上一趟回执里的 resume_seq)。"
+             "真抹时不许越过已完成的水位 —— 那会在日志里留一个洞",
+    )
+    player_erase.add_argument(
+        "--limit", type=int, default=None,
+        help="这一趟最多看多少条事件(数的是条数,不是 seq 跨度)。"
+             "⚠️ 它封住的是改写那一遍,收名字那一遍永远要看全量",
+    )
+    player_erase.add_argument(
+        "--resume", action="store_true",
+        help="只把上一趟没做完的接着做完;没有未完成的就什么都不做,"
+             "绝不顺手开一趟新的",
+    )
+    player_erase.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出"
     )
 
@@ -5063,6 +5078,9 @@ def run_player(args: argparse.Namespace) -> int:
         try:
             receipt = world.erase_player(
                 args.player, reason=args.reason, dry_run=not args.yes,
+                since_seq=getattr(args, "since_seq", None),
+                limit=getattr(args, "limit", None),
+                resume=bool(getattr(args, "resume", False)),
             )
         except ValueError as exc:
             print(f"[player] {exc}", file=sys.stderr)
@@ -5078,11 +5096,26 @@ def run_player(args: argparse.Namespace) -> int:
               f"会话 {receipt['conversations']} 场 {receipt['messages']} 条消息、"
               f"记忆删 {receipt['memories_dropped']} 行改 {receipt['memories_redacted']} 行"
               f"(显示名 {receipt['names']} 个,跳过 {receipt['names_skipped']} 个)。")
+        # 分片与续跑那两格。**没做完必须说出来** —— 一趟停在半路而只印一行计数,
+        # 读的人会把它当成做完了,而这条路上"以为做完了"是不可逆的那一边。
+        from anima_world.api import _ERASE_PHASE_NOT_STARTED, _ERASE_PHASE_PARTIAL
+
+        if receipt.get("resume_seq") is not None:
+            print(f"[player] 还没到日志尽头:接着跑 --since-seq {receipt['resume_seq']}"
+                  f"(或者直接 --resume)。")
+        if receipt.get("phase") == _ERASE_PHASE_PARTIAL and not receipt.get("resume_seq"):
+            print("[player] 这个世界里有一趟抹除停在半路 —— --resume 把它做完。")
         if not args.yes:
             print("[player] (没带 --yes:世界一个字节都没动)")
-        else:
+        elif receipt.get("seq") is not None:
             print(f"[player] 已记下 player_erased(seq={receipt['seq']})——"
                   "账本没动;别的进程的内存窗口重启后干净。")
+        elif receipt.get("phase") == _ERASE_PHASE_NOT_STARTED:
+            print("[player] 没有没做完的抹除 —— 什么都没做"
+                  "(--resume 只续,不新开)。")
+        else:
+            print("[player] 这一片写完了,**审计事件还没写** —— "
+                  "抹除要走到日志尽头才算数。")
         return 0
     try:
         receipt = world.forget_player(
@@ -5404,7 +5437,13 @@ def contract_payload() -> dict[str, Any]:
     镜像可以直接 diff 键集与 op 表。要跑不了世界也能回答,所以不碰 db、不建库。
     """
     import anima_world
-    from anima_world.api import _PLAYER_TTL_SECONDS
+    from anima_world.api import (
+        _ERASE_PHASE_DONE,
+        _ERASE_PHASE_NOT_STARTED,
+        _ERASE_PHASE_PARTIAL,
+        _ERASURE_PROGRESS_TTL_SECONDS,
+        _PLAYER_TTL_SECONDS,
+    )
     from anima_world.beats import (
         OP_REQUIRED_FIELDS,
         PREDICATE_REQUIRED_FIELDS,
@@ -5443,7 +5482,12 @@ def contract_payload() -> dict[str, Any]:
             # **带 TTL,而且不进 `.cyberworld`** —— JSON 存不了 TTL,装回去就是一份
             # 永不过期的假在场;而包是分发物,不该带着别人的玩家此刻在哪儿。
             # 镜像端(运维台 `lib/worldPackage.js`)照这一格对齐:打包时跳过这两类键。
-            "volatile_keys": ["lock", "players", "player:{player_id}"],
+            # 3.5.0 多了 `erasure:{player_id}`:一趟没做完的法务抹除的进度,
+            # 而它记着的正是**要被抹掉的那些名字**(见 `RedisErasureProgress`)。
+            # 打进包发出去比不抹还糟,所以它和 lock / 在场同一类:带 TTL、不进包。
+            "volatile_keys": [
+                "lock", "players", "player:{player_id}", "erasure:{player_id}",
+            ],
             "presence": {
                 "index_key": "anima:{world_id}:players",
                 "row_key": "anima:{world_id}:player:{player_id}",
@@ -5534,6 +5578,37 @@ def contract_payload() -> dict[str, Any]:
             # 长得一模一样 —— 而那两件事差着这个仓库最怕的那一类 bug:线上那 20 个
             # 早就在册的角色一张卡都装不进去,全程零报错。
             "write_command": "agent set-card",
+        },
+        # 法务抹除(《拟人化互动办法》第十六条)。这一段存在的理由和
+        # `location_image_write_command` 逐字相同:**消费方按出口在不在探测,
+        # 不比版本号** —— 同一个版本号下有过好几份不同的引擎,而"这支引擎的抹除
+        # 续不续得上"猜错了不报错,只会在一个大世界上永远排在队列里。
+        "erasure": {
+            "read_command": "player erase",       # 不带 --yes 就是只数
+            "write_command": "player erase --yes",
+            # `null` = 这支引擎的抹除**一趟被杀就回不来**(3.4.0 及更早);
+            # 命令名 = 可续,而且续跑不会重新推断名字。宿主的作业调度按这一格
+            # 决定敢不敢把抹除切成片、敢不敢在部署时把它杀掉。
+            "resume_command": "player erase --resume",
+            "shard_params": ["since_seq", "limit"],
+            "phases": [_ERASE_PHASE_NOT_STARTED, _ERASE_PHASE_PARTIAL, _ERASE_PHASE_DONE],
+            # 进度键的形状。**镜像端要跟的是这一格加 `storage.volatile_keys`**:
+            # 打包必须跳过它 —— 它装着正要被抹掉的那些名字。
+            "progress_key": "anima:{world_id}:erasure:{player_id}",
+            "progress_ttl_seconds": _ERASURE_PROGRESS_TTL_SECONDS,
+            "gloss": (
+                "`anima-world player erase --player <id> [--yes] [--since-seq N] "
+                "[--limit K] [--resume]` —— 不带 `--yes` 只数(和 `world drop` 同款)。"
+                "⚠️ **分片分的是改写那一遍,收名字那一遍永远 O(全量事件)**:他的名字"
+                "可能出现在任何一条事件的自由文本里,而那种句子不带他的 id。所以"
+                "这几个参数**不会让每一发请求变快** —— 它们买到的是「一趟被杀在半路"
+                "之后还能续,而且名字不丢」,以及「一次调用的写入量有上限」。"
+                "回执的 `phase` 说的是**这个人在这个世界里的抹除处在哪一步**"
+                "(not_started / partial / done),不是「他被抹干净了没有」(看计数);"
+                "一次**预演**也答得出 partial,宿主据此把「被墙挡在门外」和「抹到"
+                "一半」分开。`resume_seq` 是下一趟从哪儿接着看。"
+                "真跑时 `--since-seq` 不许越过已完成的水位(会在日志里留一个洞)"
+            ),
         },
         "beats": {
             "schema_version": None,

@@ -50,7 +50,11 @@ def test_contract_reports_every_wire_format_version():
         # 3.2.0:在场玩家搬进 Redis。**打包时必须跳过 `volatile_keys`** —— 镜像端
         # (运维台 `lib/worldPackage.js`)照这一格对齐,漏了的下场是导出的世界带着
         # 别人的玩家此刻在哪儿,装回去还成了一份永不过期的假在场(JSON 存不了 TTL)。
-        "volatile_keys": ["lock", "players", "player:{player_id}"],
+        # 3.5.0 多了 `erasure:{player_id}`:一趟没做完的法务抹除的进度,而它记着的
+        # 正是**要被抹掉的那些名字**。它进包比不抹还糟,所以和 lock / 在场同一类。
+        "volatile_keys": [
+            "lock", "players", "player:{player_id}", "erasure:{player_id}",
+        ],
         "presence": {
             "index_key": "anima:{world_id}:players",
             "row_key": "anima:{world_id}:player:{player_id}",

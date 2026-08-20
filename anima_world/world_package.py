@@ -327,6 +327,25 @@ def _is_presence_key(short: str) -> bool:
     return short == "players" or short.startswith("player:")
 
 
+def _is_volatile_key(short: str) -> bool:
+    """这个去前缀键**带 TTL 或纯属进程态**吗 —— 带走它一次都不对。
+
+    这一条和 `contract --json` 的 `storage.volatile_keys` 是同一份清单,
+    三类各有各的坏法,但坏的方式都一样安静:
+
+    - `lock` —— 跨进程互斥的钥匙。JSON 存不了 TTL,装回去是一把永不过期的死锁。
+    - `players` / `player:*` —— 在场。装回去是一屋子永不散场的幽灵访客,
+      而且包是分发物,不该带着别人的玩家此刻站在哪儿。
+    - `erasure:*`(3.5.0)—— **一趟没做完的法务抹除的进度,里面装着正要被抹掉的
+      那些名字**。把它打进包发出去,比不抹还糟;而装进另一个世界则会让那边的
+      下一趟抹除从一个跟它毫无关系的水位接着做(见 `RedisErasureProgress`)。
+
+    **导出与导入两侧都用它。** 老包里没有这些键,但手改过的包有 —— 而"装回一份
+    永不过期的假东西"这个坏法从哪个入口进来都一样坏。
+    """
+    return short == "lock" or _is_presence_key(short) or short.startswith("erasure:")
+
+
 def _is_growing_key(short: str) -> bool:
     """这个去前缀键装的是不是"随时间无限增长的四样"之一(含其计数器/索引)。"""
     return short in {
@@ -340,7 +359,7 @@ def _is_growing_key(short: str) -> bool:
 def _restore_redis_entries(redis: Any, world_id: str, entries: dict[str, dict[str, Any]]) -> None:
     prefix = _world_prefix(world_id)
     for short in sorted(entries):
-        if _is_presence_key(short):
+        if _is_volatile_key(short):
             continue
         entry = entries[short]
         key = prefix + short
@@ -512,6 +531,8 @@ def dump_world_records(
       新世界一开机就有一屋子谁也找不到的幽灵访客。而且包是**分发物**:把一个世界
       发给别人,不该带着别人的玩家此刻站在哪儿。它落 Redis 是为了扛重启,不是为了
       被打包发出去。
+    - `erasure:*` **不带走**(3.5.0):一趟没做完的法务抹除的进度,而它记着的正是
+      **要被抹掉的那些名字**。把它打进一份分发物里,比不抹还糟。
     - `meta` 里的 `owner_pid` / `owner_host` / `owner_token` **剥掉**:装进新世界等于让一个
       还没人跑过的世界自称"有人在跑"。
     - `config` 里 `is_secret` 的行 **剥掉**:包是**分发物**,带着作者的钥匙发出去
@@ -521,7 +542,7 @@ def dump_world_records(
     growing: dict[str, dict[str, Any]] = {}
     for key in sorted(_scan_world_keys(redis, world_id)):
         short = key[len(prefix):]
-        if short == "lock" or _is_presence_key(short):
+        if _is_volatile_key(short):
             continue
         ktype = _text(redis.type(key))
         value: Any

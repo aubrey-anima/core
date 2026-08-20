@@ -2140,6 +2140,56 @@ SELECT,这一条是整本账。** 真跑另外还有一遍写。
 
 出口:`World.erase_player()`(§3)/ `anima-world player erase`(§4.2.3.2)。
 
+##### 可续与分片(3.5.0):`since_seq` / `limit` / `resume`
+
+⚠️ **先说它不做什么。** 分片分的是**改写那一遍**;收名字那一遍永远 O(全量事件),
+而且 `World.open` 那次重放本来就是这条路上最贵的一段。所以这几个参数
+**不会让每一发请求变快** —— 让抹除门答得出话的是宿主那侧的异步作业,不是它们。
+收名字那一遍分不动是个**语义**结论,不是没优化:他的名字可能出现在任何一条事件
+的自由文本里,而那种句子不带他的 id,任何按 `player_id` 建的索引都覆盖不到
+(这也正是那条索引不是完整解的原因)。想让它变便宜,只有放弃"自由文本里的名字
+也抹"—— 那是法务范围的判断,不是引擎的判断。
+
+它买到的是另外两样,而**第一样是正确性**:
+
+1. **一趟被杀在半路之后还能续,而且名字不丢。** 3.4.0 及更早有一个不可逆的死角:
+   改写从低 seq 往高 seq 走,而名字的来源之一就是日志自己(`*_id`/`*_name` 配对),
+   `forget_player` 又早把在场与联系态清了。半路被杀之后低 seq 那半的配对已经是
+   「(已注销)」→ **重跑的第一遍收不到他的名字** → 尾巴上那些只在自由文本里提过他
+   的句子**再也抹不掉**,而且一处不报错。3.5.0 把解析好的名字与水位在动日志的
+   第一个字节**之前**落进一个带 TTL 的进度键,续跑一律读它,**绝不重新推断**。
+   `tests/test_erase_player.py::test_杀在中途再续跑_名字不丢` 钉着这一条。
+2. **一次调用的写入量有上限**(`limit`),被杀最多丢一片。
+
+进度键 `anima:{world_id}:erasure:{player_id}`(HASH,TTL 24 小时)。它在
+`contract --json` 的 `storage.volatile_keys` 里,**打包必须跳过** —— 它装着
+**正要被抹掉的那些名字**,进了包比不抹还糟。TTL 到期 = 回到 3.4.0 的行为
+(下一趟从头做完整的第一遍),所以它远长于任何一趟抹除可能花的时间。
+**平时这个键是不存在的**:键在就说明有一趟停在半路。
+
+| 参数 | 说明 |
+|---|---|
+| `limit=K` | 这一趟最多看 K **条事件**(不是 seq 跨度) |
+| `since_seq=N` | 从 seq > N 处接着看。真跑时**不许越过已完成的水位** —— 越过去就是在日志里留一个洞,而下一趟从更高的水位接着做,没有一处会报错;越了当场 `ValueError`。预演不受这条管(它不写,造不出洞) |
+| `resume=True` | **只把没做完的那趟做完**;没有未完成的就什么都不做(各格全 0、`phase="not_started"`),**绝不顺手开一趟新的**。不带它的普通重跑照旧自动续上,所以宿主的重试循环什么都不用改 |
+
+回执多两格,**它们答的是两个不同的问题**:
+
+- `phase` —— **这个人在这个世界里的抹除处在哪一步**:`not_started` / `partial` /
+  `done`。⚠️ 它**不是**"他被抹干净了没有"(后者看计数)。一次**预演**也答得出
+  `partial`,而那正是宿主今天问不出来、只能把"被墙挡在门外"和"抹到一半"混成
+  同一个 503 的那一格。
+- `resume_seq` —— 还没看完时下一趟从哪儿接着看;看到头了是 `None`。
+
+`seq`(审计事件 `player_erased` 的 seq)**有值 = 这趟走到了尽头**:停在半路时
+不写审计事件,因为那条事件的意思就是"抹完了"。真跑的计数跨片累加(回执给的是
+整趟活的总数);预演只数这一趟看过的窗口 —— 把已完成的计数加进一次预演,给出的
+数既不是"还剩多少"也不是"已经抹了多少"。转录与记忆**在第一片就删掉,而且早于那个
+长循环**:它们便宜、有界,而且是这条链上最私密的一份 —— 放在循环后面,第一片被杀
+在循环里就留下"转录一条没动";放在前面,被杀留下的是"最要紧的已经没了、剩下的是
+改写"。代价不对称,所以顺序不对称。续跑不重做它们(计数从进度键带过来),
+所以**续跑那次回执里的 `forget` 是第一片那次的原件**,不是重新数出来的。
+
 #### 2.9.10.2 他处得有多深(`player_engagement`)
 
 第十条要求"过度依赖风险预警、情感边界引导"。判断与干预是宿主的事(引擎不触达用户),
@@ -2754,7 +2804,7 @@ from anima_world.api import World
 | `world.inbox_page(player_id, *, since_seq=0, limit=50)` | `inbox()` 的带游标版本,每一格语义与 `contact_requests_page()` 逐字相同(两扇门共用同一个 `_filtered_page`)。`player_id` 给 `None` 就是不过滤 |
 | `world.contact_forecast(agent_id=None)` | **此刻**每对 (角色, 玩家) 算出来是多少,含没触发的与被冷却挡下的。调 `contact.threshold` 用 —— 只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。只读:不占额度、不写冷却、不发事件,且**和真轮次共用同一个判定函数** |
 | `world.forget_player(player_id, *, reason="", dry_run=False)` | **一个人离开了这个世界**(§2.9.10)。往日志里追加一条 `player_departed` 事实,由折叠端和世界自己去响应它:关系(两个方向)、联系冷却、姿态、静音、回头找你、他教过的规则,一并作废;**历史一个字不改**(事件、记忆、转录、账本全留着 —— 她记得这个人来过,只是不再等他)。回执 `{player_id, reason, relations, edges, contact, chat_state, dry_run, seq}`(`edges` 是关系图上撤掉的边 —— 它是一张自己的表,折叠端碰不到,不显式撤的话 `cliques()` 里会坐着一个不存在的人)。**幂等**;`dry_run=True` 一个字节都不写。CLI 出口 `anima-world player forget` |
-| `world.erase_player(player_id, *, reason="", dry_run=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}`。**幂等**;`dry_run=True` 一个字节都不写。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账);要抹干净就没有 `limit` 可以给。长期解是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮)。CLI 出口 `anima-world player erase` |
+| `world.erase_player(player_id, *, reason="", dry_run=False, since_seq=None, limit=None, resume=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq, resume_seq, phase}`。**幂等**;`dry_run=True` 一个字节都不写(但**读**进度键)。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账)。3.5.0 的 `since_seq` / `limit` / `resume` **分的是改写那一遍,收名字那一遍永远要看全量**,所以它们不让请求变快;买到的是"一趟被杀在半路还能续、而且名字不丢"(进度键 `anima:{world_id}:erasure:{player_id}`,带 TTL、**不进包**)与"一次调用的写入量有上限"。`phase` 是 `not_started`/`partial`/`done` —— **这个人的抹除处在哪一步**,不是"抹干净了没有";`seq` 有值 = 走到了日志尽头。长期解仍是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮,而且**它也不是完整解**:自由文本里的名字不带 id)。CLI 出口 `anima-world player erase` |
 | `world.player_engagement(player_id)` | **他跟这个世界处得有多深**(§2.9.10.2)—— 依赖预警(第十条)要的那笔账,散在三处的数据拢到一起:`{player_id, conversations, messages, agents, first_seen, last_seen, span_days, relationships[], closest, contacts}`。**给数不给结论** —— 阈值与干预是宿主的判断(引擎不触达用户),而一个「依赖指数」会被做成进度条(同 `relationship_summary` 那条纪律)。`agents` 单独一格:只黏着一个角色和跟五个都熟是两种依赖。时间戳是**墙钟**(合规按真实时间算,世界 tick 和真实时间没有固定比率)。⚠️ 转录归 MySQL 的世界里这是一次 SELECT,别放进 tick 循环。CLI 出口 `anima-world engagement` |
 | `world.persona_drift(agent_id, *, baseline_n=None, player_id=None)` | **她还是不是她**(§2.9.12)—— 人设漂移的尺子。把她说过的话按时间排开,拿她自己最早那几条当基线,后面的走 CUSUM(单条抖动没有意义,CUSUM 专认持续的小偏移)。**纯计数、不调模型**,所以同一段转录跑一百遍给同一个答案 ——能进 CI(`anima-world drift` 漂了退 1),也能当体检。七个特征里 `sycophancy`(迎合度)单独有一格,它同时是合规项(第八条五:不得过度迎合用户)。**样本不够时 `ok=False` 并说出为什么** ——在 5 条消息上宣布「人设很稳」比不测更坏。测的是**文风**不是人格:当报警器,别当结论。CLI 出口 `anima-world drift` |
 | `world.relationship_summary(agent_id, other_id)` | **她这会儿把这个人当什么** —— 一句人话、一个粗档、和一条出处(§2.9.11)。`{agent_id, other_id, agent_name, other_name, exists, met, band, band_name, summary, axes:{sentiment,trust,affection,respect}, last_change}`。**`met` 和 `exists` 不是一回事**:`met` = 这两个说过话(联系态上有 `last_contact_tick`),`exists` = 判定折过一条 `sentiment_delta`。判定跑在对话关闭时,所以 `met=True, exists=False` 是一个真实且常见的中间态(§2.9.11 第 4 条)。`band`/`band_name` 走 `memory_triggers.band()` / `BAND_NAMES`,**和引擎自己认的是同一个函数**;⚠️ **`exists` 是 False 时这两格是 `None` / `""`,不是「不远不近」那一档** —— 空白不是一个档位,它是**还没有值**,拿 0.0 去查档表查出来的那一格是引擎自己编的(宿主自己决定画成"还没开始"还是不画)。`last_change` = 上一次改变它的那条事件 `{seq, tick, delta, direction, conversation_id, summary}`,查不到就 `conversation_id: None` + `summary: ""`(**不编**);整段关系没有来往时是 `None`。`exists` 是 False 时四个轴都是 0.0 —— 那是**没有来往**,不是敌意。玩家的 `other_name` 取的是**最近一次来往**那行记下的名字(联系态每个角色一行,而人是会改名的),所以同一个玩家在这份名单上永远只有一个称呼。CLI 出口 `anima-world relationship` |
@@ -3125,7 +3175,16 @@ anima-world player erase --world-id w --player u1 --reason 用户要求删除 --
 | `--player` | (必填) | 抹谁 |
 | `--reason` | 空 | 记进 `player_erased` 审计事件(那条载荷里没有名字) |
 | `--yes` | - | 真抹。**不带它只数**要动多少,一个字节都不写(和 `world drop` 同一个习惯) |
-| `--json` | - | 回执:`{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}` |
+| `--since-seq` | 不给 | 从这条 seq 之后接着抹(续跑给上一趟回执里的 `resume_seq`)。真抹时**不许越过已完成的水位**,越了退 2 |
+| `--limit` | 不给 | 这一趟最多看多少**条事件**。⚠️ 它封住的是改写那一遍,收名字那一遍永远要看全量 |
+| `--resume` | - | 只把上一趟没做完的接着做完;**没有未完成的就什么都不做**,绝不顺手开一趟新的 |
+| `--json` | - | 回执:`{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq, resume_seq, phase}` |
+
+**没做完会说出来**(3.5.0):停在半路时印一行"还没到日志尽头:接着跑
+`--since-seq N`(或者直接 `--resume`)",而且**不印 `player_erased`** ——
+审计事件的意思是"抹完了",一趟停在半路只印一行计数,读的人会当成做完了,
+而这条路上"以为做完了"是不可逆的那一边。`phase` / `resume_seq` 的含义与
+进度键的形状见 §2.9.10.1 的「可续与分片」。
 
 ⚠️ **不带 `--yes` 那一趟不是"数一下",它是 O(全量事件) 的两遍全表扫描**(为什么
 非扫不可,见 §2.9.10.1 那段 ⚠️)。**宿主要把它当一份作业跑,不是当一次查询** ——
@@ -3793,6 +3852,8 @@ id**(两个动词都收人话),按世界的规模封顶。覆盖这个模板时�
 | `config` / `prompts` | 作者动过的配置 / 作者改过的提示词模板(见 §2.11) |
 | `stock:{owner}` / `stock_owners` / `stock_places` / `visibility` | 量 / 有量的东西 / 量在哪儿 / 谁感知得到。`visibility` 一行是 `{"kind","key","visibility","label"}`,**可选多一个** `"bands": [[阈值, 词], …]`(§2.9.4.2)—— **没分档的行没有这个字段**(留一个 `"bands": null` 只会让"这个量分没分档"多出一种写法)。跨仓库注意:镜像读这张表时按"可选字段"处理即可;`.cyberworld` 里它随作者层的 `visibility` 段与状态层的 redis 段**原样往返** |
 | `world_rules` / `kinds` / `entities` | 世界的规律 / 种类声明 / 实例(见 §2.9.6) |
+| `players` / `player:{player_id}` | 在场玩家的名册索引 / 一个在场玩家的行(**带 TTL,打包跳过** —— JSON 存不了 TTL,装回去是一份永不过期的假在场) |
+| `erasure:{player_id}` | 一趟**没做完**的法务抹除的进度:解析好的名字、涉他的 seq、改写水位、已累计的计数(3.5.0,§2.9.10.1)。**带 TTL(24 小时),打包跳过** —— 它装着正要被抹掉的那些名字,进了包比不抹还糟。**平时不存在**:键在就说明有一趟停在半路 |
 
 **`:meta` 里躺着的行**(键清单只说了"元数据",而具体几行一直没写下来):
 

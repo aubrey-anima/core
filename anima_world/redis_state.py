@@ -2753,6 +2753,86 @@ class RedisPlayerPresence:
         return [pid for pid in self.ids() if self.get_transit(pid) is not None]
 
 
+# ── 法务抹除的进度(3.5.0)────────────────────────────────────────────────────
+
+
+def erasure_progress_key(world_id: str, player_id: str) -> str:
+    """一趟没做完的法务抹除的进度(HASH,字段值是 JSON)。**带 TTL,不进包。**"""
+    return f"{KEY_PREFIX}:{world_id}:erasure:{player_id}"
+
+
+class RedisErasureProgress:
+    """**一趟抹除做到哪儿了,以及它当初解析出来的那些名字。**
+
+    这个键存在的理由是一个不可逆的死角,不是性能(见 `World.erase_player`):
+    改写主循环把日志从低 seq 往高 seq 改,而**名字的来源之一就是日志本身**
+    (`_collect_player_names` 按 `*_id`/`*_name` 配对收)。`forget_player` 先跑,
+    在场与联系态那两个来源当场就没了。于是一趟被杀在半路的抹除会留下:
+    低 seq 那半的 `player_name` 已经是「(已注销)」、高 seq 那半还是原文 ——
+    **重跑时第一遍收不到他的名字**(配对的那格已经被自己抹掉了),`replacements`
+    是空的,尾巴上那些只在自由文本里提过他名字的句子**再也抹不掉了**,
+    而且一处不报错。
+
+    所以顺序是硬的:**名字先落这个键,再动日志第一个字节。** 键在 = 有一趟没做完;
+    键没了 = 那一趟走到了日志尽头(审计事件已写)。
+
+    三条:
+
+    - **带 TTL**(`erasure:{player_id}` 进 `contract --json` 的 `volatile_keys`)。
+      它装着**正要被抹掉的那些名字** —— 一个不会过期的进度键就是把抹除的对象
+      原样另存一份,而且存在最不容易被想起来的地方。TTL 到了就当没有:下一趟
+      从头做一遍完整的第一遍扫描(= 3.4.0 的行为),只是那个死角回来了,
+      所以 TTL 要远大于任何一趟抹除可能花的时间。
+    - **打包时跳过**(`world_package._is_volatile_key`)。包是分发物;把一份
+      "这个人叫什么、我们正要抹他"的清单发出去,比不抹还糟。
+    - **`dry_run` 只读不写。** 预演一个字节都不写是这条命令的硬承诺,而预演
+      **读**这个键是对的:上一趟死在半路时,只有它说得出原本要替的是哪些名字。
+    """
+
+    __slots__ = ("_redis", "_world_id", "_ttl")
+
+    def __init__(self, redis: Any, world_id: str, ttl_seconds: float) -> None:
+        self._redis = redis
+        self._world_id = str(world_id)
+        self._ttl = float(ttl_seconds)
+
+    def load(self, player_id: str) -> dict[str, Any] | None:
+        """上一趟留下的进度;没有(或已过期)就 `None`。"""
+        pid = str(player_id or "").strip()
+        if not pid:
+            return None
+        raw = self._redis.hgetall(erasure_progress_key(self._world_id, pid)) or {}
+        if not raw:
+            return None
+        row = {
+            (f.decode("utf-8") if isinstance(f, bytes) else str(f)): _loads(v)
+            for f, v in raw.items()
+        }
+        # 半截的行当没有 —— 缺了 names 或 cursor 的进度指挥不了下一趟,
+        # 而按它接着做会从一个猜出来的水位继续,那正是这个键要防的事。
+        if "names" not in row or "cursor" not in row:
+            return None
+        return row
+
+    def save(self, player_id: str, row: dict[str, Any]) -> None:
+        """整行写下并续上 TTL。**写它必须早于日志的第一个字节。**"""
+        pid = str(player_id or "").strip()
+        if not pid:
+            return
+        key = erasure_progress_key(self._world_id, pid)
+        self._redis.hset(key, mapping={f: _dumps(v) for f, v in row.items()})
+        if self._ttl > 0:
+            self._redis.expire(key, int(self._ttl))
+        else:
+            self._redis.persist(key)
+
+    def clear(self, player_id: str) -> None:
+        """那一趟走到了尽头 —— 连同它记着的名字一起删掉。"""
+        pid = str(player_id or "").strip()
+        if pid:
+            self._redis.delete(erasure_progress_key(self._world_id, pid))
+
+
 def drop_stale_copies_for_mysql(redis: Any, world_id: str) -> list[str]:
     """删掉"只有 Redis"时期留下的 events / memories 拷贝 —— 这些表归 MySQL 了。
 

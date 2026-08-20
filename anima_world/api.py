@@ -70,7 +70,7 @@ from anima_world.media import (
     media_uri_errors,
 )
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
-from anima_world.redis_state import RedisPlayerPresence
+from anima_world.redis_state import RedisErasureProgress, RedisPlayerPresence
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
 from anima_world.types import AgentState, Projection
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, DEFAULT_SECONDS_PER_TICK
@@ -708,6 +708,22 @@ _ERASED_NAME = "(已注销)"
 # id 键 → 名字键的配对:`player_id`→`player_name` 这类按 `_id`→`_name` 推,
 # 判定事件的 `as`/`target` 与账本的 `from`/`to` 是仅有的四个不带后缀的。
 _ERASE_ID_KEYS = frozenset({"as", "target", "from", "to"})
+#: 回执里跨片累加的那几格(进度键里存的也是这几格)。
+_ERASE_COUNT_KEYS = (
+    "events", "conversations", "messages", "memories_dropped", "memories_redacted",
+)
+#: 改写多少条落一次水位。**按批,不按条** —— 每条一次 Redis 往返是这个仓库
+#: 明说过的反面教材(`catch_up_projection` 那条)。和 `_iter_event_log` 的一页同宽。
+_ERASE_CURSOR_EVERY = 500
+#: 进度键活多久。**它装着正要被抹掉的那些名字**,所以必须会过期 —— 一个不过期的
+#: 进度键就是把抹除的对象原样另存一份,还存在最不容易被想起来的地方。而它又必须
+#: 远长于任何一趟抹除可能花的时间(晚潮实测一趟 188 秒),否则续跑读不到名字,
+#: 那个不可逆的死角就回来了。24 小时是这两条之间的取值,不是一个精确的数。
+_ERASURE_PROGRESS_TTL_SECONDS = 24 * 60 * 60
+#: `phase`:**这个人在这个世界里的抹除处在哪一步**,不是"他被抹干净了没有"。
+_ERASE_PHASE_NOT_STARTED = "not_started"
+_ERASE_PHASE_PARTIAL = "partial"
+_ERASE_PHASE_DONE = "done"
 
 
 def _mentions_pid(value: Any, pid: str) -> bool:
@@ -1617,6 +1633,12 @@ class World:
         # **直接进她的决定上下文**。两条都指向 Redis。
         self.presence_store = RedisPlayerPresence(
             self.scheduler.redis, self.scheduler.world_id or "", _PLAYER_TTL_SECONDS
+        )
+        # 一趟没做完的法务抹除做到哪儿了(3.5.0)。**平时是空的** —— 键在就说明
+        # 有一趟停在半路,而它记着的名字是那一趟唯一能把活干完的凭据。
+        self.erasure_progress = RedisErasureProgress(
+            self.scheduler.redis, self.scheduler.world_id or "",
+            _ERASURE_PROGRESS_TTL_SECONDS,
         )
         # 公开属性照旧叫 `players`,照旧是个 mapping(只加不改):底下换成写穿到
         # Redis 的视图,`players["p1"]["display_name"] = …` 这类写法一个字不用改。
@@ -5590,7 +5612,9 @@ class World:
         return player_id
 
     def erase_player(
-        self, player_id: str, *, reason: str = "", dry_run: bool = False
+        self, player_id: str, *, reason: str = "", dry_run: bool = False,
+        since_seq: int | None = None, limit: int | None = None,
+        resume: bool = False,
     ) -> dict[str, Any]:
         """**法务抹除:把这个人的交互数据从世界里抹掉。** 和 `forget_player`(告别,
         历史一个字不动)是两个动作 —— 这个是用户行使删除权时宿主要调的那一个,
@@ -5636,19 +5660,271 @@ class World:
         在那之前,宿主的做法只有一个:**把它放到请求之外去跑**(一次性子进程 /
         后台作业),别指望引擎这一侧把它变便宜——常数项砍得再多,它还是 O(全量事件)。
 
+        ## 可续与分片(3.5.0):`since_seq` / `limit` / `resume`
+
+        ⚠️ **先说它不做什么,免得照着一个假承诺去设计宿主**:分片分的是**改写
+        那一遍**,收名字那一遍(`_erase_survey`)永远 O(全量事件),而且
+        `World.open` 那次重放本来就是这条路上最贵的一段。所以**分片不会让每一发
+        请求变快** —— 让抹除门答得出话的是宿主那侧的异步作业,不是这几个参数。
+
+        它买到的是另外两样,而**第一样是正确性,不是性能**:
+
+        1. **一趟被杀在半路之后还能续,而且名字不丢。** 3.4.0 及更早有一个不可逆的
+           死角:改写从低 seq 往高 seq 走,而名字的来源之一就是日志自己
+           (`*_id`/`*_name` 配对)。半路被杀之后低 seq 那半的配对已经是
+           「(已注销)」,`forget_player` 又早把在场与联系态清了 —— 重跑的第一遍
+           **收不到他的名字**,于是尾巴上那些只在自由文本里提过他的句子
+           **再也抹不掉**,一处不报错。3.5.0 把解析好的名字与水位在动日志的第一个
+           字节**之前**落进一个带 TTL 的进度键(`anima:{world_id}:erasure:{pid}`,
+           `contract --json` 的 `storage.volatile_keys` 里有它,**打包时跳过** ——
+           它装着正要被抹掉的那些名字),续跑一律读它,绝不重新推断。
+        2. **一次调用的写入量有上限。** `limit` 封住这一趟看多少条,被杀最多丢一片。
+
+        - `limit=K` —— 这一趟最多看 K 条事件(**数的是条数,不是 seq 跨度**)。
+        - `since_seq=N` —— 从 seq > N 处接着看。真跑时**不许越过已完成的水位**
+          (越过去就是在日志里留一个洞,而下一趟从更高的水位接着做,没有一处
+          会报错)—— 越了当场 `ValueError`。预演不受这条管:它不写,造不出洞。
+        - `resume=True` —— **只把没做完的那趟做完**;没有未完成的就什么都不做
+          (回执各格全 0、`phase="not_started"`),**绝不顺手开一趟新的**。
+          不带它的普通重跑照旧会自动续上(进度键在就接着做),所以宿主的重试
+          循环什么都不用改。
+
+        回执多两格,**它们答的是两个不同的问题**:
+
+        - `phase` —— **这个人在这个世界里的抹除处在哪一步**:`not_started`(没有
+          未完成的)/ `partial`(有一趟停在半路)/ `done`(这一趟走到了日志尽头,
+          审计事件已写、进度键已删)。⚠️ 它**不是**"他被抹干净了没有" —— 后者看
+          计数。一次**预演**也答得出 `partial`,而那正是宿主今天问不出来、只能把
+          "被墙挡在门外"和"抹到一半"混成同一个 503 的那一格。
+        - `resume_seq` —— 还没看完时下一趟从哪儿接着看;看到头了是 `None`。
+
         返回回执 `{player_id, reason, forget, events, conversations, messages,
-        memories_dropped, memories_redacted, names, names_skipped, dry_run, seq}`;
+        memories_dropped, memories_redacted, names, names_skipped, dry_run, seq,
+        resume_seq, phase}`;`seq` 有值 = 审计事件写下了 = 这趟走到了尽头。
         `dry_run=True` 一个字节都不写(所以数不出 `forget.chat_state`,并且比真跑
-        少数一条 —— 真跑会把 `forget` 刚追加的那条 `player_departed` 里的名字也抹掉)。
+        少数一条 —— 真跑会把 `forget` 刚追加的那条 `player_departed` 里的名字也抹掉);
+        预演**读**进度键但不写它。真跑的计数跨片累加,预演只数这一趟看过的窗口。
+        转录与记忆**在第一趟就删掉,而且早于那个长循环**(它们便宜、有界,又是这条
+        链上最私密的一份);续跑不重做它们,计数从进度键里带过来 —— 所以**续跑那次
+        回执里的 `forget` 是第一片那次的原件**,不是重新数出来的。
         CLI 出口:`anima-world player erase`(不带 `--yes` 只数)。
         """
         pid = str(player_id or "").strip()
         if not pid:
             raise ValueError("player_id is required")
+        if limit is not None and int(limit) < 1:
+            raise ValueError("limit 至少是 1")
+        if since_seq is not None and int(since_seq) < 0:
+            raise ValueError("since_seq 不能是负数")
         scheduler = self.scheduler
         log = scheduler.event_log
+        progress = self.erasure_progress
+        carried = progress.load(pid)
 
-        # ── 名字先收:forget 会清联系态,而联系态正是名字的来源之一 ──────────
+        # ── 上一趟没做完:名字与水位从**进度键**来,不从日志来 ─────────────────
+        # 这是那个键存在的全部理由,而它防的不是慢,是一个不可逆的死角:改写从低
+        # seq 往高 seq 走,而名字的来源之一就是日志自己(`*_id`/`*_name` 配对);
+        # 被杀在半路之后低 seq 那半的配对已经是「(已注销)」,重跑的第一遍**收不到
+        # 他的名字**,于是尾巴上那些只在自由文本里提过他的句子再也抹不掉,
+        # 而且一处不报错。所以续跑绝不重新推断名字。
+        if carried is not None:
+            names = {str(n) for n in (carried.get("names") or [])}
+            skipped = [str(n) for n in (carried.get("skipped") or [])]
+            his_seqs = {int(s) for s in (carried.get("seqs") or [])}
+            scanned_through = int(carried.get("scanned_through") or 0)
+            cursor = int(carried.get("cursor") or 0)
+            carried_counts = dict(carried.get("counts") or {})
+            forget_receipt = carried.get("forget")
+            reason = reason or str(carried.get("reason") or "")
+        elif resume:
+            # `--resume` 是"只把没做完的那趟做完"。没有未完成的就什么都不做,
+            # **绝不顺手开一趟新的** —— 那正是操作者以为自己在续、其实在从头抹
+            # 的样子,而从头抹会重跑一遍 O(全量) 并再写一条审计事件。
+            return {
+                "player_id": pid, "reason": reason, "forget": None,
+                "events": 0, "conversations": 0, "messages": 0,
+                "memories_dropped": 0, "memories_redacted": 0,
+                "names": 0, "names_skipped": 0,
+                "dry_run": bool(dry_run), "seq": None,
+                "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
+            }
+        else:
+            names, skipped, his_seqs, scanned_through = self._erase_survey(pid)
+            cursor = 0
+            carried_counts = {}
+            forget_receipt = self.forget_player(pid, reason=reason, dry_run=dry_run)
+
+        # **`since_seq` 不许越过水位。** 越过去就是在日志里留一个洞:中间那一段
+        # 再也不会有人回来抹(下一趟从更高的水位接着做),而一处不报错。预演不受
+        # 这条管 —— 它一个字节都不写,翻到哪儿都造不出洞。
+        if not dry_run and since_seq is not None and int(since_seq) > cursor:
+            raise ValueError(
+                f"since_seq={int(since_seq)} 越过了这趟抹除已完成的水位 {cursor}:"
+                "中间那一段再也不会有人回来抹,而且一处不报错"
+            )
+        # 长名先换:「小明哥」比「小明」先替,免得替完短的把长的拆成两截。
+        replacements = {n: _ERASED_NAME for n in sorted(names, key=len, reverse=True)}
+
+        # 真跑的计数**跨片累加**(回执要给出整趟活的总数);预演只数这一趟看过的
+        # 那个窗口 —— 把已完成的计数加进一次预演,给出的数既不是"还剩多少"
+        # 也不是"已经抹了多少"。
+        base = {} if dry_run else carried_counts
+        receipt: dict[str, Any] = {
+            "player_id": pid, "reason": reason,
+            "forget": forget_receipt,
+            "events": int(base.get("events") or 0),
+            "conversations": int(base.get("conversations") or 0),
+            "messages": int(base.get("messages") or 0),
+            "memories_dropped": int(base.get("memories_dropped") or 0),
+            "memories_redacted": int(base.get("memories_redacted") or 0),
+            "names": len(names), "names_skipped": len(skipped),
+            "dry_run": bool(dry_run), "seq": None,
+            "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
+        }
+
+        def _counts() -> dict[str, int]:
+            return {k: receipt[k] for k in _ERASE_COUNT_KEYS}
+
+        # ── 历史:改写,不删行 ─────────────────────────────────────────────
+        # 两遍扫描是语义上必需的:名字要先收齐(第一遍)才知道拿什么去比对,
+        # 而名字可能出现在**任何一条**事件的正文里,包括收到它之前的那些 ——
+        # 所以合不成一遍。能省的只有常数:
+        # ① 第一遍已经对 seq ≤ `scanned_through` 的每一条判过 `about` 了,
+        #    直接查 `his_seqs`(载荷这期间没人动:改写它的只有抹除自己);
+        #    比它新的照旧现判 —— 那是 `forget_player` 刚追加的那条、以及别的进程
+        #    在这两遍之间写下的,漏判它们等于把抹除的边界往回缩。
+        # ② `dry_run` 只要那个 bool,别为它把每一层 dict/list 重建一遍。
+        # ③ 什么都改不动时连日志都不用翻(没有名字要替、也没有一条涉他)——
+        #    只有比第一遍更新的那几条还得看。
+        nothing_to_change = not replacements and not his_seqs
+        floor = scanned_through if nothing_to_change else 0
+        start_at = max(cursor if since_seq is None else int(since_seq), floor)
+
+        # **名字先落盘,再动日志的第一个字节。** 顺序反过来就是上面那个死角。
+        live = not dry_run and not nothing_to_change
+        if live and carried is None:
+            progress.save(pid, {
+                "names": sorted(names), "skipped": list(skipped),
+                "seqs": sorted(his_seqs), "scanned_through": scanned_through,
+                "cursor": 0, "counts": {}, "forget": forget_receipt,
+                "reason": reason, "started_at": time.time(),
+            })
+
+        # ── 转录与记忆:**第一趟就做完,而且早于那个长循环** ────────────────────
+        # 它们便宜、有界,而且是这条链上最私密的那一份。放在改写循环**后面**的话,
+        # 第一片被杀在循环里就留下"转录一条没动";放在前面,被杀留下的是"最要紧的
+        # 已经没了,剩下的是改写"。代价不对称,所以顺序不对称。
+        # 续跑不重做(计数从进度键里带过来),否则同一批会被数第二遍。
+        if dry_run or carried is None:
+            chat = getattr(self, "chat_store", None)
+            if chat is not None and hasattr(chat, "erase_player"):
+                wiped = chat.erase_player(pid, dry_run=dry_run)
+                receipt["conversations"] = wiped["conversations"]
+                receipt["messages"] = wiped["messages"]
+            memory = scheduler.memory_store
+            if memory is not None and hasattr(memory, "erase_for_event_seqs"):
+                receipt["memories_dropped"] = memory.erase_for_event_seqs(
+                    his_seqs, dry_run=dry_run)
+                receipt["memories_redacted"] = memory.redact_summaries(
+                    replacements, dry_run=dry_run)
+
+        examined = 0
+        resume_from = start_at
+        exhausted = True
+        if log is not None:
+            for e in _iter_event_log(log, since=start_at):
+                if limit is not None and examined >= int(limit):
+                    exhausted = False
+                    break
+                examined += 1
+                seq = int(e.seq or 0)
+                if seq <= scanned_through:
+                    about = seq in his_seqs
+                else:
+                    about = e.who == pid or _mentions_pid(e.payload, pid)
+                if about or replacements:
+                    if dry_run:
+                        if _erase_probe(e.payload, replacements, blank=about):
+                            receipt["events"] += 1
+                    else:
+                        payload, changed = _erase_scrub(
+                            e.payload, replacements, blank=about)
+                        if changed:
+                            receipt["events"] += 1
+                            log.rewrite(seq, {
+                                "ts": e.ts, "type": e.type, "who": e.who,
+                                "loc": e.loc, "payload": payload,
+                            })
+                resume_from = seq
+                # **先改写、后挪水位**,和 `_projection_seq` 同一条纪律:任何一处
+                # 把水位推过没做过的事件,那几条再也补不回来。落盘按批 —— 每条一次
+                # Redis 往返是这个仓库明说过的反面教材。
+                if live and examined % _ERASE_CURSOR_EVERY == 0:
+                    progress.save(pid, {"cursor": resume_from, "counts": _counts()})
+
+        # `phase` 说的是**这个人在这个世界里的抹除处在哪一步**,不是"这一趟做了
+        # 什么",也不是"他被抹干净了没有"(后者看计数)。所以一次预演也答得出
+        # 「上一趟死在半路了」—— 而那正是宿主最需要、今天却问不出来的一格。
+        outstanding = _ERASE_PHASE_PARTIAL if carried is not None else _ERASE_PHASE_NOT_STARTED
+
+        if dry_run:
+            receipt["phase"] = outstanding
+            if not exhausted:
+                receipt["resume_seq"] = resume_from
+            return receipt
+
+        if not exhausted:
+            # 这一片做完了,日志还没到头:**不写审计事件**(它的意思是"抹完了"),
+            # 进度键留着,回执告诉宿主从哪儿接着做。
+            receipt["resume_seq"] = resume_from
+            receipt["phase"] = _ERASE_PHASE_PARTIAL if live else outstanding
+            if live:
+                progress.save(pid, {"cursor": resume_from, "counts": _counts()})
+            self._erase_recent_window(pid, replacements)
+            return receipt
+
+        # ── 记下这件事本身(审计):载荷里只有 id 和数目,没有任何名字 ─────────
+        # 两把锁都要(理由同 `forget_player`):`_guard()` 挡别的进程,
+        # `scheduler._lock` 挡自己的 tick 线程。
+        with self._guard(), scheduler._lock:
+            scheduler.catch_up_projection()
+            event = scheduler._record_and_deliver({
+                "type": "player_erased",
+                "who": None,
+                "payload": {
+                    "player_id": pid, "reason": reason,
+                    "events": receipt["events"],
+                    "conversations": receipt["conversations"],
+                    "messages": receipt["messages"],
+                    "memories_dropped": receipt["memories_dropped"],
+                    "memories_redacted": receipt["memories_redacted"],
+                },
+            })
+            receipt["seq"] = (event or {}).get("seq")
+        # 审计写成了才删进度键:反过来的话,审计那一步炸掉就再也没人知道这趟
+        # 抹到哪儿了,而名字也跟着没了。
+        progress.clear(pid)
+        receipt["phase"] = _ERASE_PHASE_DONE
+
+        self._erase_recent_window(pid, replacements)
+        return receipt
+
+    def _erase_survey(
+        self, pid: str
+    ) -> tuple[set[str], list[str], set[int], int]:
+        """抹除的**第一遍**:他叫过什么、哪些事件涉他、扫到了哪一条。
+
+        ⚠️ **它永远是 O(全量事件),分片一格都分不动它。** 判据是保守面:他的名字
+        可能出现在**任何一条**事件的自由文本里,而那种句子不带他的 id —— 任何
+        按 `player_id` 建的索引都覆盖不到它们(那正是 D10 不是完整解的原因)。
+        想让这一遍变便宜,只有放弃"自由文本里的名字也抹"这条,而那是法务范围的
+        判断,不是引擎的判断。
+
+        **必须早于 `forget_player`**:联系态与在场是名字的两个来源,forget 会清掉
+        它们。这个顺序踩过一次,写在这里免得下一个人把两句挪反。
+        """
+        scheduler = self.scheduler
+        log = scheduler.event_log
         names: set[str] = set()
         info = self.players.get(pid) or {}
         display = str(info.get("display_name") or "").strip()
@@ -5683,87 +5959,11 @@ class World:
         agent_names = {b.agent.name for b in scheduler.agents.values()}
         skipped = sorted(n for n in names if len(n) < 2 or n in agent_names)
         names -= set(skipped)
-        # 长名先换:「小明哥」比「小明」先替,免得替完短的把长的拆成两截。
-        replacements = {n: _ERASED_NAME for n in sorted(names, key=len, reverse=True)}
+        return names, skipped, his_seqs, scanned_through
 
-        receipt: dict[str, Any] = {
-            "player_id": pid, "reason": reason,
-            "forget": self.forget_player(pid, reason=reason, dry_run=dry_run),
-            "events": 0, "conversations": 0, "messages": 0,
-            "memories_dropped": 0, "memories_redacted": 0,
-            "names": len(names), "names_skipped": len(skipped),
-            "dry_run": bool(dry_run), "seq": None,
-        }
-
-        # ── 历史:改写,不删行 ─────────────────────────────────────────────
-        # 两遍扫描是语义上必需的:名字要先收齐(第一遍)才知道拿什么去比对,
-        # 而名字可能出现在**任何一条**事件的正文里,包括收到它之前的那些 ——
-        # 所以合不成一遍。能省的只有常数:
-        # ① 第一遍已经对 seq ≤ `scanned_through` 的每一条判过 `about` 了,
-        #    直接查 `his_seqs`(载荷这期间没人动:改写它的只有抹除自己);
-        #    比它新的照旧现判 —— 那是 `forget_player` 刚追加的那条、以及别的进程
-        #    在这两遍之间写下的,漏判它们等于把抹除的边界往回缩。
-        # ② `dry_run` 只要那个 bool,别为它把每一层 dict/list 重建一遍。
-        # ③ 什么都改不动时连日志都不用翻(没有名字要替、也没有一条涉他)——
-        #    只有比第一遍更新的那几条还得看。
-        if log is not None:
-            resume = 0 if (replacements or his_seqs) else scanned_through
-            for e in _iter_event_log(log, since=resume):
-                seq = int(e.seq or 0)
-                if seq <= scanned_through:
-                    about = seq in his_seqs
-                else:
-                    about = e.who == pid or _mentions_pid(e.payload, pid)
-                if not about and not replacements:
-                    continue
-                if dry_run:
-                    if _erase_probe(e.payload, replacements, blank=about):
-                        receipt["events"] += 1
-                    continue
-                payload, changed = _erase_scrub(e.payload, replacements, blank=about)
-                if changed:
-                    receipt["events"] += 1
-                    log.rewrite(seq, {
-                        "ts": e.ts, "type": e.type, "who": e.who,
-                        "loc": e.loc, "payload": payload,
-                    })
-
-        # ── 转录与记忆 ─────────────────────────────────────────────────────
-        chat = getattr(self, "chat_store", None)
-        if chat is not None and hasattr(chat, "erase_player"):
-            wiped = chat.erase_player(pid, dry_run=dry_run)
-            receipt["conversations"] = wiped["conversations"]
-            receipt["messages"] = wiped["messages"]
-        memory = scheduler.memory_store
-        if memory is not None and hasattr(memory, "erase_for_event_seqs"):
-            receipt["memories_dropped"] = memory.erase_for_event_seqs(
-                his_seqs, dry_run=dry_run)
-            receipt["memories_redacted"] = memory.redact_summaries(
-                replacements, dry_run=dry_run)
-
-        if dry_run:
-            return receipt
-
-        # ── 记下这件事本身(审计):载荷里只有 id 和数目,没有任何名字 ─────────
-        # 两把锁都要(理由同 `forget_player`):`_guard()` 挡别的进程,
-        # `scheduler._lock` 挡自己的 tick 线程。
-        with self._guard(), scheduler._lock:
-            scheduler.catch_up_projection()
-            event = scheduler._record_and_deliver({
-                "type": "player_erased",
-                "who": None,
-                "payload": {
-                    "player_id": pid, "reason": reason,
-                    "events": receipt["events"],
-                    "conversations": receipt["conversations"],
-                    "messages": receipt["messages"],
-                    "memories_dropped": receipt["memories_dropped"],
-                    "memories_redacted": receipt["memories_redacted"],
-                },
-            })
-            receipt["seq"] = (event or {}).get("seq")
-
-        # ── 本进程的内存事件窗口跟着改 —— 只读门不该还端着抹掉之前的原文 ──────
+    def _erase_recent_window(self, pid: str, replacements: dict[str, str]) -> None:
+        """本进程的内存事件窗口跟着改 —— 只读门不该还端着抹掉之前的原文。"""
+        scheduler = self.scheduler
         with scheduler._lock:
             window = scheduler.recent_events
             for i, ev in enumerate(window):
@@ -5771,7 +5971,6 @@ class World:
                 fresh, changed = _erase_scrub(dict(ev), replacements, blank=about)
                 if changed:
                     window[i] = fresh
-        return receipt
 
     def player_engagement(self, player_id: str) -> dict[str, Any]:
         """**他跟这个世界处得有多深** —— 依赖预警要的那笔账(E2)。

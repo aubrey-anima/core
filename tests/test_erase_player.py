@@ -360,3 +360,198 @@ def test_cli_对不存在的世界一律拒绝(tmp_path):
     redis_for(tmp_path / "w.db")
     result = run_cli("player", "erase", "--world-id", "nope", "--player", "x", "--yes")
     assert result.returncode == 2
+
+
+# ── 可续与分片(3.5.0)──────────────────────────────────────────────────────
+#
+# 这一节钉的**第一件事是正确性,不是性能**。3.4.0 及更早有一个不可逆的死角:
+# 改写从低 seq 往高 seq 走,而名字的来源之一就是日志自己(`*_id`/`*_name` 配对)。
+# 一趟被杀在半路之后,低 seq 那半的配对已经是「(已注销)」,`forget_player` 又早把
+# 在场与联系态清了 —— 重跑的第一遍**收不到他的名字**,于是尾巴上那些只在自由文本里
+# 提过他的句子再也抹不掉,而且一处不报错。
+#
+# 分片本身不让任何一发请求变快(收名字那一遍永远 O(全量事件),`World.open` 那次
+# 重放更是分不动),所以别拿它去换宿主那侧的墙 —— 它买到的是"续得上"和"一次调用的
+# 写入量有上限"。
+
+
+PID = "ghost-shard"
+
+
+def _bare_event(world, payload: dict) -> int:
+    """直接往日志里放一条,payload 由测试完全控制。"""
+    event = world.scheduler._record_and_deliver(
+        {"type": "state_change", "who": None, "payload": payload}
+    )
+    return int((event or {}).get("seq") or 0)
+
+
+def _dead_corner(world) -> tuple[int, int, int]:
+    """摆出那个死角:**配对的名字在低 seq,自由文本里的名字在高 seq。**
+
+    刻意**不**建在场也不建联系态 —— 那正是真实场景(在场 15 分钟就过期,而合规
+    抹除往往发生在这个人走了很久之后)。于是他的名字只有日志里那一处配对说得出,
+    而 `forget_player` 追加的那条 `player_departed` 只兜底得出他的 id。
+    """
+    before = world.scheduler.event_log.max_seq()
+    paired = _bare_event(world, {
+        "kind": "sentiment_delta", "as": "npc",
+        "target": PID, "target_name": "阿檀", "note": "他来过",
+    })
+    free_text = _bare_event(world, {"kind": "narration", "text": "阿檀昨天说她怕黑"})
+    assert free_text > paired
+    return before, paired, free_text
+
+
+def test_杀在中途再续跑_名字不丢(world):
+    """**这一条是这一轮的理由。** 半路停下、名字只剩自由文本那一份 —— 续跑要抹掉它。"""
+    before, paired, free_text = _dead_corner(world)
+    assert world.players.get(PID) is None, "夹具前提:他不在场"
+
+    # 一片只做到配对那条为止(`before` 条创世事件 + 配对那条)。
+    partial = world.erase_player(PID, reason="用户要求删除", limit=before + 1)
+    assert partial["phase"] == "partial"
+    assert partial["resume_seq"] == paired
+    assert partial["seq"] is None, "没到日志尽头就写审计事件 = 把半途报成抹完了"
+
+    rows = {int(e.seq): e for e in world.scheduler.event_log.replay()}
+    assert "阿檀" not in json.dumps(rows[paired].payload, ensure_ascii=False)
+    assert "阿檀" in json.dumps(rows[free_text].payload, ensure_ascii=False), \
+        "夹具前提没成立:自由文本那条本来就该还没被碰过"
+
+    # 死角本身:此刻**重新推断**名字什么也推不出来 —— 配对那格已经被自己抹掉了。
+    # 进度键买的就是这一格,所以这一行必须留着:它一旦推得出来,下面那条测试
+    # 就不再是在验进度键了。
+    fresh_names, _, _, _ = world._erase_survey(PID)
+    assert fresh_names == set(), "推得出名字的话,这个测试证明不了进度键有用"
+
+    # 而进度键记着它。续跑不重新推断,直接接着抹。
+    done = world.erase_player(PID, resume=True)
+    assert done["phase"] == "done" and done["seq"] is not None
+    assert done["resume_seq"] is None
+    assert "阿檀" not in _all_payload_text(world), "自由文本那条永远抹不掉了"
+    assert world.erasure_progress.load(PID) is None, "做完了还留着一份待抹名单"
+
+
+def test_进度键在动日志之前就落盘_而且计数跨片累加(world):
+    before, paired, _ = _dead_corner(world)
+    first = world.erase_player(PID, limit=before + 1)
+    saved = world.erasure_progress.load(PID)
+    assert saved is not None and "阿檀" in saved["names"]
+    assert int(saved["cursor"]) == paired
+    # 第二片把剩下的做完,计数是**整趟活**的总数,不是这一片的。
+    second = world.erase_player(PID, since_seq=paired)
+    assert second["events"] >= first["events"] >= 1
+    assert second["phase"] == "done"
+
+
+def test_since_seq_不许越过水位(world):
+    before, paired, _ = _dead_corner(world)
+    world.erase_player(PID, limit=before + 1)
+    with pytest.raises(ValueError, match="水位"):
+        world.erase_player(PID, since_seq=paired + 5)
+    # 预演造不出洞,所以它不受这条管。
+    world.erase_player(PID, dry_run=True, since_seq=paired + 5)
+
+
+def test_resume_没有未完成的就什么都不做(world):
+    _dead_corner(world)
+    receipt = world.erase_player(PID, resume=True)
+    assert receipt["phase"] == "not_started"
+    assert receipt["events"] == 0 and receipt["seq"] is None
+    assert receipt["forget"] is None, "--resume 顺手开了一趟新的"
+    assert "阿檀" in _all_payload_text(world), "--resume 在没活可续时抹了东西"
+
+
+def test_预演读进度键但不写它_而且答得出半途(world):
+    before, _, _ = _dead_corner(world)
+    world.erase_player(PID, limit=before + 1)
+    saved = dict(world.erasure_progress.load(PID))
+
+    preview = world.erase_player(PID, dry_run=True)
+    assert preview["phase"] == "partial", "预演答不出半途,宿主就只能把它猜成没开始"
+    assert preview["dry_run"] is True
+    assert world.erasure_progress.load(PID) == saved, "预演写了进度键"
+
+
+def test_进度键不进包(world):
+    """它装着**正要被抹掉的那些名字**,而包是分发物。"""
+    from anima_world.world_package import dump_world_records
+
+    before, _, _ = _dead_corner(world)
+    world.erase_player(PID, limit=before + 1)
+    assert world.erasure_progress.load(PID) is not None, "夹具前提没成立"
+
+    shorts = [
+        r["key"] for r in dump_world_records(
+            redis=world.scheduler.redis, world_id=world.scheduler.world_id
+        ) if r.get("kind") == "redis"
+    ]
+    assert not any(k.startswith("erasure:") for k in shorts), \
+        f"一份待抹名单被打进了包里:{shorts}"
+
+
+def test_cli_分片两发再续跑(tmp_path):
+    db = tmp_path / "w.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        before, paired, _ = _dead_corner(world)
+
+    first = run_cli("player", "erase", "--world-id", "w", "--player", PID,
+                    "--yes", "--limit", str(before + 1), "--json")
+    assert first.returncode == 0, first.stderr
+    receipt = json.loads(first.stdout)
+    assert receipt["phase"] == "partial" and receipt["resume_seq"] == paired
+
+    # 越过水位当场拒,而且是退 2 —— 按退出码判断的脚本要看得出这次没做成。
+    hole = run_cli("player", "erase", "--world-id", "w", "--player", PID,
+                   "--yes", "--since-seq", str(paired + 5))
+    assert hole.returncode == 2
+    assert "水位" in hole.stderr
+
+    done = run_cli("player", "erase", "--world-id", "w", "--player", PID,
+                   "--yes", "--resume", "--json")
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["phase"] == "done"
+
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        assert "阿檀" not in _all_payload_text(world)
+
+
+def test_cli_不带新参数时_输出与3_4_0逐行相同(tmp_path):
+    """**3.4.0 形状的调用,stdout 一行不多一行不少。**
+
+    分片那两行只在真的停在半路时才出现;一趟走到尽头的普通抹除照旧只印计数 +
+    `player_erased`。按行数钉是有意的 —— 多印一行不会让任何断言红,而下游按行
+    找东西的脚本会当场错位。
+    """
+    db = tmp_path / "w.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        agent_id = next(iter(world.scheduler.agents))
+        _befriend(world, agent_id, "u9", name="阿檀")
+
+    preview = run_cli("player", "erase", "--world-id", "w", "--player", "u9")
+    lines = [ln for ln in preview.stdout.splitlines() if ln.startswith("[player]")]
+    assert len(lines) == 2, lines
+    assert lines[0].startswith("[player] u9 —— 要抹:")
+    assert lines[1] == "[player] (没带 --yes:世界一个字节都没动)"
+
+    done = run_cli("player", "erase", "--world-id", "w", "--player", "u9", "--yes")
+    lines = [ln for ln in done.stdout.splitlines() if ln.startswith("[player]")]
+    assert len(lines) == 2, lines
+    assert lines[0].startswith("[player] u9 —— 抹了:")
+    assert lines[1].startswith("[player] 已记下 player_erased(seq=")
+
+
+def test_cli_没做完要说出来(tmp_path):
+    """一趟停在半路而只印一行计数,读的人会当成做完了 —— 这条路上那是不可逆的一边。"""
+    db = tmp_path / "w.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        before, _, _ = _dead_corner(world)
+
+    out = run_cli("player", "erase", "--world-id", "w", "--player", PID,
+                  "--yes", "--limit", str(before + 1)).stdout
+    assert "还没到日志尽头" in out and "--resume" in out
+    assert "player_erased" not in out, "半途印出审计事件 = 说它抹完了"
