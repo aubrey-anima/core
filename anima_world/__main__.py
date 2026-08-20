@@ -258,7 +258,20 @@ def _build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("key")
     config_set.add_argument("value")
 
-    doctor = sub.add_parser("doctor", help="体检:世界文件、密钥、LLM 连通性、时钟快慢")
+    # **这一行要说得出它真查了什么。** 「世界文件」是 world.db 时代的词(世界早已
+    # 只住 Redis),而它真正查的那几样里最贵的一样 —— 长过程有没有做完 —— 一个字
+    # 都没出现在帮助里:人不会去跑一个自己不知道能回答这个问题的命令。
+    doctor = sub.add_parser(
+        "doctor",
+        help="体检:Redis 持久化、密钥、LLM 连通性、时钟快慢、"
+             "自主链、长过程有没有做完",
+        description="体检:Redis 会不会把世界忘掉、密钥在不在、LLM 通不通、"
+                    "时钟快慢、定时轮次这条链通没通、"
+                    "要花时间的长过程有几件真做完了(按事件日志数,不是按本次开机)。"
+                    " 退出码是**总账**:这一趟里需要处理的项数之和 —— "
+                    "长过程一件没丢的世界照样可能退 1(比如这台 Redis 没开 AOF)。"
+                    "别拿它的退出码当单项判据,读屏幕上那一行。",
+    )
     _add_world_args(doctor)
     doctor.add_argument("--skip-probe", action="store_true", help="不要真的调用一次 LLM")
 
@@ -3184,7 +3197,10 @@ def _place_names(state: dict[str, Any]) -> dict[str, str]:
 
 
 def _print_roster(world: Any, world_id: str, *, in_play: bool = False) -> None:
-    """这个世界住着谁 —— 一个 .cyberworld 至今没有办法自报家门(#6)。
+    """这个世界住着谁 —— 一个 .cyberworld 报不出自己的名册(#6;3.6.0 仍如此)。
+
+    `world inspect` 读的是 manifest,那上面只有封皮(要哪个引擎、叫什么、多大),
+    没有一行说得出住着谁 —— 所以名册只能开着世界问。
 
     `in_play=True` 是 `play` 里的 `/who`。**末尾那句"找谁说话"必须跟着变**:
     在 play 里换人是 `/at 夏`,而这张表照旧教人去开一个新进程跑
@@ -3860,9 +3876,14 @@ def run_presence(args: argparse.Namespace) -> int:
     """`anima-world presence` —— 开 `presence.enforce_colocation` 之前的体检。
 
     **这道命令是为迁移写的。** 引擎侧收紧位置语义会当场打断线上世界:
-    `player_move` 是宿主的可选调用,今天线上根本没人调,于是"异地"是每一次调用的
-    默认值 —— 那道闸打开的当天,`give` 和一起做事全线开始拒绝,而回执看上去像是
-    玩家自己站错了地方。
+    `player_move` 是宿主的可选调用,**写这条命令时(3.2.0)线上根本没人调**,于是
+    "异地"是每一次调用的默认值 —— 那道闸打开的当天,`give` 和一起做事全线开始拒绝,
+    而回执看上去像是玩家自己站错了地方。
+
+    ⚠️ **那句实况已经过期,而这道命令的价值恰恰因此还在**(2026-08-20 复核):
+    站点 2026-08-13 前后接上了 `player_move`(落脚 / 重连 / 世界重启复位三处),
+    在场行有 15 分钟 TTL,所以今天的真相是"门只对最近 15 分钟内进过世界的人开" ——
+    不是"没人有位置",而是"谁有、谁没有,得当场量一次"。**这道命令就是那把尺子。**
 
     所以它先答"这个世界里有没有人在维护玩家的位置",再给一句**能照着做的**结论。
     """
@@ -5783,7 +5804,9 @@ def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
     return 0
 
 
-def _report_engagements_kept(started: int, dropped: list[Any]) -> int:
+def _report_engagements_kept(
+    started: int, dropped: list[Any], *, finished: int = 0, gone: int = 0,
+) -> int:
     """起了头的长过程有几件真做完了 —— 返回"需要处理"的项数。
 
     为什么在 `doctor` 里,而且**为什么按事件数不按 `subsystem_health`**:
@@ -5796,12 +5819,34 @@ def _report_engagements_kept(started: int, dropped: list[Any]) -> int:
     世界照跑、日志一行不错,作者要到发现"她那件事一次都没做完"才知道 ——
     而在这之前,一个开着 `anima-world run` 的人**没有任何办法问出这句话**
     (FOR-STUDIO 的判据:库里有而 CLI 上没有,对外面等于不存在)。
+
+    ⚠️ **"做完了几件"从前是减出来的**(`started - len(dropped)`),而那个减法把
+    三样东西一起算成了"做完":东西没了收不了尾的(`reason="gone"`,代价一样
+    不退)、条件没过的(`finish_affordance` 判否)、以及**此刻还在做的**。
+    于是一个刚起了三件长活的世界会被报成"做完了 3 件",一句听起来最像好消息、
+    而恰好在自己要度量的那件事情上说反了的话。现在四样各数各的:做完的按
+    收尾那条 `entity_interaction`(**只有它的 payload 带 `duration`**,是长过程
+    收尾独有的记号),半路被带走的和收不了尾的各按 `entity_disengage` 的
+    `reason` 分,剩下的才是在做。起头那一格**不数参与者**
+    (`joint_role == "participant"`):一起做的一件事会给每个人各发一条
+    `entity_engage`,照人头数的话三个人吃一顿饭会被数成三件事,而收尾只有一条。
+
+    ⚠️ **这一格报的是这个世界的一生,不是最近一段**(退出码同理:出过一次就
+    退 1,以后再也回不了绿)。一个跑了半年的世界身上永远背着头三天那次事故 ——
+    "该不该有个时间窗"是产品/运维的判断,不是引擎能替谁定的,记在看板 D25。
     """
     if not started:
         print(f"  {onboarding.dim('这个世界还没有起过要花时间的长过程(duration)')}")
         return 0
-    kept = started - len(dropped)
-    line = f"要花时间的长过程:起了 {started} 件,{len(dropped)} 件半路被带走(代价不退)"
+    in_flight = max(0, started - finished - len(dropped) - gone)
+    parts = [f"起了 {started} 件", f"做完 {finished} 件"]
+    if dropped:
+        parts.append(f"{len(dropped)} 件半路被带走(代价不退)")
+    if gone:
+        parts.append(f"{gone} 件收不了尾(东西没了,代价一样不退)")
+    if in_flight:
+        parts.append(f"{in_flight} 件还在做")
+    line = "要花时间的长过程:" + ",".join(parts)
     if not dropped:
         print(f"  {onboarding.green(onboarding.OK)} {line}")
         return 0
@@ -5810,7 +5855,7 @@ def _report_engagements_kept(started: int, dropped: list[Any]) -> int:
     last = (dropped[-1].payload or {})
     who = dropped[-1].who or "?"
     print(f"      {onboarding.dim('最近一件:' + who + ' 的 ' + str(last.get('verb') or '?') + ' ' + str(last.get('target') or '?'))}")
-    print(f"      {onboarding.dim('做完了 ' + str(kept) + ' 件 —— 比例低就是排班在抢她的手,看 occupies 声明对不对')}")
+    print(f"      {onboarding.dim('做完 ' + str(finished) + ' / 被带走 ' + str(len(dropped)) + ' —— 比例低就是排班在抢她的手,看 occupies 声明对不对')}")
     return 1
 
 
@@ -5843,16 +5888,28 @@ def run_doctor(args: argparse.Namespace) -> int:
     # 16 万),每加一个体检项就多走一遍的话,`doctor` 的代价随项数线性涨。
     joined: set[str] = set()
     engaged = 0
+    finished = 0
+    gone = 0
     dropped: list[Any] = []
     for e in log.replay():
+        payload = e.payload or {}
         if e.type == "agent_join" and e.who:
             joined.add(e.who)
         elif e.type == "entity_engage":
-            engaged += 1
-        elif e.type == "entity_disengage" and str(
-            (e.payload or {}).get("reason") or ""
-        ) == "left":
-            dropped.append(e)
+            # 一起做的一件事一人一条,而收尾只有发起人那一条 —— 数人头会让
+            # 分子分母不是同一个单位(见 `_report_engagements_kept` 的丑话)。
+            if str(payload.get("joint_role") or "") != "participant":
+                engaged += 1
+        elif e.type == "entity_interaction" and "duration" in payload:
+            # **长过程收尾独有的记号。** 一下子做完的那种交互不带 `duration`,
+            # 所以这一格数的就是"真做完的长过程",不必再回头对 engage 那条。
+            finished += 1
+        elif e.type == "entity_disengage":
+            reason = str(payload.get("reason") or "")
+            if reason == "left":
+                dropped.append(e)
+            else:
+                gone += 1
     print(f"  {onboarding.green(onboarding.OK)} {len(joined)} 个角色,{events} 条事件")
 
     status = onboarding.llm_status(store, world_id)
@@ -5908,7 +5965,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
 
     problems += _report_autonomy_chain(redis, world_id, store)
-    problems += _report_engagements_kept(engaged, dropped)
+    problems += _report_engagements_kept(
+        engaged, dropped, finished=finished, gone=gone)
 
     print()
     if problems:
@@ -6385,7 +6443,7 @@ def _print_welcome() -> int:
 
   然后:
 
-      anima-world doctor       {onboarding.dim('体检:密钥、LLM 连通性、时钟快慢')}
+      anima-world doctor       {onboarding.dim('体检:密钥、LLM、时钟、长过程有没有做完')}
       anima-world config list  {onboarding.dim('看/改配置(密钥自动打码)')}
 
   想造一个自己的世界?那是另一个程序 —— 创作工作台:

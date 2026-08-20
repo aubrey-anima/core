@@ -1361,7 +1361,14 @@ class _ToolRuntime:
 
     def _display(self, who: str) -> str:
         if who.startswith("player:"):
-            return self.player_name(who.split(":", 1)[1])
+            pid = who.split(":", 1)[1]
+            name = self.player_name(pid)
+            # **裸 id 不进人话。** `player_name()` 找不到行时回落成 id —— 那是
+            # 给调用方的兜底,而这里拼出来的句子是**念给玩家看的**:
+            # 「「p1」不在她跟前」里那个 `p1` 是一个主键,不是任何人的名字。
+            # 而这一支恰好只在"世界没有这个玩家的行"时才走到 —— 也就是他刚
+            # `player_leave` 过、或者宿主从没登记过他,正是最该说实话的那次。
+            return "这位玩家" if name == pid else name
         return self.agent_names().get(who, who)
 
     def _named(self, who: str) -> str:
@@ -1383,6 +1390,31 @@ class _ToolRuntime:
             (entity.name or target) if entity is not None else target,
         )
 
+    def _colocation_gate(self, actor_id: str, player_id: str) -> str:
+        """他俩这会儿当不成面的话,**是哪一种**当不成面。当得成就是空串。
+
+        `face_to_face()` 把四种原因折成同一个 `False`,而这一层要把它们分开说 ——
+        理由和 `intent._colocation_refusal` 逐字同一条:「你不在她跟前」在一个
+        宿主没落过 `player_move` 的世界里是**一句假话**,它把"世界不知道他在哪"
+        说成了"他站错了地方",而后者他自己改得掉、前者他做什么都改不掉。
+
+        次序是承重的:先问她在不在赶路,再问她的位置,最后才问他的 ——
+        `agent_location()` 对在途的人仍报着**出发前那个地名**,先看地名的话,
+        两处相同就会得出"他们在一起"这个和 `face_to_face()` 相反的结论。
+        判定与 `face_to_face()` 必须逐位同构(`tests/test_interaction_witness_and_invites.py`
+        钉着),两份判断分了岔就会出现"闸说得出理由、门却没拦"。
+        """
+        scheduler = self._world.scheduler
+        if actor_id in scheduler._transit:
+            return "inviter_in_transit"
+        here = self.agent_location(actor_id)
+        if not here:
+            return "inviter_where_unknown"
+        where = self._world.player_location(player_id).strip()
+        if not where:
+            return "player_where_unknown"
+        return "" if here == where else "player_not_here"
+
     def _invitee(
         self, actor_id: str, target: str, verb: str, who: str,
         *, player_id: str, stock_key: str,
@@ -1398,8 +1430,8 @@ class _ToolRuntime:
                 # 一次调用只替**一个**玩家说话。替别人点头等于把他的意志也取消掉,
                 # 而那正是这一层要挡的东西 —— 只是换成了玩家。
                 gate = "player_not_you"
-            elif not self.face_to_face(actor_id, pid):
-                gate = "player_not_here"
+            else:
+                gate = self._colocation_gate(actor_id, pid)
             return together.Invitee(
                 id=who, name=self.player_name(pid), is_player=True, gate=gate,
             )
@@ -4006,8 +4038,9 @@ class World:
         ⚠️ **在场名单里从前只有玩家。** 于是一个站在三个同事中间的角色,提示词第一句
         写的是「这会儿你身边没有别人」,而下面 `interact` 的参数说明正让她用 `with`
         点名跟她一起做的人 —— 名单从来没给过她。晚潮那 11 个标着「得有人一起」的
-        动词因此 238 天、161648 条事件里一次都没被发出去过:机制全在(同意、
-        `joint_gate`、共同经历都写好了),缺的只是**她不知道身边有谁**。
+        动词因此 238 天、161648 条事件里一次都没被发出去过(**2026-08-19 在那个
+        世界上量的,是修这条时的实况,不是现状**):机制全在(同意、`joint_gate`、
+        共同经历都写好了),缺的只是**她不知道身边有谁**。
         """
         scheduler = self.scheduler
         brain = scheduler.agents.get(agent_id)
@@ -4895,14 +4928,7 @@ class World:
         scheduler = self.scheduler
         row = scheduler.pending_invitation(int(invite_seq))
         if row is None:
-            settled = scheduler.settled_invitation(int(invite_seq))
-            out = {
-                "ok": False, "outcome": "gone",
-                "refusal": _INVITE_GONE_LABELS.get(settled, _INVITE_GONE_UNKNOWN),
-            }
-            if settled:
-                out["settled"] = settled
-            return out
+            return self._invite_gone(int(invite_seq))
         if str(row.get("player_id") or "") != pid:
             # 替**别人**答应,和引擎替他答应是同一件事的两种写法。
             raise tools_mod.ToolCallError("这份邀请不是给你的")
@@ -4910,8 +4936,12 @@ class World:
             # 关系与记忆焊在 `settle_invitation` 里,不在这儿补 —— 见它的 docstring。
             settled = scheduler.settle_invitation(int(invite_seq), "declined")
             if settled is None:
-                return {"ok": False, "outcome": "gone",
-                        "refusal": "这份邀请已经不在了"}
+                # 上面那行和 `pending_invitation()` 之间它有了结局(她收回去了、
+                # 或者过了期)。**同一件事只能有一句话**:这里从前另写了一句
+                # 光秃秃的"这份邀请已经不在了",于是同一个「没赶上」在两条路上
+                # 报出两种形状 —— 一条带 `settled` 说得出是哪一种,一条什么都
+                # 不说,而下游没办法知道自己碰上的是哪一条。
+                return self._invite_gone(int(invite_seq))
             return {"ok": True, "outcome": "declined",
                     "agent_id": row.get("agent_id"), "text": row.get("text")}
         try:
@@ -4938,9 +4968,10 @@ class World:
             return {"ok": True, "outcome": "accepted", **outcome}
         refusal = str(outcome.get("refusal") or "")
         absent = ""
-        if str(outcome.get("gate") or "") == "player_not_here":
+        if str(outcome.get("gate") or "") in together.COLOCATION_GATES:
             # **这一句从前是怪玩家的**:她按作息表溜达开、他一步没动,报文照样
             # 写「你不在她跟前」。人话与枚举一起换掉,两头都点名。
+            # 按**整族**闸分支,不按单个闸名 —— 见 `together.COLOCATION_GATES`。
             absent, refusal = self._invite_absence(row, pid)
         scheduler.settle_invitation(int(invite_seq), "expired", note=refusal)
         out = {
@@ -4953,6 +4984,22 @@ class World:
             out["absent"] = absent
         return out
 
+    def _invite_gone(self, invite_seq: int) -> dict[str, Any]:
+        """他按下去的时候这份邀请已经有了结局 —— **一句话,一种形状**。
+
+        两条路走到这儿(按之前就结了、按的过程中被结了),而它们从前各写各的
+        报文。合成一个的理由和 `_INVITE_GONE_LABELS` 同一条:说得出是哪一种
+        结局,他手机上那句话才不至于四种情形共用一句。
+        """
+        settled = self.scheduler.settled_invitation(int(invite_seq))
+        out: dict[str, Any] = {
+            "ok": False, "outcome": "gone",
+            "refusal": _INVITE_GONE_LABELS.get(settled, _INVITE_GONE_UNKNOWN),
+        }
+        if settled:
+            out["settled"] = settled
+        return out
+
     def _invite_absence(self, row: Mapping[str, Any], pid: str) -> tuple[str, str]:
         """他按了「好」而这件事得当面 —— **到底是谁不在场**。回(枚举, 人话)。
 
@@ -4963,8 +5010,13 @@ class World:
         「怎么办」,这边分的是「怪谁」。
 
         `unknown` 是**说不上来**,不是"都怪你":她开口那一刻的地点没记下来
-        (老事件)、或者世界压根不知道他在哪(宿主没调过 `player_move`)。
-        猜一个出来会让那句话读起来完全正常而恰好是反的。
+        (老事件)、或者世界这会儿不知道他俩里某一个在哪。猜一个出来会让那句话
+        读起来完全正常而恰好是反的。
+
+        ⚠️ **"世界不知道他在哪"不等于"宿主没接 `player_move`"**。它至少有三种
+        来路:他 `player_leave` 过、在场记录过了 `_PLAYER_TTL_SECONDS`(15 分钟)
+        没续上、宿主确实没落过位置。把三种写成一种,就等于对着一个接得好好的
+        宿主说它没接 —— 而那句话现在是假的(站点 2026-08-13 前后已接上)。
         """
         runtime = self._tool_runtime
         scheduler = self.scheduler
@@ -4978,10 +5030,16 @@ class World:
             # 她在赶路 = 不在任何地方(`_where_is` 同一条)。照 `agent_location`
             # 那份直说会写出"你在 cafe,她在 cafe —— 这件事得当面",一句谎。
             return ("agent", f"{name}这会儿在路上,还没落脚 —— 不是你不在")
+        if not here:
+            # 世界不知道**她**在哪。落到下面几支的话会写成"她已经离开咖啡店了 ——
+            # 她这会儿在别处",一句把"查不到"说成"她走了"的话。
+            return ("unknown",
+                    f"世界这会儿不知道{name}在哪 —— 不是你没到场。"
+                    f"等她落了脚再问一次")
         if not where:
             return ("unknown",
-                    f"世界不知道你这会儿在哪 —— 宿主没调过 player_move。"
-                    f"{name}在{here_name}")
+                    f"世界这会儿不知道你在哪 —— 你可能已经离开这个世界了,"
+                    f"也可能是这一程还没把落脚处告诉世界。{name}在{here_name}")
         asked = str(row.get("loc") or "")
         if not asked:
             return ("unknown",
@@ -5339,6 +5397,14 @@ class World:
 
         合成一句"你不在她跟前"的话,第二种会看起来像是玩家自己站错了地方,
         而他做什么都改不了 —— 那是这个仓库最怕的那种"技术上没错、读起来是谎"。
+
+        ⚠️ **而第二行自己今天也不够准**(2026-08-20 记):下面那句回执把原因写死成
+        「宿主没调过 `player_move`」,可**下线**(`player_leave`)与**在场行过期**
+        (15 分钟 TTL)走的是同一支 —— 那两种情形里宿主刚刚才调过,这句话是假的。
+        邀请门那半边(`_invite_absence` / `_colocation_gate`)这一轮已经按闸分了家、
+        不再指认宿主;**这扇门没跟上**:它的措辞被 `test_colocation.py` 钉着,而
+        这一轮的单子没授权改那条断言。**这是有意留的欠账,不是没看见**;它默认关
+        (`presence.enforce_colocation`),所以线上读不到这句话。
         """
         if not self.config_get("presence.enforce_colocation", False):
             return ""

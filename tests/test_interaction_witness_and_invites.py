@@ -824,15 +824,59 @@ def test_两个人都走开了_一句话说全两头(world):
 
 
 def test_世界不知道他在哪时_不许说成是他站错了地方(world):
-    """`_colocation_error` 那张三分表的第二行:这一种**宿主的事**,而合成一句
-    「你不在她跟前」会让它看起来像是玩家自己站错了地方,而他做什么都改不了。"""
+    """`_colocation_refusal` 那张三分表的第二行:这一种**世界自己说不上来**,
+    而合成一句「你不在她跟前」会让它看起来像是玩家站错了地方,而他做什么都改不了。
+
+    ⚠️ **走 `player_leave()` 而不是 `world.players.pop()`** —— 要用引擎自己产得出
+    的那条路。直接掏投影的话,这条测试钉住的是一个只有测试到得了的状态,而线上
+    真正会走到这儿的是"他下线了 / 在场记录过了 15 分钟"。
+    """
     world.player_move("p1", "cafe")
     _invite(world)
     seq = world.invitations("p1")[0]["seq"]
-    world.players.pop("p1", None)                # 他从在场名单上消失了
+    world.player_leave("p1")                     # 他下线了
     out = world.answer_invitation("p1", seq, accept=True)
     assert out["absent"] == "unknown"
-    assert "player_move" in out["refusal"]
+    assert out["gate"] == "player_where_unknown"
+    # **不许再说"宿主没调过 `player_move`"** —— 那句话在一个接得好好的宿主上是假的
+    # (站点 2026-08-13 前后已接上;这里的宿主也确实调过,只是他离开了)。
+    assert "player_move" not in out["refusal"]
+    assert "世界这会儿不知道你在哪" in out["refusal"]
+
+
+def test_世界不知道他在哪时_句子里不许漏出裸pid(world):
+    """`player_name()` 找不到行时回落成 id —— 那是给调用方的兜底,而这句话是
+    **念给玩家看的**。「「p1」不在她跟前」里那个 `p1` 是一个主键,不是谁的名字。
+
+    这一支恰好只在"世界没有这个玩家的行"时才走到,也就是最该说实话的那一次。"""
+    out = _invite(world, player_id="ghost")      # 世界从没见过这个人
+    detail = out.get("detail") or out
+    refusal = str(detail.get("refusal") or "")
+    assert detail["gate"] == "player_where_unknown", detail
+    assert "ghost" not in refusal, refusal
+    assert "这位玩家" in refusal, refusal
+
+
+def test_她在赶路时_那句话不许写成他站错了地方(world):
+    """`face_to_face()` 折掉的第三种原因。照 `agent_location` 那份直说的话,回执
+    会写成"你在咖啡店,她也在咖啡店 —— 一起做事得当面",一句技术上没错、而玩家
+    读起来是谎的话(`_colocation_refusal` 里逐字同一条)。"""
+    world.player_move("p1", "cafe")
+    world._tool_runtime.move_agent("夏", "yard")   # 起程,还没落脚
+    assert "夏" in world.scheduler._transit
+    detail = _invite(world).get("detail") or {}
+    assert detail["gate"] == "inviter_in_transit", detail
+    assert "在赶路" in str(detail["refusal"])
+
+
+def test_四个闸都属于当面那一族(world):
+    """**别写 `== "player_not_here"`。** 拆闸时把整族的名字收进一个常量,是为了
+    让下游那一支不会因为拆闸而悄悄关掉 —— 少掉的三种恰好是最需要点名的。"""
+    from anima_world import together
+
+    assert together.COLOCATION_GATES <= set(together.GATE_LABELS)
+    assert "player_not_here" in together.COLOCATION_GATES
+    assert len(together.COLOCATION_GATES) == 4
 
 
 # ── 五、契约那一格答得出来 ────────────────────────────────────────────────

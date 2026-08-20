@@ -463,9 +463,12 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
         "marked with importance (the character half already narrates itself)",
     ),
     # 异地就只能打电话。**默认关**,而这不是犹豫,是账:引擎侧收紧会当场打断线上
-    # 世界 —— `player_move` 是宿主可选调用,今天线上根本没人调,于是"异地"是每一次
-    # 调用的默认值,一开就是 give / 一起做事全线开始拒绝。迁移次序只能是
-    # "先让宿主调 player_move,再开这个开关"(`anima-world presence` 就是查这个的)。
+    # 世界 —— `player_move` 是宿主可选调用,而**写这条时(3.2.0,2026-08)线上一个
+    # 宿主都没调**,于是"异地"是每一次调用的默认值,一开就是 give / 一起做事全线
+    # 开始拒绝。⚠️ **那句实况已经过期**:站点于 2026-08-13 前后接上 `player_move`
+    # (落脚 / 重连 / 世界重启复位三处都调),而在场行带 15 分钟 TTL —— 所以今天的
+    # 问题不是"没人调",是"覆盖率有多少"。迁移次序不变,但先量再开:
+    # `anima-world presence` 就是查这个的。
     "presence.enforce_colocation": (
         False, "bool", "presence", False,
         "Capabilities declared requires_colocation refuse when the player is not "

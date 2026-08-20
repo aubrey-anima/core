@@ -166,13 +166,33 @@ GATE_LABELS: dict[str, str] = {
     "muted": "把发起的这个人静音了",
     "incapable": "这会儿做不了这件事",
     "conditions": "这会儿还轮不到这件事",
+    # 「不在她跟前」这**一句话原本装着四件事**:他真的在别处 / 世界不知道他在哪 /
+    # 开口的那个人在赶路 / 世界不知道开口的那个人在哪(`face_to_face()` 把这四种
+    # 折成同一个 False)。合成一句的报应是具体的:一个宿主还没调过 `player_move`
+    # 的世界,每一次相约都读起来像"玩家自己站错了地方",而他做什么都改不掉 ——
+    # 那句话是假的。分法逐字照 `intent._colocation_refusal` 的三分表,多出来的
+    # 一条是"她在赶路"(那边由 `agent_in_transit` 那一支单独兜着)。
     "player_not_here": "不在她跟前 —— 一起做事得当面",
+    "player_where_unknown": "在哪,世界这会儿不知道 —— 一起做事得当面,"
+                            "而没有人告诉过世界他在哪",
+    "inviter_in_transit": "还当不了面 —— 开口的那个人在赶路,这会儿不在任何地方",
+    "inviter_where_unknown": "还当不了面 —— 世界不知道开口的那个人在哪",
     "player_not_you": "不是这次调用的那个玩家,替不了他答应",
     # 这两条是**世界的状态**(作者关了那扇门 / 她今天问够了),不是他的意思 ——
     # 所以和上面几条同一族,判在性格之前,而且一个字都不写在他头上。
     "player_invites_off": "这个世界不让角色主动开口相约",
     "invite_capped": "今天已经被约过了 —— 再问下去就不像人,像推送了",
 }
+
+# 上面那四条里,哪几条的意思是「这件事得当面而没当成」。**分开列是因为下游要按它
+# 分支**:`World.answer_invitation()` 拿它决定要不要去查"到底是谁不在场"
+# (`_invite_absence`)。写成 `== "player_not_here"` 的话,拆闸这件事就会**悄悄
+# 关掉那一支** —— 拆之前那个判断覆盖 100% 的当面失败,拆之后只剩四分之一,
+# 而少掉的那三种恰好是最需要点名的。
+COLOCATION_GATES: frozenset[str] = frozenset({
+    "player_not_here", "player_where_unknown",
+    "inviter_in_transit", "inviter_where_unknown",
+})
 
 # 她开了口,他还没答。**这不是拒绝,也不是硬闸** —— 硬闸的意思是"这件事这会儿
 # 办不成",而这一条的意思是"这件事正等着一个人回话"。合成一个的话,玩家读到的

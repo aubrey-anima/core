@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -482,13 +483,30 @@ def test_出五次事只值一个事件_不淹日志(tmp_path, open_world):
     assert _kept(world)["degraded"] == 3 and _kept(world)["ok"] == 3
 
 
-def test_没出过事的世界这盏灯根本不点(tmp_path, open_world):
-    """"开机第一次成功不值一个事件" —— 那一条没被 sticky 破坏。"""
+def test_没出过事的世界这盏灯是绿的_而且不发事件(tmp_path, open_world):
+    """"开机第一次成功不值一个事件" —— 那一条没被 sticky 破坏。
+
+    ⚠️ 而**灯本身要点亮**:粘的意思是"红了不许自己变绿",不是"绿这一档不存在"。
+    早退排在设 `status` 之前的那一版里,件件收得了尾的世界这一格是 `null` ——
+    而 `null` 和"这条链一次都没跑过"在 `state()` 上分不出来,读的人于是分不清
+    "没事"和"没跑"。**一个既有字段的取值悄悄变了,下游的判断当场错。**"""
     world = _slow_world(tmp_path, open_world, name="kept5")
     _finish(world)
-    assert _kept(world)["status"] is None
+    assert _kept(world)["status"] == "ok"
+    assert _kept(world)["degraded"] == 0 and _kept(world)["reason"] == ""
     assert not [e for e in world.events() if e["type"] == "subsystem_health"
                 and (e["payload"] or {}).get("subsystem") == "engagement_kept"]
+
+
+def test_红了就不许自己变绿(tmp_path, open_world):
+    """点亮那一半不能把粘性弄丢:出过事之后再顺利做完一件,灯照旧红着,
+    `reason` 也照旧留着最近那一件的名字(否则数字说得出出过事,却说不出是什么事)。"""
+    world = _slow_world(tmp_path, open_world, name="kept5b")
+    _drag_away(world)
+    _finish(world)
+    assert _kept(world)["status"] == "degraded"
+    assert _kept(world)["ok"] == 1 and _kept(world)["degraded"] == 1
+    assert "起了头就被带走了" in _kept(world)["reason"]
 
 
 def test_体检答得出这条链(tmp_path, open_world, capsys):
@@ -504,11 +522,36 @@ def test_体检答得出这条链(tmp_path, open_world, capsys):
     started = len([e for e in log.replay() if e.type == "entity_engage"])
     dropped = [e for e in log.replay() if e.type == "entity_disengage"
                and (e.payload or {}).get("reason") == "left"]
-    assert _report_engagements_kept(started, dropped) == 1
+    finished = len([e for e in log.replay() if e.type == "entity_interaction"
+                    and "duration" in (e.payload or {})])
+    assert (started, finished, len(dropped)) == (2, 1, 1)
+    assert _report_engagements_kept(started, dropped, finished=finished) == 1
     out = capsys.readouterr().out
-    assert "起了 2 件,1 件半路被带走" in out
+    assert "起了 2 件,做完 1 件,1 件半路被带走" in out
     assert "打磨" in out and "bench:a" in out
     assert _report_engagements_kept(0, []) == 0
+
+
+def test_做完了几件不许是减出来的(capsys):
+    """**"起了 - 被带走" 把三样东西算成了"做完"**:东西没了收不了尾的
+    (代价一样不退)、条件没过的、以及**此刻还在做的**。于是一个刚起了三件长活
+    的世界会被报成「做完了 3 件」—— 一句听起来最像好消息、而恰好在自己要度量的
+    那件事上说反了的话。"""
+    from anima_world.__main__ import _report_engagements_kept
+
+    # 三件刚起头,一件都没结 —— 一个字的"做完"都不许出现。
+    assert _report_engagements_kept(3, [], finished=0) == 0
+    out = capsys.readouterr().out
+    assert "做完 0 件" in out and "3 件还在做" in out
+
+    # 一件做完、一件被带走、一件东西没了 —— 四格各说各的,没有一格是减出来的。
+    dropped = [SimpleNamespace(payload={"verb": "打磨", "target": "bench:a"},
+                               who="夏")]
+    assert _report_engagements_kept(3, dropped, finished=1, gone=1) == 1
+    out = capsys.readouterr().out
+    assert "起了 3 件,做完 1 件,1 件半路被带走" in out
+    assert "1 件收不了尾" in out
+    assert "还在做" not in out
 
 
 # ── 那句话是给玩家读的 ────────────────────────────────────────────────────────

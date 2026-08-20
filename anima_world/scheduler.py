@@ -769,13 +769,22 @@ class Scheduler:
         成功都把上一次掉线的 `reason` 抹成空串 —— `state()` 上于是留下一盏
         `status: "ok"` 而 `degraded: 3`、`reason: ""` 的灯:数字说出过三次事,
         而**是哪三件永远查不回来了**。粘住之后:红了就红着(至多一个事件),
-        `reason` 留着最近那一件的名字;成功那一半只加 `ok`。
+        `reason` 留着最近那一件的名字;成功那一半只加 `ok`,**但第一次成功照旧
+        把灯点成 `"ok"`** —— 见下面那一段。
         """
         health = self._subsystem_health.setdefault(
             subsystem, {"ok": 0, "degraded": 0, "status": None, "reason": ""}
         )
         health["ok" if ok else "degraded"] += 1
         if sticky and ok:
+            if health["status"] is None:
+                # **粘住的意思是"红了不许自己变绿",不是"绿这一档不存在"。**
+                # 这里从前在设 `status` 之前就早退,于是一个从没出过事的世界这一格
+                # 永远是 `null` —— 而 `null` 在 `state()` 上和"这个子系统压根没跑过"
+                # 逐字相同,读的人分不出"没事"和"没跑"。更贵的是它是**一个既有字段
+                # 的取值悄悄变了**(baseline 上是 `"ok"`):加一格下游看不见,改一格
+                # 下游的判断当场错,而两者都不报错。
+                health["status"] = "ok"
             return
         status = "ok" if ok else "degraded"
         if health["status"] == status:

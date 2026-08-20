@@ -127,7 +127,10 @@ python -m twine upload dist/*         # 发布
 # 给人用的三个命令
 anima-world start                     # 引导配 LLM → 创世 → 前台运行;新世界用演示速度
 #   创世 = 装内置的 demo.cyberworld;换一个世界用 --world-file(--seed 已移除)
-anima-world doctor                    # 体检:Redis 持久化、密钥、真调一次 LLM、时钟翻译成人话
+anima-world doctor                    # 体检:Redis 持久化、密钥、真调一次 LLM、时钟翻译成人话、
+#   自主链通没通、**要花时间的长过程有几件真做完了**(按事件日志数,不是按本次开机)
+#   ⚠️ 退出码是**总账**:它数的是这一趟里"需要处理"的项数之和,所以一个长过程一件没丢的
+#   世界照样可能退 1(比如这台 Redis 没开 AOF)。别拿 `doctor` 的退出码当单项判据。
 anima-world config set llm.api_key sk-…   # 机器键自动进 ~/.anima-world,世界键进 :config
 
 # 给改提示词的人用的(run_prompt / World.debug_prompt)
@@ -153,10 +156,16 @@ anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
 anima-world world drop --world-id w --yes             # 整个抹掉一个世界(不带 --yes 只数)
 anima-world world inspect my.cyberworld               # 只读第一行:要哪个引擎、多大
 anima-world validate world my.cyberworld              # 不建世界就查作者层
-# `.cyberworld` 是 gzip JSONL:`zcat x.cyberworld | grep '"type": "entity_spawn"'` 真的能用。
+# `.cyberworld` 是 JSONL:`zcat x.cyberworld | grep '"type": "entity_spawn"'` 真的能用。
 # ⚠️ **冒号后那个空格是承重的**:记录用 `json.dumps` 默认分隔符写出去,所以
 # `'"type":"entity_spawn"'`(这里和 README 里原本就是这么写的)**一条都匹配不到** ——
 # 而 grep 找不到时退出码 1、屏幕上什么都没有,和"这个世界确实没生过东西"长得一模一样。
+# ⚠️ **"gzip" 是写出去那一半的规矩,不是读进来那一半的**:`world export` 永远写 gzip
+# (且 `mtime=0`,保证可 diff),而装载器**只看头两个字节**,裸 JSONL 照收 —— 手写一个
+# 世界不该被逼着先压缩。所以包里自带的 `anima_world/demo.cyberworld` 就是**裸文本**
+# (有意的:一个 review 不了的二进制块不该是新用户看到的第一眼),对它 `zcat` 会退 1,
+# 得用 `cat`。一句"`.cyberworld` 是 gzip JSONL"照着敲会在唯一一个人人手上都有的
+# 文件上失败。
 ```
 
 嵌入到应用里(主要用法):`from anima_world.api import World` →
@@ -166,6 +175,15 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
 
 ## 关键不变量
 
+- **会过期的断言必须带日期,否则它会以"现状"的身份被一直引用下去**(2026-08-20 立)。
+  这个仓库的 docstring 是**病历不是现状**:大半在讲一个已经治好的病。可病历里那句
+  「今天线上根本没人调 `player_move`」写的是 3.2.0 那会儿的实况,站点 2026-08-13
+  前后就接上了,而那句话一个字没改地躺在 `intent._colocation_refusal` 里 —— 直到
+  一个验收员照它推出「这扇门在线上一次都不会开」,并把这个假结论写进了验收报告。
+  **代价是别人替我们错了一轮。** 规矩:凡是写「今天/目前/线上/一次都没」的句子,
+  当场补上**量它的日期与版本**;实况过期了**别删,标注**(删掉等于把当初的判断
+  依据也一起删了,下次没人知道这条闸为什么默认关着)。判据很好用:
+  **这句话半年后还成立吗?不成立就必须带日期。**
 - **`start` 是人的门,`run`/`World.open` 是程序的门**:`start` 会引导配置 LLM、给新世界
   换成演示速度(1 tick/秒);`run` 和 `World.open` 一概不做。改 onboarding 时别把这
   两条路径搅在一起。
