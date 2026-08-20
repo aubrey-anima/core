@@ -100,3 +100,14 @@ class Projection:
     **和 `balances` 同生共死**:`player_forget` 不清余额,所以也不清这一格 ——
     清了的话一个被忘掉又回来的人会带着旧钱再领一次新钱。
     """
+    invitations: dict[int, dict[str, Any]] = field(default_factory=dict)
+    """还等着人回答的邀请:**那条 `agent_invites` 的 `seq` → payload**。
+
+    `agent_invites` 加进来,`invitation_settled` 拿出去 —— **它是从账本折出来的,
+    不是第二张真相表**。这一条是有意的:一份"谁在等你"的清单如果自己存一份状态,
+    那么每个进程手里都有一份可能不一样的答案(线上世界壳、维护容器、tick 进程
+    各一个),而分叉的那一天没有任何一处会报错。折出来的话,`catch_up_projection`
+    免费把它们对齐,重放也必然得到同一份清单。
+
+    **它不用另开一个 Redis 键**,所以这一层不动存储契约:邀请是事件,不是易失态。
+    """

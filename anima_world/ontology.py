@@ -176,6 +176,15 @@ _ASCII_RE = re.compile(r"^[\x00-\x7f]+$")
 # 有上限本身不是可选的(那是这一层的判据),可选的只是**几个**。
 DEFAULT_HERE_BUDGET = 5
 
+# 一个能力里认得的字段**全集**。校验器和 `contract --json` 读的是同一份 ——
+# 抄成两份的话,新加一格时总会有一次只改了校验器:引擎收得下,而创作台问出来的
+# 答案里没有它,两边都不报错。消费方的铁律是"问引擎、不读文档",那么被问的那一格
+# 就必须**是**引擎判断时用的那一格,不是它的一份手抄本。
+AFFORDANCE_KEYS = (
+    "when", "set", "requires", "costs", "consumes", "label", "duration", "occupies",
+    "spawn", "destroys_target", "participants", "importance",
+)
+
 
 class OntologyError(ValueError):
     """本体声明有毛病 —— 逐条列出,一次性报完。
@@ -333,6 +342,14 @@ class Affordance:
     destroys_target: bool = False
     # 这件事得有人一起做。`None` = 单人的老样子(**默认**,所以已有的世界逐位不变)。
     participants: ParticipantSpec | None = None
+    # 在场的人**该多把这件事记在心上**。`None` = 不写 = 这一层整个缺席,
+    # 行为与从前逐位相同(和 `kinds` / perception / 规律的 `emit.importance`
+    # 逐字同构:**声明本身就是开关**,所以这里没有默认值)。
+    #
+    # 为什么不设默认:给它一个 0.3 之类的缺省,等于替每个作者宣布"世界上任何一次
+    # 交互都值得被人记一辈子" —— 于是记忆里塞满了谁又端详了一次杯子,而真正要紧
+    # 的那几件淹在里面。记什么由写这个世界的人挑,引擎不替他挑。
+    importance: float | None = None
 
     @property
     def is_joint(self) -> bool:
@@ -836,18 +853,18 @@ def _parse_affordance(
         spec = {}
     if not isinstance(spec, dict):
         return (None, [f"{label}.affordances.{verb}:效果必须是对象,收到 {type(spec).__name__}"])
-    unknown = set(spec) - {
-        "when", "set", "requires", "costs", "consumes", "label", "duration", "occupies",
-        "spawn", "destroys_target", "participants",
-    }
+    unknown = set(spec) - set(AFFORDANCE_KEYS)
     if unknown:
         errors.append(
             f"{label}.affordances.{verb}:不认识的字段 {sorted(unknown)} —— "
             f"只认 when / set(关于它)、requires / costs / consumes(关于她)、"
             f"duration / occupies(关于时间)、spawn / destroys_target(关于生灭)、"
-            f"participants(关于跟谁一起)与 label(关于她怎么读它)。"
+            f"participants(关于跟谁一起)、importance(关于在场的人记不记得住)"
+            f"与 label(关于她怎么读它)。"
             f"门槛事件归规律那一层(能力只管这一下改了什么)"
         )
+
+    importance = _parse_affordance_importance(label, verb, spec, errors)
 
     verb_label, label_errors = _affordance_label(label, verb, spec.get("label"))
     errors.extend(label_errors)
@@ -1105,9 +1122,36 @@ def _parse_affordance(
             spawn=spawn,
             destroys_target=destroys,
             participants=participants,
+            importance=importance,
         ),
         [],
     )
+
+
+def _parse_affordance_importance(
+    label: str, verb: str, spec: dict[str, Any], errors: list[str]
+) -> float | None:
+    """`importance`:0~1,可选。**不写 = 谁都不记得**,和从前逐位相同。
+
+    形状照抄规律那一层的 `_parse_importance`(`rules.py`),一个字都不改 ——
+    作者在一处学会的刻度,到另一处必须还是同一把尺。上下界都是闸而不是 clamp:
+    一个写了 `8` 的作者想的是"很重要",按 1 截断之后他永远不会知道自己写错了刻度。
+    """
+    if "importance" not in spec:
+        return None
+    raw = spec["importance"]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        errors.append(
+            f"{label}.affordances.{verb}.importance:必须是 0~1 的数"
+            f"(在场的人该多把这件事记在心上),收到 {type(raw).__name__}"
+        )
+        return None
+    if not 0.0 <= float(raw) <= 1.0:
+        errors.append(
+            f"{label}.affordances.{verb}.importance:必须落在 0~1 之间,收到 {raw}"
+        )
+        return None
+    return float(raw)
 
 
 def _parse_participants(

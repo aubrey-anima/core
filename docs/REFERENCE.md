@@ -136,11 +136,13 @@
 | `payment` | `from`, `to`, `amount`, `reason` | 经济账本的唯一真相,余额是它的投影 |
 | `item_transfer` | `from`, `to`, `item_id`, `qty`, `from_name`, `item_name` | 库存是它的投影。两个 `*_name` 是**那一刻的人话**（2.2.0 起，`World.give_item` 写）：玩家的显示名住在内存态、物品名住在经济表，重放时两样都可能不在手上 —— 不随事件走的话，重放出来就是「8f3c-… 把 sketchbook 给了我」。老事件缺这两个字段，读的一方要回落 |
 | `item_consume` | `who`, `item_id`, `source` | |
-| `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)、`reflection`(反思)、`reaction`(听完一句闲话的反应),或 `witness`(她**亲眼撞见**世界里发生的一件事,§2.9.3.2;另带 `rule` / `source_type` 说明是哪条规律种下的)。`reflection` / `reaction` **不外传**(§2.8) |
+| `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)、`reflection`(反思)、`reaction`(听完一句闲话的反应),或 `witness`(她**亲眼撞见**世界里发生的一件事:一条规律跨过门槛 §2.9.3.2,或者有人当着她的面做了一件作者声明过 `importance` 的事 §2.9.6.7;两半都另带一格 `source_type` 说明来路 —— 规律那半是**那条规律发的事件类型**(作者定的)外加 `rule`,交互那半固定是 `"entity_interaction"` 外加 `affordance`(`<实体id>.<动词>`)与 `actor`(做的人,可以是 `player:<id>`))。`reflection` / `reaction` **不外传**(§2.8) |
 | 规律 `emit` 出来的那一条(**类型由作者定**) | `rule`, `owner`, 这条规律写的每个量, `edge`, 外加作者自己的 `payload` | §2.9.3.1。`edge` 是 `"rise"` / `"fall"`(这次门槛是往哪个方向跨的),**总是有**;作者声明了 `importance` 时另带 `importance` / `text`,没声明就一个都不出现。这三个契约键在作者的 `payload` **之后**合并 —— 它们是引擎的回答,不该被一个手滑的同名键盖掉 |
 | `conversation` | `agent_id`, `conversation_id`, `summary`, `message_count`, `started_at`, `closed_at`, `participants`, `location` | 整场会话只发这一条,在关闭时 |
 | `capability_registered` | `id`, `kind`, `description`, `params_schema` | 首启生成的能力目录 |
 | `subsystem_health` | `subsystem`, `status`, `reason`, `previous` | 子系统档位**切换**(ok↔degraded)。只在切换时发,不是每次降级都发 |
+| `agent_invites` | `agent_id`, `agent_name`, `player_id`, `target`, `verb`, `verb_label`, `target_name`, `party`, `text`, `created_tick`, `expires_tick`, `round` | **她开口约了一个玩家**(§2.9.6.7)。`player_id` 是**裸 pid**(关系表与读侧过滤的键);`party` 是原样交回 `perform_affordance` 的名单(**带着他自己** `player:<id>`);`text` 是她开口那一刻说的那句话,**存下来不在读的时候现拼**(动词的 `label` 明天可能被作者改掉) |
+| `invitation_settled` | `invite_seq`, `outcome`, `agent_id`, `agent_name`, `player_id`, `target`, `verb`, `verb_label`, `target_name`, `created_tick`, `expires_tick`, 可选 `note` | 上一条的结局。`outcome` ∈ `accepted` / `declined` / `expired` / `cancelled`(`together.INVITE_OUTCOMES`)。**四种只落这一种事件**:「他拒绝了」和「他没看见」必须在账本上分得开、在待办清单上一样地消失 |
 | `player_action` | `player_id`, `role`, `action`, `details` | 同样的四个字段**也**在事件顶层(实时流的既有形状,不变)。⚠️ payload 里有值这件事**只对 1.1.1 之后产生的事件成立** —— 更早的世界里这里是 `{}`,不补也不迁移,读历史时要当它可能缺席 |
 
 **稳定性**:字段**只加不改**,与 `World` 门面同一条纪律 —— 已有类型不会删字段或改语义。
@@ -1860,6 +1862,115 @@ delta = social.joint.relation_step × 人数因子 × 时长因子 × (1 - |当�
 没剩下一条记录:那要依赖结算次序,而那是一个没有人写下过的约定),中途走开的人不算
 "一起吃过饭"。
 
+##### 2.9.6.7 做一件事要算数:`importance`、玩家旁白、邀请门(3.6.0)
+
+到 2.3.0 为止,一次交互做完就**结束了**:量动了,事件躺在日志里,而屋里没有一个人
+记得它发生过。一个人可以当着满屋子人的面把那棵树砍了,下一句话谁都不会提。这一节
+补的是"做了之后世界还欠谁一笔",三格,同一根轴。
+
+###### 一、`importance`:作者说这件事值不值得被记住
+
+```json
+{"id": "tree", "affordances": {
+  "砍倒": {"label": "把它砍倒", "importance": 0.9, "destroys_target": true,
+           "costs": {"体力": "me_体力 - 30"}},
+  "擦一擦": {"label": "擦一擦叶子"}
+}}
+```
+
+`kinds.<种类>.affordances.<动词>.importance`,**0~1,可选**。写了它,这件事做完时
+**此刻同处一地的每个角色各记住一条**(记忆 `kind` 是现成的 `witness`,和规律那一半
+共用,§2.9.3.2);不写的世界**这一层整个不存在**,行为与从前逐位相同。
+
+**没有默认值,而这一条是有意的。** 给它一个缺省等于替每个作者宣布"世界上任何一次
+交互都值得记一辈子",于是她的记忆里塞满了谁又端详了一次杯子,真正要紧的那几件淹
+在里面。声明本身就是开关 —— 和 perception、`participants`、`consent_stock` 逐字同构。
+
+三条和规律那一半**逐字相同**的纪律:见证者**按位置**算(位置查不到 = 没有见证者,
+不是"所有人");走 `memory_seed` 这条现成的路(不新增记忆种类);来路写在**事件**上
+(`source_type: "entity_interaction"` / `affordance` / `actor`),不进记忆行。
+写 `0` 和不写的**行为**一样(都不记),但前者是"我想过了,不值一提" —— 它过了作者
+那道声明,不该被当成 bug 报出来。
+
+⚠️ **做的人是玩家还是角色,这条路上一处分支都没有。** 见证者从引擎模拟得动的那份
+名册里来,玩家因此自然不在其中 —— 不是被一句 `if` 滤掉的。同理**做这件事的角色
+自己也是见证者**(她当然记得自己刚干了什么),她那条写「我照料,在老槐树」,别人
+那条写「江晚照料,在老槐树」:分的是"是不是我",不是"是不是玩家"。
+
+**算不出来不许掀翻这次交互**:量已经落库了,这时候抛出去会让一次成功的交互在她眼里
+变成一句报错,而她刚做的那件事已经真的发生了(只 `warning` 一句)。
+
+**问得到、也校验得住**:`contract --json` 的 `seed.affordance_keys`(一个能力里认得的
+字段**全集**)与 `seed.affordance_importance`(取值范围 / 读出口 / 没有默认值 / 一句
+人话),`anima-world contract` 的人话面也各印一行;`world check` 与 `validate world`
+认这个字段,写成 `importance: 8` **当场退 2**。⚠️ 那一格**读的就是校验器减的那个元组**
+(`ontology.AFFORDANCE_KEYS`),不是它的一份手抄本 —— 抄成两份的话,新加一格时总会有
+一次只改了校验器:引擎收得下,而创作台问出来的答案里没有它,两边都不报错
+(`tests/test_interaction_witness_and_invites.py` 钉着这一条)。
+
+###### 二、玩家做的那一下也进旁白(`narrative.player.enabled`,默认 **关**)
+
+此前只有角色的动作有旁白。一个玩家和一个角色并排站着擦同一扇窗,世界的量一样地动,
+而时间线上只有她那一句 —— 读起来像"她一个人在这儿忙活",而他就在旁边。
+
+三道闸,缺一不可:**只管玩家那一半**(角色的旁白早就有,走行为树 `emit_action` 那条
+路;在这里再发一次等于同一件事写两遍)、**作者声明了 `importance` 才有**(和见证记忆
+同一根轴 —— 擦一次杯子不值得一句旁白,而"值不值得"只有作者说得出)、
+**`narrative.player.enabled` 默认关**(旁白是一次 LLM 调用,而它按玩家的每一次动作
+触发,默认开等于替每个已有世界多开一笔账)。
+
+交给旁白提供方的形状和角色那条**逐字相同**(`{"kind": "interact", "params": {...}}`),
+所以提供方一处分支都不用加。**永不在 tick 线程上调**,丢进 `_narrative_pool`。
+玩家没有黑板(引擎不模拟他的身体),给的是一份空 `raw` + 真实的 `location` ——
+照实说比假装有一份好。
+
+###### 三、邀请门:她点玩家的名时,他得自己答
+
+**这一条修的是一句假话。** 一起做事(§2.9.6.6)那扇门上原本写着"一次调用只替一个
+玩家说话",而代码里有一条岔路绕开了它:一个**角色**发起的 `interact` 把玩家写进
+`with` 名单时,引擎**替他答应了**。于是"取消对方意志的能力比没有这个能力坏得多"
+这句话,对角色成立,对玩家不成立 —— 而这一层保护的本来就是玩家。
+
+现在这条岔路通向一扇门:
+
+```python
+world.invitations("p1")            # 有人在等你点头(每行多一格 pending)
+world.answer_invitation("p1", invite_seq, True)    # 他自己按下的那一下
+```
+
+- **她开口** → 一条 `agent_invites` 事件,然后**等**。她不做那件事,一个字都不写。
+- **他按"好"** → **在这一刻重查一遍闸**(他可能已经走开、她可能睡了或手上有了别的
+  事),过了才落 `invitation_settled{accepted}` 并真的去做;做不成落 `expired` 并把
+  原因写进 `note`。决定与执行之间世界还在跑,和 `act()` 的"在执行时校验,不在决定时"
+  是同一条。
+- **他按"不"** → `invitation_settled{declined}`,**并且只有这一支**写在关系上
+  (`sentiment_delta{cause: "invitation_declined"}`,按 `together.decline_delta`
+  算,是共同经历那一步的反向、且**只动 sentiment/affection/trust,不动 respect** ——
+  推掉一次邀请不该让她少敬重他)+ 她的一条记忆(复用现成的 `relation_shift`,
+  **不新增记忆种类**)。纯算术,一次模型都不调(§2.9.6.6 红线 3)。
+- **他没答,挂到 ttl** → `invitation_settled{expired}`,**一个字都不写**:不落
+  `memory_seed`、不发 `sentiment_delta`。**「拒绝」和「错过」不是一件事** ——
+  一个在手机上玩的人放下手机不等于他说了不。这是本层唯一"一旦开始记就抹不掉"的
+  取舍,所以它有一条专门钉死的测试。
+
+过期**按世界时钟判**(`expires_tick <= clock`,跑在 tick 线程上,纯算术),不按墙钟:
+墙钟会让同一份日志重放出两份历史,而两边都不报错。
+
+**上限用完不是错,是她今天不再开口。** `social.joint.invites_per_player_per_day`
+(默认 2)按 (角色, 玩家, 世界日) 计,跨日自动清零(进程态,和八卦的每日额度同一个
+形状)。一个不设上限的邀请者在玩家眼里和一条消息推送没有区别,而她本该是一个人 ——
+**这是「像个人」和「像推送」的分界**。`social.joint.npc_may_invite_player` 默认 **开**;
+关掉它,那条岔路退回一次普通的拒绝(`player_invites_off`)。
+
+⚠️ **玩家自己按按钮那条路一个字没变。** 他调 `player_tool("interact", …)` 时"发起
+这次调用的那个人"就是他,所以不必问他肯不肯 —— 被问的只有名单上的角色。这两条路
+从前挤在同一个函数里,3.6.0 把它们分开了。
+
+⚠️ **`player_options()` / `player_tools()` 的线格式一个字没动**:邀请不是"他此时此地
+点得动什么",它是一件已经发生在他身上的事。宿主照 `invitations()` 单画一份待办。
+
+⚠️ **引擎不负责送达**,推送/红点归宿主(和 `agent_wants_contact` 同一条)。
+
 #### 2.9.7 有界性是**渲染器**的属性,不是存储的属性
 
 本体层加进来之后,世界里可以有一万棵树。它们住 Redis 还是 MySQL 一样把提示词撑爆 ——
@@ -2849,7 +2960,10 @@ from anima_world.api import World
 | `world.inbox(player_id, *, since_seq=0, limit=50)` | 有谁来找过你(`agent_hail`)。`payload.reason == "delayed_reply"` 是她兑现"等会儿再说"那一条。**只在你在场时成立** —— 敲门是"她已经在你面前开口了" |
 | `world.contact_requests(player_id=None, *, since_seq=0, limit=50)` | **她想起过你**(`agent_wants_contact`,见 §2.9.8)。和 `inbox()` 互补:这一条**只在你不在跟前时成立**。`payload` 带 `reason`(主由头)/ `reasons[]`(每条带 `ref` 出处)/ `topic`(想说什么的线索)/ `components`(分数怎么算出来的)/ `day` + `at`。不给 `player_id` 就是全部。⚠️ **引擎不负责送达**:推送/红点归宿主 |
 | `world.contact_requests_page(player_id=None, *, since_seq=0, limit=50)` | 上一条的**带游标**版本,增量拉取用它。回 `{events, next_seq, cursor, scanned, total}`。⚠️ **`cursor` 和"这一页有没有他的事"无关** —— 它是这一窗**扫过的**最后一条 seq,所以**空页也推得动游标**。少了它就有一种安静的饿死:热闹世界里这一窗全是别人的事件 → 空页 → 宿主拿不到能推的 seq → 他自己那条永远排在窗口外,世界照跑、日志干净。`scanned` 是过滤前扫了多少条(宿主照它看出"我在替别人翻页")。做成姊妹方法而不是给老方法加关键字,是因为返回类型随参数值变化的函数在调用点上读起来是猜谜 |
-| `world.inbox_page(player_id, *, since_seq=0, limit=50)` | `inbox()` 的带游标版本,每一格语义与 `contact_requests_page()` 逐字相同(两扇门共用同一个 `_filtered_page`)。`player_id` 给 `None` 就是不过滤 |
+| `world.inbox_page(player_id, *, since_seq=0, limit=50)` | `inbox()` 的带游标版本,每一格语义与 `contact_requests_page()` 逐字相同(三扇门共用同一个 `_filtered_page`)。`player_id` 给 `None` 就是不过滤 |
+| `world.invitations(player_id=None, *, since_seq=0, limit=50)` | **有人在等你点头**(`agent_invites`,见 §2.9.6.7)—— 她点了这个玩家的名要一起做一件事,而引擎**不替他答应**。每行是那条事件,外加一格 `pending`:这份邀请**此刻**还等不等得到答复。事件本身是历史(她当时确实问了),"还在等吗"是**现在** —— 两者在一条流里读得出,宿主才画得出「3 条待回应」,而不是把三天前答复过的邀请再亮一次红点。不给 `player_id` 就是全部。⚠️ **引擎不负责送达**:推送/红点归宿主。⚠️ 增量拉取用下一条 |
+| `world.invitations_page(player_id=None, *, since_seq=0, limit=50)` | 上一条的**带游标**版本,回 `{events, next_seq, cursor, scanned, total}`,每一格语义与 `contact_requests_page()` 逐字相同(三扇门共用同一个 `_filtered_page`)。理由也逐字相同:热闹的世界里拿"这一页最后一条"当游标会把他自己那条永远排在窗口外 |
+| `world.answer_invitation(player_id, invite_seq, accept)` | **他自己按下的那一下** —— 引擎里唯一一处替玩家点头的入口,而它拿到的正是他点的那一下(§2.9.6.7)。`invite_seq` 就是那条 `agent_invites` 的 `seq`。`accept=True`:**在这一刻重查一遍闸**(他可能已经走开、她可能睡了或手上有了别的事),过了才落 `invitation_settled{accepted}` 并真的去做,做不成落 `expired` 并把原因写进 `note` —— 决定与执行之间世界还在跑,和 `act()` 的"在执行时校验,不在决定时"同一条。`accept=False`:落 `declined`,**并且只有这一支**动关系、进她的记忆(纯算术,一次模型都不调);他没答挂到 ttl 那一支是**错过**不是拒绝,一个字都不写。回 `{"ok","outcome",…}`,`outcome` ∈ `together.INVITE_OUTCOMES` 或 `"gone"`(答过了 / 已过期)。**重复答复不报错**(两个设备同时点同一份是常态);替**别人**答抛 `ToolCallError` |
 | `world.contact_forecast(agent_id=None)` | **此刻**每对 (角色, 玩家) 算出来是多少,含没触发的与被冷却挡下的。调 `contact.threshold` 用 —— 只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。只读:不占额度、不写冷却、不发事件,且**和真轮次共用同一个判定函数** |
 | `world.forget_player(player_id, *, reason="", dry_run=False)` | **一个人离开了这个世界**(§2.9.10)。往日志里追加一条 `player_departed` 事实,由折叠端和世界自己去响应它:关系(两个方向)、联系冷却、姿态、静音、回头找你、他教过的规则,一并作废;**历史一个字不改**(事件、记忆、转录、账本全留着 —— 她记得这个人来过,只是不再等他)。回执 `{player_id, reason, relations, edges, contact, chat_state, dry_run, seq}`(`edges` 是关系图上撤掉的边 —— 它是一张自己的表,折叠端碰不到,不显式撤的话 `cliques()` 里会坐着一个不存在的人)。**幂等**;`dry_run=True` 一个字节都不写。CLI 出口 `anima-world player forget` |
 | `world.erase_player(player_id, *, reason="", dry_run=False, since_seq=None, limit=None, resume=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq, resume_seq, phase}`。**幂等**;`dry_run=True` 一个字节都不写(但**读**进度键)。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账)。3.5.0 的 `since_seq` / `limit` / `resume` **分的是改写那一遍,收名字那一遍永远要看全量**,所以它们不让请求变快;买到的是"一趟被杀在半路还能续、而且名字不丢"(进度键 `anima:{world_id}:erasure:{player_id}`,带 TTL、**不进包**)与"一次调用的写入量有上限"。`phase` 是 `not_started`/`partial`/`done` —— **这个人的抹除处在哪一步**,不是"抹干净了没有";`seq` 有值 = 走到了日志尽头。长期解仍是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮,而且**它也不是完整解**:自由文本里的名字不带 id)。CLI 出口 `anima-world player erase` |
@@ -2984,7 +3098,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 
 | 函数 | 说明 |
 |---|---|
-| `world.kinds()` | 声明过的种类:`{"id","gloss","builtin","budget","quantities":[{"key","default","visibility","label","unit","bands"}],"affordances":[{"verb","label","duration","occupies","changes_world","needs_actor","conditions","sets","requires","costs","consumes","spawn","destroys_target","participants"}]}`(`requires`/`costs`/`consumes` 是关于**施动者**的那一半,见 §2.9.6.1;`duration`/`occupies` 见 §2.9.6.2;`participants` 是**得有人一起做**的那一格 `{"min","max"}`,`None` = 单人,见 §2.9.6.6 —— 界面上它决定"叫谁一起"那个选人框该不该出现)。**能力表只有这一个地方问得到** —— `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在,宿主猜一份动词表出来是猜错了也不报错。`label` 是她提示词里读到的那几个字,也是界面上该印的那几个字(动词可以是作者自造的,引擎手上没有别的地方查得到它)。量上那个 `bands`(没分档 = `[]`)同理:**"作者把这个量翻成了哪几个词"只有这里问得到**,猜一份出来不报错,只是界面上写着一个这个世界里不存在的说法(§2.9.4.2) |
+| `world.kinds()` | 声明过的种类:`{"id","gloss","builtin","budget","quantities":[{"key","default","visibility","label","unit","bands"}],"affordances":[{"verb","label","duration","occupies","changes_world","needs_actor","conditions","sets","requires","costs","consumes","spawn","destroys_target","participants","importance"}]}`(`requires`/`costs`/`consumes` 是关于**施动者**的那一半,见 §2.9.6.1;`duration`/`occupies` 见 §2.9.6.2;`participants` 是**得有人一起做**的那一格 `{"min","max"}`,`None` = 单人,见 §2.9.6.6 —— 界面上它决定"叫谁一起"那个选人框该不该出现;`importance` 是**做完这件事在场的人会不会记住**,0~1,`None` = 作者没声明 = 这一层缺席,见 §2.9.6.7)。**能力表只有这一个地方问得到** —— `stocks()` 只给得出数字,而数字不告诉你 `tend` 这个词存不存在,宿主猜一份动词表出来是猜错了也不报错。`label` 是她提示词里读到的那几个字,也是界面上该印的那几个字(动词可以是作者自造的,引擎手上没有别的地方查得到它)。量上那个 `bands`(没分档 = `[]`)同理:**"作者把这个量翻成了哪几个词"只有这里问得到**,猜一份出来不报错,只是界面上写着一个这个世界里不存在的说法(§2.9.4.2) |
 | `world.entities(kind=None)` | 实例:`{"id","kind","name","gloss","location","values"}`,**带此刻的量**。分开问的话宿主得先 `entities()` 再逐个 `stocks()`,而两次之间世界还在跑 |
 | `world.check_entity(entity_id=None)` | **这些东西活得了吗**:`{"entity","kind","ok","problems":[…]}`,不给 id 就查全部。引擎在每次出生时自己跑同一套(见 §2.9.6.5),这是手动入口——写声明时问"我这么写生出来的东西活得了吗",或查一个已经在世界里的东西为什么不动弹 |
 | `world.engagements(agent_id=None)` | **谁正在做一件要花时间的事**:`{"agent","target","verb","label","started_tick","ends_tick","remaining","occupies"}`。少了它,一个埋头干了十个月的人和一个闲着的人在宿主眼里长得一模一样(同样的信息也进 `state()` 里那个人的 `activity.engaged`) |
@@ -3793,6 +3907,10 @@ readline。
 | `social.joint.min_willingness` | float | 0.20 | **没有邀请判定器时**（没配 key）答应的门槛：亲密度 × 随和 × stance。有判定器时读人设判，这个键不参与 |
 | `social.joint.relation_step` | float | 0.06 | 一次共同经历值多少关系。**故意大于** `DeterministicRelationshipJudge.STEP`（0.04）——一起经历过的事该比说过多少句话更能改变关系（`tests/test_together.py` 钉着这个大小关系） |
 | `social.joint.full_duration_ticks` | int | 12 | 一起待多久算"待满了"（12 = 5 分钟/tick 时的一个世界小时）。一下子的事拿一半，不是零 |
+| `social.joint.npc_may_invite_player` | bool | **true** | 角色点玩家的名要一起做事时,**落一条邀请等他自己答**(§2.9.6.7)。关掉它,那条岔路退回一次普通的拒绝(`player_invites_off`)。⚠️ 3.6.0 之前引擎在这里**替玩家答应了** —— 这个键默认开,是因为关着等于把那扇门整个封死,而不是退回旧行为 |
+| `social.joint.invite_ttl_ticks` | int | 12 | 一份邀请等几个 tick 没人答就过期(12 = 一个世界小时)。**按世界时钟判**,不按墙钟 —— 墙钟会让同一份日志重放出两份历史,而两边都不报错 |
+| `social.joint.invites_per_player_per_day` | int | 2 | 同一个角色一个世界日最多约同一个玩家几次。**用完不是错,是她今天不再开口** —— 一个不设上限的邀请者在玩家眼里和一条消息推送没有区别,而她本该是一个人。跨日自动清零(进程态,和八卦的每日额度同一个形状);给 0 = 不限 |
+| `narrative.player.enabled` | bool | false | **玩家做的那一下也进旁白**(§2.9.6.7),只对声明了 `importance` 的能力生效。默认关,因为旁白是一次 LLM 调用而它按玩家的每一次动作触发 |
 | `presence.enforce_colocation` | bool | false | 声明了 `requires_colocation` 的能力，在玩家不在她跟前时拒绝（§2.9.9）。⚠️ **开之前先让宿主调 `player_move`**——`anima-world presence` 就是查这个的；不查就开等于让 `give` 和一起做事全线拒绝，而回执看上去像玩家自己站错了地方 |
 | `social.hearsay_reaction.enabled` | bool | false | 一条八卦落地后问一次判定「这句话听在她耳朵里什么感觉」（吃醋；§2.8）。**每条八卦一次模型往返** —— 自成一个开关就是因为这个代价 |
 | `contact.enabled` | bool | false | 她会想起一个**不在跟前**的玩家,落成 `agent_wants_contact`(§2.9.8)。**不搭 `chat.tools.enabled`**:这一层不挑动词,没有 LLM 也成立 |

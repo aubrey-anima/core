@@ -702,6 +702,9 @@ _INVITE_TALK_TURNS = 6
 # 她读到的那句话一直是对的 —— 坏的是**程序读到的那一份**。
 _WORLD_SAID_NO = frozenset({
     "conditions", "participant_gate", "incapable", "busy", "absent", "declined",
+    # 她开了口,他还没答。**不是错**,也不是拒绝 —— 她该等,或者去做别的;
+    # 报成 `ToolCallError` 的话,一次成功的邀请在她眼里会变成一句报错。
+    "invited",
 })
 
 
@@ -1153,9 +1156,10 @@ class _ToolRuntime:
 
     def _consent(
         self, actor_id: str, target: str, verb: str, party: Sequence[str],
-        *, player_id: str = "",
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """挨个问过去。返回 `(答应了的, 没答应的)`,两边都是 `Consent.to_dict()`。
+        *, player_id: str = "", accepted_ids: Sequence[str] = (),
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """挨个问过去。返回 `(答应了的, 没答应的, 还等着答的)`,三边都是
+        `Consent.to_dict()`。
 
         **两段,次序是有意的**:先世界(`joint_gate` + 静音 + 玩家在不在跟前),
         再性格。一句笼统的"她没答应"会让玩家以为被拒绝的是这个人,而真正的原因
@@ -1163,6 +1167,27 @@ class _ToolRuntime:
 
         **邀请人也可能是玩家。** 判定器读到的那个名字要照他的显示名写 ——
         给一个 `player:9f2c…` 过去,她收到的邀请是一个 uuid 发来的。
+
+        ## 第三堆是新的:被点名的**玩家**不再当场被替着点头
+
+        这里从前写着一句假话:「玩家过了在场那道闸就是答应 —— 他就是发起这次调用
+        的那个人」。**在这条分支上他从来不是。** 玩家自己按按钮时他是 `actor_id`,
+        走不到这里;走到这里的只有一种情形 —— **一个 NPC 点了他的名**(聊天里
+        `interact(with=["我"])`,或者一轮 autonomy 里她自己决定的)。于是引擎替他
+        答应了一件他根本没被问过的事,而这个模块的第一条红线就是**邀请必须能被
+        拒绝**。同一条红线保护着虚构的人、取消着真人的意志,是这个引擎最不该有的
+        那种不对称。
+
+        现在这一支落一条 `agent_invites`,然后**等**。三条:
+
+        - **`accepted_ids` 是唯一能替玩家点头的路**,而它只有 `answer_invitation`
+          传得进来(私有形参,公开的 `interact_with` 一个字没变)。伪造一次同意
+          因此不是"别这么做",是**没有这个写法**。
+        - **它跳过的只有"问"这一步,不跳过闸。** 他点头那一刻人可能已经走开了 ——
+          `_invitee` 的 `player_not_here` 照查(这就是验收里"答复那一刻重查"的落点)。
+        - 世界关着这扇门(`social.joint.npc_may_invite_player`)、或者她今天已经
+          问够了(`social.joint.invites_per_player_per_day`),都归**硬闸**那一堆:
+          那是世界的状态,不是他的意思。**问够了不是错**,是她今天不再开口。
         """
         scheduler = self._world.scheduler
         judge = scheduler.relationship_judge
@@ -1176,6 +1201,9 @@ class _ToolRuntime:
 
         accepted: list[dict[str, Any]] = []
         refused: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+        to_invite: list[str] = []
+        pre_ok = {str(a) for a in accepted_ids if str(a)}
         for who in party:
             invitee = self._invitee(
                 actor_id, target, verb, who,
@@ -1185,12 +1213,16 @@ class _ToolRuntime:
                 refused.append(together.decide_alone(
                     invitee, min_willingness=min_willingness).to_dict())
                 continue
-            if invitee.is_player:
-                # 玩家过了在场那道闸就是答应 —— **他就是发起这次调用的那个人**。
-                # 替他去问一个 LLM 是荒谬的:他刚刚按下了那个按钮。
+            if who in pre_ok:
+                # 他**真的点过头了**(`answer_invitation` 那条路)。这一句在这条
+                # 路上是真的 —— 从前它写在所有路上,那才是假的。
                 accepted.append(together.Consent(
                     who=who, accepted=True, source="gate", note="你自己点的头",
                 ).to_dict())
+                continue
+            if invitee.is_player:
+                # **先记下,最后再开口**(见循环下面那一段)。
+                to_invite.append(who)
                 continue
             verdict = None
             if judge_invite is not None:
@@ -1231,7 +1263,60 @@ class _ToolRuntime:
                     source="judge", note=verdict.reason,
                 )
             (accepted if decided.accepted else refused).append(decided.to_dict())
-        return (accepted, refused)
+
+        # **开口排在最后,而且只在别人都过得了的时候。** 一件已经办不成的事
+        # (有人过不了闸、有人不肯)不该先在他手机上响一下再自己消失 —— 那份邀请
+        # 会挂到 ttl 才过期,还白占掉她今天的额度。这是"一个人过不了闸,整件事就
+        # 不发生"(红线 2)在开口这一侧的样子。
+        #
+        # 没被问到的人**不进 `consents`**:那张表记的是"问了谁、他说了什么",
+        # 而他根本没被问 —— 塞一条进去,读的人分不出"他没答"和"没问他"。
+        if to_invite and not refused:
+            for who in to_invite:
+                asked = self._invite(
+                    actor_id, target, verb, who, party,
+                    verb_label=verb_label, target_name=target_name,
+                    inviter=inviter,
+                )
+                (pending if asked.get("ok") else refused).append(asked["consent"])
+        return (accepted, refused, pending)
+
+    def _invite(
+        self, actor_id: str, target: str, verb: str, who: str,
+        party: Sequence[str], *, verb_label: str, target_name: str, inviter: str,
+    ) -> dict[str, Any]:
+        """她对一个玩家开口。返回 `{"ok", "consent", ...}`。
+
+        **句子在这里拼一次,存进事件**(`together.describe_invitation`)——
+        和判定器读到的是同一句。读那扇门的时候现拼一遍的话,作者明天改了动词的
+        label,他手机上那条昨天的邀请会跟着变成另一句话。
+        """
+        pid = who.split(":", 1)[1]
+        others = [self._display(p) for p in party if p != who]
+        text = together.describe_invitation(
+            inviter=inviter, verb_label=verb_label,
+            target_name=target_name, others=others,
+        )
+        asked = self._world.scheduler.invite_player(
+            actor_id, pid, target=target, verb=verb, party=list(party), text=text,
+            verb_label=verb_label, target_name=target_name, agent_name=inviter,
+        )
+        if not asked.get("ok"):
+            # 门关着 / 今天问够了。**归硬闸那一堆** —— 那是世界的状态,
+            # 不是他的意思(`GATE_LABELS` 里那两条)。
+            reason = str(asked.get("reason") or "")
+            gate = "player_invites_off" if reason == "invites_off" else "invite_capped"
+            return {"ok": False, "consent": together.Consent(
+                who=who, accepted=False, reason=gate, source="gate",
+                note=together.GATE_LABELS[gate],
+            ).to_dict()}
+        consent = together.Consent(
+            who=who, accepted=False, reason=together.INVITE_PENDING,
+            source="gate", note=text,
+        ).to_dict()
+        consent["invite_seq"] = asked["invite_seq"]
+        consent["expires_tick"] = asked["expires_tick"]
+        return {"ok": True, "consent": consent, **asked}
 
     def _display(self, who: str) -> str:
         if who.startswith("player:"):
@@ -1405,6 +1490,30 @@ class _ToolRuntime:
         擦完一样掉体力。给玩家关着的那阵子,同一个世界里是两套物理 —— 而她那套
         才是真的。`player_id` 是另一回事:它说的是这一轮跟她说话的人是谁,
         一次角色调用照样带着它。
+
+        ⚠️ **被点名的玩家不在这条路上答应**(3.6.0):她点了他的名,落一条
+        `agent_invites` 然后等 —— 回执是 `reason: "invited"`,不是 `ok: True`。
+        替他点头的唯一入口是 `World.answer_invitation()`,而它走的是下面那条
+        私有的 `_interact_with`。
+        """
+        return self._interact_with(
+            actor_id, target, verb, participants, player_id,
+        )
+
+    def _interact_with(
+        self, actor_id: str, target: str, verb: str,
+        participants: Sequence[str] | None = None, player_id: str = "",
+        *, accepted_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """`interact_with` 的正文,外加一个**只有引擎内部给得出**的参数。
+
+        `accepted_ids` 里的人**已经真的点过头了**。它私有,是因为它是这一层唯一
+        能绕过"问一遍"的东西 —— 公开出去就等于给每个宿主一把替玩家点头的钥匙,
+        而这个模块的第一条红线正是"邀请必须能被拒绝"。今天只有
+        `World.answer_invitation()` 传得进来,而它拿到的是玩家自己按下的那一下。
+
+        **它跳过的只有"问",不跳过闸**:`_consent` 里 `pre_ok` 那一支排在
+        `invitee.gate` 之后,所以"他这会儿还在不在她跟前"照查。
         """
         scheduler = self._world.scheduler
         party_raw = list(participants or ())
@@ -1430,10 +1539,28 @@ class _ToolRuntime:
                 # 玩家点一次"跟我一起",收到一句"她不能跟自己……",说的是别人。
                 raise tools_mod.ToolCallError(
                     f"{scheduler._named(actor_id)}不能跟自己一起做一件事")
-            accepted, refused = self._consent(
-                actor_id, target, verb, party, player_id=player_id
+            accepted, refused, pending = self._consent(
+                actor_id, target, verb, party, player_id=player_id,
+                accepted_ids=accepted_ids,
             )
-            consents = [*accepted, *refused]
+            consents = [*accepted, *refused, *pending]
+            if pending and not refused:
+                # **她问了,他还没答。** 这不是"她被拒绝了",两者必须分得开 ——
+                # 合成一句的话,她下一步该"换个人"还是该"等一会儿",谁也说不出。
+                # 排在 `refused` 之后:一件已经办不成的事(有人过不了闸)不该被
+                # 报成"等他回话",那会让调用方白等一个永远不会成真的答复。
+                asked = pending[0]
+                return {
+                    "ok": False, "target": target, "verb": verb,
+                    "reason": together.INVITE_PENDING,
+                    "refusal": (
+                        f"{self._named(str(asked.get('who') or ''))}"
+                        f"{together.INVITE_PENDING_LABEL}"
+                    ),
+                    "invite_seq": asked.get("invite_seq"),
+                    "expires_tick": asked.get("expires_tick"),
+                    "consents": consents,
+                }
             if refused:
                 # **点名说出是谁、为什么。** 一句"没人答应"会让下一步无从谈起:
                 # 该换个人、该等他睡醒、还是该死心,是三件完全不同的事。
@@ -3429,6 +3556,10 @@ class World:
                             {"min": a.participants.minimum, "max": a.participants.maximum}
                             if a.participants is not None else None
                         ),
+                        # 在场的人记不记得住这一下。`None` = 作者没写 = 这一层
+                        # 整个缺席(不是 0):**没写**和**写了 0**是两句话,前者
+                        # 是"我还没想过",后者是"我想过了,不值一提"。
+                        "importance": a.importance,
                     }
                     for a in kind.affordances.values()
                 ],
@@ -4481,8 +4612,9 @@ class World:
     ) -> dict[str, Any]:
         """"按 kind 取一页、按 player_id 过滤、把游标交出去"。
 
-        **两扇门共用这一份**(`contact_requests_page` / `inbox_page`):各写一遍的话
-        它们迟早在"空页时游标怎么算"上分叉,而那正是这个洞本身。
+        **三扇门共用这一份**(`contact_requests_page` / `inbox_page` /
+        `invitations_page`):各写一遍的话它们迟早在"空页时游标怎么算"上分叉,
+        而那正是这个洞本身。
         """
         page = self.history(since_seq=since_seq, limit=limit, kind=kind)
         scanned = page["events"]
@@ -4500,6 +4632,131 @@ class World:
             "cursor": int(scanned[-1]["seq"]) if scanned else int(since_seq),
             "scanned": len(scanned),
             "total": page["total"],
+        }
+
+    # ── 有人在等你点头(邀请门)────────────────────────────────────────────
+    #
+    # **和上面两扇门是三件事,不是一件。** `inbox`(`agent_hail`)的语义写在它自己
+    # 的 docstring 里:「敲门不是对话……玩家还没回话,世界里什么也没发生」——
+    # **不回也没事**是它的定义。`contact_requests` 的定义是「**只在你不在跟前时
+    # 成立**」。而一份邀请:不回她就站在那儿等着,而且一起做事**必须面对面**。
+    # 三个前置条件两两互斥,合进一扇门等于把它们变成同一件事,于是玩家分不出
+    # "她跟我打了个招呼"、"她隔着半张地图想起我"和"她在等我点头"。
+    #
+    # 但**翻页的规矩共用那一份**(`_filtered_page`,第三个消费者):各写一遍的话
+    # 它们迟早在"空页时游标怎么算"上分叉,而那正是饿死玩家的那个洞。
+
+    def invitations(
+        self, player_id: str | None = None, *, since_seq: int = 0, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """**有人在等你点头** —— 她开口约过他的那些事件。
+
+        每条多一格 `pending`:这份邀请**此刻**还等不等得到答复。事件本身是历史
+        (她当时确实问了),而"还在等吗"是**现在** —— 两者在一条流里读得出,
+        宿主才画得出"3 条待回应",而不是把三天前答复过的邀请再亮一次红点。
+
+        ⚠️ **要增量拉取请用 `invitations_page()`**,理由和 `contact_requests()`
+        逐字相同(热闹的世界里拿最后一条 seq 当游标会饿死)。
+
+        ⚠️ **引擎不负责送达**,推送/红点归宿主。这里给的是有据可查的世界事件。
+        """
+        return self.invitations_page(
+            player_id, since_seq=since_seq, limit=limit
+        )["events"]
+
+    def invitations_page(
+        self, player_id: str | None = None, *, since_seq: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        """`invitations()` 的**带游标**版本 —— 增量拉取用这一条。
+
+        `{"events", "next_seq", "cursor", "scanned", "total"}`,游标语义和
+        `contact_requests_page()` / `inbox_page()` 逐字相同(共用 `_filtered_page`)。
+        """
+        # **只读门自己补课**(和 `state()` / `roster()` 同一条):`pending` 那一格
+        # 从投影里读,而别的进程刚落的答复这个进程还没折过。跑着的世界会在下一次
+        # 追加时自愈,暂停的不会 —— 而只读门不该指望世界正好在动。
+        self.scheduler.catch_up_projection()
+        waiting = self.scheduler._memory_projection.invitations
+        page = self._filtered_page(
+            kind="agent_invites", player_id=player_id,
+            since_seq=since_seq, limit=limit,
+        )
+        page["events"] = [
+            # **拷一份,不改那条事件**:投影拷一份那条纪律在读侧的样子 ——
+            # 就地写一格 `pending` 会让 `World.events()` 里那条事件从此长得和
+            # 日志里那条不一样。
+            {**e, "pending": int(e.get("seq") or 0) in waiting}
+            for e in page["events"]
+        ]
+        return page
+
+    def answer_invitation(
+        self, player_id: str, invite_seq: int, accept: bool,
+    ) -> dict[str, Any]:
+        """**他自己按下的那一下。** 这是引擎里唯一一处替玩家点头的入口 ——
+        而它拿到的正是他点的那一下。
+
+        `invite_seq` 就是那条 `agent_invites` 的 `seq`(`invitations()` 每行都带)。
+
+        `accept=True`:**在这一刻重查一遍闸,再去做**。决定与执行之间世界还在
+        跑 —— 他点头时人可能已经走开了、她可能睡了或者手上有了别的事。查过之后
+        才落 `invitation_settled{accepted}`,做不成就落 `expired` 并把原因写进
+        `note`:**不许在他不在场时把那件事做掉**。
+
+        `accept=False`:落 `invitation_settled{declined}`,并且**只有这一支**会
+        写在关系上、进她的记忆(纯算术,一次模型都不调 —— 红线 3)。他没答而挂到
+        ttl 的那一支是**错过**,不是拒绝,一个字都不写。
+
+        返回 `{"ok", "outcome", ...}`。`outcome` 是 `together.INVITE_OUTCOMES`
+        里的一个,或者 `"gone"`(这份邀请已经不在了 —— 答过了、或者已经过期)。
+        **重复答复不报错**:两个设备同时点同一份邀请是常态,而第二下不该看到
+        一次异常。
+        """
+        pid = str(player_id or "").strip()
+        if not pid:
+            raise ValueError("player_id is required")
+        scheduler = self.scheduler
+        row = scheduler.pending_invitation(int(invite_seq))
+        if row is None:
+            return {
+                "ok": False, "outcome": "gone",
+                "refusal": "这份邀请已经不在了 —— 要么答过了,要么已经过期",
+            }
+        if str(row.get("player_id") or "") != pid:
+            # 替**别人**答应,和引擎替他答应是同一件事的两种写法。
+            raise tools_mod.ToolCallError("这份邀请不是给你的")
+        if not accept:
+            # 关系与记忆焊在 `settle_invitation` 里,不在这儿补 —— 见它的 docstring。
+            settled = scheduler.settle_invitation(int(invite_seq), "declined")
+            if settled is None:
+                return {"ok": False, "outcome": "gone",
+                        "refusal": "这份邀请已经不在了"}
+            return {"ok": True, "outcome": "declined",
+                    "agent_id": row.get("agent_id"), "text": row.get("text")}
+        try:
+            outcome = self._tool_runtime._interact_with(
+                str(row.get("agent_id") or ""),
+                str(row.get("target") or ""), str(row.get("verb") or ""),
+                [str(p) for p in (row.get("party") or [])],
+                player_id=pid,
+                accepted_ids=[f"{scheduler.PLAYER_PREFIX}{pid}"],
+            )
+        except tools_mod.ToolCallError as exc:
+            # 那样东西没了、动词没了 —— 世界在这中间变了。**这不是他的错,
+            # 也不是她的拒绝**,所以走"错过"那一支:不落记忆、不动关系。
+            scheduler.settle_invitation(int(invite_seq), "expired", note=str(exc))
+            return {"ok": False, "outcome": "expired", "reason": "gone",
+                    "refusal": str(exc)}
+        if outcome.get("ok"):
+            scheduler.settle_invitation(int(invite_seq), "accepted")
+            return {"ok": True, "outcome": "accepted", **outcome}
+        refusal = str(outcome.get("refusal") or "")
+        scheduler.settle_invitation(int(invite_seq), "expired", note=refusal)
+        return {
+            "ok": False, "outcome": "expired",
+            "reason": str(outcome.get("reason") or ""), "refusal": refusal,
+            **{k: v for k, v in outcome.items()
+               if k not in {"ok", "reason", "refusal"}},
         }
 
     def contact_stats(self) -> dict[str, Any]:

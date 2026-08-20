@@ -417,18 +417,31 @@ def test_更长的共同经历更算数(world, open_world, tmp_path):
 # ── 玩家也能一起 ────────────────────────────────────────────────────────────
 
 
-def test_玩家算得进一场共同经历_而且不用去问他肯不肯(world):
-    """他就是发起这次调用的那个人 —— 替他去问一个 LLM 是荒谬的。"""
+def test_玩家自己按下的那一下_不用去问他肯不肯(world):
+    """他就是发起这次调用的那个人 —— 替他去问一个 LLM 是荒谬的。
+
+    ⚠️ **这条路是 `player_tool`,不是 `act`。** 这个断言从前挂在
+    `world.act("夏", …, player_id="p1")` 上,而那条路上"发起这次调用的那个人"
+    是**她**:她在对话里点了他的名,引擎替他点了头。同一句话在一条路上是真的、
+    在另一条路上是假的,而两条路当时共用一个分支 —— 3.6.0 把它们分开了
+    (假的那一半见 `test_她点他的名时_他得自己答`)。
+    """
+    from anima_world.relationship_judge import InviteVerdict
+
+    class _Judge:
+        seen: list = []
+
+        def judge_invite(self, **kwargs):
+            type(self).seen.append(kwargs)
+            return InviteVerdict(accept=True, reason="好啊")
+
     world.player_move("p1", "cafe")
-    result = world.act(
-        "夏", "interact",
-        {"target": "bench:oak", "verb": "同坐", "with": ["我"]},
-        surface="body", player_id="p1",
-    )
-    assert result["ok"] is True
-    assert result["detail"]["consents"][0]["source"] == "gate", (
-        "他就是发起这次调用的那个人 —— 替他去问一个 LLM 是荒谬的"
-    )
+    world.scheduler.relationship_judge = _Judge()
+    result = world.player_tool(
+        "p1", "interact", {"target": "bench:oak", "verb": "同坐", "with": ["夏"]})
+    assert result["ok"] is True, result
+    # 被问的只有**她**。他没有被问,因为问的人就是他。
+    assert len(_Judge.seen) == 1 and _Judge.seen[0]["a"]["name"] == "苏晚夏"
     world.scheduler.catch_up_projection()
     assert _sentiment(world, "夏", "p1") > 0
     assert _sentiment(world, "p1", "夏") > 0

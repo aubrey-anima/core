@@ -3668,6 +3668,11 @@ def run_ontology(args: argparse.Namespace) -> int:
                 )
                 print(f"         ✦ 得有人一起:除发起的人之外还要 {want}"
                       f",而且每个人都要点头(拒得掉)")
+            # 记不记得住。不写的话这一行整个不印 —— 印一句"importance 无"会让读的
+            # 人以为有个默认值在那儿,而真相是这一层压根没铺开。
+            if a.get("importance") is not None:
+                print(f"         ✦ 在场的人会记住这一下(importance "
+                      f"{a['importance']:g}),做的人是玩家也一样")
         if not kind["builtin"]:
             # 内置种类没有实例住在本体里(角色在投影里),那条上限对它没有意义。
             print(f"    同一个地方最多带 {kind['budget']} 个进提示词")
@@ -5461,6 +5466,7 @@ def contract_payload() -> dict[str, Any]:
         TAGLINE_MAX_CHARS,
     )
     from anima_world.media import MEDIA_SCHEMES
+    from anima_world.ontology import AFFORDANCE_KEYS
     from anima_world.world_seed import (
         WORLD_SEED_AGENT_KEYS,
         WORLD_SEED_AGENT_OPTIONAL_KEYS,
@@ -5525,6 +5531,31 @@ def contract_payload() -> dict[str, Any]:
             # `agent_keys` 是必填集(镜像端拿它算"少了什么"),把可选键混进去
             # 等于要求每个世界给每个角色写一张卡。
             "agent_optional_keys": sorted(WORLD_SEED_AGENT_OPTIONAL_KEYS),
+            # **一个能力里写得下哪些字段。** 它是校验器判断时用的那一份
+            # (`ontology.AFFORDANCE_KEYS`),不是抄给创作台看的副本 —— 抄一份的话,
+            # 加一格时总有一次只改了校验器,而这一头照旧答着旧清单,两边都不报错。
+            "affordance_keys": sorted(AFFORDANCE_KEYS),
+            # 本轮新的那一格,单独点名。**创作台按它在不在探测,不比版本号** ——
+            # 同一个版本号下有过好几份不同的引擎,而"这支引擎会不会让在场的人
+            # 记住这件事"猜错了**不报错**:世界照跑、日志干净,只是屋里的人什么
+            # 都没记住,而作者要到读某个人的记忆时才发现。
+            "affordance_importance": {
+                "range": [0.0, 1.0],
+                "read_command": "ontology",
+                # **不写 = 这一层整个缺席**,和 perception / kinds 逐字同构:
+                # 没有默认值,也没有 `.enabled` 开关。写下一个数才是说
+                # "这件事值得被记住",于是同屋的每个人各落一条见证记忆。
+                "default": None,
+                "gloss": (
+                    "`kinds.<种类>.affordances.<动词>.importance`(0~1,可选)—— "
+                    "**声明它,同处一地的其他角色就会各记住一条**(记忆 kind "
+                    "`witness`,出处进 `entity_interaction` 的载荷);不写的世界"
+                    "这一层整个不存在,行为与从前逐位相同。它同时是**玩家动作进"
+                    "旁白**的那道闸:玩家做了一件声明过 importance 的事才可能生成"
+                    "旁白,而那条路另有一个默认关着的世界开关 "
+                    "`narrative.player.enabled`"
+                ),
+            },
             "location_keys": sorted(WORLD_SEED_LOCATION_KEYS),
             # 地点的两格图。和 `agent_optional_keys` 同一格、同一个理由:
             # **可选**,而且创作台要一个问得到的答案而不是按版本号猜。
@@ -5665,6 +5696,11 @@ def run_contract(args: argparse.Namespace) -> int:
     write_cmd = payload["seed"]["location_image_write_command"]
     print(f"  地点图出口     读出口 anima-world {payload['seed']['location_image_read_command']}"
           f"   写出口 " + (f"anima-world {write_cmd}" if write_cmd else "没有(只在作者层落地)"))
+    print(f"  能力字段       {payload['seed']['affordance_keys']}")
+    imp = payload["seed"]["affordance_importance"]
+    print(f"  importance     {imp['range'][0]}~{imp['range'][1]},可选;"
+          f"不写 = 谁都不记得(这一层整个缺席)   "
+          f"读出口 anima-world {imp['read_command']}")
     print(f"  节拍 op        {', '.join(payload['beats']['ops'])}")
     print(f"  节拍谓词       {', '.join(payload['beats']['predicates'])}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")

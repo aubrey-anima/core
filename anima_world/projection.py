@@ -51,6 +51,47 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_item_consume(proj, e)
     elif e.type == "player_departed":
         _apply_player_departed(proj, e)
+    elif e.type == "agent_invites":
+        _apply_agent_invites(proj, e)
+    elif e.type == "invitation_settled":
+        _apply_invitation_settled(proj, e)
+
+
+# ── 谁在等你回答 ────────────────────────────────────────────────────────────
+
+
+def _apply_agent_invites(proj: Projection, e: Event) -> None:
+    """她开口叫了他一起做一件事 —— 这份邀请从此挂着,等一个答复。
+
+    **挂在投影里而不是另存一份状态**:一份"谁在等你"的清单要是自己有一张表,
+    每个进程手里就各有一份可能不一样的答案(世界壳一个、维护容器一个、tick
+    进程一个),而分叉那天没有一处会报错。折出来的清单靠 `catch_up_projection`
+    免费对齐,重放也必然得到同一份。
+
+    **它的 id 就是这条事件的 `seq`**,不另发一个号。另发一个的话世界里就多了
+    一个 id 命名空间(要保证唯一、要进 `.cyberworld`、要跨进程不撞),换来的是
+    一个和 seq 一一对应的数字 —— 而 `seq` 本来就是账本发的、天然唯一、翻页
+    (`_filtered_page`)用的也是它。
+    """
+    seq = int(e.seq or 0)
+    if seq <= 0:
+        return
+    row = dict(e.payload)
+    row["seq"] = seq
+    proj.invitations[seq] = row
+
+
+def _apply_invitation_settled(proj: Projection, e: Event) -> None:
+    """这份邀请有了结局(答应 / 拒绝 / 过期 / 撤回)—— 它不再等人了。
+
+    **四种结局都只是把它从"还等着"里拿掉**,结局本身留在日志里。所以"他拒绝了"
+    和"他没看见"这两件事永远分得开:清单上都不在了,而账本上写着不同的字。
+    """
+    try:
+        invite_seq = int(e.payload.get("invite_seq") or 0)
+    except (TypeError, ValueError):
+        return
+    proj.invitations.pop(invite_seq, None)
 
 
 def _apply_player_departed(proj: Projection, e: Event) -> None:

@@ -430,6 +430,38 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
         "How long together counts as 'the whole way' for the relationship effect "
         "(12 = one world hour at 5 min/tick)",
     ),
+    # ── 她开口叫玩家一起 ────────────────────────────────────────────────────
+    #
+    # **默认开**,和这一层其余的键不一样。理由是它不是一个新玩法,是把一句已经在
+    # 发生的假话改成真话:此前她在自主轮次里点名玩家,引擎替他点了头
+    # (`Consent(accepted=True, source="gate", note="你自己点的头")`),而他从没被
+    # 问过。默认关等于把那句假话留在世界里。
+    "social.joint.npc_may_invite_player": (
+        True, "bool", "social", False,
+        "An agent's autonomy round may invite a player to do something together; "
+        "the invitation waits for his answer instead of nodding on his behalf",
+    ),
+    # 一份邀请等多久。**按世界时钟数,不按墙钟** —— 墙钟会让重放分叉,而且两边
+    # 都不报错。288 tick = 一个世界日(5 分钟/tick),所以 12 ≈ 一个世界小时。
+    "social.joint.invite_ttl_ticks": (
+        together.DEFAULT_INVITE_TTL_TICKS, "int", "social", False,
+        "How many world ticks an invitation waits for an answer before it expires "
+        "(12 = one world hour at 5 min/tick). Judged by the world clock, never wall-clock",
+    ),
+    # 同一个她、同一个他,一个世界日里最多开口几次。**这是「像个人」和「像推送」
+    # 的分界。** 用完了不是错:她今天不再开口而已,和"她想不出话说"没有区别。
+    "social.joint.invites_per_player_per_day": (
+        together.DEFAULT_INVITES_PER_PLAYER_PER_DAY, "int", "social", False,
+        "Cap on how many times one agent may invite the same player within one world "
+        "day; running out is silence, not an error",
+    ),
+    # 玩家做的事进不进世界动态。**默认关** —— 路铺好,开关留给宿主:一个刚接上的
+    # 宿主会在动态里突然多出一半自己刚点过的按钮,而那是产品决定,不是引擎决定。
+    "narrative.player.enabled": (
+        False, "bool", "narrative", False,
+        "Generate a narrative line when a player performs an affordance the author "
+        "marked with importance (the character half already narrates itself)",
+    ),
     # 异地就只能打电话。**默认关**,而这不是犹豫,是账:引擎侧收紧会当场打断线上
     # 世界 —— `player_move` 是宿主可选调用,今天线上根本没人调,于是"异地"是每一次
     # 调用的默认值,一开就是 give / 一起做事全线开始拒绝。迁移次序只能是

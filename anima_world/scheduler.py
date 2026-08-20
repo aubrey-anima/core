@@ -344,6 +344,14 @@ class Scheduler:
         # social-v5: one gossip roll per (speaker, listener) per world day.
         # Memory only — resets at rollover and on restart.
         self._gossip_rolled: set[tuple[str, str, int]] = set()
+        # (她, 他, 世界日) → 她今天已经开口约过他几次。**这是「像个人」和「像推送」
+        # 的分界**:一个不设上限的邀请者在玩家眼里就是一条推送。
+        #
+        # **进程态,和 `_gossip_rolled` 逐字同一条**:上限是礼貌,不是账 ——
+        # 重启一次让她今天多问一句,没有任何人受损;而为了它去开一个 Redis 键,
+        # 换来的是一个要跨进程一致、要进 `.cyberworld`、要跟着法务抹除走的新状态。
+        # 键里带着世界日,所以它也自己过期(日切那一下顺手清)。
+        self._invited_today: dict[tuple[str, str, int], int] = {}
         # memory-2.0: reflection watermark, hydrated from reflection_state on
         # first touch. Kept in memory so the per-memory path stays db-free;
         # `_reflection_dirty` is what still needs a checkpoint.
@@ -1485,6 +1493,10 @@ class Scheduler:
             #      于是每个长过程都白白多占一 tick(而且没人看得出来)。
             self._settle_engagements()
 
+            # 3.67 到点没人答的邀请。**按世界时钟数,不按墙钟** —— 墙钟会让同一份
+            #      日志重放出两份历史,而两边都不报错。纯算术,和上面同一类。
+            self._settle_invitations()
+
             # 3.7 定时轮次:问问她此刻要不要自己做点什么(autonomy)。
             self._maybe_run_autonomy(now)
 
@@ -1576,6 +1588,7 @@ class Scheduler:
         self._persist_reflection_watermarks()
         self._settle_economy_day()
         self._gossip_rolled.clear()
+        self._invited_today.clear()
         if self._social_enabled() and self.knowledge_graph is not None and self.event_log is not None:
             from anima_world import cliques as cliques_mod
 
@@ -2581,6 +2594,10 @@ class Scheduler:
                     "consumed": dict(outcome.consumed),
                 },
             })
+            # 事件先进历史,再变成在场者的经历 —— 顺序承重(见 `_emit_rule_event`):
+            # 事件是**事实**,记忆是从事实里长出来的**经历**,反过来的话她"记得"
+            # 的那件事在日志里还没发生。
+            self._after_interaction(agent_id, target, verb, affordance, here)
             # 生与灭排在交互事件之后:那条事件记的是"她做了这件事",而生灭是它的
             # 后果 —— 历史里先有因再有果,重放的人才读得出是哪一下造出了那样东西。
             born = self._settle_birth_and_death(agent_id, target, verb, affordance, here)
@@ -2750,6 +2767,10 @@ class Scheduler:
                     "joint_role": "initiator" if who == agent_id else "participant",
                 },
             })
+        # 见证记忆与旁白**一场只发一轮**,不是一人一轮:一起做的事会为每个人各发
+        # 一条 `entity_interaction`(每条各带自己那份代价),照着每条都种一次的话,
+        # 三个人吃一顿饭,屋里每个人会记得吃了三顿、旁白里也会写三顿。
+        self._after_interaction(agent_id, target, verb, affordance, here)
         born = self._settle_birth_and_death(agent_id, target, verb, affordance, here)
         self._settle_joint_experience(
             party, target=target, verb=verb, affordance=affordance,
@@ -2884,6 +2905,242 @@ class Scheduler:
             len(deltas),
         )
 
+    # ── 邀请:她开口问了,他还没答 ─────────────────────────────────────────
+    #
+    # 这一族补的是红线 1 在**玩家**这一侧的缺口。角色被邀请时会被真的问一次
+    # (`judge_invite` 读她的人设),而玩家被点名时,引擎此前**替他点了头**
+    # ——「你自己点的头」那句话写在代码里,而他从来没被问过。同一条红线
+    # (「邀请必须能被拒绝」)对角色成立、对人不成立,是这个引擎最不该有的那种
+    # 不对称:它保护的是虚构的人,取消的是真人的意志。
+    #
+    # 四条,每条都决定了它长什么样:
+    #
+    # - **邀请是事件,不是易失态。** 它落 `agent_invites`,折进投影;不开新的
+    #   Redis 键、不进 `volatile_keys` —— 存储契约一格不动。于是它免费得到
+    #   跨进程一致(`catch_up_projection`)和可重放。
+    # - **它的 id 就是那条事件的 `seq`。** 另发一个号等于凭空多一个 id 命名空间。
+    # - **过期按世界时钟判,不按墙钟。** 墙钟会让同一份日志重放出两份历史,
+    #   而两边都不报错。
+    # - **「拒绝」和「过期」必须分得开,而且只有前者留痕。** 他按了"不"是一个
+    #   人做出的决定(进记忆、进关系);他没答是**错过** —— 手机上的人放下手机
+    #   去吃了顿饭,回来发现她问过他一句。把这记成"他拒绝了我",是引擎替他说话,
+    #   而且是说反话。所以 expired 这一支**一个字都不写在他头上**。
+
+    def _invite_config(self) -> tuple[bool, int, int]:
+        """(她开不开得了口, 一份邀请等几个 tick, 同一个人一天最多几次)。"""
+        may = True
+        ttl = together_mod.DEFAULT_INVITE_TTL_TICKS
+        cap = together_mod.DEFAULT_INVITES_PER_PLAYER_PER_DAY
+        if self.config_store is not None:
+            try:
+                may = bool(self.config_store.get(
+                    "social.joint.npc_may_invite_player", default=may))
+                ttl = int(self.config_store.get(
+                    "social.joint.invite_ttl_ticks", default=ttl))
+                cap = int(self.config_store.get(
+                    "social.joint.invites_per_player_per_day", default=cap))
+            except (TypeError, ValueError):
+                logger.warning("social.joint.invite* 配置读不成数,按默认刻度算", exc_info=True)
+        return (may, max(1, ttl), max(0, cap))
+
+    def invite_player(
+        self, agent_id: str, player_id: str, *,
+        target: str, verb: str, party: Sequence[str], text: str,
+        verb_label: str = "", target_name: str = "", agent_name: str = "",
+    ) -> dict[str, Any]:
+        """她开口约一个玩家。**落一条事件,然后等** —— 不替他答应。
+
+        `player_id` 收**裸 pid**(关系表与 `_filtered_page` 的过滤键都是它;
+        见 `_relation_id` 那一课)。
+
+        返回 `{"ok": True, "invite_seq", "expires_tick", "round"}`,或者
+        `{"ok": False, "reason": "invites_off" | "invite_capped"}`。
+
+        **上限用完不是错。** 她今天不再开口而已 —— 一个不设上限的邀请者在玩家
+        眼里和一条消息推送没有区别,而她本该是一个人。调用方要把这一条报成
+        "她这会儿没再开口",不是报成一次失败。
+        """
+        may, ttl, cap = self._invite_config()
+        if not may:
+            return {"ok": False, "reason": "invites_off"}
+        pid = self._relation_id(str(player_id))
+        with self._lock:
+            now = int(self.clock)
+            day = self.world_time(now).day
+            key = (agent_id, pid, day)
+            asked = self._invited_today.get(key, 0)
+            if cap and asked >= cap:
+                logger.info(
+                    "%s 今天已经约过 %s %d 次了,不再开口(上限 %d)",
+                    agent_id, pid, asked, cap,
+                )
+                return {"ok": False, "reason": "invite_capped", "asked": asked}
+            here = self._where_is(agent_id)
+            event = self._record_and_deliver({
+                "type": "agent_invites", "who": agent_id, "loc": here,
+                "payload": {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name or self._relation_name(agent_id),
+                    # 裸 pid:读那扇门按它过滤(`_filtered_page`),关系表也用它。
+                    "player_id": pid,
+                    "target": target, "verb": verb,
+                    "verb_label": verb_label or verb,
+                    "target_name": target_name or target,
+                    # 名单里带着玩家自己(`player:<pid>`)—— 答应之后照原样交回
+                    # `perform_affordance`,别在答复那一刻重新拼一遍名单。
+                    "party": [str(p) for p in party],
+                    # 一句人话。**存下来,不在读的时候现拼** —— 她开口时说的那句
+                    # 话属于那一刻(动词的 label 明天可能被作者改掉)。
+                    "text": text,
+                    "created_tick": now,
+                    "expires_tick": now + ttl,
+                    "round": asked + 1,
+                },
+            })
+            self._invited_today[key] = asked + 1
+            return {
+                "ok": True, "invite_seq": int(event.get("seq") or 0),
+                "expires_tick": now + ttl, "round": asked + 1,
+            }
+
+    def pending_invitation(self, invite_seq: int) -> dict[str, Any] | None:
+        """还等着人回答的那一份(按 seq)。**先补课再答** —— 别的进程刚落的邀请,
+        这个进程也得看得见(只读门自己补课,和 `state()` / `roster()` 同一条)。"""
+        self.catch_up_projection()
+        row = self._memory_projection.invitations.get(int(invite_seq))
+        return dict(row) if row is not None else None
+
+    def settle_invitation(
+        self, invite_seq: int, outcome: str, *, note: str = "",
+    ) -> dict[str, Any] | None:
+        """给一份邀请一个结局,并把它从"还等着"里拿掉。
+
+        **四种结局都只落同一种事件**(`invitation_settled`,`outcome` 分辨),
+        因为"他拒绝了"和"他没看见"必须在账本上分得开、在清单上一样地消失。
+
+        **关系与记忆焊在这里,只焊在 `declined` 那一支上。** 让调用方在事件之外
+        再补一句的话,总有一条路只落了事件 —— 于是"他拒绝了"这件事在账本上有、
+        在她心里没有,而两边都不报错。纯算术,一次模型都不调(红线 3)。
+
+        邀请已经不在了(重复答复 / 已过期)返回 `None`,不报错:两个进程同时
+        答同一份邀请是常态,而第二个不该看到一次异常。
+        """
+        with self._lock:
+            row = self._memory_projection.invitations.get(int(invite_seq))
+            if row is None:
+                return None
+            settled = self._settle_invitation_event(invite_seq, outcome, row, note)
+            if str(outcome) == together_mod.INVITE_OUTCOMES[1]:   # "declined"
+                self._settle_invitation_declined(row)
+            return settled
+
+    def _settle_invitation_event(
+        self, invite_seq: int, outcome: str, row: Mapping[str, Any], note: str,
+    ) -> dict[str, Any]:
+        """结局那一条事件的正文。分出来只为了让上面读得清楚:**事件先落,
+        后果后落** —— 后果是从事件里长出来的,反过来的话她"记得"的那件事在
+        日志里还没发生(和 `_emit_rule_event` 的顺序逐字同一条)。"""
+        payload: dict[str, Any] = {
+            "invite_seq": int(invite_seq),
+            "outcome": str(outcome),
+            "agent_id": row.get("agent_id"),
+            "agent_name": row.get("agent_name"),
+            "player_id": row.get("player_id"),
+            "target": row.get("target"), "verb": row.get("verb"),
+            "verb_label": row.get("verb_label"),
+            "target_name": row.get("target_name"),
+            "created_tick": row.get("created_tick"),
+            "expires_tick": row.get("expires_tick"),
+        }
+        if note:
+            payload["note"] = note
+        agent_id = str(row.get("agent_id") or "")
+        return self._record_and_deliver({
+            "type": "invitation_settled",
+            "who": agent_id,
+            "loc": self._where_is(agent_id),
+            "payload": payload,
+        })
+
+    def _settle_invitation_declined(self, row: Mapping[str, Any]) -> None:
+        """他按了"不"。**纯算术,一次模型都不调**(红线 3 的另一半)。
+
+        落两样,缺一不可:一条 `sentiment_delta`(关系跨档、图谱边、planner 读的
+        那份东西全挂在它上面),和她的一条记忆 —— 数字动了而她说不出为什么,
+        是这一层最容易长成的假。
+
+        记忆复用现成的 `relation_shift`(**不新增种类**)。它走 `memory_seed`,
+        而 `memory_seed` 本来就绕开触发器与准入闸,所以不会顺带触发
+        `_on_relation_shift` —— 那一条是给触发器推断出来的跃迁用的。
+        """
+        agent_id = str(row.get("agent_id") or "")
+        pid = str(row.get("player_id") or "")
+        if not agent_id or not pid:
+            return
+        step, _full = self._joint_config()
+        rel = self._memory_projection.relations.get((agent_id, pid))
+        current = float(getattr(rel, "sentiment", 0.0) or 0.0)
+        delta = together_mod.decline_delta(current, step=step)
+        here = self._where_is(agent_id)
+        player_name = self._relation_name(f"{self.PLAYER_PREFIX}{pid}")
+        agent_name = str(row.get("agent_name") or self._relation_name(agent_id))
+        label = str(row.get("verb_label") or row.get("verb") or "")
+        what = str(row.get("target_name") or row.get("target") or "")
+        if abs(delta) >= 0.005:
+            # 判了个 0 等于没判,别为它发一条事件(和 `pair_deltas` 的 `minimum`
+            # 同一条)。**只发她 → 他这一条**:他推掉一次邀请,不该顺手改写
+            # 他自己对她的感觉 —— 那是他的事,而世界不替他写。
+            self._record_and_deliver({
+                "type": "state_change", "who": agent_id, "loc": here,
+                "payload": {
+                    "kind": "sentiment_delta", "as": agent_id, "target": pid,
+                    "delta": float(delta),
+                    "axes": together_mod.decline_axes(delta),
+                    "as_name": agent_name, "target_name": player_name,
+                    "cause": "invitation_declined",
+                },
+            })
+        self._record_and_deliver({
+            "type": "memory_seed", "who": agent_id, "loc": here,
+            "payload": {
+                "agent_id": agent_id,
+                "kind": "relation_shift",
+                "summary": (
+                    f"我叫{player_name}{'' if label.startswith('一起') else '一起'}"
+                    f"{label},在{what},{player_name}说不去"
+                ),
+                # 比一起做过的事(0.65)轻,比一句寒暄重:被当面推掉记得住,
+                # 但它不该压过真的一起做过的那几件。
+                "importance": 0.5,
+            },
+        })
+
+    def _settle_invitations(self) -> None:
+        """到点没人答的邀请,过期掉。**跑在 tick 线程上** —— 纯算术。
+
+        **按世界时钟数**(`expires_tick <= clock`),不按墙钟:墙钟会让同一份
+        日志重放出两份历史,而两边都不报错。
+
+        **这一支一个字都不写在他头上**:不落 memory_seed、不发 sentiment_delta。
+        没答不是拒绝,是错过。
+        """
+        pending = self._memory_projection.invitations
+        if not pending:
+            return
+        now = int(self.clock)
+        for invite_seq, row in sorted(list(pending.items())):
+            try:
+                expires = int(row.get("expires_tick") or 0)
+            except (TypeError, ValueError):
+                expires = 0
+            if expires > now:
+                continue
+            self.settle_invitation(invite_seq, "expired")
+            logger.info(
+                "%s 约 %s 的那一句没等到回话,过期了(第 %s 轮)",
+                row.get("agent_id"), row.get("player_id"), row.get("round"),
+            )
+
     # ── 长过程:做一件事要花的那段时间 ──────────────────────────────────────
     #
     # 时间是这个引擎此前完全说不出的那种代价。`costs` 扣的是量、`consumes` 扣的是
@@ -2919,7 +3176,16 @@ class Scheduler:
         return brain.agent.blackboard.read("loc") or brain.agent.location or ""
 
     def agent_display_name(self, agent_id: str) -> str:
-        """角色 id → 人话名。名册里没有就退回 id。"""
+        """角色 id → 人话名。名册里没有就退回 id。
+
+        **玩家也答得出。** 这个函数绑给了叙事器(`bind_names`),而旁白从今天起
+        也会讲玩家做的事 —— 只认名册的话,玩家读到的那行正文里是
+        「player:9f2c…忙活」,一个 uuid 印在他自己的世界动态里。玩家那一半
+        走 `_relation_name`(在场名单 → contact 表 → 裸 pid),和记忆、关系事件
+        里印的名字**是同一个** —— 各查各的迟早给出两个名字。
+        """
+        if agent_id.startswith(self.PLAYER_PREFIX):
+            return self._relation_name(agent_id)
         brain = self.agents.get(agent_id)
         if brain is None:
             return agent_id
@@ -3275,6 +3541,9 @@ class Scheduler:
                     **({"party": stayed} if record.get("party") else {}),
                 },
             })
+            # 长过程的见证者是**收尾那一刻**在场的人,不是起头那一刻的:一件做了
+            # 十个 tick 的事,记得它的该是看见它做成的人。
+            self._after_interaction(agent_id, target, verb, affordance, here)
             # 十月怀胎落在这一行:孩子生在**收尾那一刻**,不是起头那一刻。
             self._settle_birth_and_death(agent_id, target, verb, affordance, here)
             if record.get("party"):
@@ -4419,6 +4688,166 @@ class Scheduler:
             # 日志里答得出来。
             seed["payload"]["rule"] = payload.get("rule")
             seed["payload"]["source_type"] = event.get("type")
+            self._record_and_deliver(seed)
+
+    def _after_interaction(
+        self, who: str, target: str, verb: str, affordance: Any, here: str,
+    ) -> None:
+        """这件事真的做成了之后,世界还欠谁一笔 —— **一个接缝,不是三个**。
+
+        三条路都会走到这里(一下子的事、一起做的事、长过程收尾),而"做成之后
+        还要做什么"往后只会变多。分散在三个调用点上加的话,第四样东西迟早只加
+        在其中两处,而漏掉的那一处照跑、日志干净。
+
+        次序承重:**记忆在前,旁白在后**。记忆是同步的(她当场就记得),旁白是
+        一次可能很慢的网络调用丢进线程池 —— 反过来的话没有任何区别,但读代码的
+        人会以为旁白挡着记忆。
+        """
+        self._witness_interaction(who, target, verb, affordance, here)
+        self._narrate_interaction(who, target, verb, affordance, here)
+
+    def _narrate_interaction(
+        self, who: str, target: str, verb: str, affordance: Any, here: str,
+    ) -> None:
+        """**人做的那一下也进旁白** —— 此前只有角色的动作有旁白。
+
+        一个玩家和一个角色并排站着擦同一扇窗,世界的量一样地动,而旁白里只有
+        她那一句 —— 于是那条时间线读起来像"她一个人在这儿忙活",而他就在旁边。
+        这条补的是那半句。
+
+        三道闸,缺一不可:
+
+        - **只管玩家那一半**(`player:` 前缀)。角色的旁白早就有了,走的是行为树
+          那条路(`emit_action`);在这里再发一次等于同一件事写两遍旁白。
+        - **作者声明了 `importance` 才有**:和见证记忆同一根轴(2.5 血缘四问的
+          「变体轴」写死了这一条)—— 擦一次杯子不值得一句旁白,而"值不值得"只有
+          作者说得出。
+        - **`narrative.player.enabled`,默认关**。旁白是一次 LLM 调用,而它按玩家
+          的每一次动作触发 —— 默认开等于替每个已有世界多开一笔账。
+
+        **永不在 tick 线程上调**(和 `emit_action` 那条旁白逐字同一条):丢进
+        `_narrative_pool`,世界照走,那句话什么时候写出来什么时候落。
+        """
+        if not who.startswith(self.PLAYER_PREFIX):
+            return
+        if getattr(affordance, "importance", None) is None:
+            return
+        if self._narrative_pool is None or self.narrative_history is None:
+            return
+        if not self._player_narrative_enabled():
+            return
+        self._narrative_pool.submit(
+            self._generate_narrative,
+            who,
+            # 形状和角色那条逐字相同(`{"kind", "params"}`),所以旁白提供方
+            # **一处分支都不用加** —— 它拿到的只是"谁做了什么"。
+            {
+                "kind": "interact",
+                "params": {
+                    "target": target, "verb": verb,
+                    "label": affordance.label or verb,
+                },
+            },
+            # 他没有黑板(引擎不模拟他的身体)。**照实说比假装有一份好**:
+            # 给一份空的 `raw`,位置那一格是真的。
+            {"location": here, "raw": {}},
+        )
+
+    def _player_narrative_enabled(self) -> bool:
+        """默认 **关**。见 `_narrate_interaction` 第三条。"""
+        if self.config_store is None:
+            return False
+        return bool(self.config_store.get("narrative.player.enabled", default=False))
+
+    def _witness_interaction(
+        self, who: str, target: str, verb: str, affordance: Any, here: str,
+    ) -> None:
+        """一次交互 → 在场者的记忆(witness-memory 的另一半)。
+
+        规律那一半补的是"世界发生的事没人记得";这一半补的是**人做的事也没人
+        记得** —— 同一条裂缝的另一端。此前一个人可以当着满屋子人的面把那棵树
+        砍了,事件在日志里躺着,而屋里没有一个人记得这件事发生过。
+
+        三条纪律逐字照抄 `_witness_rule_event`,不另立一套:
+
+        - **声明本身就是开关**:作者不在这条能力上写 `importance`,这一层整个
+          缺席,行为与从前逐位相同。**没有默认值** —— 给它一个缺省等于替每个
+          作者宣布"世界上任何一次交互都值得记一辈子",于是记忆里塞满了谁又端详
+          了一次杯子,真正要紧的那几件淹在里面。
+        - **谁在场按位置算**:此刻和这件事同处一地的人。位置查不到 = 没有见证者,
+          不是"所有人"。
+        - **走 `memory_seed` 这条现成的路**,复用 `WITNESS_MEMORY_KIND`,来路
+          (`source_type` / `affordance`)写在**事件**上而不是记忆行里。
+
+        ⚠️ **做的人是玩家还是角色,这条路上一处分支都没有。** 见证者从
+        `_agent_locations()` 里来(它只装引擎模拟得动的那些人),玩家因此自然
+        不在其中 —— 不是被一句 `if` 滤掉的。同理,做这件事的角色**自己也是见证
+        者**:她当然记得自己刚干了什么。名字过 `_relation_name`(它两种人都答得
+        出),所以一句"谁做的"对玩家和角色是同一句话。
+
+        **算不出来不许掀翻这次交互**(和 `_emit_rule_event` 同一条,只是那边守的是
+        tick、这边守的是调用方):世界的量已经落库了,这时候抛出去会让一次成功的
+        交互在她眼里变成一句报错,而她刚做过的那件事已经真的发生了。
+        """
+        try:
+            self._seed_interaction_memories(who, target, verb, affordance, here)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "%s.%s 的见证者算不出来 —— 这次没有记忆落地", target, verb, exc_info=True
+            )
+
+    def _seed_interaction_memories(
+        self, who: str, target: str, verb: str, affordance: Any, here: str,
+    ) -> None:
+        """见证记忆的正文。分出来只为了让上面那一层守得住 —— 别在这里加第二道闸。"""
+        if self.memory_store is None:
+            return
+        importance = getattr(affordance, "importance", None)
+        if importance is None:
+            return                      # 作者没声明 → 这一层缺席
+        importance = min(1.0, float(importance))
+        if importance <= 0:
+            # 写了 0 和没写不是一句话:前者是"我想过了,不值一提"。两者的**行为**
+            # 一样(不记),但前者过了作者那道声明,所以不该被当成 bug 报出来。
+            return
+        if not here:
+            return
+        witnesses = [
+            agent_id for agent_id, loc in self._agent_locations().items() if loc == here
+        ]
+        if not witnesses:
+            # 不是错,只是这会儿屋里没别人(也没她自己 —— 玩家一个人在场时正是
+            # 这个样子)。但**说一句**:一个作者写了 importance 却一条记忆都没落地
+            # 的世界,沉默地长得和没写一样。
+            logger.info(
+                "%s 对 %s 做了 %s,而 %s 这会儿没有见证者 —— 没有记忆落地",
+                who, target, verb, here,
+            )
+            return
+
+        label = affordance.label or verb
+        entity = self.ontology.entities.get(target) if self.ontology is not None else None
+        what = entity.name if entity is not None and entity.name else target
+        actor = self._relation_name(who)
+        for agent_id in witnesses:
+            # 「我照料,在老槐树」/「江晚照料,在老槐树」—— 句子的形状和共同经历
+            # 那条逐字同源(`_settle_joint_experience`),两种记忆读起来才像出自
+            # 同一个世界。**自己做的事用「我」**:她的记忆里写着"江晚照料了树",
+            # 等于让她从外面看着自己。这一句分的是"是不是我",不是"是不是玩家"。
+            subject = "我" if agent_id == who else actor
+            seed = memory_seed_event(
+                agent_id,
+                {
+                    "kind": WITNESS_MEMORY_KIND,
+                    "summary": f"{subject}{label},在{what}",
+                    "importance": importance,
+                },
+            )
+            # 来路留在事件上(不进记忆行),和规律那一半同一条:日后要问"这条记忆
+            # 是哪个能力种下的",日志里答得出来。
+            seed["payload"]["affordance"] = f"{target}.{verb}"
+            seed["payload"]["source_type"] = "entity_interaction"
+            seed["payload"]["actor"] = who
             self._record_and_deliver(seed)
 
     def _rule_event_witnesses(self, owner: str) -> list[str]:

@@ -512,6 +512,40 @@ def test_橱窗里的事件是有人经历过的():
     assert told, "橱窗里没有一件她记得住的世界大事"
 
 
+def test_橱窗里有人做过一件别人记得住的事(flagship):
+    """上一条管的是**世界**发生的事有人记得,这一条管**人**做的事有人记得
+    (§2.9.6.7)。同一条裂缝的两端,少了这一端,开箱世界里一个人可以当着满屋子
+    人的面把那棵树砍了,而屋里没有一个人记得它发生过。
+
+    橱窗要把这一格演成**两半**:声明了 `importance` 的能力(做完旁边的人各记
+    一条),和**没声明**的能力(这一层对它整个不存在)。全都写满的橱窗会让人
+    以为它是必填的,而"声明本身就是开关"正是这一层的全部形状。
+
+    两头都验:文件里写了,`world.kinds()` 真的把它带出来了 —— 只验前一半的话,
+    一次改错了键名的重构会让它安静地停在半路(和地点那两格图同一条)。
+    """
+    authored = [
+        (kind["body"]["id"], verb, spec)
+        for kind in _bundled_rows() if kind.get("type") == "kind"
+        for verb, spec in (kind["body"].get("affordances") or {}).items()
+    ]
+    told = [row for row in authored if isinstance(row[2], dict) and "importance" in row[2]]
+    assert told, "橱窗里没有一件做完会被记住的事 —— 开箱看不见的特性等于没做"
+    assert len(told) < len(authored), (
+        "橱窗把每个动词都写上了 importance —— 那样看不出它是可选的,"
+        "而'不写 = 这一层整个不存在'正是它的全部形状"
+    )
+
+    rows = {
+        (kind["id"], row["verb"]): row
+        for kind in flagship.kinds() for row in kind["affordances"]
+    }
+    for kind_id, verb, spec in authored:
+        assert rows[(kind_id, verb)]["importance"] == spec.get("importance"), (
+            f"{kind_id}.{verb} 的 importance 没走到 kinds()"
+        )
+
+
 def test_橱窗里的世界会下不一样的雨():
     """`rand()` 是"可重放的意外"。橱窗不用它的话,新用户看到的世界里没有偶然性 ——
     每一天都可以被预言,而可预言的生活里长不出值得讲述的事。

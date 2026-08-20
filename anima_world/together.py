@@ -108,6 +108,24 @@ DEFAULT_RELATION_STEP = 0.06
 # 一起待多久算"待满了"。12 tick = 5 分钟/tick 时的一个世界小时 —— 一顿饭。
 DEFAULT_FULL_DURATION_TICKS = 12
 
+# 一份等着人回答的邀请能等多久。**按世界时钟数**(见 `invitation_settled`):
+# 墙钟会让同一份日志重放出两个结果,而两边都不报错。
+DEFAULT_INVITE_TTL_TICKS = 12
+# 同一个她、同一个他,一个世界日里她最多开口几次。**这是「像个人」和「像推送」
+# 的分界**:一个不设上限的邀请者,在玩家眼里和一个消息推送没有区别,而她本该是
+# 一个人。用完了不是错 —— 她今天不再开口而已。
+DEFAULT_INVITES_PER_PLAYER_PER_DAY = 2
+
+# 一份邀请的结局。**「拒绝」和「过期」必须分得开**,而且只有前者留痕:
+#
+# - `accepted` 他答应了 —— 那件事这就去做(做之前还要再过一次世界的闸)。
+# - `declined` 他按了"不" —— 这是一个**人做出的决定**,所以它进记忆、进关系。
+# - `expired` 他没答 —— 这**不是拒绝**,是错过。手机上的人放下手机去吃了顿饭,
+#   回来发现她问过他一句;把这记成"他拒绝了我"是引擎在替他说话,而且是说反话。
+#   所以这一支**不落记忆、不动关系**,一个字都不写在他头上。
+# - `cancelled` 邀请的人自己撤了(她走开了 / 睡着了 / 手上有了别的事)。
+INVITE_OUTCOMES = ("accepted", "declined", "expired", "cancelled")
+
 # 亲密度的三轴加权。**和 `contact.CLOSENESS_WEIGHTS` 是同一份**,理由也同一条:
 # `respect` 不进(敬重不使人想念,也不使人想一起吃饭),而 `sentiment` 必须占
 # 大头 —— 线上那个世界二十条关系的细三轴无一例外全是 0(见 contact.py 的长注释),
@@ -150,7 +168,17 @@ GATE_LABELS: dict[str, str] = {
     "conditions": "这会儿还轮不到这件事",
     "player_not_here": "不在她跟前 —— 一起做事得当面",
     "player_not_you": "不是这次调用的那个玩家,替不了他答应",
+    # 这两条是**世界的状态**(作者关了那扇门 / 她今天问够了),不是他的意思 ——
+    # 所以和上面几条同一族,判在性格之前,而且一个字都不写在他头上。
+    "player_invites_off": "这个世界不让角色主动开口相约",
+    "invite_capped": "今天已经被约过了 —— 再问下去就不像人,像推送了",
 }
+
+# 她开了口,他还没答。**这不是拒绝,也不是硬闸** —— 硬闸的意思是"这件事这会儿
+# 办不成",而这一条的意思是"这件事正等着一个人回话"。合成一个的话,玩家读到的
+# "她约了你"和"她约不动你"长得一模一样。
+INVITE_PENDING = "invited"
+INVITE_PENDING_LABEL = "还没答话 —— 已经问过了,等他点头"
 
 # 她自己给的那一句。和硬闸分开放,理由和 `contact.REFUSAL_LABELS` 逐字同一条:
 # 调用方不该能把"她不肯"当成硬闸传进来 —— 那是性格那一层的判断。
@@ -319,6 +347,41 @@ def experience_axes(delta: float) -> dict[str, float]:
         "affection": round(delta, 4),
         "trust": round(delta * 0.5, 4),
         "respect": round(delta * 0.5, 4),
+    }
+
+
+# 被当面推掉,相对于"一起做过一次"的分量。**比一次同行轻** —— 一次拒绝不该
+# 抵消掉三次同行,否则一段关系会被"她问了三次、他推了三次"清零,而那三次里
+# 他可能只是在忙。取 1/3:一起做一件一下子的事是 `step × 1.0 × 0.5` = 半份,
+# 一次拒绝是三分之一份,两者相比 ≈ 0.67 : 1。
+DECLINE_FACTOR = 1.0 / 3.0
+
+
+def decline_delta(current: float, *, step: float = DEFAULT_RELATION_STEP) -> float:
+    """他当面推掉一次,她对他的好感动多少。**负数,而且比一次同行轻。**
+
+    ⚠️ **只有明确的拒绝走这一条,过期不走**(见 `INVITE_OUTCOMES`)。
+
+    同样按剩余空间衰减(`1 - |当前值|`),和 `experience_delta` 逐字同一条:
+    一个跟她已经很生分的人再推一次,扣不动多少 —— 关系的下限和上限一样,
+    是渐近的,不是一条一路向下的滑梯。
+    """
+    try:
+        value = float(current)
+    except (TypeError, ValueError):
+        value = 0.0
+    raw = -float(step) * DECLINE_FACTOR * (1.0 - min(1.0, abs(value)))
+    return round(max(-1.0, min(1.0, raw)), 4)
+
+
+def decline_axes(delta: float) -> dict[str, float]:
+    """一次拒绝动哪几轴。**`respect` 不动** —— 他有权说不,而这个引擎的立场
+    正是"邀请必须能被拒绝"(红线 1)。让敬重跟着掉,等于引擎一边说着"你可以
+    拒绝",一边为此扣他的分。
+    """
+    return {
+        "affection": round(delta, 4),
+        "trust": round(delta * 0.5, 4),
     }
 
 
