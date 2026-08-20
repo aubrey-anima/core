@@ -312,6 +312,27 @@ def test_在路上那一句留着_它答的是你在哪儿(world):
     assert presence["activity"] == "正在去后院的路上", presence["activity"]
 
 
+def test_在路上那一句_自主上下文也读得到(world):
+    """🔴 **第四处分叉,潜伏着的那一处。** 在途这一支从前只写在 `world_context`
+    里,`_autonomy_context` 没有 —— 于是同一个正在去后院路上的人,她跟人说话时
+    那份提示词说「正在去后院的路上」,没人跟她说话时那份说**「闲着」**,
+    而「闲着」在中文里的意思是"可以打扰"。
+
+    ⚠️ 它此前走不到:`_maybe_run_autonomy` 把在途的人整个排除在外
+    (「在赶路的人不做别的事」),所以活路上没人撞见过。**照样钉** ——
+    潜伏的分叉不是没有分叉,它只是在等一个改动把它放出来;而这条测试直接问
+    `_autonomy_context`,不经过那道过滤,所以它验的是措辞本身。
+    """
+    scheduler = world.scheduler
+    scheduler._transit["夏"] = {
+        "from": "cafe", "to": "yard", "arrive_at": scheduler.clock + 99,
+    }
+    assert _ctx(world).activity == "正在去后院的路上"
+    # 两头逐字同一句 —— 这才是"唯一一份措辞"的判据。
+    assert (_ctx(world).activity
+            == world.world_context("夏", "p1")["presence"]["activity"])
+
+
 # ── 行为树撞上联合动词要说一句 ───────────────────────────────────────────
 
 

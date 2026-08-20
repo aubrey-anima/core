@@ -748,7 +748,9 @@ class Scheduler:
 
     REFLECTION_KIND = "reflection"
 
-    def note_subsystem(self, subsystem: str, ok: bool, reason: str = "") -> None:
+    def note_subsystem(
+        self, subsystem: str, ok: bool, reason: str = "", *, sticky: bool = False,
+    ) -> None:
         """记一次子系统的成功/降级,并在**档位切换的那一刻**发一个事件。
 
         今天降级只在 stderr 刷一行 warning。日志会滚掉,而"这个世界当时跑在什么档位
@@ -757,13 +759,29 @@ class Scheduler:
 
         只在**切换**时发事件,不是每次都发:一个持续降级的子系统会每 tick 触发一次,
         那样事件日志会被自己的健康报告淹掉(needs 那个教训)。计数照常累加。
+
+        ⚠️ **`sticky=True` 的子系统统计的是"出过没出过",不是"此刻好不好"。**
+        分界是**下一次成功还算不算平反**:planner 掉一次线、下一次通了,那盏灯就该
+        灭 —— 它报的是"这会儿能不能用"。而"她起了个头就被带走了"是一件**已经发生
+        过、赔不回来的事**(代价不退),下一件事顺利做完并不能把它抵消掉。
+        不分开的话有两个坏法,实测都在:档位跟着每一件事来回翻,五件事发五个
+        `subsystem_health` 事件(而这个函数存在的全部理由就是不淹日志);而且每次
+        成功都把上一次掉线的 `reason` 抹成空串 —— `state()` 上于是留下一盏
+        `status: "ok"` 而 `degraded: 3`、`reason: ""` 的灯:数字说出过三次事,
+        而**是哪三件永远查不回来了**。粘住之后:红了就红着(至多一个事件),
+        `reason` 留着最近那一件的名字;成功那一半只加 `ok`。
         """
         health = self._subsystem_health.setdefault(
             subsystem, {"ok": 0, "degraded": 0, "status": None, "reason": ""}
         )
         health["ok" if ok else "degraded"] += 1
+        if sticky and ok:
+            return
         status = "ok" if ok else "degraded"
         if health["status"] == status:
+            if sticky and not ok:
+                # 灯已经红着,再掉一件只更新"最近是哪一件"—— 不再发第二个事件。
+                health["reason"] = reason
             return
         previous, health["status"], health["reason"] = health["status"], status, reason
         if previous is None and ok:
@@ -3019,6 +3037,22 @@ class Scheduler:
         row = self._memory_projection.invitations.get(int(invite_seq))
         return dict(row) if row is not None else None
 
+    def settled_invitation(self, invite_seq: int) -> str:
+        """这份邀请**是怎么结束的**(`INVITE_OUTCOMES` 里的一个);说不上来是空串。
+
+        `pending_invitation()` 回 `None` 只说明"它不在等人了",而那有四种意思,
+        其中一种(`cancelled`,她把话收回去了)**不是他的责任**。答复那扇门要靠
+        这一格才说得出是哪一种 —— 一句"要么答过了、要么已经过期"恰好把那一种
+        排除在外,而它是四种里最需要说清楚的一种。
+
+        只留最近一小段(`SETTLED_INVITATIONS_KEPT`),掉出去的回空串:**说不出来
+        就别猜**。同样先补课(和 `pending_invitation` 逐字同一条)。
+        """
+        self.catch_up_projection()
+        return str(
+            self._memory_projection.settled_invitations.get(int(invite_seq)) or ""
+        )
+
     def settle_invitation(
         self, invite_seq: int, outcome: str, *, note: str = "",
     ) -> dict[str, Any] | None:
@@ -3570,9 +3604,14 @@ class Scheduler:
                     # 见 FOR-STUDIO 那一节的丑话),但**降级不许无声**:落进
                     # `subsystem_health`,`World.state()` 里数得出来,作者才有可能
                     # 发现"她那件事一次都没做完"。
+                    #
+                    # **`sticky=True`**:这一件已经发生了、代价已经付了,下一件顺利
+                    # 做完并不能把它抵消 —— 这盏灯报的是"这个世界出过没出过这种事",
+                    # 不是"此刻好不好"(见 `note_subsystem` 的丑话)。
                     self.note_subsystem(
                         "engagement_kept", False,
                         f"{agent_id}: {verb} {target} 起了头就被带走了(代价不退)",
+                        sticky=True,
                     )
                     continue
             outcome = finish_affordance(
@@ -3596,7 +3635,8 @@ class Scheduler:
                 # 健康的那一半。**只数坏的那一半读不出比例** —— "六次里有一次
                 # 被带走"和"一千次里有一次"是两个完全不同的结论,而
                 # `subsystem_health` 的 `ok` 计数正是那个分母。
-                self.note_subsystem("engagement_kept", True)
+                # 只加分母、不熄灯(`sticky=True`,和上面那半同一个开关)。
+                self.note_subsystem("engagement_kept", True, sticky=True)
             here = str(record.get("loc") or "")
             spent = now_tick - int(record.get("started", now_tick))
             # **谁真的从头待到尾。** 起头时每个人都过了同处一地那道闸,而这段时间

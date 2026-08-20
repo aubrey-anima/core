@@ -5783,6 +5783,37 @@ def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
     return 0
 
 
+def _report_engagements_kept(started: int, dropped: list[Any]) -> int:
+    """起了头的长过程有几件真做完了 —— 返回"需要处理"的项数。
+
+    为什么在 `doctor` 里,而且**为什么按事件数不按 `subsystem_health`**:
+    `World.state()["runtime"]["subsystems"]["engagement_kept"]` 只记**本次开机
+    以来**这个进程看见的那几件,而一个跑在容器里的世界每次重启都从零开始 ——
+    看板上那盏灯于是永远是刚点亮的绿。事件日志不会重启。
+
+    这一条是这个引擎里"照跑但给错东西"的标本:她起了个头(`duration` 的代价
+    **当场付了**),排班在下一 tick 把她带走,于是那件事**永远做不完、代价也不退**。
+    世界照跑、日志一行不错,作者要到发现"她那件事一次都没做完"才知道 ——
+    而在这之前,一个开着 `anima-world run` 的人**没有任何办法问出这句话**
+    (FOR-STUDIO 的判据:库里有而 CLI 上没有,对外面等于不存在)。
+    """
+    if not started:
+        print(f"  {onboarding.dim('这个世界还没有起过要花时间的长过程(duration)')}")
+        return 0
+    kept = started - len(dropped)
+    line = f"要花时间的长过程:起了 {started} 件,{len(dropped)} 件半路被带走(代价不退)"
+    if not dropped:
+        print(f"  {onboarding.green(onboarding.OK)} {line}")
+        return 0
+    print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+    # **点名最近那一件是谁的哪一件。** 只说"3 件被带走"的话,人下一步无处可去。
+    last = (dropped[-1].payload or {})
+    who = dropped[-1].who or "?"
+    print(f"      {onboarding.dim('最近一件:' + who + ' 的 ' + str(last.get('verb') or '?') + ' ' + str(last.get('target') or '?'))}")
+    print(f"      {onboarding.dim('做完了 ' + str(kept) + ' 件 —— 比例低就是排班在抢她的手,看 occupies 声明对不对')}")
+    return 1
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     """Check the things that fail quietly. Non-zero exit when one of them has."""
     from anima_world.redis_state import durability_warning, events_key, RedisEventLog
@@ -5808,7 +5839,20 @@ def run_doctor(args: argparse.Namespace) -> int:
     store = _open_config_store(redis, world_id)
     log = RedisEventLog(redis, events_key(world_id))
     events = log.count()
-    joined = {e.who for e in log.replay() if e.type == "agent_join" and e.who}
+    # **一趟 replay 数完所有要数的东西。** 这条日志十几万条是常态(线上晚潮
+    # 16 万),每加一个体检项就多走一遍的话,`doctor` 的代价随项数线性涨。
+    joined: set[str] = set()
+    engaged = 0
+    dropped: list[Any] = []
+    for e in log.replay():
+        if e.type == "agent_join" and e.who:
+            joined.add(e.who)
+        elif e.type == "entity_engage":
+            engaged += 1
+        elif e.type == "entity_disengage" and str(
+            (e.payload or {}).get("reason") or ""
+        ) == "left":
+            dropped.append(e)
     print(f"  {onboarding.green(onboarding.OK)} {len(joined)} 个角色,{events} 条事件")
 
     status = onboarding.llm_status(store, world_id)
@@ -5864,6 +5908,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
 
     problems += _report_autonomy_chain(redis, world_id, store)
+    problems += _report_engagements_kept(engaged, dropped)
 
     print()
     if problems:

@@ -402,6 +402,115 @@ def test_不占用她的长过程不要求她守在原地(tmp_path, open_world):
     assert not [e for e in world.events() if e["type"] == "entity_disengage"]
 
 
+# ── 那盏灯:engagement_kept ───────────────────────────────────────────────────
+#
+# 这一格从前**零测试**,而实测下来它抖:五件事发了五个 `subsystem_health` 事件、
+# 每次成功都把上一次掉线的 `reason` 抹成空串,于是 `state()` 上留下一盏
+# `status: "ok"` 而 `degraded: 3`、`reason: ""` 的灯 —— 数字说出过三次事,
+# 而**是哪三件永远查不回来了**。
+
+
+def _kept(world):
+    return world.scheduler.subsystem_health().get("engagement_kept")
+
+
+def _start(world):
+    """起个头。**每次先把力气填回去** —— `打磨` 一次花 20,不填的话第六次会被
+    `requires` 拦下,于是这几条测的就变成了体力而不是那盏灯。"""
+    world.scheduler.stock_store.set_many(
+        "agent:甲", {"体力": 100.0}, tick=int(world.scheduler.clock)
+    )
+    out = world.scheduler.perform_affordance("甲", "bench:a", "打磨")
+    assert out["ok"], out
+    return out
+
+
+def _drag_away(world):
+    """起个头,然后把她带走 —— 排班抢她的手就是这个形状。"""
+    _start(world)
+    world.scheduler.agents["甲"].agent.blackboard.write("loc", "别处")
+    world.tick(3)
+    world.scheduler.agents["甲"].agent.blackboard.write("loc", "cafe")
+
+
+def _finish(world):
+    _start(world)
+    world.tick(3)
+
+
+def test_被带走了要留下名字_而不是只留一个数(tmp_path, open_world):
+    """`reason` 是"哪一件"的唯一去处 —— 只说"被带走 3 件"的话,作者下一步无处可去。"""
+    world = _slow_world(tmp_path, open_world, name="kept1")
+    _drag_away(world)
+    light = _kept(world)
+    assert light["degraded"] == 1 and light["status"] == "degraded"
+    assert "打磨" in light["reason"] and "甲" in light["reason"]
+
+
+def test_成了几件也数_那是分母(tmp_path, open_world):
+    """"六次里有一次被带走"和"一千次里有一次"是两个完全不同的结论。"""
+    world = _slow_world(tmp_path, open_world, name="kept2")
+    _finish(world)
+    _finish(world)
+    assert _kept(world)["ok"] == 2
+
+
+def test_做完一件不许把上一件抹掉(tmp_path, open_world):
+    """🔴 **这盏灯报的是"出过没出过",不是"此刻好不好"** —— 代价不退,所以下一件
+    顺利做完并不能把上一件抵消。从前它跟着最近一件来回翻档,而且每次成功都
+    `reason = ""`:账上说出过三次事,是哪三件却查不回来了。"""
+    world = _slow_world(tmp_path, open_world, name="kept3")
+    _drag_away(world)
+    _finish(world)
+    light = _kept(world)
+    assert light["status"] == "degraded", "红了就该红着"
+    assert light["reason"], "最近那一件的名字不许被一次成功抹掉"
+    assert light["ok"] == 1 and light["degraded"] == 1
+
+
+def test_出五次事只值一个事件_不淹日志(tmp_path, open_world):
+    """`note_subsystem` 存在的全部理由就是不让健康报告淹掉事件日志,而档位跟着
+    每一件来回翻恰好把这条抵消掉(实测:五件事五个事件)。"""
+    world = _slow_world(tmp_path, open_world, name="kept4")
+    for _ in range(3):
+        _drag_away(world)
+        _finish(world)
+    events = [e for e in world.events()
+              if e["type"] == "subsystem_health"
+              and (e["payload"] or {}).get("subsystem") == "engagement_kept"]
+    assert len(events) == 1, [e["payload"] for e in events]
+    assert _kept(world)["degraded"] == 3 and _kept(world)["ok"] == 3
+
+
+def test_没出过事的世界这盏灯根本不点(tmp_path, open_world):
+    """"开机第一次成功不值一个事件" —— 那一条没被 sticky 破坏。"""
+    world = _slow_world(tmp_path, open_world, name="kept5")
+    _finish(world)
+    assert _kept(world)["status"] is None
+    assert not [e for e in world.events() if e["type"] == "subsystem_health"
+                and (e["payload"] or {}).get("subsystem") == "engagement_kept"]
+
+
+def test_体检答得出这条链(tmp_path, open_world, capsys):
+    """**库里有而 CLI 上没有,对外面等于不存在。** 而且它按事件数、不按
+    `subsystem_health` —— 后者只记本次开机,一个跑在容器里的世界每次重启都
+    从零开始,看板上那盏灯于是永远是刚点亮的绿。"""
+    from anima_world.__main__ import _report_engagements_kept
+
+    world = _slow_world(tmp_path, open_world, name="kept6")
+    _drag_away(world)
+    _finish(world)
+    log = world.scheduler.event_log
+    started = len([e for e in log.replay() if e.type == "entity_engage"])
+    dropped = [e for e in log.replay() if e.type == "entity_disengage"
+               and (e.payload or {}).get("reason") == "left"]
+    assert _report_engagements_kept(started, dropped) == 1
+    out = capsys.readouterr().out
+    assert "起了 2 件,1 件半路被带走" in out
+    assert "打磨" in out and "bench:a" in out
+    assert _report_engagements_kept(0, []) == 0
+
+
 # ── 那句话是给玩家读的 ────────────────────────────────────────────────────────
 
 

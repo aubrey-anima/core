@@ -116,6 +116,19 @@ _ACTIVITY_LABELS = {
 # 给每个人都缀一句「闲着」是提示词噪音,而**没有那句话本身就是闲着**。
 _IDLE_KINDS = frozenset({"idle_wander", "idle_social"})
 
+# 他按下去的时候那份邀请已经有了结局 —— **四种各说各的话**。
+# 从前只有一句"要么答过了,要么已经过期",而它恰好把 `cancelled`(她自己把话
+# 收回去了)排除在外 —— 四种里唯一一种他什么也没做错的。
+_INVITE_GONE_LABELS = {
+    "accepted": "这件事已经做过了 —— 这份邀请答应过了",
+    "declined": "这份邀请你回过了 —— 你当时说的是不去",
+    "expired": "这份邀请已经过期了",
+    "cancelled": "她不等了 —— 这句话是她自己收回去的,不是你没答",
+}
+# **说不上来就别猜**(结局掉出了 `SETTLED_INVITATIONS_KEPT` 那一段)。
+# 从四种里挑两种说,和猜一个说出来是同一种谎。
+_INVITE_GONE_UNKNOWN = "这份邀请已经不在了 —— 它有了结局,只是隔得太久,说不上来是哪一种"
+
 
 class _PlayerRow(MutableMapping):
     """一个在场玩家的那一行 —— **写穿到 Redis**。
@@ -1620,6 +1633,14 @@ class _ToolRuntime:
                 # 该换个人、该等他睡醒、还是该死心,是三件完全不同的事。
                 who = refused[0]
                 name = self._display(str(who.get("who") or ""))
+                # **闸的名字也交出去**(`gate`,只加不改):`reason` 那一格上
+                # "闸拦下的"和"他自己说不去"都写成 `declined` —— 两件事在他
+                # 手机上是两句完全不同的话,而只有这一格分得开。人话照旧在
+                # `refusal` 里;枚举给机器读,句子给人读(那条纪律的两半)。
+                gate_key = (
+                    str(who.get("reason") or "")
+                    if str(who.get("source") or "") == "gate" else ""
+                )
                 gate = together.GATE_LABELS.get(str(who.get("reason") or ""))
                 if gate is not None:
                     # 世界那一段:回执是「名字 + 一句状态」。名字划边界(中文
@@ -1634,11 +1655,14 @@ class _ToolRuntime:
                         else f"{self._named(str(who.get('who') or ''))}"
                              f"{together.DECLINE_LABEL}"
                     )
-                return {
+                out = {
                     "ok": False, "target": target, "verb": verb,
                     "reason": "declined", "refusal": refusal,
                     "consents": consents,
                 }
+                if gate_key:
+                    out["gate"] = gate_key
+                return out
             party = [str(c["who"]) for c in accepted]
         with scheduler._lock:
             outcome = scheduler.perform_affordance(actor_id, target, verb, party)
@@ -3949,6 +3973,33 @@ class World:
     def _autonomy_cap(self) -> int:
         return max(0, int(self.config_get("autonomy.max_per_day", autonomy.DEFAULT_MAX_PER_DAY) or 0))
 
+    def _self_activity_label(
+        self, agent_id: str, activity: Mapping[str, Any],
+        doing: Mapping[str, str],
+    ) -> str:
+        """**她读自己此刻在做什么** —— 只此一份措辞。
+
+        `world_context`(她跟人说话时那份)和 `_autonomy_context`(没人跟她说话
+        时那份)从前各拼各的:前者认得在途,后者不认 —— 于是同一个正在去后院
+        路上的人,一份提示词说「正在去后院的路上」,另一份说「闲着」,而
+        **「闲着」正是"可以打扰"的意思**。两处分支不会互相报错,只会让她做出两种
+        不同的决定,取决于那一刻是谁在问她。
+
+        ⚠️ 这一处此前是**潜伏的**,不是每天在犯:`_maybe_run_autonomy` 把在途的人
+        整个排除在外(「在赶路的人不做别的事」),所以活路上走不到那一支。
+        照样收:潜伏的分叉不是没有分叉,它只是在等一个改动把它放出来 ——
+        而"唯一一份措辞"这条纪律的全部意义就是不留第二处。
+        """
+        if activity.get("transit"):
+            to_name = self.scheduler.place_name(
+                str((activity.get("transit") or {}).get("to") or "")
+            )
+            return f"正在去{to_name or '别处'}的路上"
+        return doing.get(
+            self.scheduler.stock_owner_of(agent_id),
+            _ACTIVITY_LABELS.get(activity.get("kind"), "闲着"),
+        )
+
     def _autonomy_context(self, agent_id: str, now: Any) -> Any:
         """锁内一次快照(只读、无 LLM、无 IO)。worker 之后只碰这个对象。
 
@@ -3971,10 +4022,9 @@ class World:
         # (它认得 `:engaged` 那件占着人的长过程)—— 于是同一份提示词里两句话
         # 互相打脸:她读到「你在回声唱片店,闲着」,同一个房间里的人读到
         # 「江晚(在一起听完一面)」,说的是同一个人的同一分钟。
-        label = doing.get(
-            scheduler.stock_owner_of(agent_id),
-            _ACTIVITY_LABELS.get(activity.get("kind"), "闲着"),
-        )
+        # **在途那一支也在里面了**(`_self_activity_label`):从前这一行不认得
+        # 赶路,于是路上的她在这份上下文里"闲着"。
+        label = self._self_activity_label(agent_id, activity, doing)
 
         def _person(person_id: str, actor: str, name: str, kind: str) -> dict[str, str]:
             """名单上的一个人。
@@ -4744,12 +4794,23 @@ class World:
         显示成"还有时间",玩家点下去才发现已经过期了。
         **过期按世界时钟判、前端不许自己算**这条契约,少了这一格就等于逼着
         前端自己算。
+
+        🔴 **第二格是结局**(`outcome`,只加不改):不 pending 的行带上它**是怎么
+        结束的** —— `INVITE_OUTCOMES` 里的一个,说不上来是空串。少了这一格,
+        「她自己把话收回去了」和「你没来得及答」在这扇门上长得一模一样,而消费方
+        只能去别处捡那条 `invitation_settled` 事件:那条路上没有游标(壳截最后
+        100 条),离线久一点它就滑出去了,那一行于是永远显示成「错过了」——
+        **把她做的事记在他头上**,而没有一处报错。这扇门本来就有游标,把结局挂在
+        这里等于顺手把那扇门补上。
+        ⚠️ 它跟着 `SETTLED_INVITATIONS_KEPT` 那一小段走:太老的行给空串,
+        **说不上来就别猜**(消费方读到空串该照旧按 `pending` 显示,别当成某一种)。
         """
         # **只读门自己补课**(和 `state()` / `roster()` 同一条):`pending` 那一格
         # 从投影里读,而别的进程刚落的答复这个进程还没折过。跑着的世界会在下一次
         # 追加时自愈,暂停的不会 —— 而只读门不该指望世界正好在动。
         self.scheduler.catch_up_projection()
         waiting = self.scheduler._memory_projection.invitations
+        settled = self.scheduler._memory_projection.settled_invitations
         now_tick = int(self.scheduler.clock)
         page = self._filtered_page(
             kind="agent_invites", player_id=player_id,
@@ -4771,7 +4832,13 @@ class World:
             # **拷一份,不改那条事件**:投影拷一份那条纪律在读侧的样子 ——
             # 就地写一格 `pending` 会让 `World.events()` 里那条事件从此长得和
             # 日志里那条不一样。
-            rows.append({**e, "pending": pending, "expires_in": _left(e, pending)})
+            rows.append({
+                **e, "pending": pending, "expires_in": _left(e, pending),
+                # 还等着的行没有结局(空串),而不是"结局是等着" —— 两件事。
+                "outcome": "" if pending else str(
+                    settled.get(int(e.get("seq") or 0)) or ""
+                ),
+            })
         page["events"] = rows
         page["now_tick"] = now_tick
         return page
@@ -4801,9 +4868,26 @@ class World:
         ttl 的那一支是**错过**,不是拒绝,一个字都不写。
 
         返回 `{"ok", "outcome", ...}`。`outcome` 是 `together.INVITE_OUTCOMES`
-        里的一个,或者 `"gone"`(这份邀请已经不在了 —— 答过了、或者已经过期)。
-        **重复答复不报错**:两个设备同时点同一份邀请是常态,而第二下不该看到
-        一次异常。
+        里的一个,或者 `"gone"`(这份邀请已经不在了)。**重复答复不报错**:
+        两个设备同时点同一份邀请是常态,而第二下不该看到一次异常。
+
+        🔴 **说不出是谁不在场,就是把她做的事记在他头上。** 三格是为这一条加的
+        (都**只加不改**):
+
+        | 格 | 什么时候有 | 说什么 |
+        |---|---|---|
+        | `settled` | `outcome == "gone"` | 那份邀请**真正的**结局(四种里的哪一种) |
+        | `absent` | 这件事得当面而没当成 | `agent` / `player` / `both` / `unknown` |
+        | `gate` | 闸拦下的 | 闸的名字(`player_not_here` …) |
+
+        `gone` 从前只说得出"要么答过了,要么已经过期" —— 一句**恰好把她自己
+        收回去(`cancelled`)排除在外**的话,而那正是四种里唯一不是他的责任的
+        那种。`absent` 同理:她按作息表溜达开之后他再按「好」,从前拿到的报文
+        和**他**走开时逐字相同(实测),两条路都写着「不在她跟前」。
+
+        ⚠️ **`reason` 一格没动**:闸拦下的仍旧写 `declined`。它是 `act()` 那扇
+        门上的既有枚举,改它的含义 = 改跨仓库契约(下游两仓已经按现在这份交过
+        活)。要分辨读新加的 `absent` / `gate`。
         """
         pid = str(player_id or "").strip()
         if not pid:
@@ -4811,10 +4895,14 @@ class World:
         scheduler = self.scheduler
         row = scheduler.pending_invitation(int(invite_seq))
         if row is None:
-            return {
+            settled = scheduler.settled_invitation(int(invite_seq))
+            out = {
                 "ok": False, "outcome": "gone",
-                "refusal": "这份邀请已经不在了 —— 要么答过了,要么已经过期",
+                "refusal": _INVITE_GONE_LABELS.get(settled, _INVITE_GONE_UNKNOWN),
             }
+            if settled:
+                out["settled"] = settled
+            return out
         if str(row.get("player_id") or "") != pid:
             # 替**别人**答应,和引擎替他答应是同一件事的两种写法。
             raise tools_mod.ToolCallError("这份邀请不是给你的")
@@ -4849,13 +4937,67 @@ class World:
             scheduler.settle_invitation(int(invite_seq), "accepted")
             return {"ok": True, "outcome": "accepted", **outcome}
         refusal = str(outcome.get("refusal") or "")
+        absent = ""
+        if str(outcome.get("gate") or "") == "player_not_here":
+            # **这一句从前是怪玩家的**:她按作息表溜达开、他一步没动,报文照样
+            # 写「你不在她跟前」。人话与枚举一起换掉,两头都点名。
+            absent, refusal = self._invite_absence(row, pid)
         scheduler.settle_invitation(int(invite_seq), "expired", note=refusal)
-        return {
+        out = {
             "ok": False, "outcome": "expired",
             "reason": str(outcome.get("reason") or ""), "refusal": refusal,
             **{k: v for k, v in outcome.items()
                if k not in {"ok", "reason", "refusal"}},
         }
+        if absent:
+            out["absent"] = absent
+        return out
+
+    def _invite_absence(self, row: Mapping[str, Any], pid: str) -> tuple[str, str]:
+        """他按了「好」而这件事得当面 —— **到底是谁不在场**。回(枚举, 人话)。
+
+        判据是**她开口那一刻在哪**(`row["loc"]`,投影从事件顶层抄下来的那一格)。
+        只知道两个人此刻各在哪的话,一句"你们不在一处"说不出是谁动的 —— 而
+        「她走开了」和「你走开了」在他手机上是两句完全不同的话:前一句里他什么
+        也没做错。和 `_colocation_error` 那张三分表同一条纪律,只是那边分的是
+        「怎么办」,这边分的是「怪谁」。
+
+        `unknown` 是**说不上来**,不是"都怪你":她开口那一刻的地点没记下来
+        (老事件)、或者世界压根不知道他在哪(宿主没调过 `player_move`)。
+        猜一个出来会让那句话读起来完全正常而恰好是反的。
+        """
+        runtime = self._tool_runtime
+        scheduler = self.scheduler
+        agent_id = str(row.get("agent_id") or "")
+        name = runtime.agent_names().get(agent_id, agent_id) or agent_id
+        here = runtime.agent_location(agent_id)
+        where = runtime.player_location(pid)
+        here_name = scheduler.place_name(here) or "别处"
+        where_name = scheduler.place_name(where) or "别处"
+        if agent_id in scheduler._transit:
+            # 她在赶路 = 不在任何地方(`_where_is` 同一条)。照 `agent_location`
+            # 那份直说会写出"你在 cafe,她在 cafe —— 这件事得当面",一句谎。
+            return ("agent", f"{name}这会儿在路上,还没落脚 —— 不是你不在")
+        if not where:
+            return ("unknown",
+                    f"世界不知道你这会儿在哪 —— 宿主没调过 player_move。"
+                    f"{name}在{here_name}")
+        asked = str(row.get("loc") or "")
+        if not asked:
+            return ("unknown",
+                    f"你们不在一处 —— {name}在{here_name},你在{where_name}")
+        asked_name = scheduler.place_name(asked) or "别处"
+        if here != asked and where == asked:
+            return ("agent",
+                    f"{name}已经离开{asked_name}了 —— 她这会儿在{here_name},"
+                    f"而你还在{where_name}。是她走开了,不是你没到场")
+        if here == asked and where != asked:
+            return ("player",
+                    f"你已经离开{asked_name}了 —— {name}还在{here_name},"
+                    f"而你这会儿在{where_name}。一起做事得当面")
+        return ("both",
+                f"你们俩都不在{asked_name}了 —— {name}在{here_name},"
+                f"你在{where_name}。一起做事得当面")
 
     def contact_stats(self) -> dict[str, Any]:
         """"她想起你"这条链跑没跑、发没发(contact)。
@@ -7220,14 +7362,8 @@ class World:
             # 在同一份提示词的下一行读到「江晚(在一起听完一面)」—— 一处分支
             # 换来两句互相打脸的话。在途那一支留着:它答的是「你在哪儿」,
             # 比"此刻在做什么"多一格终点,而路上的人本来就不在做别的事。
-            if activity.get("transit"):
-                to_name = _place_name(str(activity["transit"].get("to") or ""))
-                label = f"正在去{to_name or '别处'}的路上"
-            else:
-                label = doing.get(
-                    scheduler.stock_owner_of(agent_id),
-                    _ACTIVITY_LABELS.get(activity.get("kind"), "闲着"),
-                )
+            # **整句挪进了 `_self_activity_label`**,自主上下文读的是同一份。
+            label = self._self_activity_label(agent_id, activity, doing)
 
             def _busy(actor: str, name: str) -> str:
                 said = doing.get(scheduler.stock_owner_of(actor))

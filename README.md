@@ -317,10 +317,14 @@ anima-world world inspect my.cyberworld --json
 因为它是文本,排障不需要任何工具:
 
 ```bash
-zcat my.cyberworld | head -3                          # 它是什么
-zcat my.cyberworld | grep '"type":"entity_spawn"'      # 这个世界里生出过什么
+zcat my.cyberworld | head -3                           # 它是什么
+zcat my.cyberworld | grep '"type": "entity_spawn"'     # 这个世界里生出过什么
 diff <(zcat a.cyberworld) <(zcat b.cyberworld)         # 两次导出差在哪
 ```
+
+⚠️ **冒号后那个空格是承重的**。记录用 `json.dumps` 的默认分隔符写出去,所以
+`grep '"type":"entity_spawn"'`(这份文档在 3.6.0 之前一直是这么写的)**一条都匹配不到**;
+而 grep 找不到时只是安静地退 1,和"这个世界确实没生出过东西"在屏幕上长得一模一样。
 
 ## 命令
 

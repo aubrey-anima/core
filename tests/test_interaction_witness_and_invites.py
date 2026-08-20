@@ -33,6 +33,9 @@ _SEED = {
     "locations": [
         {"id": "cafe", "name": "咖啡店", "description": "拐角那家"},
         {"id": "yard", "name": "后院", "description": "堆着几只空木箱"},
+        # 第三个地方,只为了"两个人各走各的"那一条:两处地点时"他也走开"
+        # 只可能走到她那儿去,而那恰好是**面对面**,验不到要验的东西。
+        {"id": "shop", "name": "杂货铺", "description": "隔着一条街"},
     ],
     "agents": [
         {"id": "夏", "name": "苏晚夏", "location": "cafe", "personality": "开朗"},
@@ -386,7 +389,10 @@ def test_他点头那一刻人已经走开_那件事不许做掉(world):
     before = _shifts(world, "夏")
     out = world.answer_invitation("p1", seq, accept=True)
     assert out["ok"] is False and out["outcome"] == "expired"
-    assert "跟前" in str(out.get("refusal") or "")
+    # **是他走开的,报文就得这么说。**(3.6.1 之前这里只验一个「跟前」——
+    # 而她走开时那句话逐字相同,一个断言同时盖住了两件相反的事。)
+    assert out["absent"] == "player"
+    assert "你已经离开" in str(out.get("refusal") or "")
     assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 0
     # 走开不是拒绝 —— 这一支同样不写在他头上。
     assert _shifts(world, "夏") == before
@@ -692,6 +698,141 @@ def test_不认识的结局当场报错(world):
         world.scheduler.settle_invitation(seq, "canceled")     # 少一个 l
     assert world.invitations("p1")[0]["pending"] is True
     assert _events(world, "invitation_settled") == []
+
+
+# ── 四之五、到底是谁不在场 ────────────────────────────────────────────────
+#
+# 🔴 **`cancelled` 从前只堵住了最窄的一条路。** `walk_away` 那个工具只挂在
+# `chat` 面上,于是"她在对话里说了句我先走"会撤回邀请,而她**按作息表**溜达开
+# (`move_agent`,和她自己决定走一模一样的那条路)不会 —— 那份邀请照旧挂着、
+# 照旧倒计时,他按下「好」拿到的是一句「『访客』不在她跟前」。
+#
+# **她走的,话却说成他不在。** 下面这几条把两条路各钉一遍;
+# `walk_away` 的 `surfaces` 一个字没拓宽(那是产品向的裁决题,不是这里能定的)。
+
+
+def _walk_off(world, agent_id="夏", to="yard"):
+    """她按作息表溜达开 —— 走 BT 那条路,和她自己决定走一模一样。"""
+    world._tool_runtime.move_agent(agent_id, to)
+    for _ in range(30):
+        if world._tool_runtime.agent_location(agent_id) == to:
+            return
+        world.tick(1)
+    raise AssertionError(f"{agent_id} 没走到 {to}")
+
+
+def test_她按作息表走开_报文不许怪到他头上(world):
+    """同一份报文从前对两件相反的事逐字相同 —— 实测过:她走开和他走开,
+    `refusal` 一个字都不差(「『访客』不在她跟前 —— 一起做事得当面」)。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    _walk_off(world)                             # 她走了,他一步没动
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["ok"] is False and out["outcome"] == "expired"
+    assert out["absent"] == "agent"              # 机器读的那一半
+    refusal = str(out.get("refusal") or "")
+    assert "苏晚夏已经离开咖啡店" in refusal      # 人读的那一半:两头都点名
+    assert "后院" in refusal and "咖啡店" in refusal
+    # **一个字都不许写成是他没到场。**
+    assert "你不在" not in refusal
+
+
+def test_他走开和她走开_是两句不同的话(world):
+    """这一条是上面那条的对照组:**只验一边等于没验。**"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world.player_move("p1", "yard")              # 这回是他走的
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["absent"] == "player"
+    assert str(out["refusal"]).startswith("你已经离开")
+
+
+def test_闸的名字也交出去_而不是只有一句人话(world):
+    """枚举给机器读、句子给人读 —— 而 `reason` 那一格上"闸拦下的"和"他自己说
+    不去"都写成 `declined`。`gate` 是唯一分得开的那一格。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    _walk_off(world)
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["gate"] == "player_not_here"
+    # `reason` 一个字没动 —— 它是 `act()` 那扇门上的既有枚举(只加不改)。
+    assert out["reason"] == "declined"
+
+
+def test_她收回之后他再按好_说得出是她收回的(world):
+    """**`gone` 从前只说得出"要么答过了,要么已经过期"** —— 一句恰好把
+    `cancelled` 排除在外的话,而那是四种里唯一他什么也没做错的一种。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    assert world.act("夏", "walk_away", {"to_location": "后院"},
+                     player_id="p1", surface="chat")["ok"] is True
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["outcome"] == "gone"
+    assert out["settled"] == "cancelled"
+    assert "她自己收回去的" in str(out["refusal"])
+    assert "过期" not in str(out["refusal"])
+
+
+def test_他自己回过的那一份_再按也说得出是他回的(world):
+    """四种结局四句话 —— 合成一句就等于把她做的事和他做的事记在一起。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    assert world.answer_invitation("p1", seq, accept=False)["ok"] is True
+    again = world.answer_invitation("p1", seq, accept=True)
+    assert again["settled"] == "declined" and "你当时说的是不去" in again["refusal"]
+
+
+def test_那扇门上每一行都带着结局(world):
+    """🔴 **消费方那条路上没有游标。** 站点只能去 `recent_events` 里捡那条
+    `invitation_settled`(壳截最后 100 条),离线久一点它就滑出去 —— 那一行
+    于是永远显示成「错过了」,把**她**做的事记在**他**头上。这扇门本来就有
+    游标,结局挂在这里等于顺手把那扇门补上。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    rows = world.invitations("p1")
+    assert rows[0]["pending"] is True and rows[0]["outcome"] == ""
+    assert world.act("夏", "walk_away", {"to_location": "后院"},
+                     player_id="p1", surface="chat")["ok"] is True
+    rows = world.invitations("p1")
+    assert rows[0]["pending"] is False and rows[0]["outcome"] == "cancelled"
+
+
+def test_她在哪儿开的口_跟着那份邀请一起挂着(world):
+    """归因靠的就是这一格。它从事件顶层抄下来,**payload 一个字没加** ——
+    线格式没动,所以镜像端不必跟。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    assert world.scheduler.pending_invitation(seq)["loc"] == "cafe"
+    assert "loc" not in _events(world, "agent_invites")[0]["payload"]
+
+
+def test_两个人都走开了_一句话说全两头(world):
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    _walk_off(world, to="yard")
+    world.player_move("p1", "shop")              # 他去了第三个地方
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["absent"] == "both"
+    assert "你们俩都不在咖啡店了" in out["refusal"]
+
+
+def test_世界不知道他在哪时_不许说成是他站错了地方(world):
+    """`_colocation_error` 那张三分表的第二行:这一种**宿主的事**,而合成一句
+    「你不在她跟前」会让它看起来像是玩家自己站错了地方,而他做什么都改不了。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world.players.pop("p1", None)                # 他从在场名单上消失了
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["absent"] == "unknown"
+    assert "player_move" in out["refusal"]
 
 
 # ── 五、契约那一格答得出来 ────────────────────────────────────────────────

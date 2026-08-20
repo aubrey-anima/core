@@ -6,6 +6,12 @@ from typing import Any
 
 from anima_world.types import AgentState, Capability, Event, Projection, Relation
 
+SETTLED_INVITATIONS_KEPT = 200
+"""结局记到第几份为止(`Projection.settled_invitations` 的上界)。
+
+**它进得了他手机上那句话,所以它必须有界。** 200 份是"他这会儿还可能去按一下"的
+那一小段:一份邀请只活 12 个 tick,超出这一段的必然早就不在任何一块屏幕上了。"""
+
 
 def project_events(events: list[Event], base: Projection | None = None) -> Projection:
     """Fold events into a Projection, optionally on top of a base projection.
@@ -72,12 +78,18 @@ def _apply_agent_invites(proj: Projection, e: Event) -> None:
     一个 id 命名空间(要保证唯一、要进 `.cyberworld`、要跨进程不撞),换来的是
     一个和 seq 一一对应的数字 —— 而 `seq` 本来就是账本发的、天然唯一、翻页
     (`_filtered_page`)用的也是它。
+
+    **`loc` 从事件的顶层抄一格进来**:她是**在哪儿**开的口。答复那扇门要靠它才
+    分得出"她走开了"和"你走开了" —— 只知道两个人此刻各在哪的话,一句"你们不在
+    一处"说不出是谁动的,而那两件事在他手机上是两句完全不同的话。抄一格而不是
+    去翻日志:那条事件已经在手上了,翻回去要 O(整条日志)。
     """
     seq = int(e.seq or 0)
     if seq <= 0:
         return
     row = dict(e.payload)
     row["seq"] = seq
+    row["loc"] = e.loc
     proj.invitations[seq] = row
 
 
@@ -86,12 +98,26 @@ def _apply_invitation_settled(proj: Projection, e: Event) -> None:
 
     **四种结局都只是把它从"还等着"里拿掉**,结局本身留在日志里。所以"他拒绝了"
     和"他没看见"这两件事永远分得开:清单上都不在了,而账本上写着不同的字。
+
+    **顺手把结局本身留一小段**(`settled_invitations`)。他手指按下去和世界收到
+    这一下之间,那份邀请可能刚刚有了结局 —— 那扇门此刻只知道"它不在清单上了",
+    于是只能回一句"要么答过了、要么已经过期",而**她把话收回去**这一种恰好被
+    这句话排除在外。留一格 `outcome` 就够说清楚,而且不必回头翻日志(按 kind
+    翻是 O(整条日志),在他按一下的那条路上不能这么花)。
     """
     try:
         invite_seq = int(e.payload.get("invite_seq") or 0)
     except (TypeError, ValueError):
         return
     proj.invitations.pop(invite_seq, None)
+    outcome = str(e.payload.get("outcome") or "")
+    if not outcome:
+        return
+    # 重放会把同一条再折一遍,所以先删后插:dict 保插入序,重排到队尾才是"最近"。
+    proj.settled_invitations.pop(invite_seq, None)
+    proj.settled_invitations[invite_seq] = outcome
+    while len(proj.settled_invitations) > SETTLED_INVITATIONS_KEPT:
+        proj.settled_invitations.pop(next(iter(proj.settled_invitations)))
 
 
 def _apply_player_departed(proj: Projection, e: Event) -> None:

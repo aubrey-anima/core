@@ -141,7 +141,7 @@
 | `conversation` | `agent_id`, `conversation_id`, `summary`, `message_count`, `started_at`, `closed_at`, `participants`, `location` | 整场会话只发这一条,在关闭时 |
 | `capability_registered` | `id`, `kind`, `description`, `params_schema` | 首启生成的能力目录 |
 | `subsystem_health` | `subsystem`, `status`, `reason`, `previous` | 子系统档位**切换**(ok↔degraded)。只在切换时发,不是每次降级都发 |
-| `agent_invites` | `agent_id`, `agent_name`, `player_id`, `target`, `verb`, `verb_label`, `target_name`, `party`, `text`, `consented`, `created_tick`, `expires_tick`, `round` | **她开口约了一个玩家**(§2.9.6.7)。`player_id` 是**裸 pid**(关系表与读侧过滤的键);`party` 是原样交回 `perform_affordance` 的名单(**带着他自己** `player:<id>`);`text` 是她开口那一刻说的那句话,**存下来不在读的时候现拼**(动词的 `label` 明天可能被作者改掉);`consented` 是**开口那一刻已经点过头的人**(她自己、以及名单里当场答应了的角色),答复时原样带回去 —— 他按"好"和世界回答之间不该再夹一次模型调用 |
+| `agent_invites` | `agent_id`, `agent_name`, `player_id`, `target`, `verb`, `verb_label`, `target_name`, `party`, `text`, `consented`, `created_tick`, `expires_tick`, `round` | **她开口约了一个玩家**(§2.9.6.7)。`player_id` 是**裸 pid**(关系表与读侧过滤的键);`party` 是原样交回 `perform_affordance` 的名单(**带着他自己** `player:<id>`);`text` 是她开口那一刻说的那句话,**存下来不在读的时候现拼**(动词的 `label` 明天可能被作者改掉);`consented` 是**她开口那一刻,名单里已经当场点过头的角色**(判定器判成答应的那几个;**她自己不在里面** —— 发起的人从不进名单,`_interact_with` 见到就当场报错)。答复时原样带回去,不再问第二遍 —— 他按"好"和世界回答之间不该再夹一次模型调用,而且再问一遍读的是模型、同一个人同一件事的答案可以和上次不同。**跳过的只有"问"这一步,闸照查**(`pre_ok` 排在 `invitee.gate` 之后) |
 | `invitation_settled` | `invite_seq`, `outcome`, `agent_id`, `agent_name`, `player_id`, `target`, `verb`, `verb_label`, `target_name`, `created_tick`, `expires_tick`, 可选 `note` | 上一条的结局。`outcome` ∈ `accepted` / `declined` / `expired` / `cancelled`(`together.INVITE_OUTCOMES`,**写进来之前逐字校验**,不认识的当场 `ValueError`)。**四种只落这一种事件**:「他拒绝了」和「他没看见」必须在账本上分得开、在待办清单上一样地消失。`cancelled` = **她自己走开了**(`walk_away` → `Scheduler.cancel_invitations()`,唯一来源),和 `expired` 一样一个字都不写 |
 | `player_action` | `player_id`, `role`, `action`, `details` | 同样的四个字段**也**在事件顶层(实时流的既有形状,不变)。⚠️ payload 里有值这件事**只对 1.1.1 之后产生的事件成立** —— 更早的世界里这里是 `{}`,不补也不迁移,读历史时要当它可能缺席 |
 
@@ -1602,6 +1602,27 @@ world.engagements()          # 谁正在做什么,还剩几个 tick
 world.state()["agents"]["夏"]["activity"]["engaged"]
 ```
 
+**那盏灯:`engagement_kept`**(子系统健康的一格,`World.state()["runtime"]["subsystems"]`)。
+`left` 这一支每发生一次就把它拨到 `degraded`,`reason` 里写清楚是**谁的哪件事**被带走了
+(`夏: 夜播 bench:oak 起了头就被带走了(代价不退)`),收得了尾的那些数进 `ok`。它和别的
+子系统灯有一处**有意的不同** —— 它是**粘的**(`note_subsystem(..., sticky=True)`):
+别的灯答"这个子系统现在还转不转得动",而这一格答的是"**这次开机里有没有人白花过时间**",
+是一笔**账**。不粘的话下一次有人顺利做完一件事就把灯拨回绿、`reason` 抹成空串,于是实测
+出来的样子是 3 条 `subsystem_health` 事件、`degraded: 3`、而 `reason` 是 `""`:数字说出过
+事,却说不出出的是什么事。粘住之后代价也降了:出五次事只发**一个**事件(灯已经红着就
+只更新"最近是哪一件"),不淹日志。没出过事的世界这一格**根本不出现** —— 空白不是"绿"。
+
+CLI 出口在 `anima-world doctor`(它读的是**事件日志**不是这盏灯 —— 灯只记本次开机,
+而一个昨天出过事、今早重启过的世界,灯是刚点亮的绿):
+
+```
+要花时间的长过程:起了 12 件,1 件半路被带走(代价不退)
+  最近一件:夏 的 夜播 bench:oak(第 88 tick)
+  做完了 11 件
+```
+
+有被带走的就退出码 1,和这条命令别的几格同一条纪律。
+
 顺带修掉了一个真 bug:排班里一个 30 分钟窗口的 `interact`,在 5 分钟一 tick 的世界里
 会**做 6 遍**(见上面那条 ⚠️)。给它一个覆盖窗口的 `duration`,占着她的那件事就**是**
 一个状态,重挑到同一个动作会被"和当前相同"挡住,于是她只做一遍、做满整段时间。
@@ -1998,6 +2019,26 @@ world.answer_invitation("p1", invite_seq, True)    # 他自己按下的那一下
 点得动什么",它是一件已经发生在他身上的事。宿主照 `invitations()` 单画一份待办。
 
 ⚠️ **引擎不负责送达**,推送/红点归宿主(和 `agent_wants_contact` 同一条)。
+
+**到底是谁不在场**(3.6.0 补的一格)。他按「好」而这一刻办不成时,旧版本的报文是一句
+`「访客」不在她跟前 —— 一起做事得当面`,**不论是谁走开的**:她按作息表溜达去了后院,
+话却说成他不在。于是三格分开答:`absent` ∈ `agent`(她走开了 / 她在路上还没落脚)/
+`player`(他走开了)/ `both` / `unknown`(**世界不知道他在哪** —— 宿主从没调过
+`player_move`,这跟"他站错了地方"是两回事),`gate` 是挡下的那道闸的名字,`refusal`
+把两头都说全(「她这会儿在后院,而你还在咖啡店。是她走开了,不是你没到场」)。
+`gone` 那一支同理多一格 `settled`,于是「你上次点的是不去」和「她自己收回去的」分得开 ——
+旧版本给两种同一句话,而那句话恰好把她走开这条真因排除在外。她在哪儿开的口靠投影行上的
+`loc`(从事件顶层抄进来的,**事件的 payload 一个字没改**)。
+
+⚠️ **「她按作息表溜达开」算不算「她不等你了」—— 结论是不算,`INVITE_OUTCOMES` 一个取值
+都没加。** 两件事要分开:**「她还等不等你」是一个决定**(她自己动手收回,`walk_away` →
+`cancel_invitations()`,唯一来源),**「这一刻办不办得成」是一个事实**(位置、闸、她手上
+有没有别的事,随时会变、也随时会变回来)。把溜达也判成 `cancelled` 就是拿事实冒充决定:
+她去隔壁拿个东西就等于说了"不等你了",而下游两个仓已经按现有取值集合交过活 —— 在他们
+那儿这份邀请会当场变成一行「她收回了」,再也回不来。所以这一轮只补"这一刻的事实"那三格,
+一个取值都不动。⚠️ 留在这里的**产品向问题**(引擎不替它拍板):他在她短暂离开时按了
+「好」,今天是**当场烧掉**这份邀请(落 `expired`,她回来了也没得答)。要不要改成"这一下
+不算,邀请还留着等她回来",是个产品决定,不是引擎的判断 —— 引擎两种都做得出来。
 
 #### 2.9.7 有界性是**渲染器**的属性,不是存储的属性
 
@@ -2990,8 +3031,8 @@ from anima_world.api import World
 | `world.contact_requests_page(player_id=None, *, since_seq=0, limit=50)` | 上一条的**带游标**版本,增量拉取用它。回 `{events, next_seq, cursor, scanned, total}`。⚠️ **`cursor` 和"这一页有没有他的事"无关** —— 它是这一窗**扫过的**最后一条 seq,所以**空页也推得动游标**。少了它就有一种安静的饿死:热闹世界里这一窗全是别人的事件 → 空页 → 宿主拿不到能推的 seq → 他自己那条永远排在窗口外,世界照跑、日志干净。`scanned` 是过滤前扫了多少条(宿主照它看出"我在替别人翻页")。做成姊妹方法而不是给老方法加关键字,是因为返回类型随参数值变化的函数在调用点上读起来是猜谜 |
 | `world.inbox_page(player_id, *, since_seq=0, limit=50)` | `inbox()` 的带游标版本,每一格语义与 `contact_requests_page()` 逐字相同(三扇门共用同一个 `_filtered_page`)。`player_id` 给 `None` 就是不过滤 |
 | `world.invitations(player_id=None, *, since_seq=0, limit=50)` | **有人在等你点头**(`agent_invites`,见 §2.9.6.7)—— 她点了这个玩家的名要一起做一件事,而引擎**不替他答应**。每行是那条事件,外加一格 `pending`:这份邀请**此刻**还等不等得到答复。事件本身是历史(她当时确实问了),"还在等吗"是**现在** —— 两者在一条流里读得出,宿主才画得出「3 条待回应」,而不是把三天前答复过的邀请再亮一次红点。不给 `player_id` 就是全部。⚠️ **引擎不负责送达**:推送/红点归宿主。⚠️ 增量拉取用下一条 |
-| `world.invitations_page(player_id=None, *, since_seq=0, limit=50)` | 上一条的**带游标**版本,回 `{events, next_seq, cursor, scanned, total, now_tick}`,前五格语义与 `contact_requests_page()` 逐字相同(三扇门共用同一个 `_filtered_page`)。理由也逐字相同:热闹的世界里拿"这一页最后一条"当游标会把他自己那条永远排在窗口外。多出来的两格答的是**还剩多久**:`now_tick` 是这一页读出来的那一刻的世界时钟,每行再多一格 `expires_in`(还剩几 tick;已经结了的行是 0)—— 没有它,宿主要画一个倒计时就得**再调一次** `World.state()` 去问时钟,而那两次调用之间世界还在走。⚠️ **`expires_in` 加在拷贝上,那条事件一个字没改**(投影拷一份的同一条纪律) |
-| `world.answer_invitation(player_id, invite_seq, accept)` | **他自己按下的那一下** —— 引擎里唯一一处替玩家点头的入口,而它拿到的正是他点的那一下(§2.9.6.7)。`invite_seq` 就是那条 `agent_invites` 的 `seq`。`accept=True`:**在这一刻重查一遍闸**(他可能已经走开、她可能睡了或手上有了别的事),过了才落 `invitation_settled{accepted}` 并真的去做,做不成落 `expired` 并把原因写进 `note` —— 决定与执行之间世界还在跑,和 `act()` 的"在执行时校验,不在决定时"同一条。⚠️ **重查的是闸,不是人心**:开口那一刻点过头的人写在事件的 `consented` 里,答复时原样带回 —— 否则他按一下"好"就要去等一次模型,而她这一次改主意的话,他收到的是一条 `expired`。`accept=False`:落 `declined`,**并且只有这一支**动关系、进她的记忆(纯算术,一次模型都不调);他没答挂到 ttl 那一支是**错过**不是拒绝,一个字都不写。回 `{"ok","outcome",…}`,`outcome` ∈ `together.INVITE_OUTCOMES` 或 `"gone"`(答过了 / 已过期)。**重复答复不报错**(两个设备同时点同一份是常态);替**别人**答抛 `ToolCallError` |
+| `world.invitations_page(player_id=None, *, since_seq=0, limit=50)` | 上一条的**带游标**版本,回 `{events, next_seq, cursor, scanned, total, now_tick}`,前五格语义与 `contact_requests_page()` 逐字相同(三扇门共用同一个 `_filtered_page`)。理由也逐字相同:热闹的世界里拿"这一页最后一条"当游标会把他自己那条永远排在窗口外。多出来的两格答的是**还剩多久**:`now_tick` 是这一页读出来的那一刻的世界时钟,每行再多一格 `expires_in`(还剩几 tick;已经结了的行是 0)—— 没有它,宿主要画一个倒计时就得**再调一次** `World.state()` 去问时钟,而那两次调用之间世界还在走。⚠️ **`expires_in` 加在拷贝上,那条事件一个字没改**(投影拷一份的同一条纪律)。3.6.0 起每行还多一格 `outcome`:**这份邀请是怎么结束的**(`INVITE_OUTCOMES` 里的一个;还等着的行是空串 —— 「还没有结局」和「结局是等着」是两件事)。⚠️ 它答的是**离线回来那一眼**:结局只落在 `invitation_settled` 那一条事件上,而宿主的事件窗是**截最后 N 条、没有游标**的,离线久一点那条就滑出去了,于是这一行只剩"没答过"的样子。有了这一格,一张待办清单**自己**说得出哪几行是她收回去的、哪几行是他自己回掉的。⚠️ **有界**:只记最近 `SETTLED_INVITATIONS_KEPT`(200)份,更老的回落成空串 —— 说不出来就别猜,而不是让这张表随世界一起长 |
+| `world.answer_invitation(player_id, invite_seq, accept)` | **他自己按下的那一下** —— 引擎里唯一一处替玩家点头的入口,而它拿到的正是他点的那一下(§2.9.6.7)。`invite_seq` 就是那条 `agent_invites` 的 `seq`。`accept=True`:**在这一刻重查一遍闸**(他可能已经走开、她可能睡了或手上有了别的事),过了才落 `invitation_settled{accepted}` 并真的去做,做不成落 `expired` 并把原因写进 `note` —— 决定与执行之间世界还在跑,和 `act()` 的"在执行时校验,不在决定时"同一条。⚠️ **重查的是闸,不是人心**:开口那一刻点过头的人写在事件的 `consented` 里,答复时原样带回 —— 否则他按一下"好"就要去等一次模型,而她这一次改主意的话,他收到的是一条 `expired`。`accept=False`:落 `declined`,**并且只有这一支**动关系、进她的记忆(纯算术,一次模型都不调);他没答挂到 ttl 那一支是**错过**不是拒绝,一个字都不写。回 `{"ok","outcome",…}`,`outcome` ∈ `together.INVITE_OUTCOMES` 或 `"gone"`(**这份邀请已经有过结局了** —— 答过了 / 过期了 / 她自己收回去了,三种都走这一支)。3.6.0 补了三格,答的是同一个问题的三个粒度 —— **到底是谁不在场**:`settled`(只在 `"gone"` 时给)是那次的结局本身,于是"她收回了"和"你上次点的是不去"在报文里分得开(旧版本两种给同一句话,而那句话把她走开这条真因排除在外);`absent` ∈ `agent`/`player`/`both`/`unknown` 是**机器读的那一格**(旧版只有一句人话,宿主要判断到底怪谁就得去 `in` 一个中文子串);`gate` 是挡下来的那道闸的**名字**(如 `player_not_here`)。⚠️ **`reason` 有意没动** —— 它是闸自己的分类(`declined`),下游按现有取值交过活了,这里只加不改。⚠️ **这三格答的是"这一刻办不办得成",不是"她还等不等你"**:她按作息表溜达开时这一支给的仍是 `expired`,`INVITE_OUTCOMES` 一个字没加 —— 见 §2.9.6.7 末尾那条"走开算不算不等你"。**重复答复不报错**(两个设备同时点同一份是常态);替**别人**答抛 `ToolCallError` |
 | `world.contact_forecast(agent_id=None)` | **此刻**每对 (角色, 玩家) 算出来是多少,含没触发的与被冷却挡下的。调 `contact.threshold` 用 —— 只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。只读:不占额度、不写冷却、不发事件,且**和真轮次共用同一个判定函数** |
 | `world.forget_player(player_id, *, reason="", dry_run=False)` | **一个人离开了这个世界**(§2.9.10)。往日志里追加一条 `player_departed` 事实,由折叠端和世界自己去响应它:关系(两个方向)、联系冷却、姿态、静音、回头找你、他教过的规则,一并作废;**历史一个字不改**(事件、记忆、转录、账本全留着 —— 她记得这个人来过,只是不再等他)。回执 `{player_id, reason, relations, edges, contact, chat_state, dry_run, seq}`(`edges` 是关系图上撤掉的边 —— 它是一张自己的表,折叠端碰不到,不显式撤的话 `cliques()` 里会坐着一个不存在的人)。**幂等**;`dry_run=True` 一个字节都不写。CLI 出口 `anima-world player forget` |
 | `world.erase_player(player_id, *, reason="", dry_run=False, since_seq=None, limit=None, resume=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq, resume_seq, phase}`。**幂等**;`dry_run=True` 一个字节都不写(但**读**进度键)。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账)。3.5.0 的 `since_seq` / `limit` / `resume` **分的是改写那一遍,收名字那一遍永远要看全量**,所以它们不让请求变快;买到的是"一趟被杀在半路还能续、而且名字不丢"(进度键 `anima:{world_id}:erasure:{player_id}`,带 TTL、**不进包**)与"一次调用的写入量有上限"。`phase` 是 `not_started`/`partial`/`done` —— **这个人的抹除处在哪一步**,不是"抹干净了没有";`seq` 有值 = 走到了日志尽头。长期解仍是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮,而且**它也不是完整解**:自由文本里的名字不带 id)。CLI 出口 `anima-world player erase` |
@@ -3686,6 +3727,11 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 没配 / 配了 / 正常)+ **真调一次 LLM**(`--skip-probe` 跳过)、`llm.api_key` 是从哪儿
 解析出来的(环境变量 / 机器配置 / 旧世界配置 —— 最后一种会点名)、后台模型槽、
 时钟快慢翻译成人话。有问题退出码 1。
+
+3.6.0 起还报**要花时间的长过程**(§2.9.6.3):起了几件、几件**半路被带走**(`left`,
+代价不退)、最近被带走的是谁的哪件事。它读**事件日志**而不是
+`World.state()` 里那盏 `engagement_kept` 灯 —— 灯只记本次开机,而一个昨天出过事、
+今早重启过的世界,灯是刚点亮的绿。有被带走的退出码 1。
 
 还报一条**不算问题但白花钱**的:`chat.intent.enabled` / `autonomy.enabled` /
 `chat.loop.enabled` 开着而 `llm.background.model` 空着时,这些便宜活会退回主模型。
