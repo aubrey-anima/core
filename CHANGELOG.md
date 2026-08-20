@@ -27,13 +27,69 @@ never tagged and never went to PyPI — they ship as container images only, so t
 thing on the index is still **1.4.0** (Apache-2.0, 2026-08-04). A section under a version
 heading means "this version's engine, as built from this repo"; whether that build ever
 left the building is a separate question, answered in `CLAUDE.md` §当前状态.
-There is deliberately **no `[Unreleased]` section**: hosts read this file to answer "is the
-thing I'm running described here?", and everything under a version heading is in the
-running image the day it's built. A change parked under `[Unreleased]` is a change that
-already shipped while telling the reader it hadn't — see 第五轮 below, which is where that
-particular lie got caught.
+There is deliberately **no `[Unreleased]` section**: a change parked under `[Unreleased]`
+is a change that already shipped while telling the reader it hadn't — see 第五轮 below,
+which is where that particular lie got caught.
+
+⚠️ **That lie has a mirror image, and the mirror image is the one that is live today.**
+The rationale above used to end "…and everything under a version heading is in the running
+image the day it's built" — false on the day it was written: `## [3.6.0]` collects review
+rounds written *after* the only `anima-world:3.6.0` image was built. A version heading says
+**what this repo contains**, never **what your image contains**, and the two drift silently
+in both directions.
+
+**When this file is ahead of an image, the only judge is to look inside the image — never
+the version number.** Tag, LABEL and `anima_world.__version__` are all set by whoever built
+it, so all three can agree while the bytes differ. Pick a symbol a round claims to have
+introduced and ask the image whether it has it:
+
+```console
+$ docker run --rm --entrypoint python anima-world:3.6.0 \
+    -c "import inspect, anima_world, anima_world.api as m; \
+        print(anima_world.__version__, inspect.getsource(m).count('_where_unknown_line'))"
+3.6.0 0     # 2026-08-20 实跑(image c8151d581dfd);同日 repo 里同一个数是 6
+```
+
+`anima-world contract --json` answers the same kind of question for the storage contract.
+Which builds ever left the building is tracked in `CLAUDE.md` §当前状态.
 
 ## [3.6.0] —— 她点你的名时,你得自己答 (2026-08-20)
+
+### 第八轮:上一轮说"改法是换成敲得动的命令",然后又写了一句全称断言
+
+上一轮治的就是「顺手交代一下」时写的**全称断言**,而它在治它的那一次提交里又写了一句:
+`docs/REFERENCE.md` 说新那句话「和 `presence` 那条命令、和答话那扇门的闸表**逐字同一份**」。
+**三个验收员各自独立敲出来它是假的** —— 闸表那三个短语在新句里命中 0/3,FOR-STUDIO 是
+第三种措辞,三份两两都不逐字。**这是同一形状的第四次**(`cafe`→「咖啡店」·「只剩这一处」·
+「有测试守着」· 现在「逐字同一份」),**每一次都写在治上一次的那个提交里**。
+这一轮**零代码、零契约**:只改说法与判据。
+
+- 🔴 **「逐字同一份」降成可核的说法。** 改成「**同的是这三条成因,措辞各文档各写各的 ——
+  别拿字符串去比**」,并给出取闸表那两格的命令(`git grep -nE '^\| .player_where_unknown' -- docs/`,
+  答 2 行)。**没有把它换成一句更准的全称断言** —— 那正是前三次的做法。
+- ⚪ **同一句给的导航判据,四行里两行是它自己。** 原判据 `git grep -n player_where_unknown -- docs/`
+  在 HEAD 上答 4 行,其中 2 行是这句话本身。新判据用 `^\|` 锚只捞表格格子,**锚是承重的**:
+  去掉它,写着命令的那一行自己就会被数进去。上一轮的 commit 标题写的是「判据自己命中自己:
+  同一天里踩了三次,三条都改成不会自答的写法」—— **第四条当时没照做。**
+- 🟡 **本文件头上「没有 `[Unreleased]`」的理由,今天是镜面反过来的同一句谎。** 原话是
+  「挂在版本号底下的东西,当天就在跑着的镜像里」;而现存唯一那个 `anima-world:3.6.0`
+  (`c8151d581dfd`)里 `_where_unknown_line` **一次都不出现**,repo 里是 6 次。当年防的是
+  「停在 Unreleased 而其实已发」,今天是「挂在已发版号下而其实没发」。头上补了一段
+  **「镜像滞后于本文件时怎么判」**:判据只能是**钻进镜像里**(`inspect.getsource` /
+  `contract --json`),**不是版号** —— tag、LABEL、`__version__` 都是建镜像的人写上去的,
+  三个一致而字节不同是常态。那条 `docker run --rm` 探针连同它当天的输出一起写在文件头。
+- 🟡 **`CLAUDE.md` 里那个会烂的数字。** 「三轮验收修复见 CHANGELOG」而 3.6.0 底下已经有
+  六轮 —— 改成一条**现数的命令**,不再写死一个数(顺手把「常用命令」那行的测试数按本轮
+  实跑改对,并注明是哪一天跑的)。
+- ⚪ **一条有意留着的欠账,补进宿主读的那份权威。** `_colocation_error` **从不问在途**、
+  猜错时印的是她的**出发地**(「你在后院,苏晚夏在咖啡店」)—— 这笔账此前只写在 `api.py`
+  的 docstring、两条测试的 docstring 和本文件里,`docs/` 侧**零命中**,只读 REFERENCE 的
+  宿主查不到。REFERENCE §2.9.9 那张三格拒绝表下面补了这一段,连同两条 `awk` 判据,并写明
+  同一条路上的 `intent.Director._colocation_refusal` **也只是猜**:它那一行里唯一带
+  `transit` 的字样是**枚举名本身**。**行为一个字没改**(修法已进看板,定版后另开)。
+- ⚪ **`docs/FOR-STUDIO.md` 那张三支表的「退出码」列是贡献值,不是进程退出码。** 同一批
+  输入在一个还没配 LLM 的世界上**一律 exit 1**(验收员实测)。表下补了半句;同节上方那条
+  「别拿 `$?` 当判据」原本就兜着,但读表的人得自己脑补。
 
 ### 第七轮:上一轮修好的那句话,自己又夸了一次口(定版前最后一轮)
 
