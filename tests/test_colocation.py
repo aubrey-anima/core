@@ -161,6 +161,12 @@ def test_她在赶路时说的是等她落脚_不是你站错了(world):
 
 
 def test_act_的回执也要说得出是三种里的哪一种(world):
+    """⚠️ 第二段那条断言 3.6.0 第五轮(2026-08-20)**换过一次**:它原先钉着
+    「没调过 `player_move`」,把一句**过期的实况**焊成了这扇门的契约 —— 而这一支
+    至少有三种来路(他下线了 / 在场记录过了 15 分钟 / 宿主确实没落过位置),
+    前两种里宿主刚刚才调过。测试钉住一句假话,那句假话就再也改不动了。
+    现在钉的是**这句话不许指认宿主**,加上它和邀请门那半边说的是同一句。
+    """
     world.config_set("presence.enforce_colocation", True)
     world.config_set("chat.tools.enabled", True)
     world.player_move("p1", "yard")
@@ -171,7 +177,10 @@ def test_act_的回执也要说得出是三种里的哪一种(world):
     world.players["p1"].pop("location")
     result = world.act("夏", "reach_out", {"player_id": "p1"},
                        player_id="p1", surface="autonomy")
-    assert "没调过 player_move" in result["error"]
+    assert "世界这会儿不知道你在哪" in result["error"]
+    assert "player_move" not in result["error"], result["error"]
+    # 两扇门一句话:`api._invite_absence` 那一支逐字同样的措辞。
+    assert "你可能已经离开这个世界了" in result["error"]
 
 
 def test_一份打算里排不进要当面的动词(world):

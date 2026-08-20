@@ -129,6 +129,10 @@ _INVITE_GONE_LABELS = {
 # 从四种里挑两种说,和猜一个说出来是同一种谎。
 _INVITE_GONE_UNKNOWN = "这份邀请已经不在了 —— 它有了结局,只是隔得太久,说不上来是哪一种"
 
+# 世界压根没有他那一行时,人话里管他叫什么。**这是引擎写的一个称呼,不是名字** ——
+# 所以 `_named()` 不给它套「」(框的只有数据里来的那一截,见 `Scheduler._named`)。
+_PLAYER_FALLBACK_DISPLAY = "这位玩家"
+
 
 class _PlayerRow(MutableMapping):
     """一个在场玩家的那一行 —— **写穿到 Redis**。
@@ -1368,14 +1372,23 @@ class _ToolRuntime:
             # 「「p1」不在她跟前」里那个 `p1` 是一个主键,不是任何人的名字。
             # 而这一支恰好只在"世界没有这个玩家的行"时才走到 —— 也就是他刚
             # `player_leave` 过、或者宿主从没登记过他,正是最该说实话的那次。
-            return "这位玩家" if name == pid else name
+            return _PLAYER_FALLBACK_DISPLAY if name == pid else name
         return self.agent_names().get(who, who)
 
     def _named(self, who: str) -> str:
         """同一个名字,**紧贴着下一个字**印时的样子 —— 见
         `Scheduler._named`,那儿写全了理由。这一份的名字还多一个来路:
-        玩家的昵称是**用户**填的,而用户填得出「老陈的猫」。"""
-        return f"「{self._display(who)}」"
+        玩家的昵称是**用户**填的,而用户填得出「老陈的猫」。
+
+        ⚠️ **框的只有数据里来的那一截**(和 `Scheduler._named` 里玩家那个「你」
+        逐字同一条):`_display()` 兜底的「这位玩家」是**引擎写的一个称呼**,
+        不是谁的名字 —— 套上「」读起来像在念一个人的名字,而这一支恰好只在
+        世界压根没有他那一行时走到,正是最不该假装知道他叫什么的那次。
+        """
+        shown = self._display(who)
+        if shown == _PLAYER_FALLBACK_DISPLAY and who.startswith("player:"):
+            return shown
+        return f"「{shown}」"
 
     def _affordance_display(self, target: str, verb: str) -> tuple[str, str]:
         """动词与东西的**人话**。判定器、回执、她的提示词读到的必须是同一个词 ——
@@ -5402,19 +5415,18 @@ class World:
         | 原因 | 玩家该干什么 |
         |---|---|
         | 你在别处 | 走过去(或者只跟她说话) |
-        | 世界不知道你在哪 | **宿主的事** —— 他没调过 `player_move` |
+        | 世界不知道你在哪 | 再进一次世界(或者等宿主把落脚处报上来) |
         | 她在赶路 | 等她落脚 |
 
         合成一句"你不在她跟前"的话,第二种会看起来像是玩家自己站错了地方,
         而他做什么都改不了 —— 那是这个仓库最怕的那种"技术上没错、读起来是谎"。
 
-        ⚠️ **而第二行自己今天也不够准**(2026-08-20 记):下面那句回执把原因写死成
-        「宿主没调过 `player_move`」,可**下线**(`player_leave`)与**在场行过期**
-        (15 分钟 TTL)走的是同一支 —— 那两种情形里宿主刚刚才调过,这句话是假的。
-        邀请门那半边(`_invite_absence` / `_colocation_gate`)这一轮已经按闸分了家、
-        不再指认宿主;**这扇门没跟上**:它的措辞被 `test_colocation.py` 钉着,而
-        这一轮的单子没授权改那条断言。**这是有意留的欠账,不是没看见**;它默认关
-        (`presence.enforce_colocation`),所以线上读不到这句话。
+        ⚠️ **第二行从前把原因写死成「宿主没调过 `player_move`」**(3.6.0 第五轮
+        改掉,2026-08-20):那一支至少有三种来路 —— 他 `player_leave` 过、在场记录
+        过了 `_PLAYER_TTL_SECONDS`(15 分钟)没续上、宿主确实没落过位置。**前两种
+        里宿主刚刚才调过**,而那句话对着一个接得好好的宿主说它没接(站点 2026-08-13
+        前后已接上)。措辞现在和 `_invite_absence` 那一支**逐字同一句**:同一件事在
+        两扇门上不该有两种说法,而这两扇门玩家都会撞上。
         """
         if not self.config_get("presence.enforce_colocation", False):
             return ""
@@ -5432,9 +5444,12 @@ class World:
         where = self._tool_runtime.player_location(player_id)
         name = self._tool_runtime.agent_names().get(agent_id, agent_id)
         if not where:
+            # **不指认宿主**(`_invite_absence` 里那一支逐字同一句):这里走到的
+            # 三种来路里,有两种宿主刚刚才调过 `player_move`。
             return (
-                f"{verb!r} 要当面才办得到,而世界不知道你这会儿在哪 —— "
-                f"宿主没调过 player_move。{name}在 {here or '别处'}"
+                f"{verb!r} 要当面才办得到,而世界这会儿不知道你在哪 —— "
+                f"你可能已经离开这个世界了,也可能是这一程还没把落脚处告诉世界。"
+                f"{name}在 {here or '别处'}"
             )
         if not here or here == where:
             # 两处地名一样却不是面对面 —— 只可能是她在赶路(`face_to_face` 与

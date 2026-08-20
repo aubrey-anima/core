@@ -338,8 +338,13 @@ def test_事件在包里是一行一条(tmp_path):
     换成文本格式的全部理由是"能 grep、能 diff、能流式"。而无限增长的那四样一旦按
     它们此刻住在哪个后端来 dump,没接 MySQL 的世界就会把整段历史塞进**一个**
     `redis` list 记录里 —— 一整行几万字节的转义 JSON。那时
-    `grep '"type":"entity_spawn"'` 找不到任何东西(它在字符串里是 `\\"type\\"`),
+    `grep '"type": "entity_spawn"'` 找不到任何东西(它在字符串里是 `\\"type\\"`),
     `diff` 也退化成整块变。**在最常见的那种世界上不成立的卖点,就是空话。**
+
+    ⚠️ **上面那个示范里冒号后的空格是承重的**:记录用 `json.dumps` 的默认分隔符
+    写出去,所以 `'"type":"entity_spawn"'`(这一句从前就是这么写的)一条都匹配
+    不到 —— 而 grep 找不到时退出码 1、屏幕空白,和"这个世界确实没生过东西"长得
+    一模一样。下面那行断言真的照它敲一遍。
 
     所以四样一律按语义记录导出,不看后端。
     """
@@ -355,6 +360,10 @@ def test_事件在包里是一行一条(tmp_path):
     )
     # 每条事件自己一行 —— 这才是 grep 找得到的前提
     assert all(l.count('"kind": "event"') == 1 for l in events)
+    # **照上面那句示范真敲一遍。** 冒号后那个空格是承重的,而写错了不报错:
+    # grep 找不到时退出码 1、屏幕空白,和"这个世界确实没生过东西"一模一样。
+    assert [l for l in lines if '"type": "agent_join"' in l], "示范里的 grep 串对不上真文件"
+    assert not [l for l in lines if '"type":"agent_join"' in l], "少空格的那种写法不该匹配到"
 
 
 def test_接不接_MySQL_导出来长得一样(tmp_path):

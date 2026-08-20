@@ -268,7 +268,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="体检:Redis 会不会把世界忘掉、密钥在不在、LLM 通不通、"
                     "时钟快慢、定时轮次这条链通没通、"
                     "要花时间的长过程有几件真做完了(按事件日志数,不是按本次开机)。"
-                    " 退出码是**总账**:这一趟里需要处理的项数之和 —— "
+                    " 退出码是「总账」:这一趟里需要处理的项数之和 —— "
                     "长过程一件没丢的世界照样可能退 1(比如这台 Redis 没开 AOF)。"
                     "别拿它的退出码当单项判据,读屏幕上那一行。",
     )
@@ -363,7 +363,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     contact_cmd.add_argument(
         "--inbox", action="store_true",
-        help="改看收件箱:谁**当面**叫住过这个玩家(agent_hail),要 --player",
+        help="改看收件箱:谁「当面」叫住过这个玩家(agent_hail),要 --player",
     )
     contact_cmd.add_argument("--json", action="store_true", dest="as_json", help="输出 JSON")
 
@@ -596,7 +596,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     set_image = location_commands.add_parser(
         "set-image",
-        help="给一个**已经跑着的世界**里的地点换图(一次一个地点;这是覆盖)",
+        help="给一个「已经跑着的世界」里的地点换图(一次一个地点;这是覆盖)",
     )
     _add_world_args(set_image)
     set_image.add_argument("--location", required=True, help="改哪儿(地点 id)")
@@ -617,7 +617,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
     set_image.add_argument(
         "--clear", action="store_true",
-        help="把这个地点的**两格图都抹掉**(不动名字、描述、几何 —— 那些归作者层)",
+        help="把这个地点的「两格图都抹掉」(不动名字、描述、几何 —— 那些归作者层)",
     )
     set_image.add_argument(
         "--dry-run", action="store_true", help="只报要改成什么,不动库"
@@ -643,7 +643,7 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_seed.add_argument("path", help="世界文件")
     validate_seed.add_argument(
         "--edit", action="store_true",
-        help="这份文件要装进一个**已有**的世界(= 一次编辑):不要求它把名册和地图"
+        help="这份文件要装进一个「已有」的世界(= 一次编辑):不要求它把名册和地图"
              "再抄一遍,引用完整性也不查(它们可以来自目标世界)",
     )
     validate_seed.add_argument("--json", action="store_true", help="机器可读输出")
@@ -710,7 +710,7 @@ def _build_parser() -> argparse.ArgumentParser:
     world_check.add_argument("package", help="要查的 .cyberworld 文件")
     world_check.add_argument(
         "--edit", action="store_true",
-        help="这份文件要装进一个**已有**的世界(= 一次编辑):不要求它把名册和地图"
+        help="这份文件要装进一个「已有」的世界(= 一次编辑):不要求它把名册和地图"
              "再抄一遍,引用完整性也不查(它们可以来自目标世界)",
     )
     world_check.add_argument(
@@ -3383,7 +3383,7 @@ def run_contact(args: argparse.Namespace) -> int:
     inbox_face = bool(getattr(args, "inbox", False))
     if inbox_face and not args.player:
         world.close()
-        print("[contact] --inbox 要 --player:收件箱是**某一个人**的",
+        print("[contact] --inbox 要 --player:收件箱是「某一个人」的",
               file=sys.stderr)
         return 2
     # 游标那三格(cursor / next_seq / scanned)只有分页的两张脸有;`--why` 是
@@ -3942,7 +3942,7 @@ def run_presence(args: argparse.Namespace) -> int:
             "player_move,否则一开就是 give / 一起做事全线拒绝。"
         )
         print(f"\n⚠ {report['unplaced']} 个玩家在世界里没有位置。{tail}")
-        print("  这里面有一部分只是**很久没动静**(在场带 TTL):真的没接 player_move 的话,"
+        print("  这里面有一部分只是「很久没动静」(在场带 TTL):真的没接 player_move 的话,"
               "刚聊过的人也会没有位置。")
         return 1
     if report["players"]:
@@ -4547,7 +4547,7 @@ def run_config(args: argparse.Namespace) -> int:
             path = machine_config.set_value(args.key, value)
             print(f"{onboarding.green(onboarding.OK)} {args.key} = {shown}")
             print(onboarding.dim(f"  写进了 {path}(0600) —— 这台机器上所有世界共用"))
-            print(onboarding.dim("  它**不进世界文件**:打包发出去的世界不该带着你的钥匙"))
+            print(onboarding.dim("  它「不进世界文件」:打包发出去的世界不该带着你的钥匙"))
             env = machine_config.env_value(args.key)
             if env is not None:
                 # 写了但不生效是最难查的一种,当场说破。
@@ -5140,7 +5140,7 @@ def run_player(args: argparse.Namespace) -> int:
             print("[player] 没有没做完的抹除 —— 什么都没做"
                   "(--resume 只续,不新开)。")
         else:
-            print("[player] 这一片写完了,**审计事件还没写** —— "
+            print("[player] 这一片写完了,「审计事件还没写」 —— "
                   "抹除要走到日志尽头才算数。")
         return 0
     try:
@@ -5765,7 +5765,7 @@ def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
         return 0
     row = meta_rows(redis, world_id).get("autonomy_stats")
     if not isinstance(row, dict):
-        print(f"  {onboarding.yellow(onboarding.WARN)} 定时轮次开着,但**一轮都没跑过** —— "
+        print(f"  {onboarding.yellow(onboarding.WARN)} 定时轮次开着,但「一轮都没跑过」 —— "
               f"她不会自己做任何事")
         print(f"      {onboarding.dim('快进(simulate)不跑它;要它跑得用 anima-world run 或 start')}")
         return 1
@@ -5955,7 +5955,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"  {onboarding.green(onboarding.OK)} llm.api_key 来自{where}")
         if where == "世界文件":
             print(f"  {onboarding.yellow(onboarding.WARN)} llm.api_key 还在"
-                  f"**世界**里 —— 它属于这台机器,不属于这个世界")
+                  f"「世界」里 —— 它属于这台机器,不属于这个世界")
             print(f"      {onboarding.dim('搬出来:anima-world config set llm.api_key sk-…')}")
 
     # 背景槽:意图分类与自主决策是**便宜活**,空着的背景槽会退回主模型。

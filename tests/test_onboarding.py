@@ -245,3 +245,43 @@ def test_config_leaf_world_id_wins_over_the_group_copy(world, capsys):
     assert main(["config", "--world-id", "ghost-world", "get",
                  "scheduler.tick_rate", "--world-id", "world"]) == 0
     assert capsys.readouterr().out.strip() == "0.75"  # 读到了真实世界
+
+
+# ── 屏幕上的字是给人读的,不是 markdown ──────────────────────────────────────
+
+
+def test_屏幕上不许出现裸markdown星号():
+    """`**总账**` 在终端上就是四个星号。
+
+    这条纪律本来只写在"忙着那句话"那一处(反引号是 markdown,玩家屏幕上就是两个
+    撇号),而 `doctor --help` 自己的说明里躺着 `退出码是**总账**` —— **一条只在
+    一个地方被执行的纪律,等于没有这条纪律**。所以这里按 AST 把 `print()` 的实参
+    与 `help=` / `description=` / `epilog=` 整个扫一遍,加新话时它会当场拦下来。
+
+    强调改用「」(和 `Scheduler._named` 同一个记号:它在终端、在提示词、在玩家
+    屏幕上都长得一样)。
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "anima_world" / "__main__.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    bad: list[tuple[int, str]] = []
+
+    def scan(node):
+        for n in ast.walk(node):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and "**" in n.value:
+                bad.append((n.lineno, n.value[:60]))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name == "print":
+            for arg in node.args:
+                scan(arg)
+        for kw in node.keywords:
+            if kw.arg in {"help", "description", "epilog"}:
+                scan(kw.value)
+
+    assert not bad, f"这些字会原样印到终端上:{bad}"

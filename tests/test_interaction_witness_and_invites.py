@@ -855,6 +855,10 @@ def test_世界不知道他在哪时_句子里不许漏出裸pid(world):
     assert detail["gate"] == "player_where_unknown", detail
     assert "ghost" not in refusal, refusal
     assert "这位玩家" in refusal, refusal
+    # **框的只有数据里来的那一截**(`Scheduler._named` 里玩家那个「你」同一条)。
+    # 「这位玩家」是引擎写的一个称呼,套上「」读起来像在念一个人的名字 ——
+    # 而这一支恰好是最不该假装知道他叫什么的那次。
+    assert "「这位玩家」" not in refusal, refusal
 
 
 def test_她在赶路时_那句话不许写成他站错了地方(world):
@@ -928,6 +932,47 @@ def test_闸和面对面必须逐位同构(world):
     assert runtime._colocation_gate("柔", "ghost") == "player_where_unknown"
     assert runtime.face_to_face("柔", "ghost") is False
     assert runtime._colocation_gate("遥", "ghost") == "inviter_where_unknown"
+
+
+def test_他按好时她在赶路_答话那扇门也得点她的名(world):
+    """**同一族闸有两扇门**:开口那扇(`_invite`,她问得出问不出)和答话那扇
+    (`answer_invitation`,他按下去那一刻重查)。3.6.0 第五轮之前,答话那扇门上
+    整族四个闸**只有 `player_where_unknown` 一条测试** —— 而这一族存在的全部理由
+    就是"说得出是谁不在场",漏掉的三种里两种恰好都不怪他。
+
+    走到这儿的路在线上很常见:她按作息表溜达开,他手机上那份邀请还亮着。
+    """
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world._tool_runtime.move_agent("夏", "yard")   # 起程,**不 tick 到落脚**
+    assert "夏" in world.scheduler._transit
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["gate"] == "inviter_in_transit", out
+    assert out["absent"] == "agent", out
+    assert "在路上" in out["refusal"] and "不是你不在" in out["refusal"]
+    # 他按了「好」而这件事没做成 —— 那是**错过**,不是他拒绝:关系与记忆一个字不写。
+    assert out["outcome"] == "expired"
+    row = world.invitations("p1")[0]
+    assert row["pending"] is False and row["outcome"] == "expired"
+
+
+def test_他按好时世界不知道她在哪_不许说成是他没到场(world):
+    """整族的第四条。`_invite_absence` 里这一支写的是 `unknown` 而不是 `player`,
+    理由和玩家那一头逐字同一条:**说不上来不等于都怪你**。落到下面几支的话,
+    句子会变成"她已经离开咖啡店了 —— 她这会儿在别处",一句把"查不到"说成
+    "她走了"的话。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world.scheduler.agents["夏"].agent.blackboard.write("loc", "")
+    world.scheduler.agents["夏"].agent.location = ""
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["gate"] == "inviter_where_unknown", out
+    assert out["absent"] == "unknown", out
+    name = world._tool_runtime.agent_names()["夏"]
+    assert f"不知道{name}在哪" in out["refusal"] and "不是你没到场" in out["refusal"]
+    assert "离开" not in out["refusal"], out["refusal"]
 
 
 # ── 五、契约那一格答得出来 ────────────────────────────────────────────────
