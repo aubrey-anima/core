@@ -1119,25 +1119,47 @@ class RedisMemoryStore:
 def _warn_skipped_location_media(
     loc_id: str, entry: dict[str, Any], stored: dict[str, Any]
 ) -> None:
-    """合并时跳过的这个地点,文件里给了图而库里没有 —— **点名一次**。
+    """合并时跳过的这个地点,文件里那几格图没生效 —— **点名一次**。
 
-    只在"文件有、库里空"这一种情况下说话:两边都写了(作者改图)按"只增不改"的
-    语义本来就该以世界为准,那不是错;两边都没有当然没什么好说。
+    **两种没生效,都要说**:
+
+    - **补图**(文件有、库里空):作者给一个还没有图的地点配了图。
+    - **换图**(两边都有、值不同):作者把图换了 —— 图床是内容寻址的,换一张图
+      就是换一条 URL,所以这是最常见的那一种编辑。
+
+    ⚠️ 上一版这里只说第一种,理由写的是"两边都写了按「只增不改」本来就该以世界
+    为准,那不是错"。**那句话在有写门之前也许还站得住,现在不成立**:作者刚刚
+    编辑了那份文件、把 URL 换成了新的一条,而世界一声不吭地留着旧图、退出码 0。
+    「按语义本该如此」和「他要的事没发生」是两回事,**只有前者被说出来的时候,
+    后者就是一次静默失败**。
+
+    两边都没有当然没什么好说;两边一模一样也没有 —— **一句总在响的警告等于没有警告**。
     """
     from anima_world.media import LOCATION_IMAGE_KEYS
 
-    missing = [
-        key for key in LOCATION_IMAGE_KEYS
-        if entry.get(key) and not stored.get(key)
+    def _text(row: dict[str, Any], key: str) -> str:
+        value = row.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    added = [k for k in LOCATION_IMAGE_KEYS if _text(entry, k) and not _text(stored, k)]
+    changed = [
+        k for k in LOCATION_IMAGE_KEYS
+        if _text(entry, k) and _text(stored, k) and _text(entry, k) != _text(stored, k)
     ]
-    if not missing:
+    if not added and not changed:
         return
+    what = "、".join(
+        part for part in (
+            f"要补的 {' / '.join(added)}" if added else "",
+            f"要换的 {' / '.join(changed)}" if changed else "",
+        ) if part
+    )
     logger.warning(
-        "地点 %r 已经在这个世界里了,所以文件里的 %s 这次**没有装进去** —— "
+        "地点 %r 已经在这个世界里了 —— 文件里%s,这次**没有生效**。"
         "作者层是「只填缺,不覆盖」,而覆盖粒度是整行(整行合并会把这个世界跑出来的"
-        "名字和描述倒带回创世那天)。补图走这扇门:"
+        "名字和描述倒带回创世那天)。补图/换图走这扇门:"
         "anima-world location set-image --location %s --%s '<URI>'",
-        loc_id, " / ".join(missing), loc_id, missing[0].replace("_", "-"),
+        loc_id, what, loc_id, (added + changed)[0].replace("_", "-"),
     )
 
 

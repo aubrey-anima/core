@@ -1474,6 +1474,11 @@ anima-world config set economy.player_allowance 60 --world-id w
 这一轮把它改成 3.x 的形状了(两个 job 各起一个真 Redis service)——
 **但那条管线只有真跑一次 Actions 才算验过,所以这里不声称它一定会绿。**
 
+⚠️ **2026-08-19 当天又定了一版 3.4.0(见文末 §3.23 的「定版 3.4.0」)** —— 本节讲的
+是 3.3.0 那一次,**别读到哪一节看运气**:3.4.0 **同样没有打 tag、没有上索引**,
+它是走镜像下来的。下面这句"3.x 能装的只有 3.3.0"因此只描述 PyPI 那条路;
+你们 venv 里那一份是哪个版本,永远以 `anima-world contract --json` 的 `engine_version` 为准。
+
 **所以 3.3.0 上了索引之后,`infra/dialect.py` 那张版本表要认得的是它,而"3.x 能装的
 只有 3.3.0"。**
 CLI 参数与线格式**一个字没改**:`--redis` + `--world-id`、`--world-file`、
@@ -1957,8 +1962,20 @@ anima-world location set-image --world-id w --location wharf --clear
 倒带回创世那一刻;这一条是一个人指名道姓说"这个地方的图换成这张"。而**换图正是日常
 用法** —— 图床是内容寻址的,换一张图就是换一条 URL。
 
-② **两格分开合并。** 只给 `--map-image` 不许把作者写了几周的 `scene_image` 顺手抹掉;
-要抹掉**某一格**给它空串,要**两格都抹**用 `--clear`。这两件事是两个开关,不是一个。
+② **两格分开合并,而且"别动"和"抹掉"是两句不同的话。** 只给 `--map-image` 不许把
+作者写了几周的 `scene_image` 顺手抹掉;要**两格都抹**用 `--clear`。单格是三个答案:
+
+| 你给的 | 意思 |
+|---|---|
+| **不给这个 flag**(API:不给这个键) | 别动这一格 |
+| **明写空串 `--map-image ''`**(API:`""`) | 抹掉这一格 |
+| **纯空白 `--map-image '   '`、空文件、API 的 `None`** | **退 2 / `ValueError`** |
+
+第三行是你们最该知道的一行:**运维台/流水线模板里一个没展开的变量,走 argv 进来
+长得就是 `'   '`**。把它读成"抹掉"就是一次**静默删图**,而回执上写着"改了"、
+退出码 0。所以四扇门(`--map-image` / `--scene-image` / 两个 `-file`)给**同一个
+答案**,判断在 `World.set_location_image` 上而不在 CLI 上 —— 放 CLI 上的话,
+argv 那侧和 `-file` 那侧迟早分叉,而分叉的那一半不报错。
 
 ③ ⚠️ **`--map-image` / `--scene-image` 到约 128 KiB 就塞不进去了,而炸的不是引擎。**
 Linux 的 `MAX_ARG_STRLEN` 把单个 argv 元素封在 128 KiB,再往上 `execve` 直接 `E2BIG`,

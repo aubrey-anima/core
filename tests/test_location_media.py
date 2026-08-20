@@ -795,3 +795,99 @@ def test_写命令不许创建世界(tmp_path):
     assert missing.returncode == 2
     assert "no-such-world" in missing.stderr
     assert "usage:" not in missing.stderr
+
+
+# ------------------------------------- 「别动」与「抹掉」是两句话(验收挑出来的)
+
+
+def test_别动这一格和抹掉这一格_四扇门同一个答案(tmp_path):
+    """**代价不对称,所以第三类是拒绝而不是"抹掉"。**
+
+    运维台/流水线的模板里一个没展开的变量,走 argv 进来长得就是 `'   '`;
+    `None` 在 Python 宿主那儿最常见的来源是 `row.get("img")` 没取到值。把它们
+    读成"抹掉"就是一次**静默删图**,而回执上写着"改了"、退出码 0 —— 而拒一次的
+    代价只是调用方补一个字。"别动这一格"已经有写法了(**不给这个键**),
+    所以 `None` 不必再承担第二种含义。
+
+    头一版这两侧是**不一致**的:argv 那扇门把纯空白掐成空、当成抹掉(rc 0),
+    而同样的内容走 `--*-file` 却是 rc 2。同一个输入两个答案,而错的那一半不报错。
+    """
+    world = _running_world(tmp_path, map_image=_MAP, scene_image=_SCENE)
+    try:
+        # ① 不给这个键 = 别动这一格(另一格照改)
+        world.set_location_image("wharf", {"scene_image": "https://img.example.com/新.jpg"})
+        assert _rows(world)["wharf"]["map_image"] == _MAP
+
+        # ② 明写空串 = 抹掉这一格
+        world.set_location_image("wharf", {"map_image": ""})
+        assert _rows(world)["wharf"]["map_image"] is None
+
+        # ③ None 与纯空白都是拒绝,而且**一个字都不写**
+        for bad in (None, "   ", "\t\n"):
+            with pytest.raises(ValueError):
+                world.set_location_image("wharf", {"scene_image": bad})
+            assert _rows(world)["wharf"]["scene_image"] == "https://img.example.com/新.jpg"
+    finally:
+        world.close()
+
+
+def test_纯空白走argv和走文件_退出码一样(tmp_path):
+    """两扇门给同一个答案 —— 判断在 `World` 上,不在 CLI 上。"""
+    _running_world(tmp_path, map_image=_MAP).close()
+
+    blank_file = tmp_path / "blank.uri"
+    blank_file.write_text("   \n", encoding="utf-8")
+
+    argv = run_cli("location", "set-image", "--world-id", "w", "--location", "wharf",
+                   "--map-image", "   ", "--json")
+    from_file = run_cli("location", "set-image", "--world-id", "w", "--location", "wharf",
+                        "--map-image-file", str(blank_file), "--json")
+    assert argv.returncode == from_file.returncode == 2
+    for done in (argv, from_file):
+        assert "usage:" not in done.stderr and done.stdout == ""
+
+    # **线上那张图还在** —— 这条测试要防的就是它被安静地删掉。
+    still = {p["id"]: p for p in json.loads(
+        run_cli("map", "--world-id", "w", "--json").stdout)["places"]}["wharf"]
+    assert still["map_image"] == _MAP
+
+    # 正对照:明写空串**才是**抹掉,而且照旧 rc 0。
+    wipe = run_cli("location", "set-image", "--world-id", "w", "--location", "wharf",
+                   "--map-image", "", "--json")
+    assert wipe.returncode == 0, wipe.stderr
+    assert json.loads(wipe.stdout)["after"]["map_image"] is None
+
+
+def test_换图再装回去_也要点名(tmp_path, caplog):
+    """**"按语义本该如此"和"他要的事没发生"是两回事。**
+
+    作者把世界文件里的那条 URL 换成新的一条再装回去 —— 两边都有图、值不同,
+    上一版这条路**一个字都不说**、退出码 0。而换图恰恰是最常见的那种编辑:
+    图床是内容寻址的,换一张图就是换一条 URL。
+    """
+    first = _write(tmp_path, _seed(map_image=_MAP), "v1.cyberworld")
+    open_world_at(tmp_path / "w.db", world_file=first, force_mock_llm=True).close()
+
+    swapped = _write(tmp_path, _seed(map_image="https://img.example.com/t/新.png"),
+                     "v2.cyberworld")
+    with caplog.at_level("WARNING"):
+        world = open_world_at(tmp_path / "w.db", world_file=swapped, force_mock_llm=True)
+    try:
+        assert _rows(world)["wharf"]["map_image"] == _MAP, "整行合并会把世界倒带"
+    finally:
+        world.close()
+
+    said = [r.getMessage() for r in caplog.records if "wharf" in r.getMessage()]
+    assert said, "换图没生效,却一声不吭"
+    assert any("map_image" in m and "location set-image" in m for m in said)
+
+
+def test_两边一模一样时闭嘴(tmp_path, caplog):
+    """一句总在响的警告等于没有警告 —— 装一份和世界逐字相同的文件时不该说话。"""
+    path = _write(tmp_path, _seed(map_image=_MAP))
+    open_world_at(tmp_path / "w.db", world_file=path, force_mock_llm=True).close()
+
+    with caplog.at_level("WARNING"):
+        world = open_world_at(tmp_path / "w.db", world_file=path, force_mock_llm=True)
+    world.close()
+    assert not [r for r in caplog.records if "map_image" in r.getMessage()]

@@ -2189,9 +2189,23 @@ class World:
         "这个地方的图换成这张"。
 
         **二、两格分开合并,给谁改谁。** 只给 `map_image` 不许把作者写了几周的
-        `scene_image` 顺手抹掉。要抹掉**某一格**就把它给成**空串**(和
-        `set_card` 的 `--portrait ''` 同一条约定);`clear=True` 是"两格都抹掉",
-        单独一格,不许和值一起给。
+        `scene_image` 顺手抹掉。`clear=True` 是"两格都抹掉",单独一格,不许和值
+        一起给。**"别动这一格"和"抹掉这一格"是两句不同的话,所以有三个答案:**
+
+        | 你给的 | 意思 |
+        |---|---|
+        | **不给这个键** | 别动这一格 |
+        | **空串 `""`** | 抹掉这一格(和 `set_card` 的 `--portrait ''` 同一条约定) |
+        | **`None` / 全是空白的字符串** | **拒绝**(`ValueError`) |
+
+        第三行是这一轮补的,理由是**代价不对称**:`None` 在宿主那儿最常见的来源是
+        `row.get("img")` 没取到值,一段全空白的字符串最常见的来源是运维台模板里
+        一个没展开的变量 —— 把它们读成"抹掉"就是一次**静默删图**,而回执上写着
+        "改了"。反过来,拒一次的代价只是调用方补一个字。**"别动"已经有写法了
+        (不给这个键),所以 `None` 不必再承担第二种含义。**
+        ⚠️ **这条判断在 API 上,不在 CLI 上**:argv 那扇门和 `--*-file` 那扇门因此
+        对同一个输入给同一个答案 —— 判断放在 CLI 的话,两扇门迟早分叉,而
+        `--map-image '   '` 安静地删掉线上那张图正是它分叉的样子。
 
         **三、这扇门只写这两格,别的键当场拒绝。** 和角色卡"不认识的键原样带过去"
         **不一样**,而不一样是对的:那一格是作者写给玩家看的一张卡,创作台预告过
@@ -2241,11 +2255,11 @@ class World:
         if store is None:
             raise RuntimeError("这个世界没有地图表 —— 没有地点可以配图")
 
-        def _clean(value: Any) -> Any:
-            """空串 = 抹掉这一格(和 `--portrait ''` 同一条约定)。
+        def _stored(value: Any) -> Any:
+            """**库里**那一格读成什么。只归一化,不判对错。
 
-            非字符串**原样放过去** —— 由那道闸去报"必须是一个 URI 字符串",
-            在这里先转成 `str()` 的话,一个 `None` 会变成字符串 `'None'`。
+            读的这一侧刻意比写的那一侧宽:历史上写坏的值该由写它的那条路负责,
+            在这里翻脸只会让一次对**另一格**的合法编辑也做不成。
             """
             if isinstance(value, str):
                 return value.strip() or None
@@ -2263,21 +2277,38 @@ class World:
                     f"这个世界里没有叫 {location_id!r} 的地点。有的是:{known}{more}"
                 )
 
-            before = {key: _clean(row.get(key)) for key in LOCATION_IMAGE_KEYS}
+            before = {key: _stored(row.get(key)) for key in LOCATION_IMAGE_KEYS}
+            problems: list[str] = []
             if clear:
                 after: dict[str, Any] = {key: None for key in LOCATION_IMAGE_KEYS}
             else:
                 after = dict(before)
                 for key, value in (images or {}).items():
-                    after[key] = _clean(value)
-                problems: list[str] = []
+                    # **三个输入三个答案**,理由见上面那张表:代价不对称,
+                    # 猜错的那一半是安静地删掉线上那张图。
+                    if value is None:
+                        problems.append(
+                            f"地点 {location_id!r}: {key} 给的是 None —— "
+                            "「别动这一格」请**不要给这个键**,「抹掉这一格」请给空串。"
+                            "None 在宿主那儿最常见的来源是「我这儿没取到值」,"
+                            "读成「抹掉」就是一次静默删图"
+                        )
+                        continue
+                    if isinstance(value, str) and value != "" and not value.strip():
+                        problems.append(
+                            f"地点 {location_id!r}: {key} 全是空白 —— 掐掉两头之后"
+                            "什么都不剩。要抹掉这一格请明写空串:一个模板里没展开的"
+                            "变量长得就是这样,而把它读成「抹掉」会安静地删掉线上那张图"
+                        )
+                        continue
+                    after[key] = (value.strip() or None) if isinstance(value, str) else value
                 for key in LOCATION_IMAGE_KEYS:
                     problems.extend(media_uri_errors(
                         after[key], label=f"地点 {location_id!r}", field=key,
                         max_bytes=LOCATION_IMAGE_MAX_BYTES,
                     ))
-                if problems:
-                    raise ValueError("\n".join(problems))
+            if problems:
+                raise ValueError("\n".join(problems))
 
             receipt: dict[str, Any] = {
                 "location_id": location_id,
