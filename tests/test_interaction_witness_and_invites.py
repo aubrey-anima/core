@@ -285,10 +285,39 @@ def test_邀请从那扇门里看得见_而且带着还等不等得到(world):
     assert rows[0]["payload"]["text"]
     assert world.invitations("p9") == [], "别人的邀请不该出现在他那扇门里"
     page = world.invitations_page("p1")
-    assert set(page) == {"events", "next_seq", "cursor", "scanned", "total"}
+    assert set(page) == {
+        "events", "next_seq", "cursor", "scanned", "total", "now_tick"}
     # **拷一份,不改那条事件**:`pending` 不许就地写进日志里那一条。
     logged = _events(world, "agent_invites")[0]
-    assert "pending" not in logged
+    assert "pending" not in logged and "expires_in" not in logged
+
+
+def test_还剩多久_一次调用就答得出(world):
+    """P2-9。`expires_tick` 是绝对刻度,"还剩多久"要减去**现在** —— 而"现在"
+    从前得再问一次 `state()`。两次调用之间世界还在走,于是前端画出来的倒计时是
+    拿另一刻的现在减这一刻的到期,偏偏在最后那几秒显示成"还有时间"。
+
+    **过期按世界时钟判、前端不许自己算**,那就得由这一格把"现在"一起给出去。
+    """
+    world.player_move("p1", "cafe")
+    _invite(world)
+    page = world.invitations_page("p1")
+    assert page["now_tick"] == int(world.scheduler.clock)
+    row = page["events"][0]
+    assert row["expires_in"] == together.DEFAULT_INVITE_TTL_TICKS
+    assert row["expires_in"] == (
+        row["payload"]["expires_tick"] - page["now_tick"]
+    )
+    world.tick(3)
+    assert world.invitations_page("p1")["events"][0]["expires_in"] == (
+        together.DEFAULT_INVITE_TTL_TICKS - 3
+    )
+    # 答复过 / 过期了的那些没有"还剩多久"可言 —— 给一个负数或者一个陈旧的
+    # 正数,都会让宿主画出一个点不动的倒计时。
+    seq = world.invitations("p1")[0]["seq"]
+    world.answer_invitation("p1", seq, accept=False)
+    done = world.invitations_page("p1")["events"][0]
+    assert done["pending"] is False and done["expires_in"] == 0
 
 
 def test_没人答_到点就过期_而且一个字都不写在他头上(world):
@@ -459,6 +488,210 @@ def test_重放折得出同一份还等着的清单(world):
     assert len(pending) == 1
     world.scheduler.reset_projection(world.scheduler.event_log.replay())
     assert dict(world.scheduler._memory_projection.invitations) == pending
+
+
+# ── 四之二、谁开的口,决定了要不要问 ──────────────────────────────────────
+#
+# 邀请门补的是"她点他的名"那一条。而玩家在对话里说「陪我听完这一面」走的是同一段
+# 代码 —— 于是 3.6.0 上线的那一刻,世界开始对着刚开口的那个人落一条邀请,问他
+# 要不要做他刚说的事。裁决里那句「玩家自己按按钮那条路一个字不变」,只有在
+# **聊天这条路也不变**时才是真的:按钮和聊天是同一个人的同一个意思。
+
+
+def _director(world):
+    from anima_world.intent import Director
+
+    return Director(world._tool_runtime)
+
+
+def _asks(world, verb="同坐", **params):
+    """玩家在对话里约她 —— 分类器判出来的就是这份 `together`。"""
+    return _director(world).direct(
+        agent_id="夏",
+        params={"target": "夏", "action": "together",
+                "object": "bench:oak", "verb": verb, **params},
+        player_id="p1",
+    )
+
+
+def test_玩家在对话里约人_当场就该发生(world):
+    """P0-1。**他自己开的口就是他的同意。**
+
+    落一条 `agent_invites` 问他要不要做他刚说的那件事,不只是多此一举 ——
+    那封信今天没有任何一处看得见(引擎有意不给 CLI 出口,壳那扇门还没开),
+    于是他说的那句话在世界里**什么也没发生**,而回执写着"她在等你回话"。
+    """
+    world.player_move("p1", "cafe")
+    out = _asks(world)
+    assert out.ok is True, out.detail
+    assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 1
+    assert _events(world, "agent_invites") == [], "给他自己发了一封信"
+    consents = (out.detail or {}).get("consents") or []
+    assert [c["who"] for c in consents] == ["player:p1"]
+    assert consents[0]["accepted"] is True
+
+
+def test_她点他的名那条路一个字不变(world):
+    """同一个函数、同一个动词,**只有"谁开的口"不同**:她开的口就得等他答。
+
+    两条路必须在同一份测试里对着看 —— 分开写的话,修好一条的那天很容易把另一条
+    带回去(3.6.0 那次正是这么把玩家自己的口封掉的)。
+    """
+    world.player_move("p1", "cafe")
+    named = _invite(world)                       # 她点他的名(聊天里的 with=["我"])
+    assert named["ok"] is False
+    assert (named.get("detail") or named)["reason"] == together.INVITE_PENDING
+    assert len(_events(world, "agent_invites")) == 1
+    assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 0
+
+
+def test_他不在她跟前时_他自己开的口也不算数(world):
+    """`accepted_ids` 跳过的只有"问"这一步,**不跳过闸** —— 隔着半张地图
+    说一句"我们一起坐会儿",世界里那条长椅不该动。"""
+    world.player_move("p1", "yard")
+    out = _asks(world)
+    assert out.ok is False
+    assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 0
+
+
+def test_一次只算得进一个还没点头的人(world):
+    """P0-2。两个玩家被点名时,**先点头的那个必然被判成没做成**。
+
+    路是这样的:两份邀请都发出去 → p1 按「好」→ `answer_invitation` 拿着
+    `player_id=p1` 重跑一遍同意 → p2 在 `_invitee` 那道 `player_not_you` 上被判
+    过不了闸 → 整件事记成 `expired`。**他按了「好」,而世界一声不吭** —— 这是
+    这个仓库最忌的那类坏法,而且没有任何一处报错。
+
+    修法是拦在**开口之前**:拦在后面的话,两份挂到过期的邀请已经发出去了,
+    她今天的额度也已经扣掉了。
+    """
+    world.player_move("p1", "cafe")
+    world.player_move("p2", "cafe")
+    out = world.act(
+        "夏", "interact",
+        {"target": "bench:oak", "verb": "同坐",
+         "with": ["player:p1", "player:p2"]},
+        surface="body",
+    )
+    assert out["ok"] is False
+    assert "一次只算得进一个" in str(out.get("error") or "")
+    assert _events(world, "agent_invites") == [], "两份必然挂到过期的邀请发出去了"
+    assert world.scheduler._invited_today == {}, "白扣掉了她今天的额度"
+    assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 0
+
+
+def test_他自己开的口_再带上一个角色_照旧要问那个角色(world):
+    """他那一票记上了,不等于别人的也记上了。"""
+    world.player_move("p1", "cafe")
+    out = _asks(world, **{"with": ["遥"]})
+    assert out.ok is True, out.detail
+    who = {c["who"]: c for c in (out.detail or {}).get("consents") or []}
+    assert set(who) == {"player:p1", "遥"}
+    assert who["player:p1"]["source"] == "gate"
+    assert who["遥"]["source"] != "gate", "沈遥没被问过就被算成答应了"
+
+
+# ── 四之三、重查的是闸,不是人心 ──────────────────────────────────────────
+
+
+class _Judge:
+    """只答"愿不愿意"的关系判定器。`answers` 用完之后一直用最后一个。"""
+
+    def __init__(self, *answers: bool) -> None:
+        self.answers = list(answers)
+        self.calls: list[str] = []
+
+    def judge_invite(self, *, a, inviter, invitation, relation, memories,
+                     location, recent_talk):
+        from types import SimpleNamespace
+
+        self.calls.append(str(a.get("name") or ""))
+        accept = self.answers[min(len(self.calls) - 1, len(self.answers) - 1)]
+        return SimpleNamespace(accept=accept, reason="嗯" if accept else "今天不想")
+
+
+def test_他按一下好_不该去等一次模型(world):
+    """P1-5。答复那一刻从前把整段同意重跑一遍 —— 包括**再问一次同行的角色**。
+
+    她开口那一刻已经问过了,答案存在 `agent_invites` 的 `consented` 里。再问一遍
+    不是省一次网络的问题:他按「好」得等一次 LLM 往返,而那一下本该是即时的。
+    """
+    judge = _Judge(True)
+    world.scheduler.relationship_judge = judge
+    world.player_move("p1", "cafe")
+    out = world.act(
+        "夏", "interact",
+        {"target": "bench:oak", "verb": "同坐", "with": ["遥", "player:p1"]},
+        surface="body",
+    )
+    assert (out.get("detail") or {}).get("reason") == together.INVITE_PENDING, out
+    assert judge.calls == ["沈遥"], "她开口那一刻问了一次"
+    invited = _events(world, "agent_invites")[0]
+    assert invited["payload"]["consented"] == ["遥"], invited["payload"]
+
+    seq = world.invitations("p1")[0]["seq"]
+    answered = world.answer_invitation("p1", seq, accept=True)
+    assert answered["ok"] is True and answered["outcome"] == "accepted", answered
+    assert judge.calls == ["沈遥"], "他按一下「好」,又去问了一次模型"
+
+
+def test_她当时点了头_就是点过头了(world):
+    """同一个人同一件事,模型第二次的答案可以和第一次不同。
+
+    再问一遍的话:他按了「好」,却因为**别人**这次改了主意被记成 `expired` ——
+    而他这辈子也不会知道自己那一下点得对不对。**闸照查**(见上面"他点头那一刻
+    人已经走开"那条),重查的只是"问"这一步。
+    """
+    judge = _Judge(True, False)      # 第二次她改口
+    world.scheduler.relationship_judge = judge
+    world.player_move("p1", "cafe")
+    world.act("夏", "interact",
+              {"target": "bench:oak", "verb": "同坐", "with": ["遥", "player:p1"]},
+              surface="body")
+    seq = world.invitations("p1")[0]["seq"]
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["ok"] is True and out["outcome"] == "accepted", out
+    assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 1
+
+
+# ── 四之四、第四种结局:她自己把话收回去 ──────────────────────────────────
+
+
+def test_她走开时把还等着的邀请收回去(world):
+    """P2-6。`cancelled` 从前是 `INVITE_OUTCOMES` 里一个**发不出来的枚举** ——
+    投影的 docstring 说着"四种结局",而全仓库只有那一行声明提到它。
+
+    留着一份她已经兑现不了的邀请,等于摆一个必然失败的按钮:他点下去只会得到
+    一句"她不在你跟前"。而这**不是拒绝也不是错过**,所以一个字都不写在他头上。
+    """
+    world.player_move("p1", "cafe")
+    _invite(world)
+    before = _shifts(world, "夏")
+    out = world.act("夏", "walk_away", {"to_location": "后院"},
+                    player_id="p1", surface="chat")
+    assert out["ok"] is True, out
+    assert out["detail"]["withdrew_invites"], out["detail"]
+
+    settled = _events(world, "invitation_settled")
+    assert len(settled) == 1 and settled[0]["payload"]["outcome"] == "cancelled"
+    assert settled[0]["payload"]["note"] == "她起身走开了"
+    assert world.invitations("p1")[0]["pending"] is False
+    # 撤回不写在他头上 —— 他什么也没做错。
+    assert _shifts(world, "夏") == before
+    assert [e for e in _events(world, "state_change")
+            if (e["payload"] or {}).get("cause") == "invitation_declined"] == []
+
+
+def test_不认识的结局当场报错(world):
+    """一个拼错的结局会安安静静地落进日志、落进那扇门,而读的人对着一个它不认识
+    的词只能当成"别的" —— 那份邀请在清单上消失、在账上不存在,两边都不报错。"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    with pytest.raises(ValueError):
+        world.scheduler.settle_invitation(seq, "canceled")     # 少一个 l
+    assert world.invitations("p1")[0]["pending"] is True
+    assert _events(world, "invitation_settled") == []
 
 
 # ── 五、契约那一格答得出来 ────────────────────────────────────────────────

@@ -266,6 +266,52 @@ def test_我没见你动过手(world):
     assert world._activities_now().get("agent:遥") == "在陪一次夜播"
 
 
+def test_她读自己那一句_和别人读她那一句_是同一句话(world):
+    """**一处分支都不要有**,而这里曾经还剩最后一处:她自己那一行。
+
+    同屋的人走 `_activities_now()`(它认得 `:engaged` 那件占着人的长过程),
+    她自己那一行却单独走 `_ACTIVITY_LABELS`(排班那一层的动作名,`interact`
+    在那张表里是「在忙手上的事」,而 `:engaged` 它根本不知道)。于是同一份
+    提示词里两句话互相打脸:她读到「你在咖啡店,闲着」,下一行写着
+    「沈遥(在陪一次夜播)」—— 同一分钟、同一个房间。
+
+    「闲着」在中文里的意思是"可以打扰",所以这不是措辞问题:她会照着那句话
+    去起另一件事。
+    """
+    started = world.act("夏", "interact",
+                        {"target": "bench:oak", "verb": "夜播"}, surface="body")
+    assert started["ok"], started
+    world.player_move("p1", "cafe")
+
+    # 一、她自己读到的那一句(聊天的 presence 块)。
+    presence = world.world_context("夏", "p1")["presence"]
+    assert presence["activity"] == "在陪一次夜播", presence["activity"]
+    assert "闲着" not in _prompt_to(world)
+
+    # 二、别人读到的她 —— 逐字同一句。
+    others = world.world_context("遥", "p1")["presence"]["others"]
+    assert "苏晚夏(在陪一次夜播)" in others, others
+
+    # 三、自主上下文那一头同一条(她要不要再起一件事,读的就是这句话)。
+    assert _ctx(world).activity == "在陪一次夜播"
+
+    # 四、做完之后两边一起变回来 —— 只改一边就是把分叉挪了个地方。
+    world.tick(7)
+    assert world.world_context("夏", "p1")["presence"]["activity"] != "在陪一次夜播"
+    assert _ctx(world).activity != "在陪一次夜播"
+
+
+def test_在路上那一句留着_它答的是你在哪儿(world):
+    """收敛不是把话都抹平。「正在去后院的路上」比「正准备出门」多一格终点,
+    而路上的人本来就不在做别的事 —— 这一支不是分支,是多知道了一件事。"""
+    scheduler = world.scheduler
+    scheduler._transit["夏"] = {
+        "from": "cafe", "to": "yard", "arrive_at": scheduler.clock + 99,
+    }
+    presence = world.world_context("夏", "p1")["presence"]
+    assert presence["activity"] == "正在去后院的路上", presence["activity"]
+
+
 # ── 行为树撞上联合动词要说一句 ───────────────────────────────────────────
 
 

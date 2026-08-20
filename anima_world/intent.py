@@ -876,8 +876,15 @@ class Director:
         from anima_world.tools.base import ToolCallError
 
         try:
-            outcome = self._runtime.interact_with(
+            # **他自己开的口 = 他的同意。** 走私有的 `_interact_with` 只为了这一
+            # 件事:把他自己那一票先记上。不记的话,3.6.0 的邀请门会对着刚说出
+            # 「陪我听完这一面」的那个人落一条 `agent_invites`,问他要不要做他
+            # 刚说的事 —— 而那封信今天没有任何一处看得见,于是这句话在世界里
+            # 什么也没发生。**她点他的名那条路一个字不变**(`tools/body.py` 的
+            # `interact(with=["我"])`):那是她的意思,他仍然得自己答。
+            outcome = self._runtime._interact_with(
                 resolved, obj, verb or "look", participants=party, player_id=player_id,
+                accepted_ids=[f"player:{player_id}"],
             )
         except ToolCallError as exc:
             return DirectorOutcome(

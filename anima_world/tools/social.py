@@ -153,9 +153,16 @@ def walk_away(ctx: ToolContext, params: dict) -> ToolResult:
         # 不摇骰子:同一个世界里"走开"应当可复现。第一个不在这儿的地方就行。
         destination = options[0]
     moved = ctx.runtime.move_agent(ctx.agent_id, destination)
+    # **她走了,那句"要不要一起坐会儿"就跟着收回去。** 留着的话,他手机上
+    # 还亮着一份邀请,点下去只会得到一句"她不在你跟前" —— 别摆一个必然失败的
+    # 按钮。这是 `INVITE_OUTCOMES` 里 `cancelled` 的来源:她改了处境,不是他
+    # 拒绝了,也不是他没答上 —— 所以一个字都不写在他头上。
+    withdrawn = ctx.runtime.withdraw_invitations(
+        ctx.agent_id, note="她起身走开了")
     return ToolResult(
         end_conversation=True, stop_loop=True,
-        detail={"to": destination, **moved},
+        detail={"to": destination, **moved,
+                **({"withdrew_invites": withdrawn} if withdrawn else {})},
     )
 
 

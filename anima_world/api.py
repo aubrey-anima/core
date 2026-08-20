@@ -1180,9 +1180,15 @@ class _ToolRuntime:
 
         现在这一支落一条 `agent_invites`,然后**等**。三条:
 
-        - **`accepted_ids` 是唯一能替玩家点头的路**,而它只有 `answer_invitation`
-          传得进来(私有形参,公开的 `interact_with` 一个字没变)。伪造一次同意
-          因此不是"别这么做",是**没有这个写法**。
+        - **`accepted_ids` 是唯一能替玩家点头的路**,而它只有引擎内部两条路传得
+          进来(私有形参,公开的 `interact_with` 一个字没变):`answer_invitation`
+          (他按下的那一下)与 `Director._together`(**他自己开的口** —— 那句
+          「陪我听完这一面」就是他的同意,再给他发一封信问他要不要做他刚说的事,
+          是这一层能犯的最荒唐的错)。伪造一次同意因此不是"别这么做",是**没有
+          这个写法**。
+        - **一次只算得进一个要被问的玩家**(见 `_interact_with` 那道形状闸)。
+          两个人的头点在两次调用里,而一次 `answer_invitation` 只带得动一个 ——
+          于是先点头的那个必然被记成"没做成",他按了"好"而世界一声不吭。
         - **它跳过的只有"问"这一步,不跳过闸。** 他点头那一刻人可能已经走开了 ——
           `_invitee` 的 `player_not_here` 照查(这就是验收里"答复那一刻重查"的落点)。
         - 世界关着这扇门(`social.joint.npc_may_invite_player`)、或者她今天已经
@@ -1214,10 +1220,12 @@ class _ToolRuntime:
                     invitee, min_willingness=min_willingness).to_dict())
                 continue
             if who in pre_ok:
-                # 他**真的点过头了**(`answer_invitation` 那条路)。这一句在这条
-                # 路上是真的 —— 从前它写在所有路上,那才是假的。
+                # 他**真的点过头了**(他按下的那一下、他自己开的那句口、或者她
+                # 开口那一刻就已经答应过的人)。这一句在这几条路上是真的 ——
+                # 从前它写在所有路上,那才是假的。
                 accepted.append(together.Consent(
-                    who=who, accepted=True, source="gate", note="你自己点的头",
+                    who=who, accepted=True, source="gate",
+                    note="你自己点的头" if invitee.is_player else "她当时点的头",
                 ).to_dict())
                 continue
             if invitee.is_player:
@@ -1277,6 +1285,11 @@ class _ToolRuntime:
                     actor_id, target, verb, who, party,
                     verb_label=verb_label, target_name=target_name,
                     inviter=inviter,
+                    # **她开口那一刻,别人已经点过的头一起存进去。** 不存的话,
+                    # 他点头那一刻得把每个人重新问一遍 —— 而"再问一次"读的是
+                    # 模型,答案可以和上一次不同:于是他按了"好",却因为她这次
+                    # 改了主意而被记成"没做成"。见 `answer_invitation`。
+                    consented=[str(c.get("who") or "") for c in accepted],
                 )
                 (pending if asked.get("ok") else refused).append(asked["consent"])
         return (accepted, refused, pending)
@@ -1284,6 +1297,7 @@ class _ToolRuntime:
     def _invite(
         self, actor_id: str, target: str, verb: str, who: str,
         party: Sequence[str], *, verb_label: str, target_name: str, inviter: str,
+        consented: Sequence[str] = (),
     ) -> dict[str, Any]:
         """她对一个玩家开口。返回 `{"ok", "consent", ...}`。
 
@@ -1300,6 +1314,7 @@ class _ToolRuntime:
         asked = self._world.scheduler.invite_player(
             actor_id, pid, target=target, verb=verb, party=list(party), text=text,
             verb_label=verb_label, target_name=target_name, agent_name=inviter,
+            consented=[c for c in consented if c],
         )
         if not asked.get("ok"):
             # 门关着 / 今天问够了。**归硬闸那一堆** —— 那是世界的状态,
@@ -1317,6 +1332,19 @@ class _ToolRuntime:
         consent["invite_seq"] = asked["invite_seq"]
         consent["expires_tick"] = asked["expires_tick"]
         return {"ok": True, "consent": consent, **asked}
+
+    def withdraw_invitations(
+        self, agent_id: str, player_id: str = "", *, note: str = "",
+    ) -> list[int]:
+        """她走开时,把还等着回话的邀请一起收回去(委托
+        `Scheduler.cancel_invitations`,理由写在那儿)。
+
+        **不按玩家挑。** 她起身去了另一个地方,那份"要不要一起坐会儿"对**谁**
+        都已经办不成了 —— 只收回跟她正说着话的那个人的话,别人手机上还亮着一份
+        她此刻根本兑现不了的邀请。
+        """
+        return self._world.scheduler.cancel_invitations(
+            agent_id, player_id, note=note)
 
     def _display(self, who: str) -> str:
         if who.startswith("player:"):
@@ -1509,8 +1537,17 @@ class _ToolRuntime:
 
         `accepted_ids` 里的人**已经真的点过头了**。它私有,是因为它是这一层唯一
         能绕过"问一遍"的东西 —— 公开出去就等于给每个宿主一把替玩家点头的钥匙,
-        而这个模块的第一条红线正是"邀请必须能被拒绝"。今天只有
-        `World.answer_invitation()` 传得进来,而它拿到的是玩家自己按下的那一下。
+        而这个模块的第一条红线正是"邀请必须能被拒绝"。三条路传得进来,每一条都
+        握着一次**真的**点头:
+
+        - `World.answer_invitation()` —— 他按下的那一下。
+        - `Director._together` —— **他自己开的口**。玩家在对话里说「陪我听完
+          这一面」,那句话就是他的同意;再落一条 `agent_invites` 问他要不要做
+          他刚说的事,是把一次表态换成一封给他自己的信。裁决里"玩家自己按按钮
+          那条路一个字不变"这句话,只有在**聊天这条路也不变**时才是真的 ——
+          按钮和聊天是同一个人的同一个意思,走的却是两条代码。
+        - `_consent` 存进 `agent_invites` 的 `consented`(她开口那一刻已经答应
+          过的人),由 `answer_invitation` 原样带回来。
 
         **它跳过的只有"问",不跳过闸**:`_consent` 里 `pre_ok` 那一支排在
         `invitee.gate` 之后,所以"他这会儿还在不在她跟前"照查。
@@ -1539,6 +1576,23 @@ class _ToolRuntime:
                 # 玩家点一次"跟我一起",收到一句"她不能跟自己……",说的是别人。
                 raise tools_mod.ToolCallError(
                     f"{scheduler._named(actor_id)}不能跟自己一起做一件事")
+            # **一次只问得动一个玩家。** 两个人的头点在两次 `answer_invitation`
+            # 里,而一次调用只带得动一个 pid —— 先点头的那个走完整条路,却在
+            # `_invitee` 那道 `player_not_you` 上把另一个人判成"过不了闸",于是
+            # 整件事记成 `expired`:**他按了「好」,而世界一声不吭**。这是这个
+            # 仓库最忌的那类坏法(别摆一个必然失败的按钮),所以拦在开口之前 ——
+            # 拦在后面的话,两份挂到过期的邀请已经发出去、额度也已经扣掉了。
+            asked_players = [
+                p for p in party
+                if p.startswith(scheduler.PLAYER_PREFIX)
+                and p not in {str(a) for a in accepted_ids if str(a)}
+            ]
+            if len(asked_players) > 1:
+                raise tools_mod.ToolCallError(
+                    "一起做一件事,一次只算得进一个还没点头的人:"
+                    f"{'、'.join(self._named(p) for p in asked_players)}"
+                    "都在名单里,而点头这件事替不了别人 —— 分两次约"
+                )
             accepted, refused, pending = self._consent(
                 actor_id, target, verb, party, player_id=player_id,
                 accepted_ids=accepted_ids,
@@ -3911,8 +3965,16 @@ class World:
         agent = brain.agent
         here = str(agent.blackboard.read("loc") or agent.location or "")
         activity = self._view._agent_activity(agent_id)
-        label = _ACTIVITY_LABELS.get(activity.get("kind"), "闲着")
         doing = self._activities_now()
+        # **她读自己那一句和读别人那一句,是同一句措辞。** 从前这一行走的是
+        # `_ACTIVITY_LABELS`(排班那一层的动作名),而同屋的人走 `_activities_now()`
+        # (它认得 `:engaged` 那件占着人的长过程)—— 于是同一份提示词里两句话
+        # 互相打脸:她读到「你在回声唱片店,闲着」,同一个房间里的人读到
+        # 「江晚(在一起听完一面)」,说的是同一个人的同一分钟。
+        label = doing.get(
+            scheduler.stock_owner_of(agent_id),
+            _ACTIVITY_LABELS.get(activity.get("kind"), "闲着"),
+        )
 
         def _person(person_id: str, actor: str, name: str, kind: str) -> dict[str, str]:
             """名单上的一个人。
@@ -4669,25 +4731,49 @@ class World:
     ) -> dict[str, Any]:
         """`invitations()` 的**带游标**版本 —— 增量拉取用这一条。
 
-        `{"events", "next_seq", "cursor", "scanned", "total"}`,游标语义和
-        `contact_requests_page()` / `inbox_page()` 逐字相同(共用 `_filtered_page`)。
+        `{"events", "next_seq", "cursor", "scanned", "total", "now_tick"}`,
+        游标语义和 `contact_requests_page()` / `inbox_page()` 逐字相同
+        (共用 `_filtered_page`)。
+
+        **多出来的那一格是时间**:`now_tick` 是这一页取出来那一刻的世界时钟,
+        每条事件另带一格 `expires_in`(还剩几个 tick,`pending` 为假时是 0)。
+        没有它的话,宿主手里只有事件里那个 `expires_tick` —— 一个绝对刻度,
+        要减去"现在"才是人看得懂的"还剩多久",而"现在"得再问一次
+        `state()`。两次调用之间世界还在走,于是画出来的倒计时是拿**另一刻**的
+        现在减这一刻的到期:平时差一两个 tick 没人看得出,而它偏偏在最后那几秒
+        显示成"还有时间",玩家点下去才发现已经过期了。
+        **过期按世界时钟判、前端不许自己算**这条契约,少了这一格就等于逼着
+        前端自己算。
         """
         # **只读门自己补课**(和 `state()` / `roster()` 同一条):`pending` 那一格
         # 从投影里读,而别的进程刚落的答复这个进程还没折过。跑着的世界会在下一次
         # 追加时自愈,暂停的不会 —— 而只读门不该指望世界正好在动。
         self.scheduler.catch_up_projection()
         waiting = self.scheduler._memory_projection.invitations
+        now_tick = int(self.scheduler.clock)
         page = self._filtered_page(
             kind="agent_invites", player_id=player_id,
             since_seq=since_seq, limit=limit,
         )
-        page["events"] = [
+
+        def _left(event: dict[str, Any], pending: bool) -> int:
+            if not pending:
+                return 0
+            try:
+                expires = int((event.get("payload") or {}).get("expires_tick") or 0)
+            except (TypeError, ValueError):
+                return 0
+            return max(0, expires - now_tick)
+
+        rows = []
+        for e in page["events"]:
+            pending = int(e.get("seq") or 0) in waiting
             # **拷一份,不改那条事件**:投影拷一份那条纪律在读侧的样子 ——
             # 就地写一格 `pending` 会让 `World.events()` 里那条事件从此长得和
             # 日志里那条不一样。
-            {**e, "pending": int(e.get("seq") or 0) in waiting}
-            for e in page["events"]
-        ]
+            rows.append({**e, "pending": pending, "expires_in": _left(e, pending)})
+        page["events"] = rows
+        page["now_tick"] = now_tick
         return page
 
     def answer_invitation(
@@ -4702,6 +4788,13 @@ class World:
         跑 —— 他点头时人可能已经走开了、她可能睡了或者手上有了别的事。查过之后
         才落 `invitation_settled{accepted}`,做不成就落 `expired` 并把原因写进
         `note`:**不许在他不在场时把那件事做掉**。
+
+        ⚠️ **重查的是闸,不是人心。** 同行的人在她开口那一刻已经被问过了
+        (`agent_invites` 的 `consented`),这里把那份答复原样带回去,不再问
+        第二遍。两个理由,都不是省一次网络:一是**他不该为了按一下"好"去等一次
+        模型**;二是再问一遍读的是模型,同一个人同一件事的答案可以和上一次不同 ——
+        于是他按了「好」,却因为**别人**这次改了主意被记成 `expired`,而他这辈子
+        也不会知道自己那一下点得对不对。她当时点了头,那就是她点过头了。
 
         `accept=False`:落 `invitation_settled{declined}`,并且**只有这一支**会
         写在关系上、进她的记忆(纯算术,一次模型都不调 —— 红线 3)。他没答而挂到
@@ -4739,7 +4832,12 @@ class World:
                 str(row.get("target") or ""), str(row.get("verb") or ""),
                 [str(p) for p in (row.get("party") or [])],
                 player_id=pid,
-                accepted_ids=[f"{scheduler.PLAYER_PREFIX}{pid}"],
+                accepted_ids=[
+                    f"{scheduler.PLAYER_PREFIX}{pid}",
+                    # 她开口那一刻就点过头的人。**闸照查**(`pre_ok` 排在
+                    # `invitee.gate` 之后),重查的只是"问"这一步。
+                    *[str(c) for c in (row.get("consented") or []) if str(c)],
+                ],
             )
         except tools_mod.ToolCallError as exc:
             # 那样东西没了、动词没了 —— 世界在这中间变了。**这不是他的错,
@@ -7111,17 +7209,25 @@ class World:
             loc_id = brain.agent.blackboard.read("loc") or brain.agent.location or ""
             loc_name = _place_name(loc_id)
             activity = self._view._agent_activity(agent_id)
-            if activity.get("transit"):
-                to_name = _place_name(str(activity["transit"].get("to") or ""))
-                label = f"正在去{to_name or '别处'}的路上"
-            else:
-                label = _ACTIVITY_LABELS.get(activity.get("kind"), "闲着")
             # 同屋的人各带一句"此刻在做什么"。措辞取自 `_activities_now()`,和自主
             # 上下文的在场名单、感知块那一行是同一份 —— 各拼一遍必然分叉,而分叉
             # 那天不报错:一边说他在擦窗,另一边把他写成闲着,两句话进同一份提示词。
             # 齐老板在线上对一个正在做事的玩家说「我没见你动过手」,病就在这儿:
             # 世界里那个人一直在动,只是提示词里从没写过。
             doing = self._activities_now()
+            # **她自己那一句走同一份措辞。** 从前它单独走 `_ACTIVITY_LABELS`,
+            # 于是一个正被长过程占着的人读到「你在回声唱片店,闲着」,而同屋的人
+            # 在同一份提示词的下一行读到「江晚(在一起听完一面)」—— 一处分支
+            # 换来两句互相打脸的话。在途那一支留着:它答的是「你在哪儿」,
+            # 比"此刻在做什么"多一格终点,而路上的人本来就不在做别的事。
+            if activity.get("transit"):
+                to_name = _place_name(str(activity["transit"].get("to") or ""))
+                label = f"正在去{to_name or '别处'}的路上"
+            else:
+                label = doing.get(
+                    scheduler.stock_owner_of(agent_id),
+                    _ACTIVITY_LABELS.get(activity.get("kind"), "闲着"),
+                )
 
             def _busy(actor: str, name: str) -> str:
                 said = doing.get(scheduler.stock_owner_of(actor))

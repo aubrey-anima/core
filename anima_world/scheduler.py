@@ -2947,11 +2947,17 @@ class Scheduler:
         self, agent_id: str, player_id: str, *,
         target: str, verb: str, party: Sequence[str], text: str,
         verb_label: str = "", target_name: str = "", agent_name: str = "",
+        consented: Sequence[str] = (),
     ) -> dict[str, Any]:
         """她开口约一个玩家。**落一条事件,然后等** —— 不替他答应。
 
         `player_id` 收**裸 pid**(关系表与 `_filtered_page` 的过滤键都是它;
         见 `_relation_id` 那一课)。
+
+        `consented` 是**她开口那一刻已经点过头的人**。存下来的理由和 `text`
+        逐字同一条:它属于那一刻。不存的话,他点头时得把同行的人重新问一遍,
+        而"再问一次"读的是模型 —— 答案可以和上一次不同,于是他按了「好」,
+        却因为**别人**这次改了主意被记成"没做成"。
 
         返回 `{"ok": True, "invite_seq", "expires_tick", "round"}`,或者
         `{"ok": False, "reason": "invites_off" | "invite_capped"}`。
@@ -2989,6 +2995,9 @@ class Scheduler:
                     # 名单里带着玩家自己(`player:<pid>`)—— 答应之后照原样交回
                     # `perform_affordance`,别在答复那一刻重新拼一遍名单。
                     "party": [str(p) for p in party],
+                    # 她开口那一刻已经点过头的人 —— 和 `text` 同一个理由:
+                    # 它属于那一刻,不在答复那一刻重新问一遍。
+                    "consented": [str(p) for p in consented],
                     # 一句人话。**存下来,不在读的时候现拼** —— 她开口时说的那句
                     # 话属于那一刻(动词的 label 明天可能被作者改掉)。
                     "text": text,
@@ -3024,7 +3033,17 @@ class Scheduler:
 
         邀请已经不在了(重复答复 / 已过期)返回 `None`,不报错:两个进程同时
         答同一份邀请是常态,而第二个不该看到一次异常。
+
+        ⚠️ **`outcome` 必须是 `INVITE_OUTCOMES` 里的一个,写错当场报错。**
+        不校验的话,一个拼错的结局会安安静静地落进日志、落进那扇门,而读的人
+        (宿主的红点、运维台的账)对着一个它不认识的词只能当成"别的",
+        于是那份邀请在清单上消失、在账上不存在 —— 两边都不报错。
         """
+        if str(outcome) not in together_mod.INVITE_OUTCOMES:
+            raise ValueError(
+                f"不认识的邀请结局 {outcome!r};只有 "
+                f"{'、'.join(together_mod.INVITE_OUTCOMES)}"
+            )
         with self._lock:
             row = self._memory_projection.invitations.get(int(invite_seq))
             if row is None:
@@ -3033,6 +3052,41 @@ class Scheduler:
             if str(outcome) == together_mod.INVITE_OUTCOMES[1]:   # "declined"
                 self._settle_invitation_declined(row)
             return settled
+
+    def cancel_invitations(
+        self, agent_id: str, player_id: str = "", *, note: str = "",
+    ) -> list[int]:
+        """**她自己把话收回去** —— 她还等着回话,人却已经走开了。返回撤掉的 seq。
+
+        `INVITE_OUTCOMES` 里那个第四种结局(`cancelled`)的唯一来源。它和另外
+        三种分得很清:`accepted`/`declined` 是**他**说的话,`expired` 是**没人**
+        说话,而这一条是**她**改了处境 —— 三者在他手机上是三句不同的话
+        (「你们一起做了」「你说了不去」「你没来得及答」「她已经走开了」)。
+
+        **挂在她的动作上,不挂在 tick 的计时器上。** 拿"她此刻不在原地"每 tick
+        判一次的话,一次游荡到隔壁也会把一份还等得到答复的邀请撤掉 —— 而"她走了"
+        和"她还在等你"从此分不开。她真的走开是一个**决定**(`walk_away` 工具、
+        她的选择必须在世界里兑现),所以撤回也是一个决定。
+
+        和 `declined` 那一支的分界照旧:**这一条一个字都不写在他头上** ——
+        不落记忆、不动关系。他什么也没做错。
+        """
+        pid = self._relation_id(str(player_id)) if player_id else ""
+        out: list[int] = []
+        with self._lock:
+            rows = sorted(list(self._memory_projection.invitations.items()))
+            for invite_seq, row in rows:
+                if str(row.get("agent_id") or "") != agent_id:
+                    continue
+                if pid and str(row.get("player_id") or "") != pid:
+                    continue
+                if self.settle_invitation(
+                    invite_seq, "cancelled", note=note,
+                ) is not None:
+                    out.append(int(invite_seq))
+        if out:
+            logger.info("%s 走开了,收回 %d 份还等着回话的邀请", agent_id, len(out))
+        return out
 
     def _settle_invitation_event(
         self, invite_seq: int, outcome: str, row: Mapping[str, Any], note: str,
@@ -3505,6 +3559,21 @@ class Scheduler:
                                     "started_at": str(record.get("loc") or "")},
                     })
                     logger.info("%s 中途走开了,%s %s 没做完", agent_id, verb, target)
+                    # ⚠️ **这一条今天还有一半是引擎自己造成的,而它此前一声不吭。**
+                    # `occupies` 的含义是"这期间她还能不能干别的",可 `emit_action`
+                    # 的 walk 那一支从不查 `_occupying` —— 于是排班在下一 tick 就能
+                    # 把一个刚起头的长过程带走:代价照付、效果一格不落、一起做的那
+                    # 几个人连关系都不变。这条边界比联合动词老,只是从前发不出联合
+                    # 动词所以够不着;3.6.0 把它抬成了头号路径。
+                    #
+                    # **这一波不改行为**(BT 与 `_occupying` 的总账不只是 walk 一支,
+                    # 见 FOR-STUDIO 那一节的丑话),但**降级不许无声**:落进
+                    # `subsystem_health`,`World.state()` 里数得出来,作者才有可能
+                    # 发现"她那件事一次都没做完"。
+                    self.note_subsystem(
+                        "engagement_kept", False,
+                        f"{agent_id}: {verb} {target} 起了头就被带走了(代价不退)",
+                    )
                     continue
             outcome = finish_affordance(
                 affordance, values=store.of(target),
@@ -3523,6 +3592,11 @@ class Scheduler:
                 continue
             if outcome.updates:
                 store.set_many(target, outcome.updates, tick=now_tick)
+            if record.get("occupies"):
+                # 健康的那一半。**只数坏的那一半读不出比例** —— "六次里有一次
+                # 被带走"和"一千次里有一次"是两个完全不同的结论,而
+                # `subsystem_health` 的 `ok` 计数正是那个分母。
+                self.note_subsystem("engagement_kept", True)
             here = str(record.get("loc") or "")
             spent = now_tick - int(record.get("started", now_tick))
             # **谁真的从头待到尾。** 起头时每个人都过了同处一地那道闸,而这段时间

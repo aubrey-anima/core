@@ -514,6 +514,18 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
      `activity.engaged`。
    - `occupies` 期间任何能力调用都拒绝,`reason == "busy"` —— **第四类**,别并进
      `conditions`:她该等自己手上这件做完,既不是换一棵,也不是去补足。
+   - ⚠️ **丑话:`occupies` 挡得住她再点一个按钮,挡不住她的排班。** 一件占着她的
+     长过程起了头之后,她自己的作息表(`duties`)或行为树仍可能在下一个 tick 把她
+     走去别处;到点收尾时她已经不在那儿了,于是落一条 `entity_disengage{reason:
+     "left"}`,**代价照付,效果一样都不落**。写 `duration` 大于两三个 tick 的能力
+     时要知道这一条 —— 尤其是当你们给这个角色排了一张很密的作息表。引擎侧这一轮
+     **有意没改行为**(那条账在排班与"她手上占着一件事"之间,不在能力这一层,动它
+     会牵到每一个角色的行为树),但**它不再是无声的**:
+     `World.state()["runtime"]["subsystems"]["engagement_kept"]` 数得出成了几件
+     (`ok`)、被带走几件(`degraded`),`reason` 那句话点名是谁的哪一件,档位一变
+     还落一条 `subsystem_health` 事件。`degraded` 不为零就是这个世界的作息表和它的
+     长过程打架了,眼下的解法在你们手上:把 `duration` 压到排班的空档里,或者把那
+     段时间从作息表里让出来。
 6. **世界能自己长出新东西,也能抹掉东西**(`spawn` / `destroys_target`)。这条对你们
    最直接:`entities` 不再是创世时钉死的一张表,所以"按规则铺开一个世界"这件事有了
    落点。
@@ -2331,8 +2343,21 @@ anima-world contract --json | jq '.erasure.resume_command'
 
 刻度上的一句参考(和你们已经在写的记忆 `importance` 同一把尺):日常动作 0.3~0.5,
 一件她会拿出来说的事 0.6~0.7,不可逆的大事(砍掉 / 生出一个新东西)0.8 以上。
-写超过 1 的**当场退 2**(`validate world` / `world check` 都认)—— 写了 8 的作者想的
-是「很重要」,按 1 截断的话他永远不会知道自己写错了刻度。
+写超过 1 的**当场开不了机**,`anima-world validate world x.cyberworld` **退 2** ——
+写了 8 的作者想的是「很重要」,按 1 截断的话他永远不会知道自己写错了刻度。
+
+⚠️ **别拿 `world check` 的退出码当这道闸**(这里此前写着"两个都退 2",是句假话):
+两个命令问的**不是同一个问题**,所以退出码本来就不同 ——
+
+| 命令 | 问的是 | 退出码 |
+|---|---|---|
+| `validate world` | **这份世界文件写对了吗**(作者的门) | 写错 = **2**,写对 = 0 |
+| `world check` | **这一版引擎装不装得下它**(宿主的门) | **答上来就是 0**,答案在 `loadable` / `errors` 里;1 = 文件都读不了 |
+
+`world check` 的 0 的意思是「我看了,报告在这儿」,不是「没问题」。**判据是那份
+JSON 的 `loadable`,不是 `$?`** —— 拿 `$?` 当判据的流水线会把一份写错了的世界当成
+合格品放过去(它 `loadable: false`、`errors` 里逐条列着,而退出码是 0)。要在 CI 上
+卡住写错的世界,用 `validate world`;或者 `world check --json | jq -e .loadable`。
 
 ### ② 同一格还是另一件事的闸:**玩家做的那一下进旁白**
 
@@ -2358,9 +2383,23 @@ anima-world contract --json | jq '.erasure.resume_command'
 `World.answer_invitation()`,那扇门归**网站那一侧**画(引擎不负责送达,推送/红点
 不是这个世界里的事)。
 
-⚠️ **玩家自己按按钮那条路一个字没变**:他点「一起坐会儿」时,发起这次调用的人就是他,
-不必问他肯不肯 —— 被问的只有名单上的角色。`player_options` / `player_tools` 的形状
-**一格没动**(邀请不是"他此时此地点得动什么",它是一件已经发生在他身上的事)。
+⚠️ **玩家自己开的口一律当场算数,不会变成一封写给他自己的信。** 判据是**这句话是谁
+开的口**,不是"参与者里有没有玩家",两条路都算他开的口:他点「一起坐会儿」那个按钮,
+以及他在**对话里**说「陪我听完这一面」(`chat.intent.enabled` 的导演路)。后一条要是
+也走问一遍,他刚说完就会收到一封问他要不要做他刚才要做的事的信 —— 而那封信他多半
+根本看不见。**她**在对话里点他的名,照旧要问,一个字没变。
+`player_options` / `player_tools` 的形状**一格没动**(邀请不是"他此时此地点得动
+什么",它是一件已经发生在他身上的事)。
+
+⚠️ **一次只算得进一个还没点头的人。** 名单里出现两个都要被问的玩家时,这次调用
+**当场被拒**(点名是哪几个),一封信都不发、每日额度一次都不扣。点头这件事替不了
+别人:两封信发出去,谁先按"好"那一下都会因为另一个人还没答而落空 —— 而**玩家按了
+「好」而世界一声不吭**是这一层最坏的坏法。要两个人一起来,分两次约。
+
+⚠️ **她走开的时候,还等着的邀请跟着收回去**(`invitation_settled{cancelled}`,和
+过期那一支一样一个字都不写)。约你的人已经不在这儿了,红点还亮着就是一句谎。它挂在
+**她的动作**上(聊天里的 `walk_away`),不挂在一个"她还在不在原地"的定时判断上 ——
+后者会把「她去了趟隔壁」和「她不等你了」算成同一件事。
 
 四个新的世界配置键,你们写不写都行(默认值就是老板拍的那一版):
 
@@ -2397,11 +2436,12 @@ anima-world contract --json | jq '.erasure.resume_command'
 |---|---|---|
 | 世界文件里写 `importance` | `world import` / `--world-file` | ✅ 新增 |
 | 不建世界就校验它(写超范围当场退 2) | `anima-world validate world x.cyberworld` | ✅ |
-| 装得进这一版引擎吗 | `anima-world world check x.cyberworld` | ✅ |
+| 装得进这一版引擎吗 | `anima-world world check x.cyberworld` | ✅ **答上来就退 0**,判据是 `loadable` 不是 `$?`(见上) |
 | 读一条能力**做完有没有人记得住** | `anima-world ontology --json` → `affordances[].importance` | ✅ 新增 |
 | 渲染上看到它 | `anima-world ontology` 多印一行 `✦ 在场的人会记住这一下(importance 0.6),做的人是玩家也一样` | ✅ 新增 |
 | 问引擎认得哪些能力字段 | `anima-world contract --json` → `seed.affordance_keys` | ✅ 新增 |
 | **发起一次邀请 / 替玩家答复** | ❌ CLI 上没有 —— 走库(`World.invitations()` / `answer_invitation()`),归网站那一侧 | ❌ 有意 |
+| 画一份邀请的**倒计时** | `World.invitations_page()` 回的 `now_tick` + 每行 `expires_in`,一次调用够 | ✅ 新增 |
 
 ⚠️ **没声明的能力,那一行一个字都不印**(`--json` 里是 `null`)。印一句
 「importance 无」会让读的人以为有个默认值在那儿,而真相是这一层压根没铺开。
