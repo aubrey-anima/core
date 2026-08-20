@@ -3832,6 +3832,16 @@ class Scheduler:
             self._engaged.pop(key, None)
             if record.get("occupies"):
                 self._current_action.pop(str(record.get("agent") or ""), None)
+            if record.get("joint_role") == "participant":
+                # 和 `_settle_engagements` 里那条 `continue` 同一条理由:一起做的事
+                # **在日志上只记一次**,由发起人那条记录记。人照样放开(上面两行已经
+                # 做完了),只是不再各发一条 `entity_disengage`。
+                # 修在源头而不是 doctor 侧,是因为 `entity_disengage` 的载荷里
+                # 根本没有 `joint_role` —— 让 doctor 认出参与者就得往一条事件的
+                # 载荷里加字段(跨仓库契约),而"起了几件"和"收不了尾几件"本来就
+                # 该按同一个单位数:一件事一条。两边不同单位的下场是 doctor 算出
+                # 一个负数,再被 `max(0, …)` 抹成 0,屏幕上是一行绿勾。
+                continue
             self._record_event({
                 "type": "entity_disengage", "who": str(record.get("agent") or ""),
                 "loc": str(record.get("loc") or ""),
@@ -3943,8 +3953,9 @@ class Scheduler:
     def _apply_item_restores(self, event: dict[str, Any]) -> None:
         """吃下去的东西按 `item_defs.restores` 补需求。
 
-        这一列 schema 里有、创世时写进去,而**从来没有人读过** —— `RESTORE_PER_TICK`
-        里的 `eat` 是个跟吃什么无关的常数,于是作者认真写的"这碗面很顶饱"在世界里
+        这一列 schema 里有、创世时写进去,而**在这个函数接上之前从来没有人读过**
+        (病历,不是现状:读它的正是下面这段)—— 那会儿 `RESTORE_PER_TICK` 里的
+        `eat` 是个跟吃什么无关的常数,于是作者认真写的"这碗面很顶饱"在世界里
         没有任何差别。经济和需求各有机制,中间一直缺这个闭环。
 
         需求没点亮时整条路惰性(与每个开关的既有承诺一致);查不到定义、解析不出

@@ -5834,11 +5834,21 @@ def _report_engagements_kept(
     ⚠️ **这一格报的是这个世界的一生,不是最近一段**(退出码同理:出过一次就
     退 1,以后再也回不了绿)。一个跑了半年的世界身上永远背着头三天那次事故 ——
     "该不该有个时间窗"是产品/运维的判断,不是引擎能替谁定的,记在看板 D25。
+
+    ⚠️ **加不平的时候把它说出来,别 `max(0, …)` 抹平**(2026-08-20 补):
+    四格各数各的之后,"还在做"是**减出来的**,而减出负数只有一个意思 —— 收尾的
+    记录比起头的多,引擎自己的账错了。从前那个 `max(0, …)` 把负数压成 0,于是
+    屏幕上是一行**绿勾**,说着"起了 1 件,做完 0 件,2 件收不了尾"这种算术上
+    不可能的话。**一行绿勾说出不可能的话,比一行红字更贵 —— 看的人会信它。**
+    加不平只改脸色和多说一句,**不进退出码**:退出码是"这个世界需要处理几项",
+    而算不平是引擎的 bug 不是这个世界的毛病,混进去会让人去改自己的世界。
     """
     if not started:
         print(f"  {onboarding.dim('这个世界还没有起过要花时间的长过程(duration)')}")
         return 0
-    in_flight = max(0, started - finished - len(dropped) - gone)
+    settled = finished + len(dropped) + gone
+    balance = started - settled
+    in_flight = balance if balance > 0 else 0
     parts = [f"起了 {started} 件", f"做完 {finished} 件"]
     if dropped:
         parts.append(f"{len(dropped)} 件半路被带走(代价不退)")
@@ -5847,10 +5857,17 @@ def _report_engagements_kept(
     if in_flight:
         parts.append(f"{in_flight} 件还在做")
     line = "要花时间的长过程:" + ",".join(parts)
-    if not dropped:
+    if balance < 0:
+        print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+        print(f"      {onboarding.dim('这几个数加不平:起了 ' + str(started) + ' 件,收尾的记录却有 ' + str(settled) + ' 条')}")
+        print(f"      {onboarding.dim('多出来的那 ' + str(settled - started) + ' 条是引擎自己的账错了,不是这个世界的毛病 —— 请把这一行报回引擎')}")
+        if not dropped:
+            return 0
+    elif not dropped:
         print(f"  {onboarding.green(onboarding.OK)} {line}")
         return 0
-    print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
+    else:
+        print(f"  {onboarding.yellow(onboarding.WARN)} {line}")
     # **点名最近那一件是谁的哪一件。** 只说"3 件被带走"的话,人下一步无处可去。
     last = (dropped[-1].payload or {})
     who = dropped[-1].who or "?"

@@ -382,6 +382,35 @@ def test_长过程每个人各占一件事_效果只落一次(world):
     assert _sentiment(world, "夏", "遥") > 0
 
 
+def test_东西没了时一件事只记一条收不了尾_否则体检会算出负数(world):
+    """起头一件、收尾一条 —— 两头**必须是同一个单位**。
+
+    `doctor` 的「起了几件」有意不数参与者(一顿三个人的饭是一件事),而抹掉目标
+    那条循环从前给每个人各发一条 `entity_disengage`,于是两个人的一场长谈会被数成
+    「起了 1 件、2 件收不了尾」:`1 - 0 - 0 - 2 = -1`,被 `max(0, …)` 抹成 0,
+    屏幕上还是一行绿勾。所以这里按 `doctor` 的口径把账重算一遍。
+    """
+    assert _act(world, "夏", "长谈", **{"with": ["遥"]})["ok"] is True
+    assert world.engagements("夏") and world.engagements("遥")
+    # 她被占着,拆不动 —— 直接从调度器那一层抹掉(等价于别的进程干的)。
+    world.scheduler._destroy_entity("夏", "bench:oak", "长谈", "cafe")
+    assert not world.engagements("夏") and not world.engagements("遥"), "人不该挂在一个不存在的东西上"
+    # 少发一条事件不等于少放一个人:参与者照样解占,不然他到原定的结束 tick 才动得了。
+    assert world.scheduler._current_action.get("遥") is None
+
+    started = len([
+        e for e in world.events()
+        if e["type"] == "entity_engage"
+        and (e["payload"] or {}).get("joint_role") != "participant"
+    ])
+    gone = len([
+        e for e in world.events()
+        if e["type"] == "entity_disengage"
+        and (e["payload"] or {}).get("reason") == "gone"
+    ])
+    assert (started, gone) == (1, 1), "一件事起一条、收一条,分子分母才是同一个单位"
+
+
 def test_中途走开的人不算一起吃过饭(world):
     """起头时每个人都过了同处一地那道闸,而这段时间里谁都可能走开 —— 照名单发关系
     变化的话,一个开席就离场的人也算"一起吃过饭了",而世界里根本没有那顿饭。"""

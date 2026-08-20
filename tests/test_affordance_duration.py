@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from anima_world import onboarding
 from anima_world.ontology import (
     BUILTIN_AFFORDANCE_LABELS,
     OntologyError,
@@ -552,6 +553,28 @@ def test_做完了几件不许是减出来的(capsys):
     assert "起了 3 件,做完 1 件,1 件半路被带走" in out
     assert "1 件收不了尾" in out
     assert "还在做" not in out
+
+
+def test_加不平就说出来_不许压成一行绿勾(capsys):
+    """收尾的记录比起头的多 = 引擎自己的账错了。从前 `max(0, …)` 把那个负数压成
+    0,于是屏幕上是一行**绿勾**,说着「起了 1 件,做完 0 件,2 件收不了尾」这种
+    算术上不可能的话 —— **一行绿勾说出不可能的话,比一行红字更贵,看的人会信它。**
+    """
+    from anima_world.__main__ import _report_engagements_kept
+
+    # 退出码一个字不动:算不平是引擎的 bug,不是这个世界的毛病,混进"需要处理
+    # 的项数"里会把人赶去改自己的世界。
+    assert _report_engagements_kept(1, [], finished=0, gone=2) == 0
+    out = capsys.readouterr().out
+    assert "加不平" in out and "起了 1 件,收尾的记录却有 2 条" in out
+    assert "多出来的那 1 条" in out
+    assert onboarding.OK not in out, f"算术上不可能的话不许挂绿勾:{out!r}"
+    assert "还在做" not in out, "负数不是「还在做」"
+
+    # 加得平的时候一个字都不多说(这一格从前就是这么绿的,别把它吵红了)。
+    assert _report_engagements_kept(3, [], finished=1, gone=1) == 0
+    out = capsys.readouterr().out
+    assert "加不平" not in out and "1 件还在做" in out
 
 
 # ── 那句话是给玩家读的 ────────────────────────────────────────────────────────

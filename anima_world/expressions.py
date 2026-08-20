@@ -418,7 +418,8 @@ def _validate(node: ast.AST, source: str, names: set[str], *, dice: bool = False
             if not dice:
                 # **这一处没有骰子** —— 加载时就说,别等她真去做那件事时才炸。
                 # 骰子要四个坐标(世界/规律/owner/tick)才摇得出可重放的那个数,
-                # 而能力那一层今天还没有自己的坐标(见 `compile_expression`)。
+                # 而能力那一层还没有自己的坐标(3.6.0 / 2026-08-20 仍然如此;
+                # 见 `compile_expression`)。给了它坐标就来改这一条与那句人话。
                 raise ExpressionError(
                     f"{source!r}:这里没有骰子 —— `rand()` 只在世界的规律(rules)里"
                     "摇得出来。能力(affordance)的 when / requires / costs / set "

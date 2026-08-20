@@ -879,6 +879,57 @@ def test_四个闸都属于当面那一族(world):
     assert len(together.COLOCATION_GATES) == 4
 
 
+def test_闸和面对面必须逐位同构(world):
+    """`_colocation_gate()` 的 docstring 说这一条"钉着"—— 在 3.6.0 第五轮之前
+    它**一条测试都没有**(`git grep _colocation_gate -- tests/` 是 0 行)。
+
+    两份判断分了岔的样子很安静:门(`face_to_face()`)说"当得成"而闸说"当不成",
+    于是这一支既拦不住也说得出理由;反过来就是拦下了却说不出为什么。次序尤其
+    脆:`agent_location()` 对在途的人仍报着**出发前那个地名**,先看地名的话
+    "两处相同"会得出一个和 `face_to_face()` 相反的结论。所以这里按**状态 ×
+    (她, 他)** 铺开来对,不是挑一个样本点。
+    """
+    runtime = world._tool_runtime
+
+    def blackboard(agent_id):
+        return world.scheduler.agents[agent_id].agent.blackboard
+
+    def states():
+        # 每一项:(这一步怎么把世界摆成那样, 期待的闸)。**摆完不复位** ——
+        # 后一项接着前一项走,和真世界里状态会叠加一样。
+        yield ("两个人都在咖啡店", lambda: world.player_move("p1", "cafe"), "")
+        yield ("他去了后院", lambda: world.player_move("p1", "yard"), "player_not_here")
+        yield ("他下线了", lambda: world.player_leave("p1"), "player_where_unknown")
+        yield ("他回到她那儿", lambda: world.player_move("p1", "cafe"), "")
+
+    for name, arrange, expected in states():
+        arrange()
+        for agent_id in ("夏", "遥"):
+            gate = world._tool_runtime._colocation_gate(agent_id, "p1")
+            assert gate == expected, f"{name}:{agent_id} 的闸是 {gate!r}"
+            assert runtime.face_to_face(agent_id, "p1") is (gate == ""), name
+            assert gate == "" or gate in together.COLOCATION_GATES, gate
+
+    # 她在赶路 —— `agent_location()` 这时报的还是「cafe」,和他一模一样。
+    runtime.move_agent("夏", "yard")
+    assert "夏" in world.scheduler._transit
+    assert runtime.agent_location("夏") == "cafe", "前提:在途的人还挂着出发前那个地名"
+    assert runtime._colocation_gate("夏", "p1") == "inviter_in_transit"
+    assert runtime.face_to_face("夏", "p1") is False
+    assert runtime._colocation_gate("遥", "p1") == "", "对照组:没赶路的那个照旧当得成面"
+
+    # 世界说不上来**她**在哪(黑板还没写过、名册上也没有地名)。
+    blackboard("遥").write("loc", "")
+    world.scheduler.agents["遥"].agent.location = ""
+    assert runtime._colocation_gate("遥", "p1") == "inviter_where_unknown"
+    assert runtime.face_to_face("遥", "p1") is False
+
+    # 世界从没见过这个人:两头都说不上来,而**先答的是她那一头**。
+    assert runtime._colocation_gate("柔", "ghost") == "player_where_unknown"
+    assert runtime.face_to_face("柔", "ghost") is False
+    assert runtime._colocation_gate("遥", "ghost") == "inviter_where_unknown"
+
+
 # ── 五、契约那一格答得出来 ────────────────────────────────────────────────
 
 

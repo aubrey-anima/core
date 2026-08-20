@@ -1603,7 +1603,8 @@ def _edge_row_view(row: dict[str, Any]) -> dict[str, Any]:
     所以夹这一下放在**读的入口**,两个视图共用:`include_invalid` 要的是"整段
     历史",不是"没经过任何解释的字节"——它要的答案和 `as_of` 必须是同一个。
 
-    ⚠️ **审计视图今天没有读 `invalid_at` 的消费方,这条闸是提前立的。**
+    ⚠️ **审计视图没有读 `invalid_at` 的消费方,这条闸是提前立的**(3.6.0 /
+    2026-08-20 数过一遍;哪天有了消费方就再数一遍、再标一个日期)。
     仓库里 `query(include_invalid=True)` 只有两处(`api.py` 的 `forget_player` /
     `erase_player`),它们只读 `subject` / `object`。**导出包不走这条路** ——
     `world_package.dump_world_records` 遍历 Redis 键、原样吐类型化的字节,一次
