@@ -40,7 +40,10 @@ from anima_world.character_card import (
     world_card_warnings,
 )
 from anima_world.media import (
+    LOCATION_IMAGE_GLOSS,
     LOCATION_IMAGE_KEYS,
+    LOCATION_IMAGE_MAX_BYTES,
+    clip_uri,
     world_location_media_errors,
     world_location_media_warnings,
 )
@@ -559,6 +562,42 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="as_json", help="机器可读输出"
     )
 
+    location_cmd = sub.add_parser("location", help="地图数据的维护")
+    location_commands = location_cmd.add_subparsers(
+        dest="location_command", required=True
+    )
+    set_image = location_commands.add_parser(
+        "set-image",
+        help="给一个**已经跑着的世界**里的地点换图(一次一个地点;这是覆盖)",
+    )
+    _add_world_args(set_image)
+    set_image.add_argument("--location", required=True, help="改哪儿(地点 id)")
+    # **两格从 `LOCATION_IMAGE_KEYS` 长出来,不在这里再抄一遍名字。** 抄一遍的话,
+    # 哪天加第三格,这扇门是唯一不会报错、只是安静地少一个开关的地方。
+    for _key in LOCATION_IMAGE_KEYS:
+        _flag = "--" + _key.replace("_", "-")
+        set_image.add_argument(
+            _flag, default=None, dest=_key,
+            help=f"{LOCATION_IMAGE_GLOSS[_key]} —— 一条 URI"
+                 f"(https / http / data;空串 = 抹掉这一格;"
+                 f"≤ {LOCATION_IMAGE_MAX_BYTES // 1024} KiB)",
+        )
+        set_image.add_argument(
+            f"{_flag}-file", default=None, dest=f"{_key}_file", metavar="PATH",
+            help=f"从文件里读 {_key} 那条 URI(`-` = 标准输入)—— 内嵌的 data: URI "
+                 "长过约 128 KiB 就塞不进 argv 了,那是操作系统的上限,不是引擎的",
+        )
+    set_image.add_argument(
+        "--clear", action="store_true",
+        help="把这个地点的**两格图都抹掉**(不动名字、描述、几何 —— 那些归作者层)",
+    )
+    set_image.add_argument(
+        "--dry-run", action="store_true", help="只报要改成什么,不动库"
+    )
+    set_image.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+
     report_cmd = sub.add_parser(
         "report", help="对着一个世界出运行摘要 —— 只读,不跑世界"
     )
@@ -820,8 +859,9 @@ def _edit_location_media_warnings(authored: dict[str, Any] | None) -> list[str]:
         f"({'、'.join(named[:5])}{'…' if len(named) > 5 else ''})—— "
         "**目标世界里已经有的那些地点,这几格装不进去**:作者层合并按地点 id 整条"
         "跳过已有地点(整行合并会把这个世界跑出来的名字和描述倒带回创世那天)。"
-        "只有目标世界里还没有的地点才会带着图落地;给一个已经在跑的地点补图,"
-        "眼下只能重建那个世界"
+        "只有目标世界里还没有的地点才会带着图落地;给一个已经在册的地点补图走 "
+        "`anima-world location set-image --location <id> --map-image <URI>`"
+        "(3.4.0 起,`contract --json` 的 seed.location_image_write_command 报得出它)"
     ]
 
 
@@ -4730,31 +4770,8 @@ def run_agent_set_card(args: argparse.Namespace) -> int:
                   "两句话都在说这一格写成什么 —— 引擎挑哪句都是猜。",
                   file=sys.stderr)
             return 2
-        try:
-            raw = sys.stdin.read() if source == "-" else Path(source).read_text("utf-8")
-        except OSError as exc:
-            print(f"[agent] 读不了 {source}:{exc}", file=sys.stderr)
-            return 2
-        except UnicodeDecodeError:
-            # 有人会把 PNG 本身喂进来。**说清楚这里要的是哪一样东西** ——
-            # 「不是 UTF-8」这句话对着一个刚把图片拖进来的人什么也没解释。
-            print(f"[agent] {source} 不是文本 —— 这里要的是那条 URI(比如 "
-                  "`data:image/png;base64,…` 或一条 https 链接),不是图片字节;"
-                  "转 base64 是创作台那侧的活。", file=sys.stderr)
-            return 2
-        portrait = raw.strip()
-        if not portrait:
-            # 空文件几乎总是「写失败了 / 路径写错了」,而不是「我要抹掉这一格」。
-            # 当成后者的话,一次失败的写会安静地删掉线上那张立绘。
-            print(f"[agent] {source} 是空的 —— 要抹掉这一格请明写 --portrait ''。",
-                  file=sys.stderr)
-            return 2
-        if any(ch.isspace() for ch in portrait):
-            # 一条 URI 里不该有空白。掐掉两头之后还剩空白 = 文件被编辑器折了行,
-            # 而闸只看 scheme 和字节数,这种 URI 它照放 —— 出去就是一张断的图。
-            print(f"[agent] {source} 里那条 URI 中间有空白(换行?)—— 一条 URI "
-                  "不该断行,多半是被编辑器折了。整条写成一行再来一次。",
-                  file=sys.stderr)
+        portrait = _uri_from_file(source, cmd="agent", value_flag="--portrait")
+        if portrait is None:
             return 2
 
     given = {
@@ -4826,6 +4843,181 @@ def run_agent_set_card(args: argparse.Namespace) -> int:
         print("[agent] --dry-run:一个字节都没写。")
     else:
         print(f"[agent] 看一眼:anima-world roster --world-id {world_id}")
+    return 0
+
+
+def _uri_from_file(source: str, *, cmd: str, value_flag: str) -> str | None:
+    """从一个文件(`-` = 标准输入)里读**那条图的 URI 文本**;读不成返回 `None`。
+
+    存在的理由见 `run_agent_set_card` 的 docstring:Linux 的 `MAX_ARG_STRLEN` 把
+    单个 argv 元素封在 128 KiB,而契约公布的上限比它大(立绘 1 MiB、地点每格
+    256 KiB)—— 那一段距离只有撞上去才知道,而撞上去时报错的是操作系统。
+
+    **一份,不是两份。** 立绘和地点的两格图走的是同一道闸、同一个理由,这四条
+    拒绝也逐字相同;各写一份的话,下一次收紧只会收紧其中一处,而另一处不报错。
+    `value_flag` 只进那句"要抹掉这一格请明写 X ''" —— 每扇门的那个开关名不一样。
+
+    **文件里装的是那条 URI 文本,不是图片字节**:引擎一个字节都不碰(嗅 MIME、
+    转 base64 是创作台的活)。
+    """
+    try:
+        raw = sys.stdin.read() if source == "-" else Path(source).read_text("utf-8")
+    except OSError as exc:
+        print(f"[{cmd}] 读不了 {source}:{exc}", file=sys.stderr)
+        return None
+    except UnicodeDecodeError:
+        # 有人会把 PNG 本身喂进来。**说清楚这里要的是哪一样东西** ——
+        # 「不是 UTF-8」这句话对着一个刚把图片拖进来的人什么也没解释。
+        print(f"[{cmd}] {source} 不是文本 —— 这里要的是那条 URI(比如 "
+              "`data:image/png;base64,…` 或一条 https 链接),不是图片字节;"
+              "转 base64 是创作台那侧的活。", file=sys.stderr)
+        return None
+    uri = raw.strip()
+    if not uri:
+        # 空文件几乎总是「写失败了 / 路径写错了」,而不是「我要抹掉这一格」。
+        # 当成后者的话,一次失败的写会安静地删掉线上那张图。
+        print(f"[{cmd}] {source} 是空的 —— 要抹掉这一格请明写 {value_flag} ''。",
+              file=sys.stderr)
+        return None
+    if any(ch.isspace() for ch in uri):
+        # 一条 URI 里不该有空白。掐掉两头之后还剩空白 = 文件被编辑器折了行,
+        # 而闸只看 scheme 和字节数,这种 URI 它照放 —— 出去就是一张断的图。
+        print(f"[{cmd}] {source} 里那条 URI 中间有空白(换行?)—— 一条 URI "
+              "不该断行,多半是被编辑器折了。整条写成一行再来一次。",
+              file=sys.stderr)
+        return None
+    return uri
+
+
+def run_location(args: argparse.Namespace) -> int:
+    """`anima-world location set-image` —— 地图数据的写口。
+
+    和 `agent` / `memory` 同一个形状:算法在 `World` 上,CLI 只开世界、印出来、
+    定退出码。**改之前先 `--dry-run` 看一眼** —— 它动的是作者写的东西。
+    """
+    command = getattr(args, "location_command", None)
+    if command == "set-image":
+        return run_location_set_image(args)
+    print("[location] 只有 set-image 一个子命令", file=sys.stderr)
+    return 2
+
+
+def run_location_set_image(args: argparse.Namespace) -> int:
+    """`anima-world location set-image` —— 给**一个已经跑着的世界**里的地点换图。
+
+    补的是地点两格图那一轮**明着欠下**的一节:作者层是"只填缺、不覆盖",而合并
+    的粒度是**整个地点行**,于是拿一份补了图的世界文件去编辑一个已经跑起来的
+    世界,那两格一个都装不进去 —— 作者写得进、`validate world` 放行、包也导得出,
+    就是到不了玩家眼前。上一轮的处置是**不让它无声**(逐个地点 `logger.warning`
+    + `validate world --edit` / `world check --edit` 也说),但一句警告不是一扇门:
+    退出码仍然是 0,而事没做。这条命令是那扇门。
+
+    **一次只改一个地点。** 生产上这条路的入口是运维台的一次性容器,argv 由具名
+    参数白名单生成;而 argv 是数组传递,中文和标点直接当一个元素传,不过 shell。
+
+    ⚠️ **`--map-image` / `--scene-image` 够不到契约公布的那 256 KiB**,理由和
+    `--portrait` 逐字相同(`MAX_ARG_STRLEN`,报错的是操作系统不是引擎)——
+    所以两格各配一扇 `--*-file`。**标准输入只有一份**:两格都写 `-` 的话第二格
+    会读到空,而空在这条路上的含义是"抹掉这一格" —— 一次手滑会安静地删掉线上
+    那张图,所以当场拒绝。
+
+    判断都在 `World.set_location_image` 的 docstring 里(**覆盖**、两格分开合并、
+    空串抹一格、`--clear` 抹两格、只写这两格、幂等)。这里只管三件事:参数互斥、
+    退出码、印给人看。**退出码 2 = 「我听懂了,但我不干」**;编一个空回执出去的话,
+    运维的人会以为改成功了 —— 而那正是这一整轮要修的病。
+    """
+    from anima_world.api import World
+
+    given: dict[str, str] = {}
+    stdin_taken = ""
+    for key in LOCATION_IMAGE_KEYS:
+        flag = "--" + key.replace("_", "-")
+        inline = getattr(args, key, None)
+        source = getattr(args, f"{key}_file", None)
+        if inline is not None and source is not None:
+            print(f"[location] {flag} 和 {flag}-file 不能一起给:"
+                  "两句话都在说这一格写成什么 —— 引擎挑哪句都是猜。",
+                  file=sys.stderr)
+            return 2
+        if source is not None:
+            if source == "-":
+                if stdin_taken:
+                    print(f"[location] {flag}-file 和 {stdin_taken}-file 都写着 "
+                          "`-`,而标准输入只有一份 —— 第二格会读到空,而空在这里"
+                          "的意思是「抹掉这一格」。一次只从标准输入读一格。",
+                          file=sys.stderr)
+                    return 2
+                stdin_taken = flag
+            value = _uri_from_file(source, cmd="location", value_flag=flag)
+            if value is None:
+                return 2
+            given[key] = value
+        elif inline is not None:
+            given[key] = inline
+
+    flags = "/".join("--" + key.replace("_", "-") for key in LOCATION_IMAGE_KEYS)
+    if args.clear and given:
+        print(f"[location] --clear 和 {flags}(-file) 不能一起给:"
+              "一句是「这两格都抹掉」,一句是「这一格写成这样」——引擎挑哪句都是猜。",
+              file=sys.stderr)
+        return 2
+    if not args.clear and not given:
+        print(f"[location] 什么都没给 —— {flags} / 它们的 -file / --clear "
+              "至少给一个。一次什么也没改的「成功」读起来和改成功了一模一样。",
+              file=sys.stderr)
+        return 2
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "location"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[location] {exc}", file=sys.stderr)
+        return 2
+    try:
+        receipt = world.set_location_image(
+            args.location, given or None,
+            clear=bool(args.clear), dry_run=bool(args.dry_run),
+        )
+    except KeyError as exc:
+        # `KeyError` 的 str() 会加一层引号 —— 拿 args[0] 才是那句人话。
+        print(f"[location] {exc.args[0]}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"[location] {exc}", file=sys.stderr)
+        return 2
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(
+            {"operation": "location set-image", "world_id": world_id, **receipt},
+            ensure_ascii=False, indent=2))
+        return 0
+
+    where = f"{receipt['name']}({receipt['location_id']})"
+    if not receipt["changed"]:
+        # **说出「没有变化」** —— 一声不吭和改成功了长得一模一样,而这条命令
+        # 最常见的用法就是运维照着单子一个一个敲过去。
+        print(f"[location] {where} 的图没有变化,一个字都没写。")
+        return 0
+
+    before, after = receipt["before"], receipt["after"]
+    verb = "要改" if receipt["dry_run"] else "改了"
+    print(f"[location] {where} 的图{verb}:")
+    for key in LOCATION_IMAGE_KEYS:
+        was, now = before.get(key), after.get(key)
+        if was == now:
+            continue
+        # **印出来的 URI 要掐短**:一条 `data:` 图到 256 KiB 是允许的,原样吐出去
+        # 会把终端刷没,而人要看的只是"从哪一条换成了哪一条"。
+        print(f"    {key:12} {clip_uri(was) if was else '(没写)'}"
+              f" → {clip_uri(now) if now else '(删掉)'}")
+    if receipt["dry_run"]:
+        print("[location] --dry-run:一个字节都没写。")
+    else:
+        print(f"[location] 看一眼:anima-world map --world-id {world_id} --json")
     return 0
 
 
@@ -5229,11 +5421,7 @@ def contract_payload() -> dict[str, Any]:
         PORTRAIT_SCHEMES,
         TAGLINE_MAX_CHARS,
     )
-    from anima_world.media import (
-        LOCATION_IMAGE_GLOSS,
-        LOCATION_IMAGE_MAX_BYTES,
-        MEDIA_SCHEMES,
-    )
+    from anima_world.media import MEDIA_SCHEMES
     from anima_world.world_seed import (
         WORLD_SEED_AGENT_KEYS,
         WORLD_SEED_AGENT_OPTIONAL_KEYS,
@@ -5307,18 +5495,25 @@ def contract_payload() -> dict[str, Any]:
             # 一次带回全部地点,所以它比立绘那一格贵得多,数也就不一样。
             "location_image_max_bytes": LOCATION_IMAGE_MAX_BYTES,
             # 读出口与写出口,和 `character_card` 那两格同一个形状、同一个理由。
-            # **契约必须说得出「没有写门」** —— 少了这两格,一份契约看上去和
-            # `character_card` 一模一样,而创作台的铁律是"问引擎,不读文档":
-            # 它会合理地推断"既然作者层写得进,那跑着的世界当然也改得动",
-            # 然后把那个按钮画出来。`None` 是一句真话,沉默是一句谎。
+            # **3.4.0 起写出口真的有了** —— 上一版这里报的是 `None`,而那是当时
+            # 唯一诚实的答案(作者层合并按地点 id 整条跳过已有地点,于是给一个
+            # 跑着的世界补图只能重建它)。消费方的铁律是"问引擎,不读文档",
+            # 所以这一格从 `null` 变成命令名,就是"那个按钮现在可以画出来了"。
+            # ⚠️ **按这一格判,别比版本号**:同一个 3.3.0 下有过七份不同的引擎。
             "location_image_read_command": "map",
-            "location_image_write_command": None,
+            "location_image_write_command": "location set-image",
             "location_image_write_gloss": (
-                "没有写门:这两格只在**作者层**落地(建世界时,或 `world import` "
-                "一份新地点)。往一个已经跑着的世界补图眼下不行 —— 作者层合并"
-                "按地点 id **整条**跳过已有地点(整行合并会把这个世界跑出来的"
-                "名字和描述倒带回创世那天),于是只有目标世界里还没有的地点才"
-                "带得进图。给一个在册的地点补图,今天只能重建那个世界"
+                "`anima-world location set-image --location <id> "
+                "[--map-image URI] [--scene-image URI] [--clear]` —— 改一个"
+                "**已经跑着的**世界里某个地点的图,形状和 `agent set-card` 逐格"
+                "相同(明示的编辑所以**覆盖**、两格分开合并、空串抹掉一格、"
+                "`--clear` 抹掉两格、逐字相同就一个字都不写、`--dry-run` 只报不写)。"
+                "地点不存在退 2 并列出这个世界里有哪些地点。**它只写这两格** —— "
+                "名字、描述、几何只有作者层一个合法的写入者。argv 装不下的长 "
+                "`data:` URI 走 `--map-image-file` / `--scene-image-file`"
+                "(`-` = 标准输入)。作者层那条路不变,仍然是「只填缺、不覆盖」:"
+                "拿一份补了图的世界文件去装一个已有的世界,已在册的地点照旧跳过"
+                "(并逐个点名),补图请走这扇门"
             ),
         },
         # 角色卡:作者写给**玩家**看的那一面。创作台照这一段决定填什么、怎么校验,
@@ -6092,6 +6287,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_memory(args)
     if args.command == "agent":
         return run_agent(args)
+    if args.command == "location":
+        return run_location(args)
     if args.command == "player":
         return run_player(args)
     if args.command == "report":

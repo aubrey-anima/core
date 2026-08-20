@@ -1135,8 +1135,9 @@ def _warn_skipped_location_media(
     logger.warning(
         "地点 %r 已经在这个世界里了,所以文件里的 %s 这次**没有装进去** —— "
         "作者层是「只填缺,不覆盖」,而覆盖粒度是整行(整行合并会把这个世界跑出来的"
-        "名字和描述倒带回创世那天)。要给一个已经在跑的世界补图,眼下只能重建它",
-        loc_id, " / ".join(missing),
+        "名字和描述倒带回创世那天)。补图走这扇门:"
+        "anima-world location set-image --location %s --%s '<URI>'",
+        loc_id, " / ".join(missing), loc_id, missing[0].replace("_", "-"),
     )
 
 
@@ -1210,9 +1211,11 @@ class RedisLocationStore(_LocationStore):
                 # 再把文件装回一个已经在跑的世界 —— 他要的是"图补上了",而这条
                 # `continue` 给他的是"世界照跑、日志干净、图一张没有"。整行合并
                 # 会把这个世界跑出来的名字和描述倒带回创世那天,所以这里仍然不改;
-                # 但**它是一次没生效的编辑,得说出来**(真正的修法是一扇
-                # `location set-image` 写门,形状对着 `agent set-card` ——
-                # 记在 REFERENCE §2.14 与 FOR-STUDIO §3.22,还没做)。
+                # 但**它是一次没生效的编辑,得说出来** —— 而这句话现在指得出解法:
+                # 写门 `anima-world location set-image` 3.4.0 起真的有了
+                # (`World.set_location_image`,REFERENCE §2.14 / §4.2.7.1)。
+                # ⚠️ **别把这条 `continue` "修"成覆盖**:两条语义相反是对的,
+                # 理由逐字写在 `World.set_location_image` 的 docstring 里。
                 _warn_skipped_location_media(loc_id, entry, rows.get(loc_id) or {})
                 continue
             self.upsert(loc_id, **{f: entry[f] for f in _LOCATION_FIELDS if f in entry})

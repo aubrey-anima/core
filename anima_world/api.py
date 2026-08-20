@@ -64,7 +64,11 @@ from anima_world.llm_client import (
     create_llm_client_from_env,
 )
 from anima_world.locations import DEFAULT_POINTS
-from anima_world.media import LOCATION_IMAGE_KEYS
+from anima_world.media import (
+    LOCATION_IMAGE_KEYS,
+    LOCATION_IMAGE_MAX_BYTES,
+    media_uri_errors,
+)
 from anima_world.narrative import MockNarrativeProvider, OpenAICompatibleNarrativeProvider
 from anima_world.redis_state import RedisPlayerPresence
 from anima_world.scheduler import MAX_TICKS_PER_SECOND, Scheduler
@@ -2148,6 +2152,151 @@ class World:
                     },
                 })
             self.scheduler.checkpoint()
+        return receipt
+
+    def set_location_image(
+        self,
+        location_id: str,
+        images: dict[str, Any] | None = None,
+        *,
+        clear: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """改**一个已经在这个世界里的地点**的那两张图。`state()` 的写那一侧。
+
+        存在的理由和 `set_card` 是同一个故事的地点版,而且这一次是**明着欠下的**:
+        作者层的语义是"只填缺,不覆盖",而合并的粒度是**整个地点行** ——
+        `LocationStore.seed_defaults(merge=True)` 按地点 id 整条跳过已有的地点
+        (整行合并会把这个世界跑出来的名字和描述倒带回创世那天)。于是拿一份补了
+        图的世界文件去编辑一个**已经跑起来的**世界,那两格一个都装不进去:作者
+        写得进、`validate world` 放行、包也导得出,**就是到不了玩家眼前**。
+        角色卡那一次的形状逐字重演(线上 20 个早就在册的角色一张卡都装不进去),
+        区别只在这一次引擎自己先说了出来(`_warn_skipped_location_media`)——
+        而一句只在服务器日志里的话不是一扇门。
+
+        **它不发事件,而 `set_card` 发 —— 这条差别是有意的,别"统一"掉。**
+        角色卡住在 `agent_join.payload.spec` 上,也就是说它的家本来就是事件日志,
+        改它只能追加一条 `persona_update`;地图不是 —— `locations` 表是它**唯一**
+        的权威(`projection.py` 为此退役了 `location_desc_update`:地图是配置,
+        不是历史)。在这里再发一条事件,等于让"这个地点的图是什么"多出一个日志
+        之外的答案,而两个答案分叉的那天没有一处会报错。
+
+        四条判断:
+
+        **一、这是一次明示的编辑,所以它覆盖。** 和作者层合并**有意相反**,理由
+        和 `set_card` 逐字相同:那一条手里捏着一份文件(缺省还是内置橱窗),拿它
+        覆盖等于把这个世界的现在倒带回创世那一刻;这一条是一个人指名道姓地说
+        "这个地方的图换成这张"。
+
+        **二、两格分开合并,给谁改谁。** 只给 `map_image` 不许把作者写了几周的
+        `scene_image` 顺手抹掉。要抹掉**某一格**就把它给成**空串**(和
+        `set_card` 的 `--portrait ''` 同一条约定);`clear=True` 是"两格都抹掉",
+        单独一格,不许和值一起给。
+
+        **三、这扇门只写这两格,别的键当场拒绝。** 和角色卡"不认识的键原样带过去"
+        **不一样**,而不一样是对的:那一格是作者写给玩家看的一张卡,创作台预告过
+        第四样(声线 / 主题色);地点行的其余部分(名字、描述、几何)只有一个合法
+        的写入者 —— 作者层。在这里开第二个,就是让"这张地图为什么变成这样"多出
+        一个答案。
+
+        **四、逐字相同就一个字都不写**(`changed: false`)。一次什么也没改的"成功"
+        读起来和改成功了一模一样,而这条命令最常见的用法是运维照着单子敲一遍。
+
+        校验走 `media.media_uri_errors` **那一份**判断(scheme + 每格 256 KiB,
+        数按读出口定),对**合并后**的值、在**写之前**跑 —— 另写一套的下场是同一
+        条 URI 在开机时和这条路上得到两个答案。坏值抛 `ValueError`(一次列全),
+        不认识的地点抛 `KeyError` **并把这个世界里有哪些地点说出来**(编一个空回执
+        出去的话,运维的人会以为改成功了);两种拒绝都**一个字都不写**。
+
+        返回 `{location_id, name, before, after, changed, cleared, dry_run}`。
+        `before` / `after` **两格永远都在**(没写的是 `None`)—— 形状和读出口
+        `state()` 的 `locations[]` 行一致,于是回执和世界能直接对上;
+        `dry_run=True` 一个字节都不写。
+        """
+        location_id = str(location_id or "").strip()
+        if not location_id:
+            raise ValueError("location_id is required")
+        if clear and images:
+            raise ValueError(
+                "--clear 和 --map-image/--scene-image 不能一起给:"
+                "一句是「这两格都抹掉」,一句是「这一格写成这样」——引擎挑哪句都是猜"
+            )
+        if not clear and not images:
+            raise ValueError(
+                "什么都没给 —— --map-image / --scene-image / --clear 至少给一个。"
+                "一次什么也没改的「成功」读起来和改成功了一模一样"
+            )
+        if images is not None and not isinstance(images, dict):
+            raise ValueError(f"images 必须是一个对象,收到 {type(images).__name__}")
+        unknown = sorted(set(images or {}) - set(LOCATION_IMAGE_KEYS))
+        if unknown:
+            raise ValueError(
+                f"这扇门只写地点的两格图({' / '.join(LOCATION_IMAGE_KEYS)}),"
+                f"不认识:{'、'.join(unknown)}。地点的名字、描述、几何只有一个合法的"
+                "写入者 —— 作者层;在这里开第二个,「这张地图为什么变成这样」就多出"
+                "一个答案"
+            )
+
+        store = getattr(self.scheduler, "location_store", None)
+        if store is None:
+            raise RuntimeError("这个世界没有地图表 —— 没有地点可以配图")
+
+        def _clean(value: Any) -> Any:
+            """空串 = 抹掉这一格(和 `--portrait ''` 同一条约定)。
+
+            非字符串**原样放过去** —— 由那道闸去报"必须是一个 URI 字符串",
+            在这里先转成 `str()` 的话,一个 `None` 会变成字符串 `'None'`。
+            """
+            if isinstance(value, str):
+                return value.strip() or None
+            return value
+
+        with self._guard():
+            row = store.get(location_id)
+            if row is None:
+                # **把这个世界里有哪些地点说出来。** 抄错一个 id 最常见的原因是
+                # 名字记岔了,而一句「没有这个地点」不足以让人自己找回来。
+                ids = [str(r.get("id") or "") for r in store.all()]
+                known = "、".join(ids[:20]) or "(一个地点都没有)"
+                more = "…" if len(ids) > 20 else ""
+                raise KeyError(
+                    f"这个世界里没有叫 {location_id!r} 的地点。有的是:{known}{more}"
+                )
+
+            before = {key: _clean(row.get(key)) for key in LOCATION_IMAGE_KEYS}
+            if clear:
+                after: dict[str, Any] = {key: None for key in LOCATION_IMAGE_KEYS}
+            else:
+                after = dict(before)
+                for key, value in (images or {}).items():
+                    after[key] = _clean(value)
+                problems: list[str] = []
+                for key in LOCATION_IMAGE_KEYS:
+                    problems.extend(media_uri_errors(
+                        after[key], label=f"地点 {location_id!r}", field=key,
+                        max_bytes=LOCATION_IMAGE_MAX_BYTES,
+                    ))
+                if problems:
+                    raise ValueError("\n".join(problems))
+
+            receipt: dict[str, Any] = {
+                "location_id": location_id,
+                "name": str(row.get("name") or "").strip() or location_id,
+                "before": dict(before),
+                "after": dict(after),
+                "changed": after != before,
+                "cleared": bool(clear),
+                "dry_run": bool(dry_run),
+            }
+            if not receipt["changed"] or dry_run:
+                return receipt
+
+            # **只写变了的那几格。** 整行写回去等于把这一行的其余部分(名字、
+            # 描述、几何)也当成这次编辑的内容 —— 而它们此刻可能是别的进程刚写的。
+            store.upsert(location_id, **{
+                key: after[key] for key in LOCATION_IMAGE_KEYS
+                if after[key] != before[key]
+            })
         return receipt
 
     def world_time(self) -> Any:

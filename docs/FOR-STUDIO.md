@@ -14,9 +14,9 @@
 
 | | |
 |---|---|
-| 发出方 | anima-world(世界引擎),**3.3.0** |
+| 发出方 | anima-world(世界引擎),**3.4.0** |
 | 面向 | anima-studio(创作工作台) |
-| 日期 | 2026-07-31 起持续追加,最后一次 2026-08-19(定版 3.3.0) |
+| 日期 | 2026-07-31 起持续追加,最后一次 2026-08-19(定版 3.4.0,见 §3.23) |
 | 用途 | **让工作台知道现在够得着什么** —— 然后照着提 issue |
 
 这份文档回答一个问题:**站在工作台那一侧,这个引擎现在能做什么。**
@@ -1755,22 +1755,22 @@ URI 的图(1048576 × 4/3 + 22 = **1398126** 字节),而引擎当场拒收。**�
 而地点的图骑在 `state()` 上 —— 那道门被网站**每几秒轮询一次**,且**一次带回全部地点**。
 CLAUDE.md 那条「进得了提示词的必须有界」在这里的对偶是**进得了读出口的必须有界**。
 
-⚠️ **一扇还欠着的写门**(现在就说,免得你们撞上去):作者层是"只填缺不覆盖",而合并装载
-是**按地点 id 整条跳过**已有地点 —— 所以拿一份带图的文件去编辑一个**已经跑起来的**世界,
-图**装不进去**。真正的修法是补一扇 `location set-image`(形状对着 `agent set-card`),**下一单**。
+⚠️ **那扇当时欠着的写门,3.4.0 已经补上了 —— 见 §3.23。** 作者层是"只填缺不覆盖",
+而合并装载是**按地点 id 整条跳过**已有地点,所以拿一份带图的文件去编辑一个**已经跑起来的**
+世界,图**装不进去**(这条**没变**,而且不会变:整行合并会把那个世界跑出来的名字和描述
+倒带回创世那天)。**给一个已经在册的地点补图,请走 `anima-world location set-image`。**
 **给新世界出包不受影响** —— 那条路是创世,图正常落地。
 
-这一轮把这件事做成了**三处都问得出来**,不用你们读这份文档才知道:
+那一轮把这件事做成了**三处都问得出来**,3.4.0 起这三处的结尾都改成指向那扇门:
 
 | 问谁 | 它怎么答 |
 |---|---|
-| `contract --json` | `seed.location_image_read_command == "map"`,而 **`seed.location_image_write_command` 是 `null`**,外加一句 `location_image_write_gloss` 说明为什么。对照 `character_card.write_command == "agent set-card"` —— **两段形状一样,答案不一样** |
-| `validate world --edit` / `world check --edit` | 文件里真带了图时**逐个点名**"目标世界里已有的那几个地点,这几格装不进去"。从前这句话只在真开机时进服务器日志,而你们的顺序是先校验、绿了才装 —— 拿到绿灯、装完、图没了 |
-| 真开机 | 引擎照旧逐个地点 `logger.warning` |
+| `contract --json` | `seed.location_image_read_command == "map"`,而 **`seed.location_image_write_command` 从 `null` 变成了 `"location set-image"`**,外加一句 `location_image_write_gloss`。对照 `character_card.write_command == "agent set-card"` —— **两段形状一样,各答各的**。⚠️ **按这一格判,别比版本号**:同一个 `3.3.0` 下有过两套引擎 |
+| `validate world --edit` / `world check --edit` | 文件里真带了图时**逐个点名**"目标世界里已有的那几个地点,这几格装不进去",并说补图走哪扇门。从前这句话只在真开机时进服务器日志,而你们的顺序是先校验、绿了才装 —— 拿到绿灯、装完、图没了 |
+| 真开机 | 引擎照旧逐个地点 `logger.warning`,同样点名那扇门 |
 
-**`write_command: null` 是一句真话,沉默不是。** 少了这一格,一份契约看上去和 `character_card`
-那段一模一样,而最合理的推断是"作者层写得进,跑着的世界当然也改得动" —— 然后那个按钮被画
-出来,点下去改不动任何东西,零报错。
+**这一格必须跟着门走。** 一个还报着 `null` 的契约会让你们继续把"给在跑的世界补图"
+那个按钮关着,而库里明明有了 —— **库里有而对方看不见,等于没有**。
 
 ### 立绘走 CLI 有一道**操作系统**的坎,以及新开的那扇门
 
@@ -1902,3 +1902,131 @@ anima-world map --world-id demo --json | jq '.places[] | {id, map_image, scene_i
 (没写的是 `None`),而 `map_data()` / `map --json` 的 `places[]` **写了才出现**
 (和 `w`/`h` 同一个安排)。对着 `map_data` 写 `row["map_image"]` 会 `KeyError` ——
 用 `row.get(...)`。
+
+---
+
+## 3.23 补上:上面那两格图,**已经跑着的世界也改得动了**(`anima-world location set-image`,本轮)
+
+§3.22 交付时我在文档里明着记了一笔欠账:「真正的修法是补一扇 `location set-image`,
+**下一单**」。这就是那一单。
+
+### 它修的病和 §3.20 逐字相同
+
+作者层的语义是「只填缺、不覆盖」,而**覆盖的粒度是整个地点行** —— 一个地点只要已经
+在世界里,拿一份补了图的 `.cyberworld` 装回去,那两格一个都装不进去。而作者写得进、
+`validate world` 放行、包也导得出、世界照跑、日志干净:**就是到不了玩家眼前。**
+这是角色卡那一次(线上 20 个早就在册的角色一张卡都装不进去)的同一个形状。
+
+3.3.0 的处置是"不让它无声"(逐个地点 `logger.warning`,离线两扇门也说)。
+**但一句警告不是一扇门**:退出码仍然是 `0`,事没做,而任何按退出码判断的脚本
+都会把它记成成功。
+
+### 出口
+
+```bash
+# 一条 https 外链(你们的图床给的那种)
+anima-world location set-image --world-id w --location wharf \
+    --map-image   https://animametaverse.com/media/sha256/aa….webp \
+    --scene-image https://animametaverse.com/media/sha256/bb….webp
+
+# 先看一眼,不写
+anima-world location set-image --world-id w --location wharf --map-image https://… --dry-run
+
+# 长的 data: URI 走文件 / 标准输入(理由见下面第 ③ 条)
+anima-world location set-image --world-id w --location wharf --scene-image-file ./wharf.uri
+printf '%s' "$uri" | anima-world location set-image --world-id w --location wharf --map-image-file -
+
+# 抹掉一格 / 抹掉两格
+anima-world location set-image --world-id w --location wharf --map-image ''
+anima-world location set-image --world-id w --location wharf --clear
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--location` | **必填**,地点 id。**一次只改一个地点** |
+| `--map-image` / `--scene-image` | 那一格的 URI(`https` / `http` / `data`)。**空串 = 抹掉这一格** |
+| `--map-image-file` / `--scene-image-file` | 从文件里读那条 URI(`-` = 标准输入)。和同名 flag **不许一起给**;**两个都写 `-` 也不许** |
+| `--clear` | 把**两格图都**抹掉。和上面几个**不许一起给** |
+| `--dry-run` | 只报要改成什么,一个字节都不写 |
+| `--json` | 机器可读回执 |
+
+### 五条要知道的(判断本身,不是用法)
+
+① **这是一次明示的编辑,所以它覆盖** —— 和作者层合并的「只填缺不覆盖」**有意相反**。
+两条语义相反是对的:那一条手里捏着一份**文件**,拿它覆盖等于把这个世界跑出来的现在
+倒带回创世那一刻;这一条是一个人指名道姓说"这个地方的图换成这张"。而**换图正是日常
+用法** —— 图床是内容寻址的,换一张图就是换一条 URL。
+
+② **两格分开合并。** 只给 `--map-image` 不许把作者写了几周的 `scene_image` 顺手抹掉;
+要抹掉**某一格**给它空串,要**两格都抹**用 `--clear`。这两件事是两个开关,不是一个。
+
+③ ⚠️ **`--map-image` / `--scene-image` 到约 128 KiB 就塞不进去了,而炸的不是引擎。**
+Linux 的 `MAX_ARG_STRLEN` 把单个 argv 元素封在 128 KiB,再往上 `execve` 直接 `E2BIG`,
+壳报「参数列表过长」给 **rc 126** —— 引擎连被叫起来的机会都没有,没有回执、没有退出码 2、
+没有一句能翻译给用户的话。而契约公布的上限是**每格 256 KiB**,正好是那道坎的两倍。
+两扇 `--*-file` 补的就是这一段,和 §3.22 那条 `--portrait-file` 逐字同源。
+**文件里装的是那条 URI 文本,不是图片字节**(嗅 MIME、转 base64 仍然是你们的活)。
+**两格都写 `-` 当场退 2**:标准输入只有一份,第二格会读到空,而空在这条路上的意思是
+"抹掉这一格" —— 一次手滑会安静地删掉线上那张图,而回执上写着"改了"。
+
+④ **它只写这两格,别的键当场拒绝。** 地点的名字、描述、几何**只有作者层一个合法的
+写入者**;在这里开第二个,"这张地图为什么变成这样"就多出一个日志之外的答案。
+和角色卡那扇门"不认识的键原样带过去"**有意不同**(那一格是给你们预告的第四样
+留的位置,这一格不是)。
+
+⑤ **坏 URI 由原来那道闸拒**(`media.media_uri_errors`,scheme + 每格 256 KiB),
+不另判一次 —— 两份判断迟早对同一条 URI 给出两个答案。
+
+### 回执长什么样(`--json`)
+
+```json
+{
+  "operation": "location set-image",
+  "world_id": "w",
+  "location_id": "wharf",
+  "name": "码头",
+  "before": {"map_image": null, "scene_image": null},
+  "after":  {"map_image": "https://…/aa.webp", "scene_image": null},
+  "changed": true,
+  "cleared": false,
+  "dry_run": false
+}
+```
+
+`before` / `after` **两格永远都在**(没写的是 `null`)—— 形状和读出口 `state()` 的
+`locations[]` 行一致,于是回执能和世界直接对上。
+**`changed: false` 是一个正当结果**(写的值和现在逐字相同,一个字都没动),退出码仍是 0。
+
+### 退出码
+
+| 码 | 意思 |
+|---|---|
+| `0` | 写了,或者**本来就一样**(`changed: false`) |
+| `2` | **我听懂了,但我不干**:地点不存在(会把这个世界里有哪些地点列出来)、`--clear` 和值同时给、一个 flag 都没给、同一格两个 flag 同时给、两格抢标准输入、文件读不了 / 是空的 / 中间断了行、坏 URI、world_id 不存在 |
+
+**每一种拒绝都一个字都不写**,而且 `--json` 时 stdout 一个字节都不出 ——
+编一个空回执出去的话,拿它做判断的人会以为改成功了。
+
+### 契约怎么问
+
+```bash
+anima-world contract --json | jq '.seed.location_image_write_command'
+# "location set-image"   ← 3.4.0 起;3.3.0 及更早是 null(那时它是一句真话)
+```
+
+**按这一格决定那个按钮画不画,别比版本号。** 理由是硬的:同一个 `3.3.0` 下真的有过
+两套引擎(舰队跑的那份连 `anima_world.media` 模块都没有,而它自报的版本号和带图那份
+逐字相同)。`null` 不是"引擎坏了",是"这一版没有这扇门" —— 那时就别画那个按钮。
+
+### 定版 3.4.0
+
+`__version__` = **3.4.0**,`demo.cyberworld` 的 `engine_min` / `source_engine_version`
+跟着到 3.4.0。**升号的唯一目的是终结"同一个号下两套引擎"**:3.3.0 定版之后工作树又
+走完了一整轮(地点两格图、图的闸、`world check`、`--portrait-file`、五条 🔴),
+而它们全都顶着 `3.3.0` 这个号 —— 于是能力探测**问不出**两者的差别,而这件事已经在
+生产上咬过人。版本号是你们唯一读得到的那句自述,让它对两套不同的引擎说同一句话,
+和一把把上升报成下降的尺子是同一类东西。
+
+⚠️ **这一版没有打 tag、没有发 PyPI**(那条路的账见 CHANGELOG 3.3.0 那一节,
+tag 留给仓库主人扣扳机)。你们拿到它的方式仍然是**从工作树 / 镜像装 venv**,
+而不是 `pip install anima-world==3.4.0`。

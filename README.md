@@ -353,7 +353,9 @@ anima-world player         # 玩家那一侧:options 点得动什么;forget 告�
 anima-world drift          # 她还是不是她:人设漂移与迎合度(纯计数;漂了退 1,可进 CI)
 anima-world engagement     # 他跟这个世界处得有多深(依赖预警要的那笔账)
 anima-world presence       # 谁在谁跟前(开同处一地那道闸之前的体检)
-anima-world memory / agent # 老世界的数据修补(记忆 tick、被拆碎的 goals)
+anima-world agent          # 改一个跑着的世界里某个人的卡(set-card);老 goals 的修补
+anima-world location       # 改一个跑着的世界里某个地点的两格图(set-image)
+anima-world memory         # 老世界的数据修补(盖了墙钟的记忆 tick)
 ```
 
 ## 换一个模型

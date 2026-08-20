@@ -2657,21 +2657,25 @@ secret。**世界里一个 secret 都没有**:2.0 起往世界写一个非空的
 两边统一成一种形状会破坏其中一条约定,所以留着,但**必须写出来** —— 一个只在"这个
 世界恰好没配图"时才炸的宿主,是这里最难查的那种坏法。
 
-⚠️ **写口还欠着。** 作者层合并是"只填缺、不覆盖",而覆盖粒度是**整行** —— 一个地点
-只要已经在世界里,拿一份补了图的世界文件装回去**不生效**(整行合并会把这个世界跑
-出来的名字和描述倒带回创世那天)。这是角色卡那一课的同一个形状,眼下的处置是
-**不许它安静**,而且三处都问得出来:
+**写口是 [`world.set_location_image()`](#读世界) 与 `anima-world location set-image`
+(§4.2.7.1,3.4.0 起)。** 它补的是这一层**明着欠下的**一节:作者层合并是"只填缺、
+不覆盖",而覆盖粒度是**整行** —— 一个地点只要已经在世界里,拿一份补了图的世界文件
+装回去**不生效**(整行合并会把这个世界跑出来的名字和描述倒带回创世那天)。
+这是角色卡那一课的同一个形状,而 3.3.0 的处置只做到了"不许它安静"——
+**而一句警告不是一扇门**:退出码仍然是 0,事没做,下游脚本照样当成功。
+
+作者层那条路**一个字没变**(它仍然只填缺、不覆盖),所以那三处话照旧在说,
+只是结尾从"眼下只能重建那个世界"改成指向这扇门:
 
 - `contract --json` 的 `seed.location_image_read_command`(`"map"`)与
-  **`seed.location_image_write_command`(`null`)**,外加 `location_image_write_gloss`
-  一句人话。对照 `character_card.write_command`(`"agent set-card"`)—— 两段形状一样、
-  答案不一样。**"没有写门"是一个答案,沉默不是**:少了这一格,消费方最合理的推断是
-  "作者层写得进,跑着的世界当然也改得动",然后那个按钮就被画出来了。
+  **`seed.location_image_write_command`(`"location set-image"`)**,外加
+  `location_image_write_gloss` 一句人话。对照 `character_card.write_command`
+  (`"agent set-card"`)—— 两段形状一样,各自答各自的。⚠️ **消费方按这一格判,
+  别比版本号**:同一个 `3.3.0` 下有过两套引擎(见 CHANGELOG 3.4.0 那一节)。
 - `validate world --edit` 与 `world check --edit`:文件里真带了图时**逐个点名**哪几个
-  地点的图装不进去。从前这句话只在真开机时进日志,而作者的顺序是先校验、绿了才装。
-- 真开机:合并跳过一个"文件里有图、库里没有"的地点时 `logger.warning`。
-
-一个像 `agent set-card` 那样的写口(`location set-image`)是下一步,还没定。
+  地点的图装不进去,并说补图该走哪扇门。从前这句话只在真开机时进日志,
+  而作者的顺序是先校验、绿了才装。
+- 真开机:合并跳过一个"文件里有图、库里没有"的地点时 `logger.warning`,同样点名。
 
 ---
 
@@ -2711,6 +2715,7 @@ from anima_world.api import World
 | `world.state()` | 完整快照:agents(位置/状态/活动/在途)、world_time、locations(地图行:`id`/`name`/`description`/`kind`/`parent`/`x`/`y`/`w`/`h` + `map_image`/`scene_image`,后两格没写就是 `None`,见 §2.14)、relations、narrative_log、recent_events、players、simulation、runtime(db/事件/LLM 诊断,`runtime.llm.degraded_reason` 常驻)。**`players` 与 agents 那一半同形**:每行带 `location` / `in_transit`,在路上时还带 `transit: {from, to, eta_minutes}`(与 agents 的 `activity.transit` 出自同一个换算)。⚠️ 这一格从前只有 agents 有,于是一个正在赶路的玩家在快照里报的是他的**出发地**且毫无标记 —— 界面把他画在原处,而同一秒 `player_options` 正拿「你在路上」把他能干的事全挡了。位置**不抹成空串**是有意的:调用方要分得开"他在路上"和"世界不知道他在哪"。这扇只读门顺带**先把到站的人放下**(暂停的世界不会自愈) |
 | `world.roster()` | **这个世界里有谁**(§2.13):`{"agents": [{agent_id, name, tagline, portrait, billing, location, location_name, state, away, card}]}`。前**九栏是冻结的线格式**(运维台 `world_server.py` 的 `_ROSTER_FIELDS` 照它写),第十栏 `card` 是作者那张卡的原样(没写 = `None`)——引擎**不理解**这几格,只原样带过去,所以创作台预告的第四样(声线/主题色/CV)不会在这道门上被悄悄扔掉。三条:`billing` 缺省 **`supporting`** 不是 `lead`(把主角说成配角只是排版难看,把还没出场的人说成主角是**剧透**);**`hidden` 的人照出**(引擎是"有谁"的权威,筛掉是宿主那一层的事——泄露的边界在进程上,不在浏览器里);**顺序跟世界自己的名册走**(事件日志序),不按字母重排。名字/地名取不到就**原样回落 id**,不编。位置口径与 `state()` **共用同一个函数**(`identity_rows_locked`):在场读黑板的此刻,不在场读投影。CLI 出口 `anima-world roster` |
 | `world.set_card(agent_id, card=None, *, clear=False, dry_run=False)` | **改一个已经在这个世界里的人的角色卡**(§2.13)—— `roster()` 的写那一侧。存在的理由是那一层的三个写点**全在 `agent_join` 上**,而已经在册的角色不会再 join:拿一份世界文件补卡只对 `newcomers` 生效,于是整层特性对**唯一一个有真人的世界等于没做**(线上 20 个角色一张卡都装不进去,而作者写得进、校验放行、包也导得出——照跑但给错东西)。四条判断:**① 这是一次明示的编辑,所以它覆盖**——和作者层合并的"只填缺不覆盖"**有意相反**(那一条手里捏着一份文件,覆盖等于把这个世界的现在倒带回创世;这一条是一个人指名道姓说"这个人是主角",只填缺的话一个已经写着 `supporting` 的角色**永远**改不成 `lead`)。⚠️ 两条语义相反是对的,**别把其中一条"修"成另一条**。**② 部分更新合并进现有的卡**,不是替换整张卡(只给 `tagline` 不许把作者写了几周的 `billing` 和立绘顺手抹掉);要抹掉**某一格**把它给成空串。**③ `clear=True` 是单独一格**,不是"把 billing 设回 `supporting`"——那是一句声明,不是收回声明;给了它就不许再给值。**④ 合并后逐字相同就一个字都不写**(`changed: false`)——事件溯源里追加一条毫无差别的 `persona_update` 只是给历史添噪音。校验用 `character_card` **那一份**判断,对**合并后**的卡、在**写之前**跑;坏卡抛 `ValueError`(一次列全),不认识的人抛 `KeyError` **并把这个世界里有谁说出来**(编一个空结果出去 = 运维以为改成功了),两种拒绝都一个字都不写。走 `persona_update` 那条现成的路,**不就地改历史**;**卡不上黑板**(`tagline` 是广告词,上了黑板她会照着念)。返回 `{agent_id, name, before, after, changed, cleared, dry_run, warnings}`;`dry_run=True` 一个字节都不写。CLI:`anima-world agent set-card --agent X [--billing] [--tagline] [--portrait] [--clear] [--dry-run] [--json]`(§4.2.7) |
+| `world.set_location_image(location_id, images=None, *, clear=False, dry_run=False)` | **改一个已经在这个世界里的地点的那两张图**(§2.14)—— `state()` 的 `locations[]` 那一侧的写门。存在的理由是作者层合并的粒度是**整个地点行**:一个地点只要已经在世界里,拿一份补了图的世界文件装回去那两格一个都装不进去,而作者写得进、`validate world` 放行、包也导得出——**角色卡那一次的形状逐字重演**。`images` 只收 `map_image` / `scene_image`,**别的键当场 `ValueError`**(和角色卡"不认识的键原样带过去"有意不同:地点行的名字、描述、几何只有作者层一个合法写入者,在这里开第二个,"这张地图为什么变成这样"就多出一个日志之外的答案)。四条判断:**① 这是明示的编辑,所以覆盖**(和作者层合并有意相反);**② 两格分开合并**——只给 `map_image` 不许把 `scene_image` 顺手抹掉,要抹掉**某一格**把它给成空串;**③ `clear=True` 抹掉两格**,单独一格,不许和值一起给;**④ 逐字相同就一个字都不写**。校验走 `media.media_uri_errors` **那一份**(scheme + 每格 256 KiB),对**合并后**的值、在**写之前**跑;坏值抛 `ValueError`(一次列全),不认识的地点抛 `KeyError` **并把这个世界里有哪些地点说出来**,两种拒绝都一个字都不写。⚠️ **它不发事件,而 `set_card` 发** —— 角色卡的家本来就是事件日志,而 `locations` 表是地图唯一的权威(`projection.py` 为此退役了 `location_desc_update`:地图是配置,不是历史);在这里再发一条,"这个地点的图是什么"就有了两个答案。返回 `{location_id, name, before, after, changed, cleared, dry_run}`,`before`/`after` **两格永远都在**(没写的是 `None`,形状和 `state()` 的行一致);`dry_run=True` 一个字节都不写。CLI:`anima-world location set-image --location X [--map-image] [--scene-image] [--map-image-file] [--scene-image-file] [--clear] [--dry-run] [--json]`(§4.2.7.1) |
 | `world.world_time()` | 世界日历(day/hour/minute/minute_of_day) |
 | `world.memories(agent_id)` | 某角色的全部记忆行(按存储序) |
 | `world.retrieve_memories(agent_id, query=None, k=5)` | 三因子检索(时近×重要×相关),返回最相关的 k 条。**命中即加固**遗忘曲线 —— 这个「读」接口会写库,是设计不是副作用。底层 `MemoryStore.retrieve(..., reinforce=False)` 可走纯读路径(调试 / 只读视图) |
@@ -3344,6 +3349,58 @@ anima-world agent set-card --world-id w --agent 夏 --clear          # 收回这
 
 ⚠️ **写命令同样不许创建世界**:抄错一个 `--world-id` 会当场创世,而回执看上去完全
 正常(只读命令那条纪律在这里同样生效,理由更硬 —— 这条会写)。
+
+### 4.2.7.1 anima-world location set-image —— 给一个**跑着的世界**里的地点换图
+
+```bash
+anima-world location set-image --world-id w --location wharf \
+    --map-image https://animametaverse.com/media/sha256/aa….webp
+anima-world location set-image --world-id w --location wharf \
+    --scene-image https://animametaverse.com/media/sha256/bb….webp --dry-run
+anima-world location set-image --world-id w --location wharf --scene-image-file ./wharf.uri
+printf '%s' "$uri" | anima-world location set-image --world-id w --location wharf \
+    --map-image-file -
+anima-world location set-image --world-id w --location wharf --map-image ''   # 抹掉这一格
+anima-world location set-image --world-id w --location wharf --clear          # 两格都抹掉
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--location` | **必填** | 改哪儿(地点 id)。**一次只改一个地点** |
+| `--map-image` | 不动 | 地图上那一格的缩略图 URI(`https` / `http` / `data`)。**空串 = 抹掉这一格** |
+| `--scene-image` | 不动 | 走进去铺开的那张大图 URI。**空串 = 抹掉这一格** |
+| `--map-image-file` / `--scene-image-file` | 不动 | 从文件里读那条 URI(`-` = 标准输入)。和同名的那个 flag **不许一起给**;**两个都写 `-` 也不许** |
+| `--clear` | 否 | 把**两格图都**抹掉(名字、描述、几何一个字不动)。和上面几个**不许一起给** |
+| `--dry-run` | 否 | 只报要改成什么,一个字节都不写 |
+| `--json` | - | 机器可读:`{"operation":"location set-image","world_id":…, location_id, name, before, after, changed, cleared, dry_run}` |
+
+`World.set_location_image()`(§3)的 CLI 出口。判断全在那份 docstring 里(**覆盖**、
+两格分开合并、空串抹一格、`--clear` 抹两格、只写这两格、幂等),这里只补命令行上的事:
+
+- **一次只改一个地点。** 生产上这条路的入口是运维台的一次性容器,argv 由具名参数
+  白名单生成;而 argv 是数组传递,URL 里的标点直接当一个元素传,不过 shell。
+- ⚠️ **`--map-image` / `--scene-image` 到 128 KiB 就没了,而炸的不是引擎。** 和
+  `--portrait` 逐字相同的坎(`MAX_ARG_STRLEN`,`execve` 给 `E2BIG`,壳报 rc 126),
+  而这里的距离更远:契约公布的上限是**每格 256 KiB**,正好是那道坎的两倍。
+  两扇 `--*-file` 补的就是这一段。**文件里装的是那条 URI 文本,不是图片字节。**
+  两头空白掐掉;空文件退 2(一次失败的写会安静地删掉线上那张图,所以不读成
+  "抹掉这一格" —— 要抹请明写 `--map-image ''`);URI 中间还剩空白也退 2。
+- ⚠️ **两格都写 `--*-file -` 当场退 2。** 标准输入只有一份 —— 第二格会读到空,
+  而空在这条路上的意思是"抹掉这一格":一次手滑会安静地删掉线上那张图,
+  而回执上写着"改了"。
+- **退出码 2 = "我听懂了,但我不干"**(运维台把它翻译成 409):不认识的地点、
+  `--clear` 和值同时给、一个 flag 都没给、同一格的两个 flag 同时给、两格抢标准输入、
+  文件读不了 / 是空的 / 中间断了行、坏 URI(**由 `media.media_uri_errors` 那道闸拦**,
+  不另判一次)、不存在的 world_id。**每一种都一个字都不写**,`--json` 时 stdout
+  一个字节都不出。不认识的地点会**把这个世界里有哪些地点列出来**。
+- **"没有变化"要说出来**(退出码仍是 0)。这条命令最常见的用法就是运维照着一张
+  单子一个一个敲过去,敲重了得看得出来。
+
+⚠️ **它只写这两格。** 地点的名字、描述、几何只有作者层一个合法的写入者;
+要改那些,走一份 `.cyberworld` 的作者层(那条路的语义仍然是"只填缺、不覆盖",
+所以已在册的地点整条跳过 —— 这正是这扇门存在的理由)。
+
+⚠️ **写命令同样不许创建世界**:抄错一个 `--world-id` 会当场创世,而回执看上去完全正常。
 
 ### 4.3 anima-world run —— 无引导的前台宿主
 

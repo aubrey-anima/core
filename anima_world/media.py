@@ -120,7 +120,7 @@ def media_uri_errors(value: Any, *, label: str, field: str, max_bytes: int) -> l
     scheme = urlparse(text).scheme.lower()
     if scheme not in MEDIA_SCHEMES:
         errors.append(
-            f"{label}: {field} {_clip(text)!r} 不是绝对 URI"
+            f"{label}: {field} {clip_uri(text)!r} 不是绝对 URI"
             f"(只认 {', '.join(sorted(MEDIA_SCHEMES))}:)。"
             "包是分发物 —— 相对路径发出去就是一张断的图,而且不报错;"
             "要让包自足就写 data: URI"
@@ -136,8 +136,13 @@ def media_uri_errors(value: Any, *, label: str, field: str, max_bytes: int) -> l
     return errors
 
 
-def _clip(text: str, limit: int = 120) -> str:
-    """报错里不许原样回吐一条 300 KB 的 `data:` URI —— 那会把终端刷没。"""
+def clip_uri(text: str, limit: int = 120) -> str:
+    """报错里不许原样回吐一条 300 KB 的 `data:` URI —— 那会把终端刷没。
+
+    **公开的**,因为报错不是唯一会把一条 URI 印给人看的地方:`location set-image`
+    的人类回执也印"从哪一条改成哪一条"。两处各写一份 `text[:120]` 的话,下一次
+    调这个数只会调其中一处 —— 而另一处不报错,它只是继续刷屏。
+    """
     return text if len(text) <= limit else text[:limit] + "…"
 
 
