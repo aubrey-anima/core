@@ -147,6 +147,32 @@ def _where_unknown_line(name: str, here_name: str) -> str:
     空格。**抄两遍来维持"逐字相同",正是塌掉的那个机制**;句子收在这里之后,
     "两扇门说同一句话"这件事由调用点保证,不再由谁读没读全那段注释保证。
 
+    ⚠️ **收敛到这儿的只有一支,别读成"两扇门整体统一了"**(第七轮 2026-08-20
+    认账;上面那段话写下来之后,两个验收员各自独立读成了后者)。共用的**只有
+    「世界这会儿不知道你在哪」这一支**,也就是他没位置那一种。另外两种情形两扇门
+    仍是各写各的,**而且其中一句说的是她的出发地**:
+
+    | 情形 | `_invite_absence`(他按「好」那扇) | `_colocation_error`(他动手那扇) |
+    |---|---|---|
+    | 她在途、他在别处 | 「苏晚夏这会儿在路上,还没落脚 —— 不是你不在」 | 「你在后院,苏晚夏在咖啡店」← **咖啡店是她的出发地** |
+    | 世界不知道**她**在哪 | 「世界这会儿不知道苏晚夏在哪 —— 不是你没到场」 | 「苏晚夏这会儿在路上,不在任何地方」 |
+
+    **两扇门在这两种情形上说的话恰好对调了。** 病根在 `_colocation_error` 那边:
+    它**从不问 `scheduler._transit`**,只按 `here == where` 猜她在不在赶路。
+    敲得动的判据(第七轮当场敲过):
+
+        awk '/^    def _colocation_error/,/^    def intend/' anima_world/api.py | grep -c _transit
+
+    今天答 `0`。行首那两个 `^    ` 是承重的:去掉它,这段 docstring 自己就成了
+    awk 的起点,判据当场自答 `1`(第七轮真敲出来过)。⚠️ 它**宁可误报也不漏报**:
+    哪天答出非 0,先看命中落在代码里还是落在一段讲这件事的注释里 ——
+    所以那个函数的 docstring 里有意一次都没写这个名字。
+    **这不是第六轮引入的** —— `git diff fdd2408 26a204c -- anima_world/api.py`
+    里那两支的分支条件逐位相同,第六轮改的只是地名印不印成人话;
+    **但也正因为改成了人话,那句假话更像真的了**。
+    修法(改去问 `_colocation_gate` 那四个枚举,别自己按 `here` 猜)**有意留在
+    定版之后**,已进看板 —— 定版前动一条判断逻辑,换来的是没人复验过的新分支。
+
     `here_name` 收的是**过了 `Scheduler.place_name()` 的人话地名**,不是 id ——
     拼给人看的句子里出现地点变量,先问一句「过 `place_name()` 了吗」。
     """
@@ -5430,7 +5456,12 @@ class World:
     def _colocation_error(self, verb: str, agent_id: str, player_id: str) -> str:
         """这个能力要不要玩家真的在她跟前 —— 办不到就返回那句回执,办得到是空串。
 
-        `act()` 和 `intend()` 共用这一句。**回执要说得出是三种里的哪一种**:
+        **只有 `act()` 走这一句**(⚠️ 这里从前写着「`act()` 和 `intend()` 共用」,
+        第七轮 2026-08-20 自查逮到:`git grep -n '_colocation_error(' -- anima_world/`
+        只答得出**一处调用**。`intend()` 那半边是另一件事、另一句话 —— 它在排队时
+        就把这种动词整个挡回去(「排不进打算」),而且是**抛 `ValueError`,不是回执**。
+        把两条路写成一条,读的人会去 `intend()` 里找一句根本不存在的话)。
+        **回执要说得出是三种里的哪一种**:
 
         | 原因 | 玩家该干什么 |
         |---|---|
@@ -5440,6 +5471,19 @@ class World:
 
         合成一句"你不在她跟前"的话,第二种会看起来像是玩家自己站错了地方,
         而他做什么都改不了 —— 那是这个仓库最怕的那种"技术上没错、读起来是谎"。
+
+        ⚠️ **第三行是猜出来的,不是问出来的**(第七轮 2026-08-20 认账,**有意没修**)。
+        这一支的条件是 `not here or here == where`,而这个函数从头到尾**没有一处去问
+        她在不在赶路** —— 隔壁 `_colocation_gate()` 第一句问的就是那个,这里第一句问的
+        是有没有 `player_id`。于是它**猜错的时候会说出世界支持不了的话**:她在
+        「咖啡店 → 工作室」的路上而他在别处时,走的是最后那一支,印出来是
+        「你在后院,苏晚夏在咖啡店」—— 咖啡店是她的**出发地**
+        (`agent_location()` 对在途的人仍报着出发前那个地名,`_colocation_gate` 的
+        docstring 里写着同一句)。**他在别处时这句话读起来完全正常,所以没人逮到。**
+        逐支的对照表、敲得动的判据、以及"这不是第六轮引入的"那笔账,写在
+        `_where_unknown_line()` 的 docstring 里 —— 那是两扇门唯一真的合流的地方,
+        账记在合流点上才不会只有一半人读到。修法(改去问 `_colocation_gate` 那四个
+        枚举)**有意留到定版之后**,已进看板。
 
         ⚠️ **第二行从前把原因写死成「宿主没调过 `player_move`」**(3.6.0 第五轮
         改掉,2026-08-20):那一支至少有三种来路 —— 他 `player_leave` 过、在场记录
@@ -5456,6 +5500,18 @@ class World:
         回来了,因为改这个函数的人没读全。它不报错、测试也不红,只是出戏,所以专挑
         「改了这个函数但没读全」的轮次复发。**长期判据:凡是拼给玩家/角色看的句子
         里出现地点变量,一律问一句「过 `scheduler.place_name()` 了吗」。**
+
+        ⚠️ **这四句里不出现动词名**(第七轮 2026-08-20 改)。上一轮把 `{verb!r}` 换成
+        「」是对的一半 —— 记号对了,而框里那几个字母还是**函数名**:玩家刚刚动手做了
+        一件事,回敬他一句「「reach_out」要当面才办得到」。最便宜的正解是这句话根本
+        不点动词名:全仓声明 `requires_colocation` 的能力**有且只有一个**(判据:
+        `git grep -c 'requires_colocation=True' -- anima_world/tools/` → `social.py:1`),
+        所以"是哪件事"这一格里没有歧义可消;将来加了第二个,「这件事」照样对。
+        **动词名一个字都没丢**:`act()` 把它原样放在返回值的 `"tool"` 那一格里,
+        日志那一行也带着(`logger.info("act(%s, %s) 被拒:…")`),宿主排障照样
+        查得到 —— 去掉的只是**玩家读到的那份**。
+        也不给它套「」:框的只有**数据里来的那一截**(和 `_PLAYER_FALLBACK_DISPLAY`
+        同一条),「这件事」是引擎自己的话。
         """
         if not self.config_get("presence.enforce_colocation", False):
             return ""
@@ -5466,7 +5522,7 @@ class World:
         if not spec.requires_colocation:
             return ""
         if not player_id:
-            return f"「{verb}」要当面才办得到,而这次调用没说是替哪个玩家"
+            return "这件事要当面才办得到,而这次调用没说是替哪个玩家"
         if self._tool_runtime.face_to_face(agent_id, player_id):
             return ""
         here = self._tool_runtime.agent_location(agent_id)
@@ -5474,18 +5530,20 @@ class World:
         name = self._tool_runtime.agent_names().get(agent_id, agent_id)
         # **地名一律过 `place_name()`**:玩家读到的是「咖啡店」,不是 `cafe`。
         here_name = self.scheduler.place_name(here) or "别处"
-        where_name = self.scheduler.place_name(where) or "别处"
         if not where:
             # **不指认宿主**(和 `_invite_absence` 那一支共用 `_where_unknown_line`):
             # 这里走到的三种来路里,有两种宿主刚刚才调过 `player_move`。
-            return f"「{verb}」要当面才办得到,而" + _where_unknown_line(name, here_name)
+            return "这件事要当面才办得到,而" + _where_unknown_line(name, here_name)
         if not here or here == where:
             # 两处地名一样却不是面对面 —— 只可能是她在赶路(`face_to_face` 与
             # `_where_is` 同一条:在途即不在任何地方)。照 `agent_location` 那份
             # 直说会写出"你在 cafe,她在 cafe —— 这件事得当面",一句读起来是谎的话。
-            return f"「{verb}」要当面才办得到,而{name}这会儿在路上,不在任何地方"
+            # ⚠️ 这句话是**猜**出来的,猜错的样子见 docstring 第三段。
+            return f"这件事要当面才办得到,而{name}这会儿在路上,不在任何地方"
+        # `where_name` 算在这儿而不是上面:上面两支一个都用不着它(第七轮的顺手项)。
+        where_name = self.scheduler.place_name(where) or "别处"
         return (
-            f"「{verb}」要当面才办得到 —— 你在{where_name},{name}在{here_name}。"
+            f"这件事要当面才办得到 —— 你在{where_name},{name}在{here_name}。"
             f"隔着这么远,你只能跟她说话"
         )
 

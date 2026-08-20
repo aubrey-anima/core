@@ -173,6 +173,11 @@ def test_act_的回执也要说得出是三种里的哪一种(world):
     对两种写法**同时成立**,于是这条治过一次的病(CHANGELOG 3.6.0
     `### Fixed —— 她读到的地名一半是人话、一半是 id`)在这个函数里原样长回来时,
     测试一条都没红。
+
+    ⚠️ **这四句里不再出现动词名**(3.6.0 第七轮 2026-08-20 换的第三次):从前是
+    「「reach_out」要当面才办得到」—— 记号对了,框里那几个字母还是**函数名**,
+    而读它的是刚刚才动手做过这件事的玩家。动词名没丢,它在 `result["tool"]` 里,
+    下面第一段顺手钉住这一点:**去掉的只是玩家读到的那份,不是那个信息本身。**
     """
     world.config_set("presence.enforce_colocation", True)
     world.config_set("chat.tools.enabled", True)
@@ -181,15 +186,18 @@ def test_act_的回执也要说得出是三种里的哪一种(world):
                        player_id="p1", surface="autonomy")
     assert result["ok"] is False
     assert result["error"] == (
-        "「reach_out」要当面才办得到 —— 你在后院,苏晚夏在咖啡店。"
+        "这件事要当面才办得到 —— 你在后院,苏晚夏在咖啡店。"
         "隔着这么远,你只能跟她说话"
     ), result["error"]
+    # 玩家那句话里不点动词名,而宿主排障要的那一格照旧在。
+    assert result["tool"] == "reach_out", result
+    assert "reach_out" not in result["error"], result["error"]
 
     world.players["p1"].pop("location")
     result = world.act("夏", "reach_out", {"player_id": "p1"},
                        player_id="p1", surface="autonomy")
     assert result["error"] == (
-        "「reach_out」要当面才办得到,而世界这会儿不知道你在哪 —— "
+        "这件事要当面才办得到,而世界这会儿不知道你在哪 —— "
         "你可能已经离开这个世界了,也可能是这一程还没把落脚处告诉世界。苏晚夏在咖啡店"
     ), result["error"]
     assert "player_move" not in result["error"], result["error"]
@@ -204,6 +212,23 @@ def test_两扇门上同一件事必须是同一句话(world):
     (裸 id vs 人话地名,外加一个空格)—— **靠人手抄两遍来维持"逐字相同",正是
     那一轮塌掉的机制**。现在句子收在 `api._where_unknown_line()` 里,这条守住
     两扇门都还在调它。
+
+    ⚠️ **这个名字管的比它听上去大 —— 它只覆盖四支里的一支**(第七轮 2026-08-20
+    补的认账;上一轮写下这条测试之后,两个验收员各自独立把它读成"两扇门整体统一
+    了")。**一句"有测试守着"比没有测试更坏,读的人会照着它省下自己那一次检查**,
+    所以这里把射程写死:
+
+    | 情形 | 这条测试 | 实况 |
+    |---|---|---|
+    | 世界不知道**他**在哪 | ✅ 覆盖(下面这段) | 两扇门共用 `_where_unknown_line()` |
+    | 她在途、他在别处 | ❌ **没覆盖** | 邀请门说「她在路上,还没落脚」;动手那扇说「苏晚夏在咖啡店」—— 那是她的**出发地** |
+    | 世界不知道**她**在哪 | ❌ **没覆盖** | 邀请门说「世界不知道她在哪」;动手那扇说「她这会儿在路上」 |
+
+    后两支**今天就是不一致的**,而且是**有意留着**的(病根:`_colocation_error`
+    不问在途,只按 `here == where` 猜;定版前不动判断逻辑,已进看板)。
+    **别把这条测试放开到那两支去** —— 放开它会当场红,而它该红的方式是有人去修
+    那个函数,不是有人来改这段断言。逐支的账在 `api._where_unknown_line()` 的
+    docstring 里。
     """
     world.config_set("presence.enforce_colocation", True)
     world.config_set("chat.tools.enabled", True)
@@ -212,7 +237,7 @@ def test_两扇门上同一件事必须是同一句话(world):
                        player_id="p1", surface="autonomy")
     absent, refusal = world._invite_absence({"agent_id": "夏", "loc": "cafe"}, "p1")
     assert absent == "unknown"
-    assert result["error"] == "「reach_out」要当面才办得到,而" + refusal, (
+    assert result["error"] == "这件事要当面才办得到,而" + refusal, (
         result["error"], refusal)
     assert "咖啡店" in refusal and "cafe" not in refusal, refusal
 
