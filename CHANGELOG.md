@@ -152,6 +152,22 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
   只进 `--json` 的话,走**默认那条路**的人屏幕上什么都没有,而"响了 0 拍"和"这个世界
   压根没有剧情"长得一模一样。
 - 这一段是**加法**,`report_format_version` 仍然是 **2**(口径一个字没改)。
+- 🔴 **修补轮:纯函数分得开,两个真出口把它合了。** `build_run_report` 那一侧一直
+  是对的(`[]` 与 `None` 各一支,有用例钉着),可 `__main__.run_report` 写了
+  `.definitions() or None`、`World.report()` 写了 `declared if declared else None`
+  —— **在最后一步把 `[]` 压成了 `None`**。于是一个真的一拍没写的世界,`report --json`
+  答 `{"declared": null}`,正是本文档 / REFERENCE / FOR-STUDIO §0-② **三处反复警告
+  "不许合成一个"的那一合**,而三份文档都在,代码里没有一处会红。
+  更难看的一格:用 `--beats` 跑过的世界答 `{"declared":null,"fired":["第一幕"],
+  "unfired":null}` —— **响过一拍,却说不出分母**。
+  两个出口都读得到库,所以**永远答得出分母**,一格都不该折;`simulate --report` 的
+  分母改成 `[]`(它刚跑完这一趟,没有"问不出来"的道理)。
+- 🔴 **同一处还少一格键**:`beats=None` 那一支只回三格,缺 `fired_not_declared` ——
+  照着文档取第四格的消费方拿到 `KeyError`,而他取的正是这份报告说自己有的东西。
+  **"问不出来"由值说(`null`),不由键在不在说**:后者逼每个调用方写一句
+  `if "fired_not_declared" in …`,而漏写那句的人在自己的测试里看不出来。
+  **四格永远都在。** 用例补了两条,其中一条走**真出口**(此前那三条用例全在纯函数
+  那一侧,所以出口坏着而它们全绿):`git grep -n 'declared"\] == \[\]' -- tests/`。
 
 ### Added —— `chat --message`:一次一问(看板 D5;创作台从 2026-07-27 起卡在这条上)
 

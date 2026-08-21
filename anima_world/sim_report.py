@@ -386,7 +386,12 @@ def _beat_coverage(
         if beat_id and beat_id not in fired:
             fired.append(beat_id)
     if beats is None:
-        return {"declared": None, "fired": sorted(fired), "unfired": None}
+        # **四格永远都在,只是值不同。** 少一格不是"这次没有答案",是消费方照文档
+        # 取第四格时 `KeyError` —— 而它取的正是这份报告说自己有的东西。
+        # "问不出来"由**值**说(`null`),不由**键在不在**说:后者逼每个调用方写
+        # 一句 `if "fired_not_declared" in …`,而漏写那句的人在测试里看不出来。
+        return {"declared": None, "fired": sorted(fired), "unfired": None,
+                "fired_not_declared": None}
     declared = [str(b.get("id") or "") for b in beats if str(b.get("id") or "")]
     return {
         "declared": declared,

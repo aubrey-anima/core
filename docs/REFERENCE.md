@@ -3976,7 +3976,7 @@ anima-world config set llm.api_key sk-…      # 按声明类型强转后写入,
 | `agents[]` | `id` / `events` / `ticks_by_activity` / `share_by_activity` / **`idle_only`** |
 | `encounters[]` | `a` / `b` / `meetings`(相遇次数)/ `ticks` / `minutes` / `by_location` |
 | `relationships[]` | `as` / `target` / `start` / `end` / `min` / `max` / `changes` / `turning_points` |
-| `beats` | (3.7.0 新增)`declared` / `fired` / `unfired` / `fired_not_declared` —— **声明了几拍、响了几拍、哪几拍一直没响**。⚠️ **`declared: null` 是"问不出来"**(这次调用没给节拍表),`[]` 才是"这个世界真的一拍都没写";合成一个的话,一份读不到剧情的报告读起来像一个没有剧情的世界,而那两件事作者的下一步完全不同 |
+| `beats` | (3.7.0 新增)`declared` / `fired` / `unfired` / `fired_not_declared` —— **声明了几拍、响了几拍、哪几拍一直没响**。⚠️ **`declared: null` 是"问不出来"**(这次调用没给节拍表),`[]` 才是"这个世界真的一拍都没写";合成一个的话,一份读不到剧情的报告读起来像一个没有剧情的世界,而那两件事作者的下一步完全不同。⚠️ **四格永远都在,`null` 是值不是缺席** —— 键在不在会逼每个调用方先写一句 `if "…" in`,而漏写那句的人在自己的测试里看不出来。⚠️ **`report` / `simulate --report` / `World.report()` 这三条真出口永远答得出分母**(它们读得到库 / 手上就是这一趟的脚本),所以在它们身上 `declared` **不会**是 `null`;`null` 只出现在直接调 `build_run_report` 而不给 `beats=` 的时候 |
 
 ⚠️ **`beats` 这一段是加法,`report_format_version` 因此仍然是 2** ——
 口径一个字没改。**消费方按段在不在探测,别比这个号**(和全员那条"判据是出口在不在,

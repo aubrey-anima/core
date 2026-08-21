@@ -2183,11 +2183,13 @@ class World:
         # 给不出来时传 `None` 而不是 `[]` —— 「问不出来」和「一拍都没写」是两件事。
         from anima_world.redis_state import RedisBeatsStore
 
+        # ⚠️ **`declared if declared else None` 曾经写在这儿** —— 而 `[]` 与 `None`
+        # 正是这一层唯一要分开的两件事,那一句把它们合成了一件。读得到库的时候
+        # **永远答得出分母**(哪怕分母是零拍);只有连不上库那一支才是"问不出来"。
         beats = None
         if self.scheduler.redis is not None and self.scheduler.world_id:
-            declared = RedisBeatsStore(
+            beats = RedisBeatsStore(
                 self.scheduler.redis, self.scheduler.world_id).definitions()
-            beats = declared if declared else None
         return build_run_report(
             events,
             ticks=self.scheduler.clock if ticks is None else int(ticks),

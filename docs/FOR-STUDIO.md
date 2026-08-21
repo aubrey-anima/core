@@ -73,6 +73,10 @@ CHANGELOG 之外单独在这里记一笔。
 ⚠️ **`declared: null` 是"问不出来",`[]` 才是"这个世界真的一拍都没写"。**
 合成一个的话,一份读不到剧情的报告读起来像一个没有剧情的世界 —— 而这两件事你们的
 下一步完全不同。
+✅ **而你们从 `report` / `simulate --report` 拿到的那一份,`declared` 永远不是 `null`**
+(那三条出口读得到库,分母一定答得出)—— `null` 只可能出现在直接调 Python 那个纯函数
+`build_run_report` 而不给 `beats=` 的时候。⚠️ **四格永远都在**,`null` 是**值**不是
+缺席:照着这份文档取 `fired_not_declared` 不会 `KeyError`。
 ⚠️ 这一段是**加法**,`report_format_version` 仍然是 **2**(口径一个字没改)。
 **按段在不在探测,别比这个号。**
 

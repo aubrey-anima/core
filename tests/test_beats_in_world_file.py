@@ -346,3 +346,47 @@ def test_屏幕上也说得出哪几拍白写了(tmp_path, open_world):
     finally:
         plain.close()
     assert "节拍:" not in run_cli("report", "--world-id", "h2").stdout
+
+
+def test_真出口也分得开_一拍没写和问不出来(tmp_path, open_world):
+    """**纯函数分得开,不等于出口分得开** —— 而消费方读的是出口。
+
+    `build_run_report` 那一侧一直是对的(`[]` vs `None` 各一支,上面那条用例钉着),
+    可两个真出口都在最后一步写了 `or None` / `if declared else None`,把 `[]` 压成了
+    `None`。于是一个**真的一拍没写**的世界,`report --json` 答 `{"declared": null}`
+    —— 正是 FOR-STUDIO §0-② / REFERENCE / CHANGELOG 三处反复警告"不许合成一个"的
+    那一合,而三份文档都在,代码里没有一处会红。
+
+    这条用例走的是**真出口**(CLI 与 `World.report()`),不是纯函数:
+    `git grep '"declared": \\[\\]' -- tests/` 在这条之前一行不印。
+    """
+    from _worldfile import redis_for
+
+    client = redis_for(tmp_path / "n.db")
+    bare = write_seed_file(tmp_path / "bare.cyberworld", _seed())
+    world = open_world("n1", redis=client, world_file=bare)
+    try:
+        world.tick(2)
+        assert world.report()["beats"]["declared"] == [], "World.report() 把 [] 折成了 None"
+    finally:
+        world.close()
+    payload = json.loads(run_cli("report", "--world-id", "n1", "--json").stdout)
+    assert payload["beats"]["declared"] == [], payload["beats"]
+    assert payload["beats"]["unfired"] == [], payload["beats"]
+
+    # 对照组(期望 `None` 的那一支):纯函数不给分母时才是"问不出来"。
+    from anima_world.sim_report import build_run_report
+
+    assert build_run_report([], ticks=1)["beats"]["declared"] is None
+
+
+def test_四格永远都在_少一格是消费方的KeyError(tmp_path):
+    """**"问不出来"由值说,不由键在不在说。** `beats=None` 那一支曾经只回三格,
+    于是照着文档取第四格的人拿到 `KeyError` —— 而他取的正是这份报告说自己有的东西。
+    键在不在会逼每个调用方写一句 `if "fired_not_declared" in …`,而漏写那句的人
+    在自己的测试里看不出来。"""
+    from anima_world.sim_report import build_run_report
+
+    keys = {"declared", "fired", "unfired", "fired_not_declared"}
+    assert set(build_run_report([], ticks=1)["beats"]) == keys
+    assert set(build_run_report([], ticks=1, beats=[])["beats"]) == keys

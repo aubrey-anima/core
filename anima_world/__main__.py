@@ -5498,7 +5498,13 @@ def run_report(args: argparse.Namespace) -> int:
     from anima_world.redis_state import RedisBeatsStore
 
     # 分母:声明过的那一串。**只读**,和这条命令其余部分同一条纪律。
-    declared_beats = RedisBeatsStore(redis, world_id).definitions() or None
+    # ⚠️ **`or None` 曾经写在这儿,而它正好把这一层唯一要分开的两件事合成了一件**:
+    # 空列表是"这个世界真的一拍都没写",`None` 是"这次调用问不出分母" —— 纯函数
+    # 那一侧分得清清楚楚,而这个真出口在最后一步把 `[]` 压成了 `None`。
+    # 下场:一个一拍没写的世界,`report --json` 答 `{"declared": null}`,正是
+    # FOR-STUDIO §0-② / REFERENCE / CHANGELOG 三处反复警告"不许合成一个"的那一合。
+    # 这里读得到库,所以**永远答得出分母**,一格都不该折。
+    declared_beats = RedisBeatsStore(redis, world_id).definitions()
     report = build_run_report(events, ticks=clock, minutes_per_tick=mpt,
                               beats=declared_beats)
     if owner is not None:
@@ -6634,8 +6640,12 @@ def run_simulate(args: argparse.Namespace) -> int:
             scheduler.event_log.replay() if scheduler.event_log is not None else [],
             ticks=ticks,
             minutes_per_tick=mpt,
+            # 分母是**这一趟真正在跑的那份脚本**(`--beats` 给的就是它给的)。
+            # 没有 director = 这个世界这一趟一拍都没有 —— 那是一个**答案**,
+            # 所以是 `[]` 不是 `None`;`None` 留给"我问不出来",而 simulate 刚跑完
+            # 这一趟,它没有问不出来的道理。
             beats=(scheduler.beat_director.script.beats
-                   if scheduler.beat_director is not None else None),
+                   if scheduler.beat_director is not None else []),
         )
     else:
         # A planner we declared dead must not hold the exit hostage either —
