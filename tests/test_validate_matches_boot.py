@@ -448,13 +448,20 @@ def _edit_kind(**over):
 
 
 def test_编辑包里量名拼错_必须红(tmp_path):
-    """**D29 本体。** `--edit` 从前整个跳过本体预检,而 `loadable` 就是 `not errors`
-    —— 于是一份把量名拼错的编辑包拿到一句绿的 `loadable: true`,开机当场挂。
+    """**D29 本体,而"量名"是两支,这一条只钉 `set:` 那一支**(另一支在下一条)。
+
+    `--edit` 从前整个跳过本体预检,而 `loadable` 就是 `not errors` —— 于是一份把
+    量名拼错的编辑包拿到一句绿的 `loadable: true`,开机当场挂。
 
     🔬 **它不是"没说",是"说窄了",而说窄了比全不说更难逮**:那一支追加过一句
     warning「引用完整性没查:种类/地点/物品/规律可以来自目标世界」—— 那句话是真的,
     可它只解释得了被跳过的那一摞里的**最后一件**。
     **人会拿一条真的理由去覆盖整个遗漏。**
+
+    ⚠️ **而这条用例自己也犯过同一个错**:它只钉了 `set:` 那一支,于是修完之后
+    `stocks:` 那一支**照旧假绿**,178 个用例全绿而那一格坏着 —— 与此同时那句
+    warning 正面写着"量名……已经查过了"。**一条只钉了一支的用例,和一句说得比
+    做到的宽的话,合起来正好是一盏看不出来的假绿灯。**
     """
     bad = _edit_kind(affordances={"烧": {"set": {"煤亮": "煤亮 - 1"}}})
     path = _write(tmp_path / "edit_bad.cyberworld", [_MANIFEST, bad])
@@ -468,6 +475,51 @@ def test_编辑包里量名拼错_必须红(tmp_path):
     ok2, errors2 = _check_says(_write(tmp_path / "edit_ok.cyberworld",
                                       [_MANIFEST, good]), edit=True)
     assert ok2 is True, errors2
+
+
+def test_编辑包里stocks的量名拼错_必须红(tmp_path):
+    """**"量名"的另一支:`stocks:` 里写初值的那个名字。**
+
+    它和 `set:` 那一支是同一种错、同一个后果(`树髙` 安静地建成第二个量),判据也
+    是同一份(`_undeclared_stock_names`,预检与播种共用)—— 只是修 `--edit` 那一轮
+    只接上了 `parse_kinds`,没接上这一个。于是同一份包:
+    `world check --edit` 说 `loadable: true`,`validate world` 退 2,真当编辑合并
+    进一个跑着的世界 —— **当场 `OntologyError`**。
+    """
+    typo = {"kind": "author", "type": "stock",
+            "body": {"owner": "物件:煤堆", "values": {"煤亮": 3.0}}}
+    path = _write(tmp_path / "edit_stock_bad.cyberworld",
+                  [_MANIFEST, _edit_kind(), typo])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is False, "一份 stocks 量名拼错的编辑包拿到了绿灯"
+    assert any("煤亮" in e for e in errors), errors
+    assert _validate_says(path, edit=True)[0] is False, "两扇门必须同一个答案"
+
+    # 对照组:同一份包,量名写对 —— 照旧放行。
+    good = {"kind": "author", "type": "stock",
+            "body": {"owner": "物件:煤堆", "values": {"煤量": 3.0}}}
+    ok2, errors2 = _check_says(
+        _write(tmp_path / "edit_stock_ok.cyberworld", [_MANIFEST, _edit_kind(), good]),
+        edit=True)
+    assert ok2 is True, errors2
+
+
+def test_编辑包给一个没声明的种类写初值_不许假红_但要说出这一格没查(tmp_path):
+    """和 `me_X` 那一格逐字同构,而且是同一个坑的另一半。
+
+    一份编辑包完全可以只改种类 A、顺手给种类 B 的某个实例写个初值 —— B 的声明在
+    目标世界里,硬查就是**假红**。所以这一行跳过,**而且说出来**:上面那条用例刚
+    钉完"量名两支都查",要是这一格默默跳过,那句总结就又变成一句说得比做到的宽的话。
+    """
+    other = {"kind": "author", "type": "stock",
+             "body": {"owner": "agent:甲", "values": {"体力": 50}}}
+    path = _write(tmp_path / "edit_stock_xkind.cyberworld",
+                  [_MANIFEST, _edit_kind(), other])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is True, errors
+    payload = json.loads(run_cli("world", "check", path, "--edit", "--json").stdout)
+    assert any("agent:甲" in w and "离线答不了" in w for w in payload["warnings"]), (
+        payload["warnings"])
 
 
 def test_编辑包里spawn没写代价_必须红(tmp_path):
