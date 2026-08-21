@@ -233,8 +233,20 @@ def build_run_report(
     ticks: int,
     minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
     engine_version: str | None = None,
+    beats: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """把一段事件日志读成运行摘要。纯函数;`ticks` 是这次跑到的 tick 数。"""
+    """把一段事件日志读成运行摘要。纯函数;`ticks` 是这次跑到的 tick 数。
+
+    `beats` 是这个世界**声明过**的那一串节拍(`RedisBeatsStore.definitions()`)。
+    给了就多一段 `beats`:**声明了几拍、响了几拍、哪几拍一直没响**。
+
+    ⚠️ **没有它这一段答不出来,而这正是它欠了很久的原因**(FOR-STUDIO §0-②:
+    创作台列的五个问题里唯一没答上的一个)。`beat_fired` 事件一直是现成的 ——
+    缺的是**分母**:节拍从前只活在一个 `--beats` 文件里,而这条命令只读日志。
+    3.7.0 把节拍收进世界(看板 D1)之后,这个差集才第一次算得出来。
+    **一拍都没响 = 这个脚本白写,而作者必须当场知道** —— 只报 `fired` 的话,
+    "响了 0 拍"和"这个世界压根没有剧情"在屏幕上长得一模一样。
+    """
     events = sorted(events, key=lambda e: (e.ts, e.seq))
     if engine_version is None:
         from anima_world import __version__ as engine_version
@@ -351,4 +363,37 @@ def build_run_report(
         "agents": agents,
         "encounters": encounters,
         "relationships": _relationship_curves(events),
+        # **分母和分子都在**(3.7.0)。`declared` 是 `None` 说明这次调用没给节拍表
+        # —— 那是"问不出来",不是"这个世界没有剧情",两者在这里必须分得开。
+        "beats": _beat_coverage(events, beats),
+    }
+
+
+def _beat_coverage(
+    events: Iterable[Event], beats: Iterable[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """哪几拍响过、哪几拍一直没响。
+
+    响过的按 `beat_fired` 事件数(日志是唯一权威,和重启后重建 fired-set 同一份
+    来源);声明过的按世界里那份脚本。**`unfired` 是这一段存在的全部理由** ——
+    作者要的不是"响了几拍",是"我写的哪几拍白写了"。
+    """
+    fired: list[str] = []
+    for event in events:
+        if event.type != "beat_fired":
+            continue
+        beat_id = str((event.payload or {}).get("beat_id") or "")
+        if beat_id and beat_id not in fired:
+            fired.append(beat_id)
+    if beats is None:
+        return {"declared": None, "fired": sorted(fired), "unfired": None}
+    declared = [str(b.get("id") or "") for b in beats if str(b.get("id") or "")]
+    return {
+        "declared": declared,
+        "fired": [b for b in declared if b in fired],
+        # 声明了却没响的 —— **按作者写的顺序**,那是他读它的顺序。
+        "unfired": [b for b in declared if b not in fired],
+        # 日志里有、而今天的脚本里没有的:剧情被改过(或者这是一份编辑过的世界)。
+        # 不报的话,`declared` 与 `fired` 的两个长度对不上而没人说得出为什么。
+        "fired_not_declared": sorted(b for b in fired if b not in declared),
     }

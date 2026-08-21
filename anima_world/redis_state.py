@@ -2197,6 +2197,56 @@ class RedisRulesStore:
         return [rows[k]["definition"] for k in sorted(rows)]
 
 
+class RedisBeatsStore:
+    """作者写下的节拍脚本的家:`:beats`,**一个 list**(3.7.0,看板 D1)。
+
+    在这之前节拍是这个引擎里唯一一样**作者写下、却进不了世界**的东西:它只能靠
+    `--beats` 单独喂一个文件。于是工作台本地试炼五拍全响,到了舰队上**一拍都不响,
+    而且没有任何一处报错** —— 世界照常启动、居民照常过日子,只是那条故事线不存在。
+
+    **为什么是 list 不是 hash**(和 `RedisRulesStore` 那个 hash 不同):节拍是
+    **有序**的一串,`after` 那条链和"先写的先判"都靠顺序;hash 的 field 顺序不保证,
+    按 id 排序又会把作者写的顺序换成字典序 —— 而那个换法**不报错**,只是剧情的
+    次序悄悄变了。
+
+    ⚠️ **只存脚本,不存"哪几拍响过"。** 响过的是**历史**,它从 `beat_fired` 事件
+    重放出来(`Scheduler.__init__` 里那一段)—— 两份真相里存一份,另一份必然有一天
+    对不上,而这一层对不上的样子是"这一拍又响了一次"。
+    """
+
+    __slots__ = ("_redis", "_key")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._redis = redis
+        self._key = f"{KEY_PREFIX}:{world_id}:beats"
+
+    def __len__(self) -> int:
+        try:
+            return int(self._redis.llen(self._key) or 0)
+        except Exception:  # noqa: BLE001 - 读不到就当没有,别掀翻开机
+            logger.warning("读不了节拍脚本", exc_info=True)
+            return 0
+
+    def seed(self, entries: list) -> int:
+        """空的时候播一次;之后这里的行说了算 —— 和地图/规律/行为树同一条契约。
+
+        **没有 `merge=` 这一格**,而这是有意的:一条规律是法(改了就该生效),
+        而节拍是**剧情**,它和 `beat_fired` 那份历史配对。逐条合并进一个跑着的世界,
+        等于让"第三幕"在第五幕之后突然插进来 —— 而它响不响取决于一个早就滑过去的
+        条件,两边都不报错。要改剧情,开一个新世界。
+        """
+        if not entries or len(self):
+            return 0
+        self._redis.rpush(self._key, *[_dumps(dict(b)) for b in entries])
+        return len(entries)
+
+    def definitions(self) -> list[dict]:
+        """作者写下的那一串,按写的顺序。读不出来的行**当场报错,不静默跳过** ——
+        少装半份剧情和一拍不响是同一种病。"""
+        rows = self._redis.lrange(self._key, 0, -1) or []
+        return [_loads(row) for row in rows]
+
+
 class RedisOntologyStore:
     """世界的本体:`:kinds`(种类)与 `:entities`(实例)**两个 hash,物理分开**。
 

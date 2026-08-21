@@ -823,6 +823,9 @@ def authored_layer_errors(
       相对路径的立绘发出去就是一张断的图,而作者自己看不见。
     - `world_location_media_errors` —— 地点的两格图。和上一条同一道闸、
       同一个理由,只是上限的数按各自的读出口定(`media.py` 的模块 docstring)。
+    - `world_beat_errors` —— 节拍(3.7.0 起它是作者层的第十二个段)。**新增一种
+      开机失败,就必须同一轮里补进这扇门** —— 否则这两条命令又变回"比开机松"的
+      那种假绿,而上一轮(3.7.0 的 D29)刚刚为同一种病修过三格。
 
     两条纪律都在这个函数的**存在**上,不在它的实现里:
 
@@ -852,7 +855,39 @@ def authored_layer_errors(
         + visibility_band_errors(authored)
         + world_card_errors(authored)
         + world_location_media_errors(authored)
+        + world_beat_errors(authored)
     )
+
+
+def world_beat_errors(authored: dict[str, Any] | None) -> list[str]:
+    """作者写下的节拍立不立得住 —— **和开机同一份判断,不是第二份**(3.7.0)。
+
+    节拍 3.7.0 起进得了 `.cyberworld`(`AUTHOR_SECTIONS` 的第十二个段),于是它
+    **多出一种开机失败**:`build_serve_scheduler` 在第一次写之前调
+    `BeatScript.from_data`,坏脚本当场开不了机。这里调的是**同一个函数** ——
+    另写一份判断的那天,两边会先给出不同的答案,再由某个人在一个坏掉的世界上发现。
+
+    ⚠️ **这一格和 `complete` 无关:节拍没有跨引用。** 一次编辑(`--edit`)里它照查 ——
+    `op` 拼错、`after` 指着一个不存在的拍、id 重复,这几样在包**自己肚子里**就查得动
+    (`world check --edit` 的分界是"查得动查不动",不是"这是不是一个完整世界")。
+
+    ⚠️ **没写 `beats` 的世界这一层整个缺席**,和 `kinds` / perception 逐字同构 ——
+    所以是 `is None` 而不是 falsy:一份写着 `"beats": []` 的文件是"作者说这个世界
+    没有剧情",它和"这份文件没提过节拍"在这道闸上碰巧同一个答案,但别把两者写成
+    同一个判断,下一个人会照着推错。
+    """
+    if not authored:
+        return []
+    beats = authored.get("beats")
+    if beats is None:
+        return []
+    from anima_world.beats import BeatScript, BeatScriptError
+
+    try:
+        BeatScript.from_data({"beats": beats})
+    except BeatScriptError as exc:
+        return list(exc.errors)
+    return []
 
 
 def _authored_media_warnings(authored: dict[str, Any] | None) -> list[str]:
@@ -1435,7 +1470,8 @@ def build_serve_scheduler(
         RedisDict,
         RedisEconomyStore, RedisEventLog, RedisKnowledgeGraph, RedisLocationStore,
         RedisMemoryStore, RedisNeedsStore, RedisCliqueStore, RedisPromptStore,
-        RedisOntologyStore, RedisReflectionStore, RedisRulesStore, RedisStockStore,
+        RedisBeatsStore, RedisOntologyStore, RedisReflectionStore,
+        RedisRulesStore, RedisStockStore,
         RedisVisibilityStore,
         clock_key, current_action_key, decode_action, decode_plan, encode_action,
         encode_plan, events_key,
@@ -1499,6 +1535,7 @@ def build_serve_scheduler(
     stock_store = RedisStockStore(redis, world_id)
     visibility_store = RedisVisibilityStore(redis, world_id)
     rules_store = RedisRulesStore(redis, world_id)
+    beats_store = RedisBeatsStore(redis, world_id)
     ontology_store = RedisOntologyStore(redis, world_id)
     economy_store = RedisEconomyStore(redis, world_id)
 
@@ -1542,6 +1579,42 @@ def build_serve_scheduler(
     if seed_author_layer and world_seed and world_seed.get("kinds"):
         _precheck_ontology(world_seed, rules_store, location_store, economy_store,
                            ontology_store if merge_author else None)
+
+    # ── 节拍:作者层的第十二个段(3.7.0,看板 D1)──────────────────────────
+    #
+    # **先验,再写** —— 和上面那条逐字同一条:`BeatScript.from_data` 是加载期的
+    # 严格校验器(坏脚本当场报错,一次列全),而它在这里跑,所以一份坏节拍不会
+    # 留下一个装了一半的世界。
+    #
+    # **`--beats` 赢这一趟,但不写库。** 命令行上指名的那个文件是一次**明示的
+    # 覆盖**(试炼、调试都靠它),而库里那份是这个世界自己的剧情。让它写回去的话,
+    # 一次试炼就会把作者的剧情换掉,而且不报错。
+    if seed_author_layer and world_seed and world_seed.get("beats"):
+        # 验一遍再落库(`from_data` 会抛 `BeatScriptError`,和坏 `kinds` 同一条路),
+        # 并且**拿它验过的那一份去播**。
+        # ⚠️ 这里一度写成 `[dict(b) for b in … if isinstance(b, dict)]` —— 那个
+        # `isinstance` 过滤是**在校验之前把不是对象的那几拍安静扔掉**,于是一份
+        # 第三拍写成一个字符串的剧本会开机成功、少一拍,日志干净。少装半份剧情
+        # 和一拍不响是同一种病,而这一版更难发现(它连"没响"都不算——那一拍从来
+        # 就没进过这个世界)。
+        authored_script = BeatScript.from_data({"beats": world_seed["beats"]})
+        planted = beats_store.seed(authored_script.beats)
+        if planted:
+            logger.info("装进 %d 拍作者写的节拍", planted)
+        else:
+            # **不无声。** 库里已经有剧情时这一份不合并(理由见 `RedisBeatsStore.seed`),
+            # 而一句话不说的样子是"我把新剧情装进去了" —— 拿一份改过的世界文件去
+            # 编辑一个跑着的世界的人,会以为第三幕已经在里面了。
+            logger.warning(
+                "这个世界已经有 %d 拍剧情,文件里那 %d 拍**没有装进去** —— "
+                "节拍不逐条合并(它和 `beat_fired` 那份历史配对),要改剧情开一个新世界",
+                len(beats_store), len(authored_script.beats),
+            )
+    if beat_script is None and len(beats_store):
+        # **首启自动带** —— 这一条就是 D1 的另一半。没有它,节拍进得了世界文件
+        # 却仍然要靠 `--beats` 才响,而舰队上没有任何一条路会去传那个参数:
+        # 一拍都不响,零报错。
+        beat_script = BeatScript.from_data({"beats": beats_store.definitions()})
     if fresh_world:
         _store_genesis_seed(meta, world_seed)  # 出生证明随世界走
         # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
@@ -5381,7 +5454,12 @@ def run_report(args: argparse.Namespace) -> int:
     clock = RedisClock(redis, clock_key(world_id)).get()
     owner = _live_owner(redis, world_id)
 
-    report = build_run_report(events, ticks=clock, minutes_per_tick=mpt)
+    from anima_world.redis_state import RedisBeatsStore
+
+    # 分母:声明过的那一串。**只读**,和这条命令其余部分同一条纪律。
+    declared_beats = RedisBeatsStore(redis, world_id).definitions() or None
+    report = build_run_report(events, ticks=clock, minutes_per_tick=mpt,
+                              beats=declared_beats)
     if owner is not None:
         report["snapshot_of_a_running_world"] = True
 
@@ -5416,7 +5494,34 @@ def run_report(args: argparse.Namespace) -> int:
     for curve in report["relationships"]:
         print(f"    {curve['as']} → {curve['target']}:"
               f"{curve['start']} → {curve['end']}({curve['turning_points']} 个拐点)")
+    _print_beat_coverage(report["beats"])
     return 0
+
+
+def _print_beat_coverage(beats: dict[str, Any]) -> None:
+    """屏幕上也要说得出**哪几拍白写了**(3.7.0,看板 D1 的连带)。
+
+    ⚠️ **这一行不是排版,是那条诉求本身。** 创作台要的原话是"一拍都没响 = 这个
+    脚本白写,作者必须当场知道" —— 只进 `--json` 的话,敲 `anima-world report` 的
+    那个人(**默认的那条路**)屏幕上什么都没有,和"这个世界压根没有剧情"长得一模
+    一样。这和 `map` 那条"渲染是赠品"不是一回事:那里赠的是一张图,这里漏的是答案。
+    """
+    declared = beats.get("declared")
+    if declared is None:          # 问不出来 ≠ 一拍都没写:两种都不该冒充对方
+        return
+    if not declared:
+        return
+    unfired = beats.get("unfired") or []
+    line = f"    节拍:声明 {len(declared)} 拍,响了 {len(beats.get('fired') or [])} 拍"
+    if unfired:
+        line += onboarding.yellow(
+            f"  ← {len(unfired)} 拍一次都没响:{'、'.join(unfired)}")
+    print(line)
+    stray = beats.get("fired_not_declared") or []
+    if stray:
+        # 日志里有、今天的脚本里没有 = 剧情被改过。不说的话,上面两个数对不上
+        # 而没有一处解释得了为什么。
+        print(f"    响过但今天的剧本里没有:{'、'.join(stray)}(剧情改过?)")
 
 
 class _NothingInTheWorldYet:
@@ -5951,6 +6056,28 @@ def contract_payload() -> dict[str, Any]:
         },
         "beats": {
             "schema_version": None,
+            # 🆕 3.7.0(看板 D1):节拍进得了 `.cyberworld` 了,而且**首启自己带上**。
+            # `author_type` 是 `null` = 这支引擎的节拍只能靠 `--beats` 单独喂一个
+            # 文件(3.6.0 及更早)—— 而舰队上没有任何一条路会去传那个参数,于是
+            # 作者写的剧情**一拍都不响,零报错**。
+            # **按这一格探测,别比版本号。**
+            "author_type": "beat",
+            "world_file_section": "beats",
+            "storage_key": "anima:{world_id}:beats",
+            # 交接**仍然是一件产物** —— 契约的形状一个字没改(看板 D1 的选项 a)。
+            "separate_file_flag": "--beats",
+            "report_section": "beats",
+            "gloss": (
+                "节拍是**作者层**(和人物、地点、关系同属「作者写下的」),3.7.0 起"
+                "写成 `{\"kind\": \"author\", \"type\": \"beat\", \"body\": {…一拍…}}` "
+                "进世界文件,首启不给 `--beats` 也会带上。"
+                "⚠️ `--beats` 仍然认,而且**赢这一趟但不写库**:它是一次明示的覆盖"
+                "(试炼、调试靠它),让它写回去就等于一次试炼把作者的剧情换掉。"
+                "⚠️ **「哪几拍响过」不在库里**,它从 `beat_fired` 事件重放 —— 两份"
+                "真相里存一份,另一份必然有一天对不上,而这一层对不上的样子是"
+                "「这一拍又响了一次」。`report` 的 `beats` 段答「声明了几拍、响了几拍、"
+                "哪几拍一直没响」"
+            ),
             "ops": sorted(VALID_OPS),
             "op_required_fields": {
                 op: sorted(fields) for op, fields in sorted(OP_REQUIRED_FIELDS.items())
@@ -6442,6 +6569,8 @@ def run_simulate(args: argparse.Namespace) -> int:
             scheduler.event_log.replay() if scheduler.event_log is not None else [],
             ticks=ticks,
             minutes_per_tick=mpt,
+            beats=(scheduler.beat_director.script.beats
+                   if scheduler.beat_director is not None else None),
         )
     else:
         # A planner we declared dead must not hold the exit hostage either —
@@ -6457,10 +6586,14 @@ def run_simulate(args: argparse.Namespace) -> int:
             Path(args.report).parent.mkdir(parents=True, exist_ok=True)
             Path(args.report).write_text(blob + "\n", encoding="utf-8")
             idle_only = [a["id"] for a in report["agents"] if a["idle_only"]]
+            # 白写的那几拍**也进这一行**:一次试炼正是作者会问"我的剧情响了吗"的
+            # 那一刻,而报告写进文件之后没人保证他会去打开它。
+            unfired = report["beats"].get("unfired") or []
             print(f"[simulate] report → {args.report}"
                   f"  ({report['events']['total']} 事件,"
                   f"{len(report['encounters'])} 对有过相遇"
                   + (f",{len(idle_only)} 人整场无事发生:{'、'.join(idle_only)}" if idle_only else "")
+                  + (f",{len(unfired)} 拍一次都没响:{'、'.join(unfired)}" if unfired else "")
                   + ")")
     return 0
 

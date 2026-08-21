@@ -518,3 +518,74 @@ def test_编辑包用了me_而没重声明agent_不许假红_但要说出这一�
         _write(tmp_path / "edit_me_typo.cyberworld", [_MANIFEST, actor, typo]),
         edit=True)
     assert ok2 is False and any("me_精力" in e for e in errors2), errors2
+
+
+# ── 七、节拍(作者层的第十二个段,3.7.0)──────────────────────────────────────
+#
+# **新增一种开机失败,就必须同一轮里补进这两扇门。** 节拍 3.7.0 起进得了
+# `.cyberworld`,而 `build_serve_scheduler` 在第一次写之前调 `BeatScript.from_data`
+# —— 于是坏脚本当场开不了机。这一节钉的就是"三条路答案相等"这件事对新来的这一段
+# 同样成立:第一版把段收进去了却没补这扇门,`world check` 对一份开不了机的文件
+# 答 `loadable: true`(实测),而那正是上一节刚刚修掉的那种假绿。
+
+_BEAT_BODY = {
+    "id": "第一幕",
+    "trigger": {"at": {"day": 0, "minute_of_day": 5}},
+    "payload": [{"op": "memory", "agent_id": "甲", "summary": "那封没寄出去的信。"}],
+}
+
+
+def _beat(**overrides) -> dict:
+    body = dict(_BEAT_BODY)
+    body.update(overrides)
+    return {"kind": "author", "type": "beat", "body": body}
+
+
+def test_写对的节拍_三条路都放行(tmp_path, fresh_redis):
+    """对照组(期望"绿"的那一条):没有它,下面几条对一个"节拍一律拦"的实现同样成立。"""
+    path = _write(tmp_path / "beat_ok.cyberworld", [_MANIFEST, _YARD, _JIA, _beat()])
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"一份写对的剧情被拦下来了:{errors}"
+
+
+def test_坏op的节拍_校验器和开机都拦(tmp_path, fresh_redis):
+    """`op` 拼错:开机当场 `BeatScriptError`,而这两扇门从前说绿。"""
+    path = _write(tmp_path / "beat_op.cyberworld", [
+        _MANIFEST, _YARD, _JIA,
+        _beat(payload=[{"op": "没这个 op", "agent_id": "甲"}]),
+    ])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, "一份开不了机的剧情,离线两扇门必须当场说不行"
+    assert any("op" in e for e in errors), errors
+
+
+def test_节拍指着一个不存在的拍_校验器和开机都拦(tmp_path, fresh_redis):
+    """`after` 指着不存在的 id = 这一拍永远不会响,而且没有一处报错。
+
+    ⚠️ 这一件**在包自己肚子里查得动**(节拍没有跨引用),所以它和量名拼错同一类,
+    不属于 `--edit` 豁免的那一摞。
+    """
+    path = _write(tmp_path / "beat_after.cyberworld", [
+        _MANIFEST, _YARD, _JIA,
+        _beat(trigger={"after": "没有这一拍", "minutes": 5}),
+    ])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, "指着一个不存在的拍必须两条路一起拦"
+
+
+def test_编辑包里的坏节拍_照样红(tmp_path):
+    """`--edit` 豁免的是**跨引用**,不是"这是一次编辑就什么都不查"。
+
+    节拍**没有**跨引用:`op`/`after`/id 重复全在包自己肚子里。所以这一格照查 ——
+    否则一次编辑就能把一份开不了机的剧情送过绿灯。
+    """
+    path = _write(tmp_path / "beat_edit.cyberworld", [
+        _MANIFEST, _beat(payload=[{"op": "没这个 op", "agent_id": "甲"}]),
+    ])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is False and any("op" in e for e in errors), errors
+
+    # 对照组:同一次编辑里剧情写对了就放行 —— 上面那条不是"带节拍的编辑一律红"。
+    ok2, errors2 = _check_says(
+        _write(tmp_path / "beat_edit_ok.cyberworld", [_MANIFEST, _beat()]), edit=True)
+    assert ok2 is True, errors2

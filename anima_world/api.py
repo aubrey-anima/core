@@ -2084,6 +2084,7 @@ class World:
         装回去就是一把死锁)、不带 `owner_pid`/`owner_host`(装进新世界等于让一个
         还没人跑过的世界自称"有人在跑")。
         """
+        import itertools
         from datetime import datetime, timezone
 
         import anima_world
@@ -2103,12 +2104,28 @@ class World:
             source_engine_version=anima_world.__version__,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
+        # `--beats` 那一格 **3.7.0 之前是个哑参数**:它一路传到这儿,然后什么也不做
+        # —— 而节拍那条链断在中间的账(看板 D1)本来就够贵了,再加一个"传了没报错、
+        # 也没生效"的参数。现在它把那份脚本写成**作者层记录**打进包里,于是那个世界
+        # 在别处装起来时首启自己就带上它。
+        # ⚠️ 一个**跑过**的世界里节拍已经在 `:beats` 键上(3.7.0 起),它跟着状态层
+        # 走;这个参数管的是另一种:世界当初是靠命令行 `--beats` 跑起来的,库里没有。
+        extra: list[dict[str, Any]] = []
+        if beats_path is not None:
+            from anima_world.beats import BeatScript
+
+            extra = [{"kind": "author", "type": "beat", "body": dict(beat)}
+                     for beat in BeatScript.load(beats_path).beats]
         if world_lock is not None:
             world_lock.acquire()
         try:
             with scheduler._lock:
-                write_world_file(output_path, manifest, dump_world_records(
-                    redis=scheduler.redis, world_id=scheduler.world_id, mysql=mysql_conn,
+                write_world_file(output_path, manifest, itertools.chain(
+                    extra,
+                    dump_world_records(
+                        redis=scheduler.redis, world_id=scheduler.world_id,
+                        mysql=mysql_conn,
+                    ),
                 ))
         finally:
             if world_lock is not None:
@@ -2162,10 +2179,20 @@ class World:
                 self.scheduler.event_log.replay()
                 if self.scheduler.event_log is not None else []
             )
+        # 分母:这个世界**声明过**的那一串节拍(3.7.0 起它住在世界里)。
+        # 给不出来时传 `None` 而不是 `[]` —— 「问不出来」和「一拍都没写」是两件事。
+        from anima_world.redis_state import RedisBeatsStore
+
+        beats = None
+        if self.scheduler.redis is not None and self.scheduler.world_id:
+            declared = RedisBeatsStore(
+                self.scheduler.redis, self.scheduler.world_id).definitions()
+            beats = declared if declared else None
         return build_run_report(
             events,
             ticks=self.scheduler.clock if ticks is None else int(ticks),
             minutes_per_tick=int(mpt),
+            beats=beats,
         )
 
     def start_clock(self, fallback_tick_rate: float = 1.0) -> None:

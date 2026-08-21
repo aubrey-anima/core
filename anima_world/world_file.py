@@ -75,6 +75,14 @@ RECORD_KINDS = frozenset({"manifest", "author", "redis", "event", "mysql", "chec
 
 # `author` 记录的类型 → 它在编译管线里的 section 名。
 # 这张表就是"种子的十一个段"原样搬过来的,一个不多一个不少。
+#
+# 🆕 **第十二个是 `beat`(3.7.0,看板 D1)。** 它此前是这张表之外唯一一样
+# **作者写下的东西**:节拍只能靠 `--beats` 单独喂一个文件,进不了 `.cyberworld`。
+# 后果是那条链在中间断了 —— 工作台本地试炼五拍全响,到了舰队上**一拍都不响,
+# 而且没有任何一处报错**(世界照常启动、居民照常过日子,只是那条故事线不存在)。
+# 病根是判断错位:节拍**是作者层**(和人物、地点、关系同属"作者写下的",不是
+# "世界跑出来的"),而它被留在了"作者层 / 状态层"这个划分之外。
+# 收进来之后交接仍是**一件产物**,契约的形状一个字没改。
 AUTHOR_SECTIONS: dict[str, str] = {
     "agent": "agents",
     "location": "locations",
@@ -87,6 +95,7 @@ AUTHOR_SECTIONS: dict[str, str] = {
     "memory": "memories",
     "visibility": "stock_visibility",
     "place": "stock_places",
+    "beat": "beats",
 }
 # 那两个**不是一列条目而是一个对象**的段,和 `config` 同类:一份而不是一条。
 AUTHOR_OBJECT_TYPES: dict[str, str] = {
