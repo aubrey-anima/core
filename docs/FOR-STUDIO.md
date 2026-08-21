@@ -2925,11 +2925,16 @@ import 本包)。`contract --json` 的 `invitations.read_command` 因此是 `nul
 
 ```console
 $ anima-world contract --json | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['invitations']['outcomes_api'])"
+    "import sys,json;d=json.load(sys.stdin);print(d.get('invitations',{}).get('outcomes_api'))"
 World.invitation_outcomes_page
 ```
 
-`null` 或整段缺失 = 这支引擎只有那两扇有上限的门(3.6.0 及更早)。
+**这一格缺席、或者是 `null`** = 这支引擎只有那两扇有上限的门(3.6.0 及更早)。
+🔴 **而"缺席"是真正会发生的那一支,`null` 反而一支引擎都不会答**(2026-08-21 在
+3.6.0 那个 venv 上实测:整个 `invitations` 段**不存在**)。所以那行 `.get(…, {})`
+是承重的 —— 写成 `d['invitations']['outcomes_api']` 的话,老引擎上是 `KeyError`
+退 1,而**一个崩掉的探测器不是"探测出没有"**:它长得像"这台机器坏了",
+调用方多半会去查错的地方。
 同段还报 `outcomes`(四种结局的全集)与 `settled_kept`(那 200 是多少)——
 **别在消费方硬编码这两个数**。
 
@@ -3053,11 +3058,18 @@ World.invitation_outcomes_page
 
 ```console
 $ anima-world contract --json | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['beats']['author_type'])"
+    "import sys,json;d=json.load(sys.stdin);print(d.get('beats',{}).get('author_type'))"
 beat
 ```
 
-`null` = 这支引擎的节拍只能靠 `--beats` 单独喂一个文件(3.6.0 及更早)。
+**这一格缺席、或者是 `null`** = 这支引擎的节拍只能靠 `--beats` 单独喂一个文件
+(3.6.0 及更早)。
+🔴 **这句话我第一版写成了「`null` = 老引擎」,而那是错的,已实测更正**:3.6.0 上
+`beats` 段**有**,`author_type` 这一格**没有** —— 照第一版那条命令敲下去是
+`KeyError` 退 1,**没有任何一支引擎会答 `null`**。
+**这条对整份契约都成立**(`erasure`、`invitations`、`seed.*` 新格全一样):
+新加的能力格在老引擎上是**缺席**,不是 `null`。**探测一律 `.get(段, {}).get(格)`**,
+"问不出来"要落在那个 `None` 上,而不是落在一个异常上。
 
 ### 五条要知道的(判断本身,不是用法)
 

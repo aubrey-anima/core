@@ -134,8 +134,13 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
   安静扔掉。今天到不了(`author_records_to_seed` 先一步拦住),但它是一道**准备好静默
   丢弃**的闸,而这一层的失败方式恰恰是安静的。现在播的就是验过的那一份。
 - 按出口探测:`contract --json` 新增 `beats.author_type` / `world_file_section` /
-  `storage_key` / `report_section`(`author_type: null` = 这支引擎只认那个单独的文件)。
-  **别比版本号。**
+  `storage_key` / `report_section`。**别比版本号。**
+  🔴 **修补轮更正**:第一版写的是「`author_type: null` = 老引擎」,而**没有任何一支
+  引擎会答 `null`** —— 3.6.0 上 `beats` 段**有**、`author_type` 这一格**没有**(实测),
+  照那句话写的探测器是 `KeyError` 退 1。**新加的能力格在老引擎上是「缺席」不是
+  `null`**,这条对整份契约都成立(`erasure` / `invitations` / `seed.*` 一样)。
+  **探测一律 `.get(段, {}).get(格)`,让「问不出来」落在一个值上,而不是落在一个
+  异常上** —— 一个崩掉的探测器不是"探测出没有",它长得像"这台机器坏了"。
 
 ### Added —— `report` 那个差集:哪几拍白写了(FOR-STUDIO §0-② 的第四条)
 
@@ -284,7 +289,8 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 新门是 `_filtered_page` 的**第四个**消费者(游标语义和另外三扇逐字相同,
 空页也推得动游标)。**有意没有非分页的姊妹方法** —— "只给最近 N 条"正是这个 bug
 本身,再造一个等于把 40 换成别的数字。契约上按出口探测:`contract --json` 新增
-`invitations` 段(`outcomes_api` 为 `null` = 这支引擎没有这扇门)。
+`invitations` 段(`outcomes_api` **缺席或为 `null`** = 这支引擎没有这扇门;
+🔴 **3.6.0 上是整段缺席**,实测 —— 探测写 `.get("invitations", {}).get("outcomes_api")`)。
 
 ### Fixed —— 「在路上」这件事,引擎对她和对他用的是两把尺(看板 D24)
 

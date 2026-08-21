@@ -6068,9 +6068,14 @@ def contract_payload() -> dict[str, Any]:
         "erasure": {
             "read_command": "player erase",       # 不带 --yes 就是只数
             "write_command": "player erase --yes",
-            # `null` = 这支引擎的抹除**一趟被杀就回不来**(3.4.0 及更早);
-            # 命令名 = 可续,而且续跑不会重新推断名字。宿主的作业调度按这一格
-            # 决定敢不敢把抹除切成片、敢不敢在部署时把它杀掉。
+            # **这一格缺席、或者是 `null`** = 这支引擎的抹除**一趟被杀就回不来**
+            # (3.4.0 及更早);命令名 = 可续,而且续跑不会重新推断名字。宿主的作业
+            # 调度按这一格决定敢不敢把抹除切成片、敢不敢在部署时把它杀掉。
+            # ⚠️ **"缺席"那半句是承重的,而这份契约到 3.7.0 才把它写对**:一支
+            # 没有这个能力的老引擎**不会答 `null`,它整段都没有** —— 照
+            # `payload["erasure"]["resume_command"]` 那样取的探测器在它身上是
+            # `KeyError` 退 1,而**探测器崩掉和"探测出没有"是两件事**。
+            # 消费方一律 `.get("erasure", {}).get(...)`。
             #
             # ⚠️ **`--yes` 一个都不能少**,理由和 `write_command` 逐字相同:
             # 这条命令**默认是预演**(和 `world drop` 同款)。少了它,照这一格
@@ -6107,9 +6112,11 @@ def contract_payload() -> dict[str, Any]:
             "read_api": "World.invitations_page",
             "answer_api": "World.answer_invitation",
             # 🆕 3.7.0(看板 D23):结局那条事件的**带游标**出口。
-            # `null` = 这支引擎只有那两扇有上限的门(3.6.0 及更早),离线久了
-            # 「她已经走开了」会静默掉出窗外,屏幕上印成「你错过了」——
-            # **把她做的事记在他头上**,而链路上一处不报错。
+            # **这一格缺席、或者是 `null`** = 这支引擎只有那两扇有上限的门
+            # (3.6.0 及更早),离线久了「她已经走开了」会静默掉出窗外,屏幕上
+            # 印成「你错过了」—— **把她做的事记在他头上**,而链路上一处不报错。
+            # ⚠️ **3.6.0 上整个 `invitations` 段都不存在**(实测),所以探测要写成
+            # `.get("invitations", {}).get("outcomes_api")`。
             "outcomes_api": "World.invitation_outcomes_page",
             "outcomes_event": "invitation_settled",
             "outcomes": list(INVITE_OUTCOMES),
@@ -6128,10 +6135,16 @@ def contract_payload() -> dict[str, Any]:
         "beats": {
             "schema_version": None,
             # 🆕 3.7.0(看板 D1):节拍进得了 `.cyberworld` 了,而且**首启自己带上**。
-            # `author_type` 是 `null` = 这支引擎的节拍只能靠 `--beats` 单独喂一个
-            # 文件(3.6.0 及更早)—— 而舰队上没有任何一条路会去传那个参数,于是
-            # 作者写的剧情**一拍都不响,零报错**。
+            # **这一格缺席、或者是 `null`** = 这支引擎的节拍只能靠 `--beats` 单独
+            # 喂一个文件(3.6.0 及更早)—— 而舰队上没有任何一条路会去传那个参数,
+            # 于是作者写的剧情**一拍都不响,零报错**。
             # **按这一格探测,别比版本号。**
+            # ⚠️ **"缺席"是这里真正会发生的那一支,`null` 反而一支引擎都不会答**
+            # (2026-08-21 在 3.6.0 那个 venv 上实测):`beats` 段它**有**,而
+            # `author_type` 这一格**没有** → `payload["beats"]["author_type"]`
+            # 当场 `KeyError` 退 1。**一个崩掉的探测器不是"探测出没有"** ——
+            # 它长得像"这台机器坏了",而调用方多半会去查错的地方。
+            # 一律 `.get("beats", {}).get("author_type")`。
             "author_type": "beat",
             "world_file_section": "beats",
             "storage_key": "anima:{world_id}:beats",
