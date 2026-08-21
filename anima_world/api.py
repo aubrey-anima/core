@@ -135,53 +135,17 @@ _PLAYER_FALLBACK_DISPLAY = "这位玩家"
 
 
 def _where_unknown_line(name: str, here_name: str) -> str:
-    """「世界这会儿不知道你在哪」那一句 —— **两扇门共用的那一份**。
+    """「世界这会儿不知道你在哪」那一句。**2026-08-21 起它只是一层转发** ——
+    整族五句都收进了 `together.colocation_line()`,那儿才是账本。
 
-    `World._invite_absence`(他按「好」那扇)和 `World._colocation_error`
-    (他直接动手那扇)都会走到这一支,而同一个玩家两扇门都撞得上。
-
-    ⚠️ **这个函数存在的理由是"逐字同一句"曾经被人手抄着维持,然后塌了**
-    (2026-08-20 第六轮):第五轮在 `_colocation_error` 头上写下「措辞现在和
-    `_invite_absence` 那一支逐字同一句」,而那时它俩已经不一样了 —— 一处拼的是
-    人话地名、一处拼的是裸 id(`苏晚夏在咖啡店` vs `苏晚夏在 cafe`),还差一个
-    空格。**抄两遍来维持"逐字相同",正是塌掉的那个机制**;句子收在这里之后,
-    "两扇门说同一句话"这件事由调用点保证,不再由谁读没读全那段注释保证。
-
-    ⚠️ **收敛到这儿的只有一支,别读成"两扇门整体统一了"**(第七轮 2026-08-20
-    认账;上面那段话写下来之后,两个验收员各自独立读成了后者)。共用的**只有
-    「世界这会儿不知道你在哪」这一支**,也就是他没位置那一种。另外两种情形两扇门
-    仍是各写各的,**而且其中一句说的是她的出发地**:
-
-    下表引的都是**句子里说位置的那一截**,前后还有别的字,别当整句抄走:
-
-    | 情形 | `_invite_absence`(他按「好」那扇) | `_colocation_error`(他动手那扇) |
-    |---|---|---|
-    | 她在途、他在别处 | 「…这会儿在路上,还没落脚 —— 不是你不在」 | 「…你在后院,苏晚夏在咖啡店。…」← **咖啡店是她的出发地** |
-    | 世界不知道**她**在哪 | 「世界这会儿不知道…在哪 —— 不是你没到场。…」 | 「…这会儿在路上,不在任何地方」 |
-
-    **两扇门在这两种情形上说的话恰好对调了。** 病根在 `_colocation_error` 那边:
-    它**从不问 `scheduler._transit`**,只按 `here == where` 猜她在不在赶路。
-    敲得动的判据(第七轮当场敲过):
-
-        awk '/^    def _colocation_error/,/^    def intend/' anima_world/api.py | grep -c _transit
-
-    今天答 `0`。行首那两个 `^    ` 是承重的:去掉它,这段 docstring 自己就成了
-    awk 的起点,判据当场自答 `1`(第七轮真敲出来过)。⚠️ 它**宁可误报也不漏报**:
-    哪天答出非 0,先看命中落在代码里还是落在一段讲这件事的注释里 ——
-    所以那个函数的 docstring 里有意一次都没写这个名字。
-    **这不是第六轮引入的** —— `git diff fdd2408 26a204c -- anima_world/api.py`
-    里那两支的分支条件逐位相同,第六轮改的只是地名印不印成人话;
-    **但也正因为改成了人话,那句假话更像真的了**。
-    修法(改去问 `_colocation_gate` 那四个枚举,别自己按 `here` 猜)**有意留在
-    定版之后**,已进看板 —— 定版前动一条判断逻辑,换来的是没人复验过的新分支。
-
-    `here_name` 收的是**过了 `Scheduler.place_name()` 的人话地名**,不是 id ——
-    拼给人看的句子里出现地点变量,先问一句「过 `place_name()` 了吗」。
+    留着这个名字不删,是因为它是这条修法的**病历**:2026-08-20 第六轮把这一支
+    从两扇门各抄一遍收成一处(裸 id vs 人话地名、外加一个空格,抄崩了),第七轮
+    认账"收敛的只有四分之一",而剩下的四分之三**在同一时刻给玩家两种互相矛盾的
+    回执**(看板 D27)—— 2026-08-21 才连判据带句子一起收完。**一处收一支、
+    留三支各写各的,买到的是"看起来治过了"**,这是那三轮真正的教训。
     """
-    return (
-        f"世界这会儿不知道你在哪 —— 你可能已经离开这个世界了,"
-        f"也可能是这一程还没把落脚处告诉世界。{name}在{here_name}"
-    )
+    return together.colocation_line(
+        "player_where_unknown", name=name, here_name=here_name)
 
 
 class _PlayerRow(MutableMapping):
@@ -1021,11 +985,19 @@ class _ToolRuntime:
 
         判定与身份声明那一段共用同一条规矩(`chat_service.respond`):同地、且她不在
         途中。宿主没调过 `player_move` 就是没告诉世界他在哪 —— 一律按不在场,引擎不猜。
+
+        ⚠️ **他那一头 2026-08-21 换过尺子**(看板 D24):从前问的是
+        `World.player_location()`,而那一条答的是"他属于哪儿"——**在路上仍算在
+        出发地**。于是同一个"在途"在这一个函数里有两把尺:她在途 = 不在任何地方,
+        他在途 = 还站在原地。后果不是措辞,是**他走在路上时按「好」能把一起做事
+        真做成**(实测 `ok:true`),而世界里"走过去"那段路正是它让人掂量的东西。
+        `World._player_here()` 的 docstring 早就把这条写死过一次:「**新开的门问它,
+        别在门上再写一遍**」—— 而这扇门当年正是在门上又写了一遍。
         """
         if agent_id in self._world.scheduler._transit:
             return False  # 在途不算在场,与 `_colocated_agents` 同一条规矩
         here = self.agent_location(agent_id)
-        where = self._world.player_location(player_id).strip()
+        where = self._world._player_here(player_id).strip()
         return bool(here) and bool(where) and here == where
 
     def claim_hail(self, agent_id: str, player_id: str) -> str:
@@ -1470,6 +1442,13 @@ class _ToolRuntime:
         读的人会照着它省下自己那一次检查。3.6.0 第五轮(2026-08-20)才真的钉上:
         `tests/test_interaction_witness_and_invites.py::test_闸和面对面必须逐位同构`,
         按**状态 ×(她, 他)**铺开对,不是挑一个样本点。
+
+        ⚠️ **2026-08-21 多了第五条 `player_in_transit`**(看板 D24)。它不是新加了
+        一种情形,是**把一种一直存在、却被算成"他还站在原地"的情形认了出来** ——
+        在这之前他在途时这里答的是 `""`(当得成面),门也真的放行。**别把它并进
+        `player_where_unknown`**:那一句说的是"世界不知道他在哪",而世界知道得很
+        清楚 —— 他在从 A 去 B 的路上,过几拍就到。把两件事说成一件,和 `intent.py`
+        那一支把「世界不知道她在哪」印成「她在赶路」是同一种病,只是换了一头。
         """
         scheduler = self._world.scheduler
         if actor_id in scheduler._transit:
@@ -1477,6 +1456,11 @@ class _ToolRuntime:
         here = self.agent_location(actor_id)
         if not here:
             return "inviter_where_unknown"
+        # 先问在不在途、再问位置 —— 和上面判她那两句逐位对称。
+        # `player_in_transit()` 自己会先结算一次到达,所以它排在读位置之前也不会
+        # 把一个刚落脚的人报成还在赶路。
+        if self._world.player_in_transit(player_id):
+            return "player_in_transit"
         where = self._world.player_location(player_id).strip()
         if not where:
             return "player_where_unknown"
@@ -5086,6 +5070,10 @@ class World:
         (老事件)、或者世界这会儿不知道他俩里某一个在哪。猜一个出来会让那句话
         读起来完全正常而恰好是反的。
 
+        ⚠️ **`player` 这一格 2026-08-21 起多了一种来路**:他自己在赶路(D24)。
+        在这之前那种情形**根本走不到这个函数** —— 门把他在途算成"还站在出发地",
+        于是他走在路上按「好」,一起做事**真的做成了**。
+
         ⚠️ **"世界不知道他在哪"不等于"宿主没接 `player_move`"**。它至少有三种
         来路:他 `player_leave` 过、在场记录过了 `_PLAYER_TTL_SECONDS`(15 分钟)
         没续上、宿主确实没落过位置。把三种写成一种,就等于对着一个接得好好的
@@ -5099,18 +5087,18 @@ class World:
         where = runtime.player_location(pid)
         here_name = scheduler.place_name(here) or "别处"
         where_name = scheduler.place_name(where) or "别处"
-        if agent_id in scheduler._transit:
-            # 她在赶路 = 不在任何地方(`_where_is` 同一条)。照 `agent_location`
-            # 那份直说会写出"你在 cafe,她在 cafe —— 这件事得当面",一句谎。
-            return ("agent", f"{name}这会儿在路上,还没落脚 —— 不是你不在")
-        if not here:
-            # 世界不知道**她**在哪。落到下面几支的话会写成"她已经离开咖啡店了 ——
-            # 她这会儿在别处",一句把"查不到"说成"她走了"的话。
-            return ("unknown",
-                    f"世界这会儿不知道{name}在哪 —— 不是你没到场。"
-                    f"等她落了脚再问一次")
-        if not where:
-            return ("unknown", _where_unknown_line(name, here_name))
+        # **判据只有一份**(`_colocation_gate`),**句子也只有一份**
+        # (`together.colocation_line`)—— 2026-08-21 起这一支和另外两扇门共用它们。
+        # 从前这里自己按 `_transit` / `not here` / `not where` 又判了一遍,判得对,
+        # 而隔壁两扇门各自判错了一种,三份判断谁也拦不住谁走岔(看板 D27)。
+        gate = runtime._colocation_gate(agent_id, pid)
+        line = together.colocation_line(
+            gate, name=name, here_name=here_name, where_name=where_name)
+        if line:
+            # 「怪谁」这一格和「是哪一种」不是同一个问题:世界说不上来的两种一律
+            # `unknown`(**说不上来不等于都怪你**),剩下两种谁在路上就点谁的名。
+            return ({"inviter_in_transit": "agent",
+                     "player_in_transit": "player"}.get(gate, "unknown"), line)
         asked = str(row.get("loc") or "")
         if not asked:
             return ("unknown",
@@ -5478,18 +5466,15 @@ class World:
         合成一句"你不在她跟前"的话,第二种会看起来像是玩家自己站错了地方,
         而他做什么都改不了 —— 那是这个仓库最怕的那种"技术上没错、读起来是谎"。
 
-        ⚠️ **第三行是猜出来的,不是问出来的**(第七轮 2026-08-20 认账,**有意没修**)。
-        这一支的条件是 `not here or here == where`,而这个函数从头到尾**没有一处去问
-        她在不在赶路** —— 隔壁 `_colocation_gate()` 第一句问的就是那个,这里第一句问的
-        是有没有 `player_id`。于是它**猜错的时候会说出世界支持不了的话**:她在
-        「咖啡店 → 工作室」的路上而他在别处时,走的是最后那一支,印出来是
-        「你在后院,苏晚夏在咖啡店」—— 咖啡店是她的**出发地**
-        (`agent_location()` 对在途的人仍报着出发前那个地名,`_colocation_gate` 的
-        docstring 里写着同一句)。**他在别处时这句话读起来完全正常,所以没人逮到。**
-        逐支的对照表、敲得动的判据、以及"这不是第六轮引入的"那笔账,写在
-        `_where_unknown_line()` 的 docstring 里 —— 那是两扇门唯一真的合流的地方,
-        账记在合流点上才不会只有一半人读到。修法(改去问 `_colocation_gate` 那四个
-        枚举)**有意留到定版之后**,已进看板。
+        ✅ **2026-08-21 修了(看板 D27):这几句不再是猜出来的,是问出来的。**
+        从前这里从头到尾**没有一处去问她在不在赶路**,只拿 `not here or here == where`
+        猜 —— 而他站在**别处**时那个猜法两支都掉进 `else`,吐出「你在后院,
+        苏晚夏在咖啡店」:咖啡店是她的**出发地**,两个地名都对,合起来是一句谎。
+        「他在别处」是最常见的那一种,所以这句谎六轮没人逮到。现在这个函数
+        **一个位置判断都不做**,只问 `_colocation_gate()` 要那个枚举,再拿
+        `together.colocation_line()` 取句子 —— 三扇门从此**在判据和措辞两头都同一份**。
+        ⚠️ 由此多出来的第五种是 `player_in_transit`(他自己在赶路,D24):从前它
+        根本走不到这儿,因为 `face_to_face()` 判他用的是"在途仍算在出发地"那把尺。
 
         ⚠️ **第二行从前把原因写死成「宿主没调过 `player_move`」**(3.6.0 第五轮
         改掉,2026-08-20):那一支至少有三种来路 —— 他 `player_leave` 过、在场记录
@@ -5536,25 +5521,24 @@ class World:
             return ""
         if not player_id:
             return "这件事要当面才办得到,而这次调用没说是替哪个玩家"
-        if self._tool_runtime.face_to_face(agent_id, player_id):
+        gate = self._tool_runtime._colocation_gate(agent_id, player_id)
+        if not gate:
             return ""
-        here = self._tool_runtime.agent_location(agent_id)
-        where = self._tool_runtime.player_location(player_id)
         name = self._tool_runtime.agent_names().get(agent_id, agent_id)
         # **地名一律过 `place_name()`**:玩家读到的是「咖啡店」,不是 `cafe`。
-        here_name = self.scheduler.place_name(here) or "别处"
-        if not where:
-            # **不指认宿主**(和 `_invite_absence` 那一支共用 `_where_unknown_line`):
-            # 这里走到的三种来路里,有两种宿主刚刚才调过 `player_move`。
-            return "这件事要当面才办得到,而" + _where_unknown_line(name, here_name)
-        if not here or here == where:
-            # 两处地名一样却不是面对面 —— 只可能是她在赶路(`face_to_face` 与
-            # `_where_is` 同一条:在途即不在任何地方)。照 `agent_location` 那份
-            # 直说会写出"你在 cafe,她在 cafe —— 这件事得当面",一句读起来是谎的话。
-            # ⚠️ 这句话是**猜**出来的,猜错的样子见 docstring 第三段。
-            return f"这件事要当面才办得到,而{name}这会儿在路上,不在任何地方"
-        # `where_name` 算在这儿而不是上面:上面两支一个都用不着它(第七轮的顺手项)。
-        where_name = self.scheduler.place_name(where) or "别处"
+        here_name = self.scheduler.place_name(
+            self._tool_runtime.agent_location(agent_id)) or "别处"
+        where_name = self.scheduler.place_name(
+            self._tool_runtime.player_location(player_id)) or "别处"
+        line = together.colocation_line(
+            gate, name=name, here_name=here_name, where_name=where_name)
+        if line:
+            # 四种情形共用邀请门那一份句子(`together.colocation_line`)——
+            # **不指认宿主**、不把"查不到"说成"她走了"、不把出发地说成现在在哪。
+            return "这件事要当面才办得到,而" + line
+        # 只剩 `player_not_here`:两头都有落脚处,只是不在一处。**这一支有意不共用**
+        # —— 邀请门在这一支上说得出"是谁走开了"(它知道她开口那会儿在哪),
+        # 这扇门手上没有那一格,硬凑成同一句会把那份多出来的信息丢掉。
         return (
             f"这件事要当面才办得到 —— 你在{where_name},{name}在{here_name}。"
             f"隔着这么远,你只能跟她说话"

@@ -873,14 +873,27 @@ def test_她在赶路时_那句话不许写成他站错了地方(world):
     assert "在赶路" in str(detail["refusal"])
 
 
-def test_四个闸都属于当面那一族(world):
+def test_五个闸都属于当面那一族(world):
     """**别写 `== "player_not_here"`。** 拆闸时把整族的名字收进一个常量,是为了
-    让下游那一支不会因为拆闸而悄悄关掉 —— 少掉的三种恰好是最需要点名的。"""
+    让下游那一支不会因为拆闸而悄悄关掉 —— 少掉的四种恰好是最需要点名的。
+
+    ⚠️ **2026-08-21 从四条变五条**(D24:他自己在赶路)。这个数字写死在这儿是有意
+    的 —— 它会因为任何一次加减当场红,而这一族的每一条都要有人去写句子、写用例。
+    改这个数之前先问一句:新那条在 `GATE_LABELS` 里有词吗、
+    `together.colocation_line()` 里有句子吗、`_invite_absence` 说得出怪谁吗。
+    """
     from anima_world import together
 
     assert together.COLOCATION_GATES <= set(together.GATE_LABELS)
     assert "player_not_here" in together.COLOCATION_GATES
-    assert len(together.COLOCATION_GATES) == 4
+    assert len(together.COLOCATION_GATES) == 5
+    # 除了"两头都有落脚处、只是不在一处"那一条,每一条都得有一句共用的人话 ——
+    # 少一句的话,三扇门里就会有人自己现编一句(D27 就是这么来的)。
+    for gate in together.COLOCATION_GATES - {"player_not_here"}:
+        assert together.colocation_line(
+            gate, name="她", here_name="咖啡店", where_name="后院"), gate
+    assert together.colocation_line(
+        "player_not_here", name="她", here_name="咖啡店", where_name="后院") == ""
 
 
 def test_闸和面对面必须逐位同构(world):
@@ -920,6 +933,13 @@ def test_闸和面对面必须逐位同构(world):
         yield ("他去了后院", lambda: world.player_move("p1", "yard"), "player_not_here")
         yield ("他下线了", lambda: world.player_leave("p1"), "player_where_unknown")
         yield ("他回到她那儿", lambda: world.player_move("p1", "cafe"), "")
+        # **他自己在赶路**(2026-08-21,D24)。在这之前这一格根本不存在:判她用
+        # `_transit`(在途 = 不在任何地方),判他用 `player_location()`(在途 = 还算
+        # 在出发地),于是他走在路上时这里答 `""`,门也真的放行 —— 他能一边走一边
+        # 把「一起做事」做成,而"走过去"那段路正是这个世界让他掂量的东西。
+        yield ("他起程去后院", lambda: world.player_walk("p1", "yard"),
+               "player_in_transit")
+        yield ("他到了后院", lambda: world.player_move("p1", "cafe"), "")
 
     for name, arrange, expected in states():
         arrange()
@@ -975,6 +995,39 @@ def test_他按好时她在赶路_答话那扇门也得点她的名(world):
     assert out["outcome"] == "expired"
     row = world.invitations("p1")[0]
     assert row["pending"] is False and row["outcome"] == "expired"
+
+
+def test_他走在路上按好_做不成而且点的是他的名(world):
+    """**D24 的那一下,拿真世界演出来。** 2026-08-21 之前这条断言整段是反的:
+    他起程之后按「好」,`answer_invitation` 回 `ok:true`,量真的动了
+    (实测 `changed:{"坐过几回":1.0}`)—— 因为判他在不在场用的是
+    `World.player_location()`,而那一条答的是"他属于哪儿",**在路上仍算在出发地**。
+
+    她在途时这扇门早就拦得住(判她用 `scheduler._transit`)。**同一个"在途",
+    两把尺** —— 这种不对称最坏的地方不是它宽松,是它**只对一头宽松**,于是
+    「一边走一边把事做成」成了玩家能学会、而世界从没打算给的一条捷径。
+    """
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    walked = world.player_walk("p1", "yard")     # 他起程,**不推进到落脚**
+    assert walked["in_transit"] is True and world.player_in_transit("p1") is True
+    out = world.answer_invitation("p1", seq, accept=True)
+    assert out["ok"] is False, out
+    assert out["gate"] == "player_in_transit", out
+    assert out["absent"] == "player", out
+    assert "你这会儿在路上" in out["refusal"], out["refusal"]
+    # 他按了「好」而这件事没做成 —— **错过**,不是他拒绝:关系与记忆一个字不写。
+    assert out["outcome"] == "expired", out
+    # 对照组:同一个世界里,他落了脚就该做得成 —— **期望非 0 的那一条判据**。
+    # 没有它的话,"按不动"这个结论对一个整体坏掉的夹具同样成立。
+    # ⚠️ 取的是 `[-1]`:这扇门是**流水账**,第一行是刚才那份已经烧掉的。
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq2 = world.invitations("p1")[-1]["seq"]
+    assert seq2 != seq
+    assert world.answer_invitation("p1", seq2, accept=True)["ok"] is True
+    assert world.scheduler.stock_store.of("bench:oak").get("坐过几回") == 1
 
 
 def test_他按好时世界不知道她在哪_不许说成是他没到场(world):

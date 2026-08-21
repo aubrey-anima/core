@@ -184,6 +184,12 @@ GATE_LABELS: dict[str, str] = {
     "player_not_here": "不在她跟前 —— 一起做事得当面",
     "player_where_unknown": "在哪,世界这会儿不知道 —— 一起做事得当面,"
                             "而没有人告诉过世界他在哪",
+    # ⚠️ **这一格是 2026-08-21 补的第五条,补的是一把尺**(D24):在这之前
+    # 「他在赶路」根本没有自己的格子 —— 判她用 `_transit`(在途 = 不在任何地方),
+    # 判他用 `player_location()`(在途 = 还算在出发地),于是他**走在路上时按
+    # 「好」能把一起做事真做成**。两把尺合成一把之后,他那一头也有了这一种,
+    # 措辞照 `inviter_in_transit` 逐字对称。
+    "player_in_transit": "在赶路,这会儿不在任何地方 —— 一起做事得当面",
     "inviter_in_transit": "还当不了面 —— 开口的那个人在赶路,这会儿不在任何地方",
     "inviter_where_unknown": "还当不了面 —— 世界不知道开口的那个人在哪",
     "player_not_you": "不是这次调用的那个玩家,替不了他答应",
@@ -204,9 +210,48 @@ GATE_LABELS: dict[str, str] = {
 # 关掉那一支** —— 拆之前那个判断覆盖 100% 的当面失败,拆之后只剩四分之一,
 # 而少掉的那三种恰好是最需要点名的。
 COLOCATION_GATES: frozenset[str] = frozenset({
-    "player_not_here", "player_where_unknown",
+    "player_not_here", "player_where_unknown", "player_in_transit",
     "inviter_in_transit", "inviter_where_unknown",
 })
+
+
+def colocation_line(
+    gate: str, *, name: str, here_name: str, where_name: str = "",
+) -> str:
+    """当不成面的那半句人话 —— **三扇门共用的那一份**。当面比地名那一种回空串。
+
+    三扇门指的是:他直接动手那扇(`api.World._colocation_error`)、他按「好」那扇
+    (`api.World._invite_absence`)、他指使她那扇(`intent.Director._colocation_refusal`)。
+    第四扇 `_colocation_gate()` 只答枚举不写句子,所以不在这儿取词。
+
+    ⚠️ **这个函数存在的理由是"同一件事在三扇门上说三句话"真的发生过,而且骗了六轮**
+    (2026-08-21,看板 D27):同一时刻,他动手会读到「苏晚夏在咖啡店」(那是她的
+    **出发地**),他按「好」会读到「苏晚夏这会儿在路上」。两边都回 200、日志干净。
+    病根不在措辞,在**判据**:那两扇门从不问 `scheduler._transit`,只拿
+    `here == where` 去**猜**她在不在赶路 —— 而他站在别处时两扇都掉进 `else`,
+    吐出「你在广场,苏晚夏在咖啡店」,**两个地名都对,合起来是一句谎**。
+    修法是两半:判断收进 `_colocation_gate()` 那一个枚举,句子收进这里。
+    **抄两遍来维持"逐字相同",正是塌掉的那个机制**(`_where_unknown_line` 那一支
+    2026-08-20 已经吃过一次同样的亏,这次把剩下三支一起收了)。
+
+    `here_name` / `where_name` 收的是**过了 `place_name()` 的人话地名**,不是 id ——
+    拼给玩家看的句子里出现地点变量,先问一句「过 `place_name()` 了吗」。
+    `player_not_here` 有意回空串:那一支要说的是"你在 X、她在 Y",而**只有邀请门
+    知道她开口那会儿在哪**(`row["loc"]`),说得出是谁走开了 —— 三扇门在这一支上
+    本来就该说不一样详细的话,硬凑成一句会把那份多出来的信息丢掉。
+    """
+    if gate == "inviter_in_transit":
+        return f"{name}这会儿在路上,还没落脚 —— 不是你不在"
+    if gate == "inviter_where_unknown":
+        return f"世界这会儿不知道{name}在哪 —— 不是你没到场。等她落了脚再问一次"
+    if gate == "player_in_transit":
+        return f"你这会儿在路上,还没落脚 —— {name}在{here_name},等你落了脚再说"
+    if gate == "player_where_unknown":
+        return (
+            f"世界这会儿不知道你在哪 —— 你可能已经离开这个世界了,"
+            f"也可能是这一程还没把落脚处告诉世界。{name}在{here_name}"
+        )
+    return ""
 
 # 她开了口,他还没答。**这不是拒绝,也不是硬闸** —— 硬闸的意思是"这件事这会儿
 # 办不成",而这一条的意思是"这件事正等着一个人回话"。合成一个的话,玩家读到的

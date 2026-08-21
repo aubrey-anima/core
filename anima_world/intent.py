@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from anima_world import together
+
 logger = logging.getLogger(__name__)
 
 INTENTS = ("dialogue", "narrative_direction", "style_adjust")
@@ -195,6 +197,20 @@ def read_self_introduction(text: str) -> dict[str, str]:
 # 重连、世界重启复位三处都调),要开这个开关之前重新量一次在场覆盖率,别再引用
 # 上面那句 —— 它是当时的实况,不是判据。见 `_colocation_refusal` 的同一笔账。
 FACE_TO_FACE_ACTIONS = frozenset({"give", "together"})
+
+# 闸的名字(整族的判据,`together.COLOCATION_GATES`)→ 这扇门上 `reason` 的老叫法。
+# **两套词都留着,别去猜另一套**:`reason` 是这扇门 3.2.0 起就交出去的一格,改它
+# 等于破坏一个已经发出去的面;`gate` 是全系统统一的那一族。表里只有一处是**新名字**
+# ——`agent_where_unknown`:2026-08-21 之前「世界压根不知道她在哪」被印成
+# `agent_in_transit`(「她这会儿在路上」),把"查不到"说成了一件很具体的事,而那
+# 件事她自己过几拍就会结束,查不到那种不会。
+_COLOCATION_REASONS: dict[str, str] = {
+    "inviter_in_transit": "agent_in_transit",
+    "inviter_where_unknown": "agent_where_unknown",
+    "player_in_transit": "player_in_transit",
+    "player_where_unknown": "unknown_player_location",
+    "player_not_here": "elsewhere",
+}
 
 # 玩家指令 → 引擎里那个动作。值是 `(行为树的 kind, 成了怎么说, 没成怎么说)`。
 # **只收引擎真有的那几个**:多写一个进去,就是又一次"照做了"而世界一动不动。
@@ -773,6 +789,20 @@ class Director:
         拒绝要给**明确回执**,而且三种原因分得开:不在同一个地方 / 世界不知道你在
         哪 / 世界不知道**她**在哪。合成一句"你不在她跟前"的话,一个宿主根本没接
         `player_move` 的世界,看起来会像是玩家自己站错了地方 —— 而他做什么都改不了。
+
+        ✅ **2026-08-21:判断和句子都不在这儿了**(看板 D27)。这个函数从前自己拿
+        `not here or here == where` 猜,而那一句 `not here`(**世界压根不知道她在
+        哪**)被印成了「她这会儿在路上」—— 把"查不到"说成了一件很具体的事,和
+        player 那侧把 `unknown_player_location` 读成"宿主没接 `player_move`" 是
+        同一种病的镜像。现在改成问 `_colocation_gate()` 那个枚举、拿
+        `together.colocation_line()` 取句子,和另外两扇门同一份。
+
+        ⚠️ **`reason` 只加不改**:三个老取值(`unknown_player` /
+        `unknown_player_location` / `elsewhere`)一个字没动,新的两支各给一个新名字
+        (`agent_where_unknown` / `player_in_transit`)。`agent_in_transit` 从"顺带
+        兜住两种情形"缩回它字面的意思 —— **它现在只在她真的在赶路时出现**。
+        同时多一格 `gate`(只加):**闸的名字才是这一族的判据**,`reason` 是它在这扇
+        门上的老叫法,两套词各自留着,谁也别去猜另一套(`together.COLOCATION_GATES`)。
         """
         if action not in FACE_TO_FACE_ACTIONS:
             return None
@@ -794,33 +824,26 @@ class Director:
             where = str(self._runtime.player_location(player_id) or "")
         except Exception:  # noqa: BLE001
             where = ""
-        if self._runtime.face_to_face(resolved, player_id):
+        gate = self._runtime._colocation_gate(resolved, player_id)
+        if not gate:
             return None
         points = self._points()
-        if not where:
-            reason, text = "unknown_player_location", (
-                f"(这件事得当面,而世界不知道你这会儿在哪 —— "
-                f"{name}在{points.get(here) or here or '别处'}。"
-                f"隔着这么远,你只能跟她说话。)"
-            )
-        elif not here or here == where:
-            # 两处地名一样却不是面对面 —— **只可能是她在赶路**(`face_to_face` 与
-            # `_where_is` 同一条规矩:在途即不在任何地方)。照 `agent_location` 那份
-            # 直说的话,回执会写成"你在咖啡店,她在咖啡店 —— 这件事得当面",
-            # 一句技术上没错、而玩家读起来是谎的话。
-            reason, text = "agent_in_transit", (
-                f"({name}这会儿在路上,不在任何地方 —— 等她落脚再说;"
-                f"话倒是随时说得上。)"
-            )
+        here_name = points.get(here) or here or "别处"
+        where_name = points.get(where) or where or "别处"
+        line = together.colocation_line(
+            gate, name=name, here_name=here_name, where_name=where_name)
+        reason = _COLOCATION_REASONS.get(gate, "elsewhere")
+        if line:
+            text = f"(这件事得当面,而{line}。)"
         else:
-            reason, text = "elsewhere", (
-                f"(你在{points.get(where) or where}，{name}在"
-                f"{points.get(here) or here} —— 这件事得当面。"
+            text = (
+                f"(你在{where_name}，{name}在{here_name} —— 这件事得当面。"
                 f"隔着这么远,你只能跟她说话。)"
             )
         return DirectorOutcome(
             ok=False, text=text,
             detail={"target": resolved, "action": action, "reason": reason,
+                    "gate": gate,
                     "player_location": where, "agent_location": here,
                     "enforced_by": "presence.enforce_colocation"},
         )

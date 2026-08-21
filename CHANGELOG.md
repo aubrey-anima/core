@@ -53,6 +53,68 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.7.0] —— 同一件事,一把尺一句话 (2026-08-21)
+
+排雷单(`docs/任务单/2026-08-21-排雷.md`)。**升次版号是因为行为变了**,不是因为
+加了作者层字段:`presence.enforce_colocation` 开着的世界里,"他在不在她跟前"这个
+判断的答案换了一种情形(他自己在赶路),而下游按这个答案画按钮。
+⚠️ **已发布世界的 `engine_min` 一格没抬**,3.7.0 是纯加法(作者层 schema 一个字没动);
+动的只有橱窗自己的封皮 —— `test_flagship_seed` 要求它写的就是产它的那一版。
+
+### Fixed —— 「在路上」这件事,引擎对她和对他用的是两把尺(看板 D24)
+
+`_ToolRuntime.face_to_face()` 判她用 `scheduler._transit`(**在途 = 不在任何地方**),
+判他用 `World.player_location()`(**在途 = 还算在出发地**)。于是他**走在路上时按
+「好」,一起做事真的做成了**。真 Redis 上复演(基线 `4cb4aff`,`git archive` 出的
+临时树):
+
+```console
+③ 他在路上按「好」: {"ok": true, "outcome": "accepted", "changed": {"坐过几回": 1.0}}
+```
+
+修完同一句复演答 `{"ok": false, "gate": "player_in_transit"}`,`坐过几回 = 0.0`;
+**对照组**(他落了脚再按)照旧 `ok:true`、量真的动 —— 一条期望 0 的判据旁边配一条
+期望非 0 的,否则"按不动"这个结论对一个整体坏掉的夹具同样成立。
+
+这一头的答案只准有一句(`World._player_here()` 的 docstring 2026-08 就写死过:
+「**新开的门问它,别在门上再写一遍**」),而这扇门当年正是在门上又写了一遍。
+连带 `together.COLOCATION_GATES` **从四条变五条**,多的是 `player_in_transit` ——
+**别把它并进 `player_where_unknown`**:世界知道他在哪,他在从 A 去 B 的路上。
+
+### Fixed —— 同一时刻,两扇门给玩家两种互相矛盾的回执(看板 D27)
+
+她在 `cafe → workshop` 的路上、他站在广场时:
+
+```console
+# 基线 4cb4aff,真 Redis 复演
+① 他动手那扇 : 这件事要当面才办得到 —— 你在广场,苏晚夏在咖啡店。隔着这么远,你只能跟她说话
+② 他按好那扇 : 苏晚夏这会儿在路上,还没落脚 —— 不是你不在
+两扇门同句? False
+```
+
+**两个地名都对,合起来是一句谎** —— 咖啡店是她的**出发地**。病根不在措辞,在判据:
+`World._colocation_error` 与 `intent.Director._colocation_refusal` **各写了一份逐字
+同构的三分表**,都拿 `here == where` 去猜她在不在赶路,而他站在**别处**时两扇都掉进
+`else`。他在别处是最常见的那一种,所以这句谎六轮没人逮到;第六轮把地名改成人话之后
+**它更像真的了**。
+
+修法是两半,缺一半都不算修:**判断**收进 `_ToolRuntime._colocation_gate()` 那一个
+枚举(三扇门都问它,一处位置比较都不再自己做),**句子**收进
+`together.colocation_line()`(三扇门取同一份词)。2026-08-20 已经收过其中一支
+(`_where_unknown_line`),而**收一支、留三支各写各的,买到的是"看起来治过了"** ——
+两个验收员各自独立把那条测试读成了"两扇门整体统一了"。
+
+`intent` 那扇门顺带修掉一处**把"查不到"说成一件很具体的事**:`elif not here or
+here == where:` 把「世界压根不知道她在哪」印成了「她这会儿在路上」。
+`reason` **只加不改** —— 三个老取值一个字没动,新的两支各给一个新名字
+(`agent_where_unknown` / `player_in_transit`),同时多一格 `gate`(整族的判据)。
+
+### Changed
+
+- `intent` 那扇门的回执多一格 `detail["gate"]`(只加);`reason` 多两个取值。
+- `together.GATE_LABELS` 多一行 `player_in_transit`;`COLOCATION_GATES` 五条。
+- `api._where_unknown_line()` 降成一层转发,留着名字是当病历用(见它自己的 docstring)。
+
 ## [3.6.0] —— 她点你的名时,你得自己答 (2026-08-20)
 
 ### 第九轮:把闸补宽到它本该有的射程,以及一条只会点头的判据

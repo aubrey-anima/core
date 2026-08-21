@@ -140,7 +140,12 @@ def test_世界不知道你在哪_和你站错了地方是两回事(world):
     outcome = _direct(world, "give", object="红围巾")
     assert outcome.ok is False
     assert outcome.detail["reason"] == "unknown_player_location"
-    assert "不知道你这会儿在哪" in outcome.text
+    assert outcome.detail["gate"] == "player_where_unknown", outcome.detail
+    # ⚠️ 措辞 2026-08-21 换成三扇门共用的那一份(`together.colocation_line`),
+    # 从前这扇门自己写「不知道你**这会儿**在哪」,隔壁两扇写「不知道你在哪」——
+    # 同一件事三种说法,而三处各自都读得通,所以谁也不会去比。
+    assert "世界这会儿不知道你在哪" in outcome.text
+    assert "player_move" not in outcome.text
 
 
 def test_同地就放行(world):
@@ -204,42 +209,75 @@ def test_act_的回执也要说得出是三种里的哪一种(world):
 
 
 def test_两扇门上同一件事必须是同一句话(world):
-    """「世界不知道你在哪」在**两扇门**上都会撞见:他直接动手那扇
+    """当不成面的每一种,在**两扇门**上都得是同一句话:他直接动手那扇
     (`World._colocation_error`)和他按「好」那扇(`World._invite_absence`)。
 
     守的不是措辞本身,是**"逐字同一句"由谁保证**。第五轮在 `_colocation_error`
     头上写下「和 `_invite_absence` 那一支逐字同一句」,而那时它俩已经不一样了
     (裸 id vs 人话地名,外加一个空格)—— **靠人手抄两遍来维持"逐字相同",正是
-    那一轮塌掉的机制**。现在句子收在 `api._where_unknown_line()` 里,这条守住
-    两扇门都还在调它。
+    那一轮塌掉的机制**。
 
-    ⚠️ **这个名字管的比它听上去大 —— 它只覆盖四支里的一支**(第七轮 2026-08-20
-    补的认账;上一轮写下这条测试之后,两个验收员各自独立把它读成"两扇门整体统一
-    了")。**一句"有测试守着"比没有测试更坏,读的人会照着它省下自己那一次检查**,
-    所以这里把射程写死:
+    ⚠️ **这条测试 2026-08-20 只覆盖四支里的一支,而它的名字听上去覆盖全部** ——
+    两个验收员各自独立把它读成了"两扇门整体统一了"。当时的实况写在这里当反面
+    教材:她在途、他在别处时,邀请门说「她在路上,还没落脚」,动手那扇说
+    「苏晚夏在咖啡店」——**那是她的出发地**,两个地名都对,合起来是一句谎。
+    病根是**判据**不是措辞:那扇门从不问 `_transit`,只按 `here == where` 猜。
 
-    | 情形 | 这条测试 | 实况 |
-    |---|---|---|
-    | 世界不知道**他**在哪 | ✅ 覆盖(下面这段) | 两扇门共用 `_where_unknown_line()` |
-    | 她在途、他在别处 | ❌ **没覆盖** | 邀请门说「她在路上,还没落脚」;动手那扇说「苏晚夏在咖啡店」—— 那是她的**出发地** |
-    | 世界不知道**她**在哪 | ❌ **没覆盖** | 邀请门说「世界不知道她在哪」;动手那扇说「她这会儿在路上」 |
-
-    后两支**今天就是不一致的**,而且是**有意留着**的(病根:`_colocation_error`
-    不问在途,只按 `here == where` 猜;定版前不动判断逻辑,已进看板)。
-    **别把这条测试放开到那两支去** —— 放开它会当场红,而它该红的方式是有人去修
-    那个函数,不是有人来改这段断言。逐支的账在 `api._where_unknown_line()` 的
-    docstring 里。
+    ✅ **2026-08-21 连判据带句子一起收完了**(看板 D27/D24),所以这条测试**按
+    整族铺开**:五个闸一个不落,少一个就是有人往族里加了闸没写用例。
     """
+    from anima_world import together
+
     world.config_set("presence.enforce_colocation", True)
     world.config_set("chat.tools.enabled", True)
-    # p1 从没被 `player_move` 过 —— 两扇门都走"世界不知道你在哪"那一支。
-    result = world.act("夏", "reach_out", {"player_id": "p1"},
-                       player_id="p1", surface="autonomy")
-    absent, refusal = world._invite_absence({"agent_id": "夏", "loc": "cafe"}, "p1")
-    assert absent == "unknown"
-    assert result["error"] == "这件事要当面才办得到,而" + refusal, (
-        result["error"], refusal)
-    assert "咖啡店" in refusal and "cafe" not in refusal, refusal
+
+    def both_doors():
+        """两扇门问同一个处境。回 (动手那扇的整句, 按「好」那扇的 (谁不在, 那句话))。"""
+        result = world.act("夏", "reach_out", {"player_id": "p1"},
+                           player_id="p1", surface="autonomy")
+        return result["error"], world._invite_absence(
+            {"agent_id": "夏", "loc": "cafe"}, "p1")
+
+    seen: set[str] = set()
+
+    def same_sentence(expect_gate, expect_absent):
+        seen.add(expect_gate)
+        assert world._tool_runtime._colocation_gate("夏", "p1") == expect_gate
+        error, (absent, refusal) = both_doors()
+        assert absent == expect_absent, (expect_gate, absent, refusal)
+        assert error == "这件事要当面才办得到,而" + refusal, (error, refusal)
+        assert "cafe" not in refusal and "yard" not in refusal, (
+            "拼给玩家看的句子里出现地点变量,先问一句「过 place_name() 了吗」")
+        return refusal
+
+    # ① 他从没被 `player_move` 过 —— 世界不知道他在哪。
+    line = same_sentence("player_where_unknown", "unknown")
+    assert "咖啡店" in line, line
+
+    # ② 她在途、**他在别处**(2026-08-20 那句谎恰好只在这个处境下说出口)。
+    world.player_move("p1", "yard")
+    world.scheduler._transit["夏"] = {"from": "cafe", "to": "yard", "arrive_at": 999}
+    line = same_sentence("inviter_in_transit", "agent")
+    assert "在路上" in line and "咖啡店" not in line, (
+        "她的**出发地**不是她此刻在哪 —— 这正是 D27 那句谎", line)
+    world.scheduler._transit.pop("夏", None)
+
+    # ③ 世界不知道**她**在哪。
+    blackboard = world.scheduler.agents["夏"].agent
+    blackboard.blackboard.write("loc", "")
+    blackboard.location = ""
+    line = same_sentence("inviter_where_unknown", "unknown")
+    assert "在路上" not in line, ("查不到 ≠ 她在赶路", line)
+    blackboard.blackboard.write("loc", "cafe")
+    blackboard.location = "cafe"
+
+    # ④ **他自己在赶路**(D24:2026-08-21 之前这一种根本走不到这儿)。
+    world.player_walk("p1", "cafe")
+    assert world.player_in_transit("p1") is True
+    line = same_sentence("player_in_transit", "player")
+    assert "你这会儿在路上" in line, line
+
+    assert seen == set(together.COLOCATION_GATES) - {"player_not_here"}, sorted(seen)
 
 
 def test_四句话里从前没人守的那两句(world):
@@ -258,10 +296,11 @@ def test_四句话里从前没人守的那两句(world):
     东西拦得住它们悄悄改回去**。所以这条把那两句补上,守的是同一件事:玩家读到
     的句子里不出现动词名,而动词名照旧在 `result["tool"]` 里交给宿主。
 
-    ⚠️ **第四句的账不在这里**:她在 `cafe → yard` 的路上、玩家站在 yard 时,
-    它会报出她的**出发地**(「苏晚夏在咖啡店」)—— 那是一句假话,**有意不钉**。
-    钉住一句假话,那句假话就再也改不动了(这份文件上面那条测试就被这么钉过一次)。
-    逐支的账在 `api._where_unknown_line()` 的 docstring 里。
+    ⚠️ **第四句的账 2026-08-21 结清了**:她在 `cafe → yard` 的路上、玩家站在 yard
+    时,这扇门从前会报出她的**出发地**(「苏晚夏在咖啡店」)—— 一句假话,所以上一轮
+    **有意不钉**(钉住一句假话,那句假话就再也改不动了)。现在判据换成了
+    `_colocation_gate()`,句子换成了三扇门共用的那一份,那一支由本文件的
+    `test_两扇门上同一件事必须是同一句话` 按整族铺开钉住。
     """
     world.config_set("presence.enforce_colocation", True)
     world.config_set("chat.tools.enabled", True)
@@ -272,15 +311,18 @@ def test_四句话里从前没人守的那两句(world):
     assert result["error"] == "这件事要当面才办得到,而这次调用没说是替哪个玩家", result
     assert "reach_out" not in result["error"], result["error"]
 
-    # ③ 她在赶路,而玩家正好站在她的出发地 —— 这一支说的话是对的(她确实在路上),
-    #   两处地名相同却不是面对面,只可能是这一种。
+    # ③ 她在赶路。**判据是问出来的,不是"两处地名恰好相同"猜出来的** ——
+    #   所以他站在她的出发地(下面第一段)还是站在别处(第二段),说的是同一句话。
     world.player_move("p1", "cafe")
     world.scheduler._transit["夏"] = {"from": "cafe", "to": "yard", "arrive_at": 999}
     result = world.act("夏", "reach_out", {"player_id": "p1"},
                        player_id="p1", surface="autonomy")
     assert result["error"] == (
-        "这件事要当面才办得到,而苏晚夏这会儿在路上,不在任何地方"
+        "这件事要当面才办得到,而苏晚夏这会儿在路上,还没落脚 —— 不是你不在"
     ), result
+    world.player_move("p1", "yard")     # 他站到别处去 —— 从前这一步会把话变成谎
+    assert world.act("夏", "reach_out", {"player_id": "p1"},
+                     player_id="p1", surface="autonomy")["error"] == result["error"]
     assert result["tool"] == "reach_out", result
     assert "reach_out" not in result["error"], result["error"]
 
