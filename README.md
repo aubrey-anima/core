@@ -314,6 +314,20 @@ anima-world world inspect my.cyberworld --json
 #  "runnable": false}          # 照样回答,退出码 0 —— 在这里拒绝就违背了这个格式的意义
 ```
 
+⚠️ **`inspect` 读的是封皮,不是判决**:它答的是"作者**声称**要哪个引擎"。
+"这一版引擎**真的**收不收它"是另一条命令:
+
+```bash
+anima-world world check my.cyberworld --json
+# {"loadable": true, "errors": [], …}     # 退出码 = 这句话我答没答上来,loadable 才是答案
+```
+
+⚠️ 而 `check` 自己也有一段够不着的:它查的是**作者层**。一个跑过的世界导出来
+**只有状态记录**,它会照实说一句"没有作者层,所以这里没有可查的东西"——
+**然后 `loadable` 仍然是 `true`**。所以**拿一份包换到别的引擎上去之前,真开一次机**;
+判据是"该发生的发生了没有",不是"有没有报错"(老引擎不认识的状态层键是**装得进、
+开得起来、安静地不生效**的)。
+
 因为它是文本,排障不需要任何工具:
 
 ```bash
@@ -336,6 +350,7 @@ diff <(zcat a.cyberworld) <(zcat b.cyberworld)         # 两次导出差在哪
 anima-world start          # 引导配 LLM → 创世 → 前台运行 —— 从这里开始
 anima-world play           # 在活着的世界里说话:时钟一边走,她可能自己走过来找你
 anima-world chat           # 说一轮话就退(时钟不走);不带 --agent 列出谁住在这里
+#                            -m/--message 可重复 = 一次一问,不进 REPL;--json 给脚本读
 anima-world prompt         # 她收到的提示词,逐块带来源
 anima-world map            # 地图、谁在哪、谁去了哪儿(--json)
 anima-world ontology       # 有哪些种类的东西、量与动词(--json / --check)
@@ -346,7 +361,8 @@ anima-world config         # 读写配置;api key 自动进机器配置,不进�
 # 部署 / 脚本打的
 anima-world run            # 只把时钟跑在前台:不引导、不问、不改时钟
 anima-world simulate       # 无头快进(--report 落一份运行摘要;--ticks 0 = 只创世)
-anima-world world          # export / import / inspect / migrate / drop 一个世界
+anima-world world          # export / import / inspect / check / migrate / drop 一个世界
+#                            check = 这一版引擎装不装得进这份包(退出码 = 答没答上来)
 anima-world validate       # 不建世界就查一份 .cyberworld 或一份节拍脚本
 anima-world contract       # 引擎自报存储契约与包格式版本 —— 持镜像的仓库拿它对账
 anima-world report         # 只读地出一份运行摘要,不跑世界
