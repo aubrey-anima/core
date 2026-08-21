@@ -2772,3 +2772,62 @@ anima-world contract --json | jq '.seed.affordance_importance'
 - **player**:`outcome_gate` 已经当不透明字符串存了 —— 免费。要上屏才需要写第五句话。
 
 ⚠️ 这一格**靠重建镜像才到得了线上**,和 3.6.0 的 `outcome` 同一班车。
+
+## 3.27 新增:邀请的**结局**也有一扇带游标的门了(3.7.0,本轮;看板 D23)
+
+**收件人主要是运维台的世界壳与网站** —— 创作台这一轮一个字都不用改。
+写在这块板上是因为这里是唯一的回执板(见纪律第 2 条那句丑话)。
+
+### 病在哪(它一处不报错,所以值得逐字读一遍)
+
+一份邀请的**结局**(`invitation_settled`:accepted / declined / expired /
+cancelled)在 3.7.0 之前只有两条读法,而**两条都有上限**:
+
+| 读法 | 上限 |
+|---|---|
+| `World.state()` 的 `recent_events` | 40 条,而世界壳还会再截一次 |
+| `invitations_page()` 每行那格 `outcome`(3.6.0 加的) | 只记最近 **200** 份,更老的回落成空串 |
+
+玩家在手机上离线几分钟回来,那条「她已经走开了」就掉出窗外 —— **不是显示错,
+是彻底没有**,屏幕上印的是「你错过了」。而「错过」和「她收回了」是两件事,
+正如「错过」和「拒绝」是两件事。**把她做的事记在他头上,是这条链上最贵的一种错。**
+
+### 出口
+
+```python
+world.invitation_outcomes_page(player_id=None, *, since_seq=0, limit=50)
+# → {"events": [...], "next_seq": ..., "cursor": ..., "scanned": ..., "total": ...}
+```
+
+游标语义和 `contact_requests_page()` / `inbox_page()` / `invitations_page()`
+**逐字相同**(第四个共用 `_filtered_page` 的门):`cursor` 是这一窗**扫过的**
+最后一条,**空页也推得动**;`scanned` 是过滤前扫了多少条。
+
+⚠️ **有意没有非分页的姊妹方法。** "只给最近 N 条"正是这个 bug 本身 ——
+换一扇同样按 N 截断的门,只是把 40 换成别的数字。
+⚠️ **它是历史,不是清单。** 一条 `invitation_settled` 说的是"那一刻发生了什么",
+永远不会再变;问「此刻还有几份等着回话」仍然读 `invitations_page()` 的 `pending`。
+⚠️ **这扇门没有 CLI**,而且是有意的:唯一的消费方是一个 Python 宿主(世界壳
+import 本包)。`contract --json` 的 `invitations.read_command` 因此是 `null` ——
+**那个 `null` 是答案,不是"没答上来"**。
+
+### 契约怎么问(按出口探测,别比版本号)
+
+```console
+$ anima-world contract --json | python3 -c \
+    "import sys,json;print(json.load(sys.stdin)['invitations']['outcomes_api'])"
+World.invitation_outcomes_page
+```
+
+`null` 或整段缺失 = 这支引擎只有那两扇有上限的门(3.6.0 及更早)。
+同段还报 `outcomes`(四种结局的全集)与 `settled_kept`(那 200 是多少)——
+**别在消费方硬编码这两个数**。
+
+### 三仓各要跟什么
+
+- **platform**:世界壳开一扇转发门(照 contact-requests / inbox 的形状),
+  老引擎回落 501/404 要**说得出**。⚠️ 这扇门到不了线上,除非**从 core 的最终
+  commit 重建镜像** —— 和 3.6.0 的 `outcome` 同一班车。
+- **player**:接上游标,离线回来补齐结局;`cancelled` 这一档**要有自己的话**
+  (它今天在 `status_of` 里还没有格子)。
+- **tool**:一件都不用改。

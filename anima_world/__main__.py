@@ -5502,6 +5502,8 @@ def contract_payload() -> dict[str, Any]:
         TAGLINE_MAX_CHARS,
     )
     from anima_world.media import MEDIA_SCHEMES
+    from anima_world.projection import SETTLED_INVITATIONS_KEPT
+    from anima_world.together import INVITE_OUTCOMES
     from anima_world.ontology import AFFORDANCE_KEYS
     from anima_world.world_seed import (
         WORLD_SEED_AGENT_KEYS,
@@ -5681,6 +5683,33 @@ def contract_payload() -> dict[str, Any]:
                 "一次**预演**也答得出 partial,宿主据此把「被墙挡在门外」和「抹到"
                 "一半」分开。`resume_seq` 是下一趟从哪儿接着看。"
                 "真跑时 `--since-seq` 不许越过已完成的水位(会在日志里留一个洞)"
+            ),
+        },
+        # 邀请门(3.6.0 起)。**这一段是给世界壳读的,不是给创作台读的** ——
+        # 它是全系统唯一一条"读写成对"的玩家送达面,而它**一条 CLI 出口都没有**:
+        # 唯一的消费方是一个 Python 宿主(运维台的世界壳 import 本包)。
+        # 报在这里的理由和 `erasure` 逐字相同:**消费方按出口在不在探测,不比版本号**。
+        "invitations": {
+            "read_command": None,      # 有意为空:这扇门没有 CLI,见上面那段
+            "read_api": "World.invitations_page",
+            "answer_api": "World.answer_invitation",
+            # 🆕 3.7.0(看板 D23):结局那条事件的**带游标**出口。
+            # `null` = 这支引擎只有那两扇有上限的门(3.6.0 及更早),离线久了
+            # 「她已经走开了」会静默掉出窗外,屏幕上印成「你错过了」——
+            # **把她做的事记在他头上**,而链路上一处不报错。
+            "outcomes_api": "World.invitation_outcomes_page",
+            "outcomes_event": "invitation_settled",
+            "outcomes": list(INVITE_OUTCOMES),
+            # 那两处**有上限**的读法,把上限本身报出来:消费方照这两个数就知道
+            # "光靠它们够不够",而不必去猜。
+            "settled_kept": SETTLED_INVITATIONS_KEPT,
+            "gloss": (
+                "一份邀请的结局有两条读法,而在 3.7.0 之前**两条都有上限**:"
+                "`invitations_page()` 每行那格 `outcome`(只记最近 `settled_kept` 份)"
+                "与 `state()['recent_events']` 那扇窗(壳还会再截一次)。"
+                "`outcomes_api` 是**带游标**的那一条 —— 离线多久回来都补得齐。"
+                "⚠️ 它是**历史**不是清单:问「此刻还有几份等着回话」仍然读 "
+                "`invitations_page()` 的 `pending`"
             ),
         },
         "beats": {

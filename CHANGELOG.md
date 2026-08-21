@@ -61,6 +61,19 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 ⚠️ **已发布世界的 `engine_min` 一格没抬**,3.7.0 是纯加法(作者层 schema 一个字没动);
 动的只有橱窗自己的封皮 —— `test_flagship_seed` 要求它写的就是产它的那一版。
 
+### Added —— `World.invitation_outcomes_page()`:结局那扇门也有游标了(看板 D23)
+
+在这之前一份邀请的**结局**只住在两个有上限的地方:`state()` 的 `recent_events`
+(壳截 40 条)和 `invitations_page()` 每行那格 `outcome`(只记最近 200 份)。
+玩家在手机上离线几分钟回来,那条「她已经走开了」就掉出窗外,屏幕上印的是
+「你错过了」—— **不是显示错,是彻底没有**,而链路上一处不报错。
+**把她做的事记在他头上,是这条链上最贵的一种错。**
+
+新门是 `_filtered_page` 的**第四个**消费者(游标语义和另外三扇逐字相同,
+空页也推得动游标)。**有意没有非分页的姊妹方法** —— "只给最近 N 条"正是这个 bug
+本身,再造一个等于把 40 换成别的数字。契约上按出口探测:`contract --json` 新增
+`invitations` 段(`outcomes_api` 为 `null` = 这支引擎没有这扇门)。
+
 ### Fixed —— 「在路上」这件事,引擎对她和对他用的是两把尺(看板 D24)
 
 `_ToolRuntime.face_to_face()` 判她用 `scheduler._transit`(**在途 = 不在任何地方**),

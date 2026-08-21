@@ -1115,3 +1115,110 @@ def test_world_check_认这个字段(tmp_path):
     assert main(["validate", "world", str(bad_path)]) == 2, (
         "写了 8 的作者想的是「很重要」;按 1 截断的话他永远不会知道自己写错了刻度"
     )
+
+
+# ── 六、结局那扇带游标的门(看板 D23)────────────────────────────────────────
+
+
+def _settle_many(world, n, *, player_id="p1"):
+    """让这个世界里真的结掉 n 份邀请(她开口 → 他回「不去」)。**走真的那条路**:
+    直接往日志里塞 `invitation_settled` 的话,验的是一个只有测试到得了的形状。
+
+    ⚠️ **得先把那道"她今天问够了"的闸抬开**(默认 2 份/人/天)。不抬的话第三份
+    压根没发出去,而 `_invite()` 那时返回的是一句 `invite_capped` 的软拒绝 ——
+    **它不报错**,于是"这扇门只给了 2 条"看起来会像是分页少给了一条。
+    """
+    world.config_set("social.joint.invites_per_player_per_day", 99)
+    world.player_move(player_id, "cafe")
+    for _ in range(n):
+        _invite(world, player_id=player_id)
+        seq = world.invitations(player_id)[-1]["seq"]
+        world.answer_invitation(player_id, seq, accept=False)
+
+
+def test_结局那扇门有游标_离线多久回来都补得齐(world):
+    """**D23 的病:结局会从一扇 40 条的窗里掉出去,而且没有一处报错。**
+
+    在这之前结局只住在两个**有上限**的地方 —— `state()` 的 `recent_events`
+    (壳截 40 条)和 `invitations_page()` 每行那格 `outcome`(只记最近 200 份)。
+    玩家在手机上离线几分钟回来,那条「她已经走开了」就掉出窗外,屏幕上印的是
+    「你错过了」——**把她做的事记在他头上**。
+
+    这一条按**离线**的形状验:先记下水位,离线期间世界又结了几份,回来只拉
+    水位之后那几条 —— 一条不多一条不少,而且游标推得动。
+    """
+    _settle_many(world, 3)
+    first = world.invitation_outcomes_page("p1")
+    assert len(first["events"]) == 3, first
+    assert all(e["type"] == "invitation_settled" for e in first["events"])
+    assert all(e["payload"]["outcome"] == "declined" for e in first["events"])
+    cursor = first["cursor"]
+    assert cursor > 0
+
+    # 他离线了,世界又结掉两份。
+    _settle_many(world, 2)
+    later = world.invitation_outcomes_page("p1", since_seq=cursor)
+    assert len(later["events"]) == 2, later
+    assert later["cursor"] > cursor
+    # 再拉一次:该是空的,**而游标不许倒退**(倒退 = 宿主把拉过的段再拉一遍)。
+    empty = world.invitation_outcomes_page("p1", since_seq=later["cursor"])
+    assert empty["events"] == []
+    assert empty["cursor"] == later["cursor"]
+
+
+def test_结局那扇门按玩家过滤_而且空页也推得动游标(world):
+    """和另外三扇门共用 `_filtered_page`,所以那条"空页也推得动游标"的修法
+    在这扇门上必须**免费成立** —— 免费不等于不用验:共用的代码换个调用点
+    仍然可能被一句 `if` 绕开,而绕开了不报错。"""
+    _settle_many(world, 2, player_id="p1")
+    _settle_many(world, 1, player_id="p9")
+    assert len(world.invitation_outcomes_page("p1")["events"]) == 2
+    assert len(world.invitation_outcomes_page("p9")["events"]) == 1
+    assert len(world.invitation_outcomes_page()["events"]) == 3, "不给 pid 就是全都要"
+
+    # p9 那一条排在最后 —— 拿 limit=1 从头翻,第一页对 p1 是空的,而游标要往前走。
+    page = world.invitation_outcomes_page("p9", since_seq=0, limit=1)
+    assert page["events"] == [], "第一条是 p1 的"
+    assert page["scanned"] == 1 and page["cursor"] > 0, page
+
+
+def test_结局这扇门补的是invitations那一格补不了的(world):
+    """**两扇门不是重复的。** `invitations_page()` 每行那格 `outcome` 有界
+    (最近 200 份),而这扇门读的是日志本身 —— 它才是"离线多久回来都补得齐"
+    的那一条。这里不去造 201 份邀请(那要跑很久),而是钉住**结构上的差别**:
+    一格是从一张会淘汰的投影表里读的,另一扇是从只追加的日志里读的。
+    """
+    from anima_world.projection import SETTLED_INVITATIONS_KEPT
+
+    _settle_many(world, 2)
+    proj = world.scheduler._memory_projection.settled_invitations
+    assert len(proj) == 2
+    # 投影那张表**会淘汰**,而事件不会。把它清空(模拟"太老了掉出去了"):
+    proj.clear()
+    rows = world.invitations_page("p1")["events"]
+    assert all(r["outcome"] == "" for r in rows), (
+        "掉出那一小段之后,这一格只能回空串 —— 说不上来就别猜")
+    outcomes = world.invitation_outcomes_page("p1")["events"]
+    assert len(outcomes) == 2 and all(
+        e["payload"]["outcome"] == "declined" for e in outcomes), (
+        "而日志里那两条一个字都没少 —— 这正是这扇门存在的理由")
+    assert SETTLED_INVITATIONS_KEPT == 200, "契约那一格报的就是这个数"
+
+
+def test_contract_答得出结局那扇门在不在():
+    """**消费方按出口探测,不比版本号** —— 同一个版本号下有过好几份不同的引擎。
+    `null` = 这支引擎只有那两扇有上限的门。"""
+    from anima_world.__main__ import contract_payload
+    from anima_world.projection import SETTLED_INVITATIONS_KEPT
+
+    cell = contract_payload()["invitations"]
+    assert cell["outcomes_api"] == "World.invitation_outcomes_page"
+    assert cell["outcomes_event"] == "invitation_settled"
+    assert cell["outcomes"] == list(together.INVITE_OUTCOMES)
+    assert cell["settled_kept"] == SETTLED_INVITATIONS_KEPT
+    # 报出来的那几个名字得**真的调得动**(报一个不存在的出口比不报还坏)。
+    from anima_world.api import World
+    for key in ("read_api", "answer_api", "outcomes_api"):
+        name = cell[key].split(".", 1)[1]
+        assert callable(getattr(World, name)), (key, cell[key])
+    assert cell["read_command"] is None, "这扇门有意没有 CLI —— 消费方是 Python 宿主"

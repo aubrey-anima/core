@@ -4927,6 +4927,41 @@ class World:
         page["now_tick"] = now_tick
         return page
 
+    def invitation_outcomes_page(
+        self, player_id: str | None = None, *, since_seq: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        """**那些邀请后来怎么了** —— `invitation_settled` 的带游标出口(看板 D23)。
+
+        `{"events", "next_seq", "cursor", "scanned", "total"}`,游标语义和
+        `contact_requests_page()` / `inbox_page()` / `invitations_page()` 逐字相同
+        (第四个共用 `_filtered_page` 的门)。每条就是那条事件本身,
+        `payload.outcome` 是 `INVITE_OUTCOMES` 里的一个。
+
+        **它补的是一个"没有一处报错"的洞。** 在这之前结局只住在两个地方,而两个
+        都有上限:`state()["recent_events"]` 那扇**40 条的窗**(壳截过一次,再截
+        一次),和 `invitations_page()` 每行那格 `outcome`(只记最近
+        `SETTLED_INVITATIONS_KEPT` 份,更老的回落成空串)。玩家在手机上离线几分钟
+        回来,那条「她已经走开了」就掉出窗外 —— **不是显示错,是彻底没有**,
+        而链路上零报错,屏幕上印的是「你错过了」。**把她做的事记在他头上,
+        是这条链上最贵的一种错。**
+
+        ⚠️ **有游标才补得上这个洞,不是"再开一扇门"就补上了。** 一扇没有游标的门
+        只能给"最近 N 条",而这个洞的形状恰恰是"离线久了就掉出 N"—— 换一扇同样
+        按 N 截断的门,只是把 40 换成别的数字。所以这里**没有**非分页的姊妹方法
+        (`invitations()` 那种):那个形状正是这个 bug 本身,再造一个等于给下一个人
+        留一条会饿死的路。
+
+        ⚠️ **事件是历史,不是清单。** 一条 `invitation_settled` 说的是"那一刻发生了
+        什么",它**永远不会再变**;要问"此刻还有几份等着回话"仍然去
+        `invitations_page()` 读 `pending`。两扇门都读同一条日志,只是问的问题不同。
+
+        ⚠️ **引擎不负责送达**,推送/红点归宿主(和 `invitations()` 逐字同一条)。
+        """
+        return self._filtered_page(
+            kind="invitation_settled", player_id=player_id,
+            since_seq=since_seq, limit=limit,
+        )
+
     def answer_invitation(
         self, player_id: str, invite_seq: int, accept: bool,
     ) -> dict[str, Any]:
