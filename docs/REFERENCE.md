@@ -134,7 +134,7 @@
 | `location_join` | `id`, `name`, `description` | 创世时播下的地点 |
 | `travel` | `from`, `to`, `minutes`, `arrive_at` | `arrive_at` 是到达的 tick |
 | `payment` | `from`, `to`, `amount`, `reason` | 经济账本的唯一真相,余额是它的投影 |
-| `item_transfer` | `from`, `to`, `item_id`, `qty`, `from_name`, `item_name` | 库存是它的投影。两个 `*_name` 是**那一刻的人话**（2.2.0 起，`World.give_item` 写）：玩家的显示名住在内存态、物品名住在经济表，重放时两样都可能不在手上 —— 不随事件走的话，重放出来就是「8f3c-… 把 sketchbook 给了我」。老事件缺这两个字段，读的一方要回落 |
+| `item_transfer` | `from`, `to`, `item_id`, `qty`, `from_name`, `item_name` | 库存是它的投影。两个 `*_name` 是**那一刻的人话**（2.2.0 起，`_ToolRuntime.give_item` 写 —— **不是 `World` 上的方法**，它是聊天能力那条路上的运行时；这个名字从 `01f0f1b` 起写错了，2026-08-20 第九轮才被补宽的那道闸逮住）：玩家的显示名住在内存态、物品名住在经济表，重放时两样都可能不在手上 —— 不随事件走的话，重放出来就是「8f3c-… 把 sketchbook 给了我」。老事件缺这两个字段，读的一方要回落 |
 | `item_consume` | `who`, `item_id`, `source` | |
 | `memory_seed` | `agent_id`, `kind`, `summary`, `importance`, `source_ids` | `kind` 为 `hearsay*`(八卦)、`reflection`(反思)、`reaction`(听完一句闲话的反应),或 `witness`(她**亲眼撞见**世界里发生的一件事:一条规律跨过门槛 §2.9.3.2,或者有人当着她的面做了一件作者声明过 `importance` 的事 §2.9.6.7;两半都另带一格 `source_type` 说明来路 —— 规律那半是**那条规律发的事件类型**(作者定的)外加 `rule`,交互那半固定是 `"entity_interaction"` 外加 `affordance`(`<实体id>.<动词>`)与 `actor`(做的人,可以是 `player:<id>`))。`reflection` / `reaction` **不外传**(§2.8) |
 | 规律 `emit` 出来的那一条(**类型由作者定**) | `rule`, `owner`, 这条规律写的每个量, `edge`, 外加作者自己的 `payload` | §2.9.3.1。`edge` 是 `"rise"` / `"fall"`(这次门槛是往哪个方向跨的),**总是有**;作者声明了 `importance` 时另带 `importance` / `text`,没声明就一个都不出现。这三个契约键在作者的 `payload` **之后**合并 —— 它们是引擎的回答,不该被一个手滑的同名键盖掉 |
@@ -2301,22 +2301,51 @@ anima-world config set presence.enforce_colocation true --world-id w   # ③ 再
 红的)。**这道闸值钱的地方不是拦下了括号,是拦下了一句我自己复核过好几遍的错话** ——
 "这个方法挂在哪个类上"没人会去查,而它一查就是一个字符串比对。判据:
 
+    # 先自证范围非空(第九轮 2026-08-20 实敲:106 与 80),再看 grep 的答案 ——
+    # `grep -c` 的 `0` 有两种来路:范围里真没有,和范围压根是空的。两种在屏幕上
+    # 逐字相同,而后者是**命令没说话**,不是一个答案。
+    awk '/^    def _colocation_error/,/^    def intend/' anima_world/api.py | wc -l
     awk '/^    def _colocation_error/,/^    def intend/' anima_world/api.py | grep -c _transit
+    awk '/^    def _colocation_refusal/,/^    def _together/' anima_world/intent.py | wc -l
     awk '/^    def _colocation_refusal/,/^    def _together/' anima_world/intent.py | grep -n transit
 
 第一条今天答 `0`;第二条今天只答一行,而那一行是**枚举名本身**(`"agent_in_transit"`)——
 它给这个理由起了个名字,却从没问过。**行首那四个空格是承重的**,在第一条上当场看得见:
 去掉 `^    `,起点落进讲这件事的那段 docstring,同一条命令从 `0` 变成 `1`(第八轮
 2026-08-20 实敲)。**后果**:她在「咖啡店 → 工作室」的路上、而他在**别处**时,落的是第一格
-`elsewhere`,句子里她那个地名是她的**出发地**(`agent_location()` 读的是黑板上的 `loc`,
-而 `loc` **只在落地那一刻写**——`scheduler.py` 里 `self._transit.pop` 之后那句
-`blackboard.write("loc", trip["to"])`;上路那一刻只往 `_transit` 里记一笔,`loc` 一个字
-不动。判据:`git grep -nE 'write\("loc"' -- anima_world/scheduler.py` 只答一行,就是落地
-那一行)—— 玩家读到「你在后院,苏晚夏在咖啡店」,而邀请那扇门在同一情形下说的是
+`elsewhere`,句子里她那个地名是她的**出发地**(`_ToolRuntime.agent_location()` 读的是黑板上
+的 `loc`,而**上路那一刻没有任何一处写 `loc`** —— `Scheduler._start_journey` 只往 `_transit`
+里记一笔、发一条 `travel`、把她从可见性表上撤下来,`loc` 一个字不动;真正把她放下的是
+`Scheduler._land_arrivals` 里 `self._transit.pop` 之后那句 `blackboard.write("loc", trip["to"])`)
+—— 玩家读到「你在后院,苏晚夏在咖啡店」,而邀请那扇门在同一情形下说的是
 「苏晚夏这会儿在路上,还没落脚」。**他在别处时这句读起来完全正常**,所以它一直没被逮到,
 直到有人特意拿一个在途的世界去演一遍(3.6.0 第七轮验收)。运维碰上"她明明在走路、回执
 却说她在某个地方",查的就是这一条。修法(改去问 `_colocation_gate` 那四个枚举,别自己
 按地名猜)已进看板,定版后另开。
+
+**上面这段的判据,以及一句被判据锁死过的话。** 第八轮这里原先写着「`loc` **只在落地
+那一刻写**,判据 `git grep -nE 'write\("loc"' -- anima_world/scheduler.py` 只答一行」——
+结论没错,那句机制话是假的,而**那个 pathspec 让判据结构上永远推不翻它**:它只问了
+一个文件,而那个文件里本来就只有一处。**一条只会点头的判据比没有判据更坏。**
+去掉 pathspec 才是能推翻它的问法(第九轮 2026-08-20 实敲,五行,逐条是):
+
+    git grep -nE 'write\("loc"' -- anima_world/          # 今天五行,一行都不是"上路那一刻"
+    #  __main__.py  _make_beat_agent_factory 里的 factory  节拍脚本里中途加入的人,建 Agent 时写初值
+    #  __main__.py  build_serve_scheduler                  开机装名册,建 Agent 时写初值
+    #  api.py       _WorldView.__init__                    从投影恢复,**只填缺**(read("loc") is None 才写)
+    #  brain.py     Brain._apply_events                    收到**自己**的 location_join 时写(懒的那条落地路)
+    #  scheduler.py Scheduler._land_arrivals               落地那一刻,tick 帧里当场写
+
+    # 反过来问一次"上路那一刻到底写没写",范围先自证非空(第九轮实敲 35 / 0):
+    awk '/def _start_journey/,/def _is_colocated/' anima_world/scheduler.py | wc -l
+    awk '/def _start_journey/,/def _is_colocated/' anima_world/scheduler.py | grep -c 'write("loc"'
+
+⚠️ **五这个数会变,别把它当判据**;判据是"这五行里没有一行发生在上路那一刻"。
+⚠️ **第二条那个 `0` 要和第一条一起读**:`grep -c` 找不到时打印 `0` 并退 1,而一个
+**空范围**(awk 的模式写漏了)给出的也是 `0` —— 两种「0」在屏幕上逐字相同。
+⚠️ 这个问法答得全,还额外靠一件事:`blackboard.write(` 全仓 24 处,**没有一处跨行写**、
+也没有一处拿变量当键(三处 f-string 键是 `state.*` 与 `kind_*`)。`grep` 逐行,
+`.*` 跨不过换行 —— 哪天有人把参数换了行,这条命令会安静地少答一行。
 
 ⚠️ **第二格那句回执 3.6.0 第五轮(2026-08-20)换过一次措辞**:它原先写死成
 「宿主没调过 `player_move`」,而**下线**(`World.player_leave`)和**在场行过期**
@@ -3983,7 +4012,7 @@ anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真
 
 | 退出码 | `loadable` | 意思 |
 |---|---|---|
-| 0 | `true` | 这一版引擎装得进去 |
+| 0 | `true` | 这一版引擎装得进去(⚠️ **给了 `--edit` 时这是半个答案**,见 §`--edit` 那条 🔴) |
 | 0 | `false` | 装不进去,`errors` 逐条说为什么 —— **这是一个答案,不是一个异常** |
 | 1 | `null` | 没答上来:**文件打不开**(路径错 / 没权限 / 指着一个目录)。**世界没有被看过**,别把它读成一句判决 |
 | 2 | — | 这一版引擎上没有这个子命令(argparse 的 usage)—— 调用方据此回落到"问不出来" |
@@ -3998,6 +4027,12 @@ anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真
 ⚠️ **这和 `validate world` 的退出码有意不同**,而两条命令的**判断是同一份**
 (`authored_layer_errors` + `_precheck_ontology`,也就是开机调的那两个;
 `tests/test_validate_matches_boot.py` 把三条路的答案钉成逐个相等)。
+🔴 **"同一份"这句话有一个例外,而它是这一版的一个已知洞**:给了 `--edit` 时
+两条命令**都**跳过 `_precheck_ontology`,于是量名拼错那一摞在 `--edit` 下
+一条都不报、照答 `loadable: true` / 退出码 0 —— 而真装载时不看 `--edit`,
+照样开不了机。判据与完整清单见后面 §**不建世界就检查** 里那条 🔴
+(`git grep -n '_authored_ontology_errors' -- anima_world/__main__.py` 两行答案,
+两处都在 `else` 分支上)。已记进 CHANGELOG「已知问题」。
 分两个门的理由只在退出码的语义上:`validate world` 是**作者的门**(错误 2、提醒 0,
 CI 里直接当断言),`world check` 是**宿主的门**(0 = 答上来了)。这和
 "`start` 是人的门、`run` 是程序的门"是同一条分法。
@@ -4473,33 +4508,68 @@ anima-world validate beats beats.json --world-file demo.cyberworld  [--json]
 
 | 这份文件是什么 | 不给 `--edit` | 给 `--edit` |
 |---|---|---|
-| 手写的完整世界(只有 `author` 记录) | 全查 | 全查,但不要求名册/地图,引用完整性不查 |
+| 手写的完整世界(只有 `author` 记录) | 全查 | **只查形状那一半**(见下面那条 ⚠️) |
 | 跑过的世界导出来(只有状态记录) | ✅ 收下 + 一条"这里没有可查的东西"的提醒 | 同左 |
 | 只带 `kinds` 的一层(要装进已有世界) | ❌ 缺 `agents`/`locations` | ✅ 收下 |
 
 `--edit` 说的是"**这份文件要装进一个已有的世界**"。开机那条路按目标世界空不空
 自己判(`_world_exists`);校验器手上没有目标世界,所以那一格由调用方说。
-给了 `--edit` 会多一条提醒:引用完整性没查(种类 / 地点 / 物品 / 规律可以来自
-目标世界)—— 要连着世界查,用 `simulate --ticks 0 --world-file …`。
+
+🔴 **`--edit` 跳掉的不止"名册/地图 + 引用完整性",是整摞本体/规律闸。**
+这一格从前写着"全查,但不要求名册/地图,引用完整性不查",那句话把洞说窄了。
+真实分界只有一条 `else`:`_authored_ontology_errors`(= `_precheck_ontology`,
+`kinds` / `entities` / 规律的编译)**只在不给 `--edit` 时跑**。判据敲得出来:
+
+```bash
+# 三行:一行定义 + 两行调用,而那两处就是全部调用点 ——
+# validate world 一处、world check 一处,**都挂在 `else:` 上,那个 `if` 就是 `--edit`**。
+git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
+#   …:def _authored_ontology_errors(...)                   ← 定义
+#   …:                errors += _authored_ontology_errors(authored)   ← validate world 的 else
+#   …:                errors += _authored_ontology_errors(authored)   ← world check 的 else
+```
+
+⚠️ **判据是"两处调用都在 `else:` 分支里",不是行号**(行号是快照,而这里有意不写);
+也**必须带 `-- anima_world/__main__.py`** —— 不限范围的话,这份文档和 CHANGELOG 里
+提到这个名字的那几行会被自己捞回来,答案就不再是三行。
+
+⚠️ **`--edit` 下的 `loadable: true` 因此是半个答案**:它说的是"形状对"
+(`authored_layer_errors`:必填键、`stocks` 条目形状、`stock_visibility[].bands`、
+角色卡、地点的图),**不是**"这一版引擎装得进去"。量名拼错、`me_X` 没声明、
+`spawn` 没写代价、`emit` 三字段写坏、能力里写了 `rand()` —— 这些在 `--edit` 下
+一条都不报,而它们在真装载时**照样开不了机**(装载那条路不看 `--edit`,
+`_precheck_ontology` 一定会跑)。`validate world --edit` 与 `world check --edit`
+在这一点上行为逐字相同 —— 上面那条 `git grep` 的两行就是证据。
+要把这一半也查了,今天只有一个出口:`simulate --ticks 0 --world-file …`
+(连着目标世界,顺带把引用完整性也查了)。⚠️ 这是 3.6.0 的实况,不是设计意图 ——
+已记进 CHANGELOG「已知问题」,修法归引擎,不归照着这份文档写代码的人。
 
 ⚠️ **仍然不是"开机会不会成功"的全集。** 这条命令看不见目标世界,所以查不了
 "这个世界里有没有那个地点 / 那件物品 / 那条规律引用的种类";那一半只有连着世界
 才问得出,入口是 `simulate --ticks 0 --world-file …`(和 `ontology --check` 同一个
 用法)。⚠️ 也不查**运行期**才知道的事(Redis 连不连得上、LLM 有没有 key)。
 
-| 作者写错的东西 | `validate world` | `simulate --ticks 0` |
-|---|---|---|
-| `agents` / `locations` 的必填键、`stocks` 条目的形状 | ✅ 错误(退出码 2) | ✅ |
-| `stock_visibility[].bands` 写坏(§2.9.4.2) | ✅ 错误,**同一个函数**报同一批话 | ✅ |
-| 角色卡(相对路径立绘、未知字段…,§2.9.11) | ✅ 错误 / 提醒 | ✅ |
-| 地点的图(相对路径、超上限、老文档里那个 `image`,§2.14) | ✅ 错误 / 提醒 | ✅ |
-| `kinds` 里量声明的 `bands` 写坏 | ✅ `OntologyError` 一次列全 | ✅ |
-| 能力声明里写了 `rand()`(§2.9.3.3) | ✅ | ✅ |
-| `emit` 的 `importance` / `text` / `on` 写坏(§2.9.3.1) | ✅ `RuleError` | ✅ |
-| 量名拼错、动词没声明、`me_X` 没声明、`spawn` 没代价(§2.9.6) | ✅ | ✅ |
-| 常数步长那条 lint(§2.9.3.4) | ✅ 提醒(退出码 0) | ✅ 日志一行 |
-| 引用完整性(地点/角色/物品对不上) | ✅ 提醒(`--edit` 下不查) | ✅ 错误 |
-| **目标世界里有没有那个东西** | ❌ 看不见目标世界 | ✅ |
+下面这张表的中间一列**默认指不给 `--edit`**;`--edit` 那一格单列出来,因为它和
+不给的时候差得远(整摞本体/规律闸都不跑,见上面那条 🔴)。`world check` 与
+`validate world` 走同一批函数,所以这一列对它逐字同样成立。
+
+| 作者写错的东西 | `validate world` | `… --edit` | `simulate --ticks 0` |
+|---|---|---|---|
+| `agents` / `locations` 的必填键、`stocks` 条目的形状 | ✅ 错误(退出码 2) | ✅(缺名册/地图本身不算错) | ✅ |
+| `stock_visibility[].bands` 写坏(§2.9.4.2) | ✅ 错误,**同一个函数**报同一批话 | ✅ | ✅ |
+| 角色卡(相对路径立绘、未知字段…,§2.9.11) | ✅ 错误 / 提醒 | ✅ | ✅ |
+| 地点的图(相对路径、超上限、老文档里那个 `image`,§2.14) | ✅ 错误 / 提醒 | ✅ | ✅ |
+| `kinds` 里量声明的 `bands` 写坏 | ✅ `OntologyError` 一次列全 | 🔴 **不查** | ✅ |
+| 能力声明里写了 `rand()`(§2.9.3.3) | ✅ | 🔴 **不查** | ✅ |
+| `emit` 的 `importance` / `text` / `on` 写坏(§2.9.3.1) | ✅ `RuleError` | 🔴 **不查** | ✅ |
+| 量名拼错、动词没声明、`me_X` 没声明、`spawn` 没代价(§2.9.6) | ✅ | 🔴 **不查** | ✅ |
+| 常数步长那条 lint(§2.9.3.4) | ✅ 提醒(退出码 0) | ✅ 提醒 | ✅ 日志一行 |
+| 引用完整性(地点/角色/物品对不上) | ✅ 提醒 | ❌ 不查(会明说) | ✅ 错误 |
+| **目标世界里有没有那个东西** | ❌ 看不见目标世界 | ❌ | ✅ |
+
+🔴 那四格的坏处不是"少查了",是**它照样答 `loadable: true` / 退出码 0** ——
+一个答案被当成另一个答案读,正是 `world check` 这条命令当初要修的病。
+在修好之前,把 `--edit` 的绿灯读成"形状对",别读成"装得进去"。
 
 **错误退出码 2,提醒退出码 0** —— 这个区分是有意的。引用完整性(角色/地点存不存在)
 只能是**提醒**:一个 beat 完全可以先 `agent_join` 一个新角色、后面的 beat 再对他做事,

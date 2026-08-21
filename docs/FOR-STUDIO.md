@@ -725,12 +725,12 @@ social / stance / tools / intent / autonomy,并播了关系、创世记忆、钱
 | `report` 缺"节拍触发/未触发" | 等你们提 issue,按你们的口径做 |
 | `chat` 没有 `--message` 一次一问 | 同上 |
 | 量 / 规律 / 感知 / autonomy 统计**全都没有 CLI 出口** | 已认,排 1.4.0 |
-| 规律只能创世时进,不能改 | 已认,排 1.4.0(`World.set_rules` + CLI) |
+| 规律只能创世时进,不能改 | 已认。⚠️ **1.4.0 时排的那个名字 `set_rules` 到 3.6.0 还是没做,别照它写代码** —— 它是排期不是出口。判据:`git grep -n set_rules -- anima_world/ ; echo "rc=$?"` → **一行不印,`rc=1`**。⚠️ **这里必须带 `-- anima_world/` 和那个 `rc=`**:不限范围的话,文档与测试里提到这个名字的那几行会把它自己捞回来(第九轮实测 5 行,其中一行就是本行);而 `git grep` 无命中时**一个字都不打印**,没有 `rc=` 就分不清"确实没有"和"命令没跑起来"。今天真能改一个跑着的世界的规律的,是**再装一次只含 `author` 记录的世界文件**(`--world-file`):明示的编辑那条路上规律按 **id** 合并,**同名的照文件里那条重写**(`_seed_world_rules(merge=True)`)—— 规律是法不是状态,改它不会把谁的现在倒带。⚠️ 这一条和"只填缺不覆盖"那条总纪律**不同**,别照那条推 |
 | 跨实体相互作用(挖矿让矿脉减少)表达不了 | 要先设计扇入语义,1.4.0 之后 |
 | `hidden` 的量绝对不可知(八卦链没接) | 1.4.0 |
 | 逐轮 stance / tool_call 观测量没有 CLI 出口 | 等你们提 issue |
 | 定时轮次行动率偏稀(约三四天一次) | 提示词是热改模板,可自己调;结构性改法(情境触发)排 1.4.0 |
-| **`validate world` 不是"开得起来吗"的全集** —— `kinds` 里的 `bands`、`emit` 三字段、能力里的 `rand()` 它一个都报不出来 | 已认(§3.17)。今天的解法是出包前跑 `simulate --ticks 0`;要不要把规律/本体那两道闸也接进 `validate`,等你们提 issue 说清卡在哪一步 |
+| **`validate world` 不是"开得起来吗"的全集** —— `kinds` 里的 `bands`、`emit` 三字段、能力里的 `rand()` 它一个都报不出来 | ✅ **已修,别再照这一行绕**(2026-08-20 复核):`validate world` / `world check` 现在都调 `_authored_ontology_errors`(= 开机那条路上同一个 `_precheck_ontology`),这三类一条不落地报。⚠️ **但只在不给 `--edit` 时** —— `--edit` 下这一摞整个不跑、照答 `loadable: true`,那是 3.6.0 的一个已知洞,见 §3.21 里那条 🔴。⚠️ 仍然不是全集的那一半是**引用完整性**(目标世界里有没有那个地点/物品/种类),它只有 `simulate --ticks 0 --world-file` 问得出 |
 | 能力(affordance)层没有骰子 —— "这一次采摘有三成掉空"写不出来 | 已认。要先给它一组自己的坐标(世界 / 种类+动词 / 施动者 / 对象 / tick),在那之前写了 `rand()` 会**开不了机**而不是静默给 0 |
 | **法务抹除:预演的 `memories_redacted` 可能偏大** | 已认,而且**3.4.0 就有,不是 3.5.0 的回归**。真跑时 `erase_for_event_seqs` 先把由他而起的那些记忆整行删掉,`redact_summaries` 就数不到它们了;预演不真删,于是同一批被数第二遍(实测预演 3 / 真跑 0)。**方向是偏大不是偏小**,拿它当上界安全。修法另立小单 —— 判「抹干净了」看 `conversations` / `messages` / `memories_dropped`,别拿 `memories_redacted` 写断言 |
 
@@ -1074,6 +1074,45 @@ anima-world config set presence.enforce_colocation true --world-id w
 **声明过动词**:只能看不能碰的进不了参数,按钮也就不该是亮的。引擎自己在她的自主
 菜单上用的就是这两格(REFERENCE §2.9.2)。
 
+### ⚠️ 这道闸有**三扇门**,而其中两扇的"她在赶路"是猜的(2026-08-20 补记)
+
+**这一条此前只写在引擎代码与 REFERENCE §2.9.9 里,这份文档一个字都没有** ——
+而你们是照这份文档写脚本的那一侧,所以补在这儿。三扇门,同一件事三份实现:
+
+| 门 | 在哪 | 她在赶路时答什么 |
+|---|---|---|
+| `act()` 那扇(玩家动手) | `World._colocation_error` | 🔴 **猜的** —— 他在别处时落进「你在别处」,而且句子里她那个地名是**出发地** |
+| 导演那条路(玩家开口让她做) | `intent.Director._colocation_refusal` | 🔴 **猜的** —— 同上;它的 `reason` 枚举里**有** `agent_in_transit` 这个名字,但从没问过在途表 |
+| 邀请那扇(`answer_invitation`) | `_ToolRuntime._colocation_gate` | ✅ **问的** —— 第一句就查在途表,答 `inviter_in_transit` |
+
+判据敲得出来(⚠️ 行首那四个空格是承重的,去掉会把起点落进 docstring):
+
+```bash
+# 前两扇:范围先自证非空(2026-08-20 实敲 106 / 80 行),再看它问没问在途
+awk '/^    def _colocation_error/,/^    def intend/' anima_world/api.py | wc -l
+awk '/^    def _colocation_error/,/^    def intend/' anima_world/api.py | grep -c _transit
+awk '/^    def _colocation_refusal/,/^    def _together/' anima_world/intent.py | wc -l
+awk '/^    def _colocation_refusal/,/^    def _together/' anima_world/intent.py | grep -n transit
+# 2026-08-20 实敲:第一条答 0;第二条只答一行,而那一行是**枚举名本身**
+# ("agent_in_transit")—— 起了名字,从没问过。
+# ⚠️ 行数会变,别把 106/80 当判据;判据是那两条 grep 的答案。
+# ⚠️ `grep -c` 的 0 有两种来路(范围里真没有 / 范围压根是空的),两种在屏幕上逐字
+# 相同,所以上面每条都配了一次 wc -l 自证范围非空。
+
+# 第三扇:第一句就问
+sed -n '/^    def _colocation_gate/,/^    def _invitee/p' anima_world/api.py | grep -n _transit
+```
+
+**你们该怎么用这个事实**(引擎侧的修法已进看板,定版后另开 —— 别把绕法固化):
+
+- **别按回执的句子分支,按 `reason` 那一格的枚举分支。** 句子会改措辞(3.6.0 第五轮
+  就改过一次),枚举没动。
+- **别指望前两扇门吐得出 `agent_in_transit`。** 想在界面上区分"她在赶路"和"她在别处",
+  今天唯一可靠的问法是自己去问一次她的状态,不是解析这两扇门的回执。
+- **这两扇门在"她在赶路 + 他在别处"时给出的地名是她的出发地**,读起来完全正常
+  (「你在后院,苏晚夏在咖啡店」),所以它不会以红字的形式出现在你们的测试里。
+  拿一个**在途**的世界演一遍才看得见 —— 这个 bug 就是这么被逮到的(3.6.0 第七轮验收)。
+
 ### CLI 可达性
 
 | 你们要做的事 | 出口 | 有没有 |
@@ -1266,6 +1305,10 @@ anima-world world inspect x.cyberworld --json
 今天两条都行,而且它们对同一份文件给同一个答案(那是一条测试,不是一句承诺)——
 差别只剩一条:`--ticks 0` 连着目标世界,所以它还查得出"这个世界里有没有那个地点 /
 那件物品";`validate world` 看不见目标世界。细节在 §3.21。
+🔴 **上面那三个"今天 ✅"有一个前提:不给 `--edit`**(2026-08-20 复核补记)。
+加了 `--edit`,这三格**退回当年那个 ❌** —— 而且比当年更难看,因为当年它至少
+从没答应过要查,今天它答的是 `loadable: true`。所以旧建议在 `--edit` 这一格上
+**原样有效**:要问"装得进去吗",跑 `simulate --ticks 0 --world-file`。见 §3.21 那条 🔴。
 
 ## 3.18 修复:`ontology` 的量表此前印的是 label,而能力行印的是键名(3.2.0)
 
@@ -1687,6 +1730,28 @@ exit=0
 (`authored_layer_errors` + `_precheck_ontology`):必填键与形状、`stocks` 条目、
 `bands` 分档、角色卡、`kinds`/`entities`/规律的编译(量名拼错、动词没声明、`me_X`
 没声明、`spawn` 没写代价、物品 id 解不开)。
+
+🔴 **上面那句"那两个函数"只在不给 `--edit` 时成立 —— 这是 3.6.0 的一个已知洞,
+先说在前面(2026-08-20 补记)。** 给了 `--edit`,第二个函数整个不跑:
+
+```bash
+git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
+# 三行:一行定义,两行调用(validate world 一处、world check 一处)——
+# 两处调用都挂在 `else:` 上,而那个 `if` 就是 `--edit`。
+```
+
+于是 `--edit` 下的 `loadable: true` 是**半个答案**:它说的是"形状对"
+(必填键、`stocks` 条目、`bands` 分档、角色卡、地点的图),**不是**"装得进去"。
+量名拼错、动词没声明、`me_X` 没声明、`spawn` 没写代价、`emit` 三字段写坏、
+能力里写了 `rand()` —— 这六类在 `--edit` 下**一条都不报,照答 `loadable: true`
+退出码 0**,而真装载时不看 `--edit`,`_precheck_ontology` 一定会跑,世界照样开不了机。
+`validate world --edit` 行为逐字相同(同一批函数)。
+
+**你们该怎么办**(在引擎修好之前):`--edit` 的绿灯只当"形状体检"用;
+要问"真的装得进去吗",今天唯一诚实的出口是连着目标世界跑一次
+`anima-world simulate --ticks 0 --world-file <file> --world-id <目标>` ——
+它顺带把引用完整性也查了。⚠️ 这条洞已记进 CHANGELOG「已知问题」;
+**修法归引擎,你们不必绕**,修好之后这一段会改写,别把绕法固化进流水线。
 
 退出码照你们要的语义走 —— **"跑不了"是一个答案,不是一个异常**:
 
@@ -2518,8 +2583,8 @@ JSON 的 `loadable`,不是 `$?`** —— 拿 `$?` 当判据的流水线会把一
 | 你们要做的事 | 出口 | 有没有 |
 |---|---|---|
 | 世界文件里写 `importance` | `world import` / `--world-file` | ✅ 新增 |
-| 不建世界就校验它(写超范围当场退 2) | `anima-world validate world x.cyberworld` | ✅ |
-| 装得进这一版引擎吗 | `anima-world world check x.cyberworld` | ✅ **答上来就退 0**,判据是 `loadable` 不是 `$?`(见上) |
+| 不建世界就校验它(写超范围当场退 2) | `anima-world validate world x.cyberworld` | ✅(⚠️ 加 `--edit` 只剩形状体检,见下) |
+| 装得进这一版引擎吗 | `anima-world world check x.cyberworld` | ✅ **答上来就退 0**,判据是 `loadable` 不是 `$?`(见上)。⚠️ 加 `--edit` 时 `loadable` 只是半个答案,见下 |
 | 读一条能力**做完有没有人记得住** | `anima-world ontology --json` → `affordances[].importance` | ✅ 新增 |
 | 渲染上看到它 | `anima-world ontology` 多印一行 `✦ 在场的人会记住这一下(importance 0.6),做的人是玩家也一样` | ✅ 新增 |
 | 问引擎认得哪些能力字段 | `anima-world contract --json` → `seed.affordance_keys` | ✅ 新增 |
@@ -2539,6 +2604,16 @@ AOF,那条警告本身算一项)。所以流水线里**别拿 `$?` 当"有没有
 这和上面 `world check` 那条「答上来就退 0,判据是 `loadable` 不是 `$?`」是同一条纪律。
 另外那一行数的是**这个世界的一生**(事件日志只增不减),不是最近一段:一个跑了半年
 的世界身上永远背着头三天那次事故。
+
+🔴 **而「判据是 `loadable` 不是 `$?`」这条纪律,在 `--edit` 下还差一句
+(2026-08-20 补记,3.6.0 已知洞)**:`--edit` 让 `world check` 与 `validate world`
+**都**跳过整摞本体/规律闸(`_precheck_ontology`),于是量名拼错、动词没声明、
+`me_X` 没声明、`spawn` 没写代价、`emit` 三字段写坏、能力里写了 `rand()` 这六类
+**一条都不报**,`loadable` 照样是 `true`。所以在 `--edit` 这一格上,
+**`loadable: true` 也不是判据** —— 它答的是"形状对",不是"装得进去"。判据敲得出来:
+`git grep -n '_authored_ontology_errors' -- anima_world/__main__.py`(三行:
+一行定义 + 两行调用,两处调用都在 `else:` 分支上,那个 `if` 就是 `--edit`)。
+完整清单与临时办法在 §3.21 里那条 🔴。
 
 ⚠️ **这一行还有第五种脸色(3.6.0 第五轮,2026-08-20 加)**:几个数加不平的时候
 它印黄色 `!`,并多说两行 ——
