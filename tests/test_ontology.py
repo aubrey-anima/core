@@ -719,3 +719,63 @@ def test_规律读光名字_能力读me_前缀_别搞混():
          "set": {"主动": "max(主动 - 0.006 * dt, 0)"}},
     ])
     assert unreachable_requirements(_kinds(_ACTOR_ONLY_SHRINKS, _POSTER), both) == []
+
+
+# ── `kind_keys`:这一版引擎读得到的那几格,契约上问得到(3.7.0)──────────────
+
+
+def test_契约那一格和真读得到的格子对得上():
+    """**这一格是回执,不是装饰。** `parent`(单继承 + 加载期 copy-down)从 2.0 起
+    就能用,而 `docs/FOR-STUDIO.md` §3.7 到 2026-08-21 都没写过它 —— 于是创作台
+    不认这一格,对着一份**完全合法**的声明产出过一条假红。
+
+    钉的是"契约里报的每一格,引擎真的读它":一格报了而不读,消费方按它写出来的
+    世界会被静默丢掉一半;一格读了而不报,就是上面那条假红本身。
+
+    ⚠️ **这里不能靠"写一个不认识的键看它红不红"来反证** —— 种类级的不认识字段
+    今天被**静默忽略**(和能力级当场开不了机不同,见 `KIND_KEYS` 的注释)。
+    所以每一格都用**它自己的效果**来验。
+    """
+    from anima_world.__main__ import contract_payload
+    from anima_world.ontology import KIND_KEYS
+
+    assert contract_payload()["seed"]["kind_keys"] == sorted(KIND_KEYS)
+
+    kinds = _kinds(
+        {"id": "树", "gloss": "一棵树",
+         "quantities": {"树高": {"default": 1.0, "visibility": "here"}},
+         "affordances": {"照料": {"set": {"树高": "树高 + 1"}}},
+         "prompt": {"budget": 3}},
+        {"id": "橡树", "parent": "树", "quantities": {"年轮": 0.0}},
+    )
+    tree, oak = kinds["树"], kinds["橡树"]
+    seen = {
+        "id": tree.id == "树",
+        "gloss": tree.gloss == "一棵树",
+        "quantities": "树高" in tree.quantities,
+        "affordances": "照料" in tree.affordances,
+        "prompt": tree.prompt is not None and tree.prompt.budget == 3,
+        # copy-down:父的量与能力都在,子自己那一格也在。
+        "parent": {"树高", "年轮"} <= set(oak.quantities)
+        and "照料" in oak.affordances,
+    }
+    assert set(seen) == set(KIND_KEYS), sorted(set(seen) ^ set(KIND_KEYS))
+    assert all(seen.values()), [k for k, v in seen.items() if not v]
+
+
+def test_继承是合并不是替换_而且父写在后面也认():
+    """两条会被写错的:**合并的粒度是每个量名 / 每个动词**,不是整张表替换;
+    **校验顺序不等于书写顺序**(父写在子后面照样认,和 `me_*` 那条同一理由)。"""
+    kinds = _kinds(
+        {"id": "橡树", "parent": "树",
+         "quantities": {"树高": {"default": 3.0, "visibility": "here"}}},
+        {"id": "树", "gloss": "一棵树",
+         "quantities": {"树高": {"default": 1.0, "visibility": "here"},
+                        "最大树高": 12.0},
+         "affordances": {"照料": {"set": {"树高": "树高 + 1"}}, "端详": {}}},
+    )
+    oak = kinds["橡树"]
+    assert oak.quantities["树高"].default == 3.0, "子覆盖同名那一格"
+    assert oak.quantities["最大树高"].default == 12.0, "没提到的那一格照旧继承下来"
+    assert sorted(oak.affordances) == sorted(["端详", "照料"]), "能力整张表继承"
+    assert oak.gloss == "一棵树", "gloss 没写就继承父的"

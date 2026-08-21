@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 import logging
 import sys
@@ -853,6 +854,30 @@ def _authored_media_warnings(authored: dict[str, Any] | None) -> list[str]:
     if not authored:
         return []
     return world_card_warnings(authored) + world_location_media_warnings(authored)
+
+
+def _edit_ontology_gap_warnings(authored: dict[str, Any] | None) -> list[str]:
+    """一次编辑里,**具体是哪一格离线查不了** —— 只在真有那一格时才说。
+
+    今天只有一条:这份包没重声明 `agent` 种类,而它的能力里读了 `me_*`。她的量表
+    在目标世界里,所以"`me_力气` 声明过没有"这一句离线答不了。**说出来而不是
+    假装查过了** —— 那正是 `--edit` 上一版那句 warning 的病(见
+    `_package_only_ontology_errors`)。没有这一格时一个字都不说:
+    **误报够多次的警告等于没有警告**(和 `unreachable_requirements` 同一条)。
+    """
+    if not authored:
+        return []
+    rows = [dict(k) for k in (authored.get("kinds") or []) if isinstance(k, dict)]
+    if not rows or any(str(row.get("id") or "") == "agent" for row in rows):
+        return []
+    names = sorted(_me_names_used(rows))
+    if not names:
+        return []
+    return [
+        f"这份包没重声明 `agent` 种类,而能力里读了 {['me_' + n for n in names]} ——"
+        "「她身上声明过这个量吗」离线答不了(她的量表在目标世界里),这一格跳过了。"
+        "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问"
+    ]
 
 
 def _edit_location_media_warnings(authored: dict[str, Any] | None) -> list[str]:
@@ -1990,6 +2015,43 @@ def _rebuild_memories(
 
 
 
+def _undeclared_stock_names(
+    world_seed: dict[str, Any] | None, ontology: Any,
+) -> list[str]:
+    """`stocks` 段里那些"它所属的种类没声明过"的量名。**两处共用这一份**。
+
+    两处是 `_precheck_ontology`(写第一张表之前)与 `_seed_stocks`(真播的时候)。
+    收成一个函数而不是各写一遍,理由和 `_precheck_ontology` 自己的 docstring 逐字
+    相同:**两份判断迟早给出不同答案,而那种不一致会表现成"预检说没问题,开机还是
+    失败"** —— 而这一格 2026-08-21 之前正是这个样子的镜像:预检**根本没查**,
+    于是 `validate world` 说绿、开机 `OntologyError`(看板 D29 同族)。
+
+    **没声明 `kinds` 的世界这里一个字都不说**(`declared_quantities` 回空):
+    owner 和量名在那种世界里都是任意字符串,引擎无从判断 `树髙` 是笔误还是新造的量
+    —— 和 `_load_ontology` 的"声明本身就是开关"逐字同构。
+    """
+    out: list[str] = []
+    if world_seed is None or ontology is None:
+        return out
+    for index, entry in enumerate(_seed_entry_dicts(world_seed, "stocks")):
+        owner = str(entry.get("owner") or "").strip()
+        values = entry.get("values")
+        if not owner or not isinstance(values, dict):
+            # 形状读不懂那一档归 `_seed_stocks` / 作者层 schema 说,不在这儿重复。
+            continue
+        declared = ontology.declared_quantities(owner)
+        if not declared:
+            continue
+        for key in values:
+            name = str(key)
+            if name not in declared:
+                out.append(
+                    f"stocks[{index}] 给 {owner} 写了「{name}」,而它所属的种类没有"
+                    f"声明过这个量;声明过的是 {sorted(declared)}"
+                )
+    return out
+
+
 def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
                  *, ontology: Any = None, tick: int = 0, merge: bool = False) -> None:
     """种子里的初始存量(`"stocks": [{"owner": …, "values": {…}}]`)。空库一次。
@@ -2022,7 +2084,10 @@ def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
     have_owners = set(store.owners())
     if have_owners and not merge:
         return
-    problems: list[str] = []
+    # **拼错的量名那一档由 `_undeclared_stock_names` 一处说** —— 预检也调它,
+    # 所以声明了 `kinds` 的世界走到这儿时它已经答过一遍了(这里再答一遍不会有
+    # 第二种说法,因为句子是同一份)。
+    problems: list[str] = _undeclared_stock_names(world_seed, ontology)
     for index, entry in enumerate(_seed_entry_dicts(world_seed, "stocks")):
         owner = str(entry.get("owner") or "").strip()
         values = entry.get("values")
@@ -2040,10 +2105,6 @@ def _seed_stocks(world_seed: dict[str, Any] | None, store: Any,
         for key, raw in values.items():
             name = str(key)
             if declared and name not in declared:
-                problems.append(
-                    f"stocks[{index}] 给 {owner} 写了「{name}」,而它所属的种类没有"
-                    f"声明过这个量;声明过的是 {sorted(declared)}"
-                )
                 continue
             if name in existing:
                 continue
@@ -2348,8 +2409,17 @@ def _precheck_ontology(
         entity_rows = _union_by_id(ontology_store.entity_definitions(), entity_rows)
     kinds = parse_kinds(kind_rows)
     entities = parse_entities(entity_rows, kinds)
-    resolve(kinds, entities, rules=rules, locations=sorted(set(locations)),
-            items=sorted({*items, *seed_items}))
+    ontology = resolve(kinds, entities, rules=rules, locations=sorted(set(locations)),
+                       items=sorted({*items, *seed_items}))
+    # `stocks` 里的量名也在这儿查(2026-08-21,看板 D29 同族)。它的闸原本只住在
+    # **播种**里,而播种在预检之后 —— 两个后果:① `validate world` / `world check`
+    # 对一份量名拼错的文件说**绿**,而开机当场 `OntologyError`;② 开机的那次失败
+    # 发生在**写过几张表之后**,留下一个装了一半的世界,正是这个函数当初要修的形状。
+    problems = _undeclared_stock_names(world_seed, ontology)
+    if problems:
+        from anima_world.ontology import OntologyError
+
+        raise OntologyError(problems)
 
 
 def _load_ontology(
@@ -5309,7 +5379,80 @@ class _NothingInTheWorldYet:
         return []
 
 
-def _authored_ontology_errors(authored: dict[str, Any]) -> list[str]:
+_ME_NAME_IN_TEXT = re.compile(r"me_([^\s()\[\]{}<>=!+\-*/,'\"]+)")
+
+
+def _me_names_used(rows: list[dict[str, Any]]) -> set[str]:
+    """这份包里提到过哪些 `me_*`(她身上的量)。**只用来免掉一条查不了的检查。**
+
+    见 `_package_only_ontology_errors`:一份编辑包可以完全不重声明 `agent` 种类,
+    而她的量表在目标世界里。漏掉一个名字的后果是那条查不了的检查照旧报一次
+    **假红** —— 也就是退回今天的样子,不会把一份坏包放行。
+    """
+    names: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            names.update(_ME_NAME_IN_TEXT.findall(node))
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                walk(key)
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+
+    walk(rows)
+    return names
+
+
+def _package_only_ontology_errors(authored: dict[str, Any]) -> list[str]:
+    """一次**编辑**里,这份包**自己肚子里**那几件照查 —— 只豁免跨引用(看板 D29)。
+
+    在这之前 `--edit` 整个跳过本体预检,而 `loadable` 就是 `not errors`,于是一份
+    把量名拼错的编辑包拿到一句绿的 `loadable: true`,**开机当场挂**。
+    🔬 **它不是"没说",是"说窄了",而说窄了比全不说更难逮**:那一支追加过一句
+    warning「引用完整性没查:种类/地点/物品/规律可以来自目标世界」—— 那句话是真的,
+    可它只解释得了被跳过的那一摞里的**最后一件**。**人会拿一条真的理由去覆盖整个遗漏。**
+
+    分界是**这件事查得动查不动**,不是"严不严":
+
+    | 查得动(在这份包自己肚子里) | 查不动(可以来自目标世界) |
+    |---|---|
+    | 量名拼错(`set` 写到没声明过的量) | 规律的 `for_each` 指向哪个种类 / 哪个实例 |
+    | 自造动词没给 `label` | 实例的 `location` |
+    | `spawn` 声明了却没写代价 | 能力里的 `have_*` / `consumes` 指的物品 |
+    | 不认识的字段 · 继承成环 · parent 悬空 | `spawn.kind` 生的是哪个种类 |
+
+    一行 `kinds` 是一份**完整**的声明(合并按 id **整行替换**,不是逐字段打补丁),
+    所以左边那一列和目标世界一个字关系都没有。
+
+    ⚠️ **`me_X` 是个例外,而上面那张表原本把它记在左边**(2026-08-21 实测):
+    它查的是 `agent` 种类声明过的量,而一份只改某个种类的编辑包完全可以不重声明
+    `agent` —— 她的量表在目标世界里。所以这里在包没声明 `agent` 时**补一个只含
+    "这份包提到过的那些 `me_*`"的 agent 声明**:名字对得上,这一条就查不出东西来,
+    而别的检查一条不少。**这不是放水,是承认这一格离线答不了** —— 答不了的那一格
+    由调用方去 `simulate --ticks 0 --world-file` 连着世界问,那句话仍然印在 warning 里。
+    """
+    from anima_world.ontology import OntologyError, parse_kinds
+
+    rows = [dict(k) for k in (authored.get("kinds") or []) if isinstance(k, dict)]
+    if not any(str(row.get("id") or "") == "agent" for row in rows):
+        rows = [{"id": "agent",
+                 "quantities": {name: 0.0 for name in sorted(_me_names_used(rows))}}
+                ] + rows
+    try:
+        parse_kinds(rows)
+    except OntologyError as exc:
+        return list(getattr(exc, "errors", None) or [str(exc)])
+    except Exception as exc:  # noqa: BLE001 - 坏声明的形状很多,一律当成一条错报出去
+        return [str(exc)]
+    return []
+
+
+def _authored_ontology_errors(
+    authored: dict[str, Any], *, edit: bool = False,
+) -> list[str]:
     """`kinds` / `entities` / 规律那一摞闸,**不建世界地跑一遍**。
 
     走的是 `_precheck_ontology` —— 开机那条路上**同一个函数**。量名拼错、动词没
@@ -5321,10 +5464,34 @@ def _authored_ontology_errors(authored: dict[str, Any]) -> list[str]:
 
     **不另写一份判断**是这里唯一要守的:两份判断迟早给出不同答案,而那种不一致会
     表现成"预检说没问题,开机还是失败"。
+
+    ⚠️ **而"同一个函数"这句话曾经是假的,假在两头**(2026-08-21 实测,创作台在
+    3.5.0/3.6.0 双 venv 上量出来的,看板 D29 同族):
+
+    | 写法 | 这条命令 | 开机(`simulate --ticks 0`) |
+    |---|---|---|
+    | 规律 `for_each.owner: "物件:煤堆"`,**一个 `kinds` 都没写** | 🔴 退 2 | ✅ 退 0,而且规律**真的在跑** |
+    | 声明了种类,`stocks` 里量名拼错 | ✅ **说绿** | 🔴 退 1(`OntologyError`) |
+
+    **两个方向都错,而两边都不报错。** 判决:**开机是权威,这两扇门都跟它对齐** ——
+    这条命令存在的唯一理由就是离线答出"开机收不收",比开机更严是**假红**(一份跑得
+    好好的世界出不了包,而报错指着一个不存在的问题),比开机更松是**假绿**。
+    - 第一行:**声明本身就是开关**(CLAUDE.md / README 逐字)。不写 `kinds` 的世界
+      这一层整个缺席,`for_each.owner` 是个普通的量 owner。开机那条路一直这么判
+      (`if seed_author_layer and world_seed and world_seed.get("kinds")`),
+      这里从前无条件跑,于是把那个开关按住了。
+    - 第二行:`stocks` 的量名闸住在**播种**里(`_seed_stocks`),而播种在预检之后 ——
+      于是它既漏出了这扇门,又让开机在**写过几张表之后**才失败(留下一个装了一半
+      的世界,正是 `_precheck_ontology` 当初要修的那个形状)。这一轮把它搬进预检。
     """
     from anima_world.ontology import OntologyError
     from anima_world.rules import RuleError
 
+    if not (authored.get("kinds") or []):
+        # **声明本身就是开关** —— 和开机那一行逐字同一条判断。
+        return []
+    if edit:
+        return _package_only_ontology_errors(authored)
     empty = _NothingInTheWorldYet()
     try:
         _precheck_ontology(authored, empty, empty, None, None)
@@ -5413,18 +5580,22 @@ def run_validate(args: argparse.Namespace) -> int:
                 + _authored_unreachable_requirements(authored)
                 + _authored_media_warnings(authored)
             )
+            errors += _authored_ontology_errors(authored, edit=edit)
             if edit:
-                # **说出没查的那一半。** 一次编辑的引用可以落在目标世界里(它的名册
-                # 和地图在它自己的库里),而目标世界不在手上 —— 编一个绿灯出去,
-                # 正是这条命令要修的病本身。
+                # **说出没查的那一半 —— 而且只说没查的那一半。**
+                # ⚠️ 这句话 2026-08-21 之前**说窄了**:那时 `--edit` 跳过的是整摞
+                # 预检(量名拼错、动词没 label、`spawn` 没写代价一起跳),而这句
+                # warning 只解释得了最后一件。**人会拿一条真的理由去覆盖整个遗漏。**
                 warnings.append(
-                    "这是一次编辑(--edit),引用完整性没查:种类 / 地点 / 物品 / 规律"
-                    "可以来自目标世界,而目标世界不在手上 —— 要连着世界查,"
+                    "这是一次编辑(--edit),**跨引用**没查:规律指向哪个种类 / 哪个"
+                    "实例、实例在哪个地点、能力里的物品、`spawn` 生的是哪个种类 ——"
+                    "这几样可以来自目标世界,而目标世界不在手上。"
+                    "包自己肚子里那几件(量名、动词的 label、`spawn` 有没有代价、"
+                    "不认识的字段)**已经查过了**。要连着世界查剩下的,"
                     "用 `simulate --ticks 0 --world-file …`"
                 )
+                warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_location_media_warnings(authored)
-            else:
-                errors += _authored_ontology_errors(authored)
         return _report_validation("world", args.path, errors, warnings, args.json)
 
     data, read_error = _load_json_file(args.path)
@@ -5504,7 +5675,7 @@ def contract_payload() -> dict[str, Any]:
     from anima_world.media import MEDIA_SCHEMES
     from anima_world.projection import SETTLED_INVITATIONS_KEPT
     from anima_world.together import INVITE_OUTCOMES
-    from anima_world.ontology import AFFORDANCE_KEYS
+    from anima_world.ontology import AFFORDANCE_KEYS, KIND_KEYS
     from anima_world.world_seed import (
         WORLD_SEED_AGENT_KEYS,
         WORLD_SEED_AGENT_OPTIONAL_KEYS,
@@ -5573,6 +5744,13 @@ def contract_payload() -> dict[str, Any]:
             # (`ontology.AFFORDANCE_KEYS`),不是抄给创作台看的副本 —— 抄一份的话,
             # 加一格时总有一次只改了校验器,而这一头照旧答着旧清单,两边都不报错。
             "affordance_keys": sorted(AFFORDANCE_KEYS),
+            # 一条 `kinds` 行认哪些字段(3.7.0)。⚠️ **它是"读得到的那几格"的清单,
+            # 不是一道闸**:能力级的不认识字段当场开不了机,而种类级的今天被**静默
+            # 忽略**。写在契约里是因为 `parent`(单继承 + 加载期 copy-down)从 2.0
+            # 起就能用,而 FOR-STUDIO §3.7 到 2026-08-21 都没写过它 —— 创作台因此
+            # 不认这一格,对着一份完全合法的声明产出过一条**假红**。
+            # **消费方问这一格,别照文档维护一份清单。**
+            "kind_keys": sorted(KIND_KEYS),
             # 本轮新的那一格,单独点名。**创作台按它在不在探测,不比版本号** ——
             # 同一个版本号下有过好几份不同的引擎,而"这支引擎会不会让在场的人
             # 记住这件事"猜错了**不报错**:世界照跑、日志干净,只是屋里的人什么
@@ -6422,14 +6600,16 @@ def run_world_check(args: argparse.Namespace) -> int:
                 + _authored_unreachable_requirements(authored)
                 + _authored_media_warnings(authored)
             )
+            errors += _authored_ontology_errors(authored, edit=payload["edit"])
             if payload["edit"]:
                 warnings.append(
-                    "这是一次编辑(--edit),引用完整性没查:种类 / 地点 / 物品 / 规律"
-                    "可以来自目标世界,而目标世界不在手上"
+                    "这是一次编辑(--edit),**跨引用**没查:规律指向哪个种类 / 哪个"
+                    "实例、实例在哪个地点、能力里的物品、`spawn` 生的是哪个种类 ——"
+                    "这几样可以来自目标世界。包自己肚子里那几件(量名、动词的 label、"
+                    "`spawn` 有没有代价、不认识的字段)**已经查过了**"
                 )
+                warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_location_media_warnings(authored)
-            else:
-                errors += _authored_ontology_errors(authored)
         payload["errors"] = errors
         payload["warnings"] = warnings
         payload["loadable"] = not errors

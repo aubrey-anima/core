@@ -185,6 +185,20 @@ AFFORDANCE_KEYS = (
     "spawn", "destroys_target", "participants", "importance",
 )
 
+# 一条 `kinds` 行认哪些字段(3.7.0 起进 `contract --json` 的 `seed.kind_keys`)。
+#
+# ⚠️ **这一格和上面那个 `AFFORDANCE_KEYS` 有一条要紧的差别,别读串了**:能力级
+# 的不认识字段是**当场开不了机**,而**种类级的不认识字段今天被静默忽略**
+# (`_parse_one_kind` 只挑它认得的几个键读)。所以这个元组是**"读得到的那几格"
+# 的清单,不是一道闸** —— 它答的是「这一版引擎读不读得懂我写的这一格」,
+# 不答「我写错了它会不会拦我」。收严那一条不在这一轮做:那会让写过额外键的
+# 已发布世界当场开不了机,而这份清单本身就是为了让人**先看得见**才写下来的。
+#
+# `parent` 在这里,而 FOR-STUDIO §3.7 直到 2026-08-21 都没写过它 —— 于是创作台
+# 不认这一格,对着一份完全合法的声明产出过一条**假红**。这正是"消费方问引擎、
+# 不读文档"要有出口才成立的那一半。
+KIND_KEYS = ("affordances", "gloss", "id", "parent", "prompt", "quantities")
+
 
 class OntologyError(ValueError):
     """本体声明有毛病 —— 逐条列出,一次性报完。

@@ -344,3 +344,177 @@ def test_读不了的文件_check_说的是没答上来_不是装不进去(tmp_p
 def _validate_json(path: str) -> tuple[int, dict]:
     done = run_cli("validate", "world", path, "--json")
     return done.returncode, json.loads(done.stdout)
+
+
+# ── 五、两扇门在打架的那两格(看板 D29 同族,2026-08-21)────────────────────
+#
+# 这一节钉的都是**双向**的不一致:一格假红、一格假绿,而两边都不报错。
+# 判据是同一条:**开机是权威**。比开机严 = 一份跑得好好的世界出不了包,而报错指着
+# 一个不存在的问题;比开机松 = 绿灯放行,开机当场挂。两种都比"没有校验器"更坏,
+# 因为它们教会使用者不信这扇门。
+
+
+def test_一个kinds都没写的世界_校验器不许比开机更严(tmp_path, fresh_redis):
+    """**声明本身就是开关。** 不写 `kinds` 的世界这一层整个缺席,`for_each.owner`
+    是个普通的量 owner —— 开机那条路一直这么判
+    (`if seed_author_layer and world_seed and world_seed.get("kinds")`)。
+
+    而这扇门从前**无条件**跑本体预检,于是它把那个开关按住了:创作台内置示例作业
+    产出的世界 `validate world` 退 2、`simulate --ticks 0` 退 0 **而且规律真的在跑**
+    (600 tick 后煤量 100 → 94.24)。看板 D20 的标题「3.x 上一个都开不了机」因此是
+    错的 —— 那份世界**开得起来**,坏的是**出不了包**(`export_package` 拿
+    `validate world` 当闸)。**「开不了机」和「出不了包」得分开说。**
+    """
+    rule = {"kind": "author", "type": "rule", "body": {
+        "id": "煤堆每日消耗", "every": {"ticks": 1},
+        "for_each": {"owner": "物件:煤堆"},
+        "set": {"煤量": "煤量 - 0.01"},
+    }}
+    stock = {"kind": "author", "type": "stock",
+             "body": {"owner": "物件:煤堆", "values": {"煤量": 100.0}}}
+    path = _write(tmp_path / "nokinds.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, stock, rule])
+    ok_validate, ok_boot, errors = _both(path, fresh_redis)
+    assert ok_boot is True, errors
+    assert ok_validate is True, (
+        "一个 kinds 都没写的世界被校验器拦下来了 —— 这是假红:开机收它", errors)
+
+
+def test_量名拼错_校验器不许比开机更松(tmp_path, fresh_redis):
+    """**假绿**,而假绿比假红更贵:一份 `validate world` 说 `valid` 的包,创世当场
+    `OntologyError`。
+
+    病根不在判断本身,在**判断跑的时机**:量名那道闸原本只住在**播种**里
+    (`_seed_stocks`),而播种在 `_precheck_ontology` **之后** —— 于是它既漏出了这扇
+    离线的门,又让开机在**写过几张表之后**才失败,留下一个装了一半的世界
+    (正是 `_precheck_ontology` 当初被开出来要修的那个形状)。
+    """
+    kind = {"kind": "author", "type": "kind", "body": {
+        "id": "物件", "gloss": "一样东西",
+        "quantities": {"煤量": {"default": 100.0, "visibility": "here"}},
+    }}
+    entity = {"kind": "author", "type": "entity",
+              "body": {"id": "物件:煤堆", "name": "煤堆", "location": "yard"}}
+    stock = {"kind": "author", "type": "stock",
+             "body": {"owner": "物件:煤堆", "values": {"煤亮": 100.0}}}
+    path = _write(tmp_path / "typo.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, kind, entity, stock])
+    ok_validate, ok_boot, errors = _both(path, fresh_redis)
+    assert ok_boot is False and ok_validate is False, errors
+    assert any("煤亮" in e and "煤量" in e for e in errors), errors
+
+    # 对照组(期望非 0 的那一条判据的反面):把量名写对,三条路一起放行。
+    stock_ok = {"kind": "author", "type": "stock",
+                "body": {"owner": "物件:煤堆", "values": {"煤量": 100.0}}}
+    good = _write(tmp_path / "typo_ok.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, kind, entity, stock_ok])
+    assert _both(good, fresh_redis, world_id="w2")[0] is True
+
+
+def test_量名拼错的世界_一个字都不许先写进去(tmp_path, fresh_redis):
+    """上一条的另一半,而这一半只有真开机看得见:**验不过就一个字都不写**。
+
+    从前那道闸在播种里,而播种之前地图、规律、物品已经落库了 —— 一份写错量名的
+    文件因此留下一个**装了一半**的世界,而且那次失败让这个前缀不再是空的,
+    于是作者改好文件再来一次走的已经不是创世那条路。
+    """
+    from anima_world.api import World
+
+    kind = {"kind": "author", "type": "kind", "body": {
+        "id": "物件", "gloss": "一样东西",
+        "quantities": {"煤量": {"default": 100.0, "visibility": "here"}},
+    }}
+    entity = {"kind": "author", "type": "entity",
+              "body": {"id": "物件:煤堆", "name": "煤堆", "location": "yard"}}
+    stock = {"kind": "author", "type": "stock",
+             "body": {"owner": "物件:煤堆", "values": {"煤亮": 100.0}}}
+    path = _write(tmp_path / "half.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, kind, entity, stock])
+    with pytest.raises(Exception):
+        World.open("half", redis=fresh_redis, world_file=path,
+                   force_mock_llm=True).close()
+    left = [k for k in fresh_redis.scan_iter("anima:half:*")]
+    assert left == [], f"失败的创世留下了 {sorted(left)} —— 一个装了一半的世界"
+
+
+# ── 六、`--edit` 只豁免跨引用(看板 D29 本体)────────────────────────────────
+
+
+def _edit_kind(**over):
+    body = {"id": "物件", "gloss": "一样东西",
+            "quantities": {"煤量": {"default": 100.0, "visibility": "here"}}}
+    body.update(over)
+    return {"kind": "author", "type": "kind", "body": body}
+
+
+def test_编辑包里量名拼错_必须红(tmp_path):
+    """**D29 本体。** `--edit` 从前整个跳过本体预检,而 `loadable` 就是 `not errors`
+    —— 于是一份把量名拼错的编辑包拿到一句绿的 `loadable: true`,开机当场挂。
+
+    🔬 **它不是"没说",是"说窄了",而说窄了比全不说更难逮**:那一支追加过一句
+    warning「引用完整性没查:种类/地点/物品/规律可以来自目标世界」—— 那句话是真的,
+    可它只解释得了被跳过的那一摞里的**最后一件**。
+    **人会拿一条真的理由去覆盖整个遗漏。**
+    """
+    bad = _edit_kind(affordances={"烧": {"set": {"煤亮": "煤亮 - 1"}}})
+    path = _write(tmp_path / "edit_bad.cyberworld", [_MANIFEST, bad])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is False, "一份开机必挂的编辑包拿到了绿灯"
+    assert any("煤亮" in e for e in errors), errors
+    assert _validate_says(path, edit=True)[0] is False, "两扇门必须同一个答案"
+
+    # 对照组:同一份包,量名写对 —— 照旧放行(期望非 0 的那一条判据)。
+    good = _edit_kind(affordances={"烧": {"set": {"煤量": "煤量 - 1"}}})
+    ok2, errors2 = _check_says(_write(tmp_path / "edit_ok.cyberworld",
+                                      [_MANIFEST, good]), edit=True)
+    assert ok2 is True, errors2
+
+
+def test_编辑包里spawn没写代价_必须红(tmp_path):
+    """四件里的另一件。**代价由作者写,不是引擎发配额** —— 而这一条和目标世界
+    一个字关系都没有。"""
+    bad = _edit_kind(affordances={"生": {"spawn": {"kind": "物件", "name": "新的"}}})
+    path = _write(tmp_path / "edit_spawn.cyberworld", [_MANIFEST, bad])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is False and any("代价" in e for e in errors), errors
+
+
+def test_编辑包的跨引用照旧豁免(tmp_path):
+    """豁免的是**查不动**的那一摞,不是"严的那一摞":规律指向哪个种类、实例在哪个
+    地点、能力里的物品 —— 这几样可以来自目标世界,而目标世界不在手上。"""
+    rule = {"kind": "author", "type": "rule", "body": {
+        "id": "锈", "every": {"ticks": 1},
+        "for_each": {"kind": "目标世界里的种类"},
+        "set": {"锈度": "锈度 + 1"},
+    }}
+    path = _write(tmp_path / "edit_xref.cyberworld", [_MANIFEST, _edit_kind(), rule])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is True, errors
+
+
+def test_编辑包用了me_而没重声明agent_不许假红_但要说出这一格没查(tmp_path):
+    """⚠️ **`me_X` 那一件原本被记成"在包自己肚子里",而它不是**(2026-08-21 实测)。
+
+    它查的是 `agent` 种类声明过的量,而一份只改某个种类的编辑包完全可以不重声明
+    `agent` —— 她的量表在目标世界里。硬查就是**假红**。
+    **所以这一格跳过,而且说出来** —— 假装查过了正是 `--edit` 上一版那句 warning
+    的病本身。
+    """
+    bad = _edit_kind(affordances={
+        "烧": {"requires": ["me_体力 >= 10"], "set": {"煤量": "煤量 - 1"}}})
+    path = _write(tmp_path / "edit_me.cyberworld", [_MANIFEST, bad])
+    ok, errors = _check_says(path, edit=True)
+    assert ok is True, errors
+    payload = json.loads(run_cli("world", "check", path, "--edit", "--json").stdout)
+    assert any("me_体力" in w and "离线答不了" in w for w in payload["warnings"]), (
+        payload["warnings"])
+
+    # 对照组:包里自带 `agent` 声明时,这一格**真的查** —— 拼错的 me_ 名字要红。
+    actor = {"kind": "author", "type": "kind", "body": {
+        "id": "agent", "quantities": {"体力": {"default": 100, "visibility": "self"}}}}
+    typo = _edit_kind(affordances={
+        "烧": {"requires": ["me_精力 >= 10"], "set": {"煤量": "煤量 - 1"}}})
+    ok2, errors2 = _check_says(
+        _write(tmp_path / "edit_me_typo.cyberworld", [_MANIFEST, actor, typo]),
+        edit=True)
+    assert ok2 is False and any("me_精力" in e for e in errors2), errors2
