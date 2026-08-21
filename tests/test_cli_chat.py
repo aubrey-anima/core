@@ -169,3 +169,68 @@ def test_a_turns_observations_land_on_the_message_row(tmp_path, monkeypatch):
         assert any(m.get("stances") or m.get("stance") for m in metas), (
             f"她声明了姿态,消息行上却一个字没记:{metas!r}"
         )
+
+
+# ── 一次一问(3.7.0,看板 D5)────────────────────────────────────────────────
+
+
+def test_一次一问_说完就退_不读stdin(tmp_path):
+    """**这条门存在的理由是"驱动 REPL 脆在排版上"。**
+
+    创作台的"一键试玩 / 性格试镜"从 2026-07-27 起卡在这条上:它只能喂 stdin、
+    按提示符切 stdout,而抬头、降级提示、`名字 > ` 那几段任何一版换了样子,
+    子进程那一侧就切错 —— **而它不会报错,只会把半句抬头当成她说的话。**
+
+    所以这里钉的是两件:说完真的退(**不读一个字的 stdin**),以及那一轮真的
+    进了世界(和 REPL 那条路共用 `record_chat_turn`,不是另写一条)。
+    """
+    db = _a_world(tmp_path)
+    # ⚠️ stdin 里塞一句话 —— **它一个字都不该被读到**。喂空串的话,
+    # "说完就退"和"读到 EOF 才退"这两种实现给出同一个答案。
+    result = _chat(db, "--agent", "夏", "-m", "在吗", stdin="这句不许被读到\n")
+    assert result.returncode == 0, result.stderr
+    assert "苏晚夏 >" in result.stdout, result.stdout
+
+    with open_world_at(db, force_mock_llm=True) as world:
+        conversations = world.conversations("夏")
+        assert len(conversations) == 1, "一次一问也是一轮一记,不是退出时才补一笔"
+        said = {
+            message["content"]
+            for message in world.conversation_messages(conversations[0]["id"])
+            if message["role"] == "user"
+        }
+        assert said == {"在吗"}, said
+
+
+def test_一次一问_可重复_而且共用同一份转录(tmp_path):
+    """给三句就是三轮,顺序不许乱。**共用一份进程内转录** —— 各喂各的话,多轮的
+    连贯性就没了(世界只收当轮有限历史,完整转录归宿主,这条一个字没变)。"""
+    import json as _json
+
+    db = _a_world(tmp_path)
+    result = _chat(db, "--agent", "夏", "-m", "一", "-m", "二", "-m", "三", "--json")
+    assert result.returncode == 0, result.stderr
+    payload = _json.loads(result.stdout)
+    assert [row["said"] for row in payload["turns"]] == ["一", "二", "三"]
+    assert payload["agent_id"] == "夏" and payload["agent_name"] == "苏晚夏"
+    # **降级绝不无声**:Mock 上她照样回得出话,而那几句是模板。
+    assert payload["degraded_reason"], payload
+
+
+def test_json那条路上_stdout只有那一份json(tmp_path):
+    """混着印的话,调用方就得先剥壳 —— 而剥壳的写法迟早在某一版排版上碎掉,
+    **那正是这道门要治的病本身**。
+
+    ⚠️ 散场那行"这一场引擎记了 N 条警告"**仍然印,只是走 stderr** —— 静音它就把
+    "收着不丢"换成了"丢掉",而丢掉是这个仓库最怕的那种。
+    """
+    import json as _json
+
+    db = _a_world(tmp_path)
+    result = _chat(db, "--agent", "夏", "-m", "喂", "--json")
+    _json.loads(result.stdout)          # 整个 stdout 必须是一份 JSON,不许有壳
+    assert "@" not in result.stdout, "抬头漏进 stdout 了"
+
+    # 对照组(期望非 0 的那一条判据):不给 --json 时抬头照旧在,而且在 stdout 上。
+    human = _chat(db, "--agent", "夏", "-m", "喂")
+    assert "苏晚夏 @" in human.stdout, human.stdout

@@ -110,7 +110,7 @@ class _CollectedLogs(logging.Handler):
 
 
 @contextlib.contextmanager
-def _engine_logs_out_of_the_way(verbose: bool = False):
+def _engine_logs_out_of_the_way(verbose: bool = False, *, to_stderr: bool = False):
     """人正在跟她说话的这段时间里,引擎的日志收起来 —— `start` / `chat` / `play`。
 
     实测的样子:玩家问了一句,屏幕上先冒出来
@@ -123,6 +123,10 @@ def _engine_logs_out_of_the_way(verbose: bool = False):
 
     此前只有关系判定那一个 logger 被单独按下去(而且只在已降级时),于是别的模块
     照旧插话 —— 一个一个按下去就是给下一个模块留一个洞。
+
+    `to_stderr` 给 `chat --message --json`(3.7.0):那条路上 **stdout 必须只有那一份
+    JSON**,而散场这一行是给人看的。⚠️ **仍然要印,只是换一条管道** —— 静音它就把
+    "收着不丢"这条纪律换成了"丢掉",而丢掉正是这个上下文管理器不做的那件事。
     """
     if verbose:
         yield None
@@ -139,7 +143,8 @@ def _engine_logs_out_of_the_way(verbose: bool = False):
         if sink.records:
             note = (f"这一场里引擎记了 {len(sink.records)} 条警告;"
                     f"最后一条:{sink.records[-1][:60]}。加 --verbose 看全部。")
-            print(f"  {onboarding.dim(note)}")
+            print(f"  {onboarding.dim(note)}",
+                  file=sys.stderr if to_stderr else sys.stdout)
 
 
 def _connect_redis(url: str | None):
@@ -287,6 +292,12 @@ def _build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--name", default=None,
                   help="你的名字;不给就是「他还没告诉你名字」,她会称你「访客」但不会当成名字")
     chat.add_argument("--list", action="store_true", dest="list_only", help="只列出角色名册就退出")
+    chat.add_argument(
+        "--message", "-m", action="append", default=None, dest="messages",
+        help="说一句就退,不进 REPL(可重复,按顺序一句一轮)—— 给脚本和子进程用",
+    )
+    chat.add_argument("--json", action="store_true", dest="as_json",
+                      help="回执出成 JSON(只在 --message 下有意义)")
     chat.add_argument("--verbose", action="store_true",
                       help="引擎的日志照原样打出来(默认收着,散场报一行)")
 
@@ -4140,7 +4151,7 @@ def run_prompt(args: argparse.Namespace) -> int:
 
 
 def run_chat(args: argparse.Namespace) -> int:
-    """和一个角色对话的 REPL(#6)。
+    """和一个角色对话:**REPL,或者一次一问**(#6;`--message` 是 3.7.0 加的)。
 
     引擎最像人的那件能力,过去只有写 Python 才够得着:`World.chat_reply` →
     `record_chat_turn` 早就齐全,缺的只是一道门。这里就是那道门,没有新的引擎
@@ -4152,6 +4163,24 @@ def run_chat(args: argparse.Namespace) -> int:
 
     转录留在这个进程里,每轮只把最近若干条传进世界(纪律:完整转录归宿主)。
     每说完一轮就 `record_chat_turn`,于是**说完一句话那一刻 db 就是完整的**。
+
+    ## `--message`:一次一问(3.7.0,看板 D5)
+
+    在这之前这条命令**只有 REPL**,而创作台的"一键试玩 / 性格试镜"要的是
+    「说一句、拿到回话、退出」—— 它只能去驱动一个交互式 REPL:喂 stdin、
+    按提示符切分 stdout。那条路**脆在排版上**:抬头、降级提示、`名字 > ` 这几段
+    任何一版换了样子,子进程那一侧就切错,**而它不会报错,只会把半句抬头当成
+    她说的话**。库里 `World.chat_reply` 早就够,缺的一直只是一道门。
+
+    - `--message` **可重复**,按顺序一句一轮,共用同一份进程内转录 ——
+      多轮的连贯性因此还在(世界只收当轮有限历史,完整转录归宿主,这条没变)。
+      给一句就是一句,不落进 REPL、不读 stdin、不要 tty。
+    - `--json` 时 **stdout 上只有那一份 JSON**:抬头与提示一律闭嘴。混着印的话,
+      调用方就得先剥壳,而剥壳的写法迟早在某一版排版上碎掉 —— 那正是这道门要
+      治的病本身。
+    - 回执里带 `degraded_reason`:一个跑在 Mock 上的世界照样回得出话,而那几句是
+      **模板**。**降级绝不无声** —— 拿模板当"她说的话"去做判断,和拿一份假绿灯
+      出包是同一种错。
     """
     from anima_world.api import World
 
@@ -4189,26 +4218,42 @@ def run_chat(args: argparse.Namespace) -> int:
 
         degraded = world.state().get("runtime", {}).get("llm", {}).get("degraded_reason")
         where = info.get("location") or ""
-        print(onboarding.rule(
-            f"{info.get('name', agent_id)} @ {places.get(where, where) or '?'}"
-        ))
-        if degraded:
+        # `--message --json` 时 stdout 上**只有那一份 JSON** —— 抬头和提示混进去,
+        # 子进程那一侧就得先剥壳,而剥壳的写法迟早在某一版的排版上碎掉。
+        quiet = bool(getattr(args, "messages", None)) and bool(getattr(args, "as_json", False))
+        if not quiet:
+            print(onboarding.rule(
+                f"{info.get('name', agent_id)} @ {places.get(where, where) or '?'}"
+            ))
+        if degraded and not quiet:
             print(f"  {onboarding.yellow('这个世界正跑在 Mock 上')}({degraded})——"
                   f"回复会是模板。配一个:anima-world config set llm.api_key sk-…")
+        if degraded:
             # 没有 LLM 时,关系判定每一轮都要抱怨一次"读不出 JSON"—— 那是上面
             # 这句话的必然结果,不是新消息,而它会横插在对话中间。真 LLM 下的
             # 同一句话是真信号,所以只在已降级时闭嘴。
             logging.getLogger("anima_world.relationship_judge").setLevel(logging.ERROR)
-        print(f"  {onboarding.dim('说点什么。空行或 Ctrl-D / Ctrl-C 结束。')}\n")
+        scripted = [str(m) for m in (getattr(args, "messages", None) or []) if str(m).strip()]
+        scripted_mode = bool(getattr(args, "messages", None))
+        if not scripted_mode:
+            print(f"  {onboarding.dim('说点什么。空行或 Ctrl-D / Ctrl-C 结束。')}\n")
 
         history: list[dict[str, str]] = []
         turns = 0
+        said_rows: list[dict[str, Any]] = []
         while True:
-            try:
-                line = input(f"{display_name} > ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
+            if scripted:
+                # **一次一问**:给了 `--message` 就不进 REPL —— 说完这几句就退。
+                # 见 `_chat_one_shot_note`(这条门为什么存在,以及它为什么可重复)。
+                line = scripted.pop(0).strip()
+            else:
+                if scripted_mode:
+                    break            # 脚本模式:说完就走,不落进 REPL
+                try:
+                    line = input(f"{display_name} > ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
             if not line:
                 break
             history.append({"role": "user", "content": line})
@@ -4228,13 +4273,27 @@ def run_chat(args: argparse.Namespace) -> int:
                 history.pop()
                 continue
             reply = reply.strip() or "……"
-            print(f"{info.get('name', agent_id)} > {reply}\n")
+            if not (scripted_mode and args.as_json):
+                print(f"{info.get('name', agent_id)} > {reply}\n")
             history.append({"role": "assistant", "content": reply})
             # 一轮一记:关系判定在这里发生,世界也在这里落盘。
             world.record_chat_turn(agent_id, args.player_id, history[-2:], meta=meta)
             turns += 1
+            said_rows.append({"said": line, "reply": reply, "meta": dict(meta)})
 
-        if turns:
+        if scripted_mode and args.as_json:
+            print(json.dumps({
+                "operation": "chat",
+                "world_id": world_id,
+                "agent_id": agent_id,
+                "agent_name": info.get("name", agent_id),
+                "player_id": args.player_id,
+                "turns": said_rows,
+                # **降级绝不无声**:一个跑在 Mock 上的世界照样回得出话,而那几句
+                # 是模板 —— 拿它当"她说的话"去做判断的下场,和拿一份假绿灯出包一样。
+                "degraded_reason": degraded or "",
+            }, ensure_ascii=False, sort_keys=True))
+        elif turns:
             print(f"  {onboarding.dim(f'聊了 {turns} 轮,已经记进这个世界。')}\n")
         return 0
     finally:
@@ -6778,7 +6837,13 @@ def main(argv: list[str] | None = None) -> int:
     # `_engine_logs_out_of_the_way`)。挂在这儿而不是三个 `run_*` 里面,是因为
     # 最吵的那几条发生在 `World.open` 里面 —— 函数体开头才拦就已经晚了。
     if args.command in ("start", "chat", "play"):
-        with _engine_logs_out_of_the_way(getattr(args, "verbose", False)):
+        # `chat --message --json` 那条路上 stdout 只许有那一份 JSON,散场那一行
+        # 走 stderr(**仍然印**,见 `_engine_logs_out_of_the_way` 的 `to_stderr`)。
+        with _engine_logs_out_of_the_way(
+            getattr(args, "verbose", False),
+            to_stderr=bool(getattr(args, "messages", None))
+            and bool(getattr(args, "as_json", False)),
+        ):
             return _dispatch(args)
     return _dispatch(args)
 
