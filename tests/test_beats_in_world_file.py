@@ -390,3 +390,64 @@ def test_四格永远都在_少一格是消费方的KeyError(tmp_path):
     keys = {"declared", "fired", "unfired", "fired_not_declared"}
     assert set(build_run_report([], ticks=1)["beats"]) == keys
     assert set(build_run_report([], ticks=1, beats=[])["beats"]) == keys
+
+
+def test_import一份纯作者层的包_一个键都不落_而空世界首启装的是橱窗(tmp_path, caplog):
+    """**「首启自己带上」这句承诺,在 `world import` 那条路上不成立** —— 而它不成立
+    的样子比"节拍不响"重得多。
+
+    `world import` 只落键、不编译作者层(它自己的 docstring 写着,是有意的)。
+    一份**只有作者层**的包因此一个键都不落 —— 于是那个 world_id 仍然是**空的**,
+    而空世界首启装的是**内置橱窗**:屏幕上住着夏、遥、柔,不是作者写的那些人,
+    退出码 0、日志干净。
+
+    ⚠️ **这一格不是节拍特有的**(agents / locations 一起没进去),所以修法不是给
+    节拍打补丁 —— 要么 `import` 那条路整个补上作者层编译(改的是 `world import`
+    的语义 = 契约变更,得先拍板),要么**把承诺写窄**。这一轮选了后者,
+    而这条用例把"窄到哪儿"钉住:**变宽了就红。**
+    """
+    import logging
+
+    from _worldfile import redis_for
+
+    client = redis_for(tmp_path / "i.db")
+    path = write_seed_file(tmp_path / "w.cyberworld", _seed(beats=[_BEAT]))
+    with caplog.at_level(logging.WARNING):
+        done = run_cli("world", "import", path, "--world-id", "i1")
+    assert done.returncode == 0, done.stderr
+    assert list(client.scan_iter("anima:i1:*")) == [], (
+        "纯作者层的包不该落键 —— 落了就是另一种病")
+    # 而这一句才是这条用例存在的理由:那个警告必须说出**真正的后果**。
+    # 它从前一律说"状态记录已经落键,这个世界从此不是空的了" —— 对这一种文件
+    # 那句话是假的,而假在最要紧的一格上:世界恰恰**还是空的**,所以首启会去装橱窗。
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "内置橱窗" in said and "一个键都没落" in said, said
+
+
+def test_import一份跑过的带剧情世界_节拍跟着状态层过来(tmp_path, open_world):
+    """**对照组,也是"窄到哪儿"的另一头**:`--world-file` 与"跑过的世界导出/导入"
+    这两条路上,「首启自己带上」是真的 —— 节拍在状态层 `:beats` 键上跟着走。
+    只钉上面那条否定的话,读的人会以为整件事都没做成。
+    """
+    from _worldfile import redis_for
+
+    client = redis_for(tmp_path / "j.db")
+    path = write_seed_file(tmp_path / "w.cyberworld", _seed(beats=[_BEAT]))
+    world = open_world("j1", redis=client, world_file=path)
+    try:
+        world.tick(1)          # 还没到第 5 分钟,那一拍还没响
+    finally:
+        world.close()
+    out = tmp_path / "out.cyberworld"
+    assert run_cli("world", "export", "--world-id", "j1", "--output", str(out),
+                   "--package-id", "jp", "--name", "跑过的").returncode == 0
+    assert run_cli("world", "import", str(out), "--world-id", "j2").returncode == 0
+    restored = open_world("j2", redis=client)
+    try:
+        assert restored.scheduler.beat_director is not None, "import 之后首启没带上"
+        restored.tick(4)
+        fired = [e["payload"]["beat_id"]
+                 for e in restored.history(kind="beat_fired", limit=50)["events"]]
+        assert fired == ["第一幕"], fired
+    finally:
+        restored.close()
