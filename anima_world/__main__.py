@@ -5848,8 +5848,30 @@ def _report_autonomy_chain(redis: Any, world_id: str, store: Any) -> int:
     return 0
 
 
+def _run_since_seq(redis: Any, world_id: str) -> int | None:
+    """这个世界这一趟是从哪条事件之后开始跑的 —— 读不到 / 没盖过就是 `None`。
+
+    `None` 是**答不上来**,不是 0:0 会被读成"整条日志都算本次开机以来",
+    而那恰好把这条命令变回它原来的样子,还多了一句听起来很确定的话。
+    """
+    from anima_world.redis_state import meta_rows
+    from anima_world.scheduler import Scheduler
+
+    try:
+        raw = meta_rows(redis, world_id).get(Scheduler.RUN_SINCE_SEQ)
+    except Exception:  # noqa: BLE001 - 读不到就是答不上来,别掀翻体检
+        return None
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _report_engagements_kept(
     started: int, dropped: list[Any], *, finished: int = 0, gone: int = 0,
+    run_since_seq: int | None = None, dropped_this_run: int | None = None,
 ) -> int:
     """起了头的长过程有几件真做完了 —— 返回"需要处理"的项数。
 
@@ -5875,9 +5897,20 @@ def _report_engagements_kept(
     (`joint_role == "participant"`):一起做的一件事会给每个人各发一条
     `entity_engage`,照人头数的话三个人吃一顿饭会被数成三件事,而收尾只有一条。
 
-    ⚠️ **这一格报的是这个世界的一生,不是最近一段**(退出码同理:出过一次就
-    退 1,以后再也回不了绿)。一个跑了半年的世界身上永远背着头三天那次事故 ——
-    "该不该有个时间窗"是产品/运维的判断,不是引擎能替谁定的,记在看板 D25。
+    ⚠️ **数报的仍然是这个世界的一生,而退出码 2026-08-21 起按「本次开机以来」**
+    (看板 D25,受托拍板)。两者分开是有意的:**账要全,判要新**。
+    一个跑了半年的世界身上永远背着头三天那次事故 —— 从前那笔账让这条命令
+    **出过一次就再也回不了绿**,而 `CLAUDE.md` 同时写着它能进 CI;
+    **一条永远红的 CI 检查等于没有这条检查**,人只会把它 `|| true` 掉,
+    于是真出事那天它照样是红的、照样没人看。
+
+    ⚠️ **窗口从哪来:`:meta` 的 `run_since_seq`**(`Scheduler.RUN_SINCE_SEQ`)——
+    世界这一趟第一次推动时钟时盖的戳。`doctor` 是另一个进程,进程内存里那盏
+    `engagement_kept` 的灯它看不见。
+    ⚠️ **戳不在的时候不许悄悄放行**:那意味着这个世界还没在这一版引擎上跑过一 tick
+    (老世界、刚导入、只被只读门开过)。这时退出码**照旧按一生算**,并且把
+    "我为什么答不出最近那一段"印出来 —— 把"问不出来"过成绿灯,正是这条命令
+    最容易长出的下一个谎。
 
     ⚠️ **加不平的时候把它说出来,别 `max(0, …)` 抹平**(2026-08-20 补):
     四格各数各的之后,"还在做"是**减出来的**,而减出负数只有一个意思 —— 收尾的
@@ -5939,6 +5972,15 @@ def _report_engagements_kept(
     who = dropped[-1].who or "?"
     print(f"      {onboarding.dim('最近一件:' + who + ' 的 ' + str(last.get('verb') or '?') + ' ' + str(last.get('target') or '?'))}")
     print(f"      {onboarding.dim('做完 ' + str(finished) + ' / 被带走 ' + str(len(dropped)) + ' —— 比例低就是排班在抢她的手,看 occupies 声明对不对')}")
+    # **账要全,判要新。** 上面几行是这个世界的一生,退出码只看这一趟。
+    if run_since_seq is None:
+        print(f"      {onboarding.dim('这个世界还没在这一版引擎上跑过一 tick(:meta 里没有 run_since_seq)——')}")
+        print(f"      {onboarding.dim('答不出「本次开机以来」那一段,所以退出码照一生算。跑起来之后再体检一次')}")
+        return 1
+    if not dropped_this_run:
+        print(f"      {onboarding.dim('本次开机以来(事件 #' + str(run_since_seq) + ' 之后)一件都没被带走 —— 退出码不记这一笔')}")
+        return 0
+    print(f"      {onboarding.dim('其中 ' + str(dropped_this_run) + ' 件是本次开机以来的(事件 #' + str(run_since_seq) + ' 之后)—— 退出码记的是这一格')}")
     return 1
 
 
@@ -5974,6 +6016,11 @@ def run_doctor(args: argparse.Namespace) -> int:
     finished = 0
     gone = 0
     dropped: list[Any] = []
+    dropped_this_run = 0
+    # **"本次开机以来"这句话只有世界自己答得出。** doctor 是另一个进程,进程内存里
+    # 那盏 `engagement_kept` 的灯它看不见 —— 水位是世界这一趟推第一 tick 时盖的戳
+    # (`Scheduler.RUN_SINCE_SEQ`)。**戳不在 ≠ 没问题**,见 `_report_engagements_kept`。
+    run_since_seq = _run_since_seq(redis, world_id)
     for e in log.replay():
         payload = e.payload or {}
         if e.type == "agent_join" and e.who:
@@ -5991,6 +6038,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             reason = str(payload.get("reason") or "")
             if reason == "left":
                 dropped.append(e)
+                if run_since_seq is not None and int(e.seq) > run_since_seq:
+                    dropped_this_run += 1
             else:
                 gone += 1
     print(f"  {onboarding.green(onboarding.OK)} {len(joined)} 个角色,{events} 条事件")
@@ -6049,7 +6098,8 @@ def run_doctor(args: argparse.Namespace) -> int:
 
     problems += _report_autonomy_chain(redis, world_id, store)
     problems += _report_engagements_kept(
-        engaged, dropped, finished=finished, gone=gone)
+        engaged, dropped, finished=finished, gone=gone,
+        run_since_seq=run_since_seq, dropped_this_run=dropped_this_run)
 
     print()
     if problems:

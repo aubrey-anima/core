@@ -234,6 +234,8 @@ class Scheduler:
         # 这一个 World 的身份(占用戳用)。见 `another_runner`:pid 认不出
         # "本进程里另一个 World",而那正好是要分开的两种情况之一。
         self._owner_token = uuid.uuid4().hex
+        # 这一趟有没有盖过"从哪条事件之后开始跑"那个戳(见 `RUN_SINCE_SEQ`)。
+        self._run_marked = False
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=200)
         self._event_signal = threading.Event()
         self._next_event_seq: int = 1
@@ -1472,11 +1474,45 @@ class Scheduler:
 
     # ── Tick loop ─────────────────────────────────────────────────────────────
 
+    RUN_SINCE_SEQ = "run_since_seq"
+    """`:meta` 里那一格:**这一趟是从哪条事件之后开始跑的**。
+
+    存在的理由是 `doctor` 是**另一个进程**(一次性 CLI),而"本次开机以来"这句话
+    在进程内存里是答得出的、在进程外是答不出的 —— 于是那条命令只好按**全量日志**
+    判,结果是**一个世界历史上出过一次事,这条命令从此永远退 1**(看板 D25),
+    而 `CLAUDE.md` 同时写着它能进 CI:一条永远红的 CI 检查等于没有这条检查。
+
+    ⚠️ **盖戳的时机是"这一趟第一次推动世界时钟",不是 `World.open`。**
+    只读的门(`map` / `prompt` / 运维脚本)每开一次世界也走 `open`,拿它当"开机"
+    的话,一次 10 秒的 `anima-world map` 会把水位推到最新 —— 紧接着的 `doctor`
+    报一句「本次开机以来 0 件」的**绿勾**,而那句话什么也没度量。
+    **一行绿勾说出一句什么也没度量的话,比一行红字更贵。**
+    """
+
+    def _mark_run_start(self) -> None:
+        """这一趟的水位:**当前日志的末条 seq**(1 起连续,所以 `count()` 就是它)。
+
+        每个进程只写一次(`_run_marked`)。写在推第一 tick 之前,所以这一 tick
+        产生的事件都算在这一趟里。写不进去就算了 —— 一个体检用的水位,不该有
+        任何一条路因为它掀翻世界。
+        """
+        self._run_marked = True
+        if self.meta_store is None or self.event_log is None:
+            return
+        try:
+            self._write_meta(self.RUN_SINCE_SEQ, str(int(self.event_log.count())))
+        except Exception:  # noqa: BLE001 - 体检水位写不进去不该拦住世界跑
+            logger.debug("写不进本次开机水位", exc_info=True)
+
     def tick(self) -> None:
         """Advance world clock by tick_delta and process one frame."""
         with self._lock:
             if self._stopped:
                 return
+            if not self._run_marked:
+                # **这一趟真的开始跑世界了** —— 盖一个 `doctor` 在别的进程里读得到
+                # 的水位。见 `RUN_SINCE_SEQ` 的 docstring:时机是第一 tick,不是 open。
+                self._mark_run_start()
 
             prev_day = self.world_time().day
             self.clock += self.tick_delta

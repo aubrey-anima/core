@@ -534,7 +534,10 @@ def dump_world_records(
     - `erasure:*` **不带走**(3.5.0):一趟没做完的法务抹除的进度,而它记着的正是
       **要被抹掉的那些名字**。把它打进一份分发物里,比不抹还糟。
     - `meta` 里的 `owner_pid` / `owner_host` / `owner_token` **剥掉**:装进新世界等于让一个
-      还没人跑过的世界自称"有人在跑"。
+      还没人跑过的世界自称"有人在跑"。3.7.0 起 `run_since_seq` 同理(`doctor` 的
+      "本次开机以来"水位):它是**进程态**,而进程态不进 `.cyberworld` ——
+      带着走的话,一个刚装好、一 tick 没跑过的世界会拿着别人那一趟的水位,
+      于是 `doctor` 把上一个世界的一段历史当成"本次开机以来"。
     - `config` 里 `is_secret` 的行 **剥掉**:包是**分发物**,带着作者的钥匙发出去
       是不可挽回的。
     """
@@ -551,7 +554,8 @@ def dump_world_records(
             if short == "config":
                 value = _strip_secret_config_rows(value)
             elif short == "meta":
-                for transient in ("owner_pid", "owner_host", "owner_token"):
+                for transient in ("owner_pid", "owner_host", "owner_token",
+                                  "run_since_seq"):
                     value.pop(transient, None)
         elif ktype == "list":
             value = [_text(v) for v in (redis.lrange(key, 0, -1) or [])]

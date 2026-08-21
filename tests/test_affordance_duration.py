@@ -653,3 +653,93 @@ def test_同一件事起两次头那句话也说人话(tmp_path, open_world):
     world.scheduler.perform_affordance("甲", "bench:a", "打磨")
     said = world.scheduler.perform_affordance("甲", "bench:a", "打磨")["refusal"]
     assert "tick" not in said and "15 分钟" in said, said
+
+
+# ── 退出码按「本次开机以来」,账仍然按一生(看板 D25)────────────────────────
+
+
+def test_退出码不许被半年前那一次永远钉红(capsys):
+    """**病:出过一次事,这条命令从此永远退 1**,而 `CLAUDE.md` 同时写着它能进 CI。
+    一条永远红的 CI 检查等于没有这条检查 —— 人只会把它 `|| true` 掉,于是真出事
+    那天它照样是红的、照样没人看。
+
+    修法是**账要全,判要新**:上面那几行照旧报这个世界的一生,退出码只看这一趟
+    (水位是 `:meta` 的 `run_since_seq`,世界这一趟推第一 tick 时盖的)。
+    """
+    from anima_world.__main__ import _report_engagements_kept
+
+    dropped = [SimpleNamespace(payload={"verb": "打磨", "target": "bench:a"},
+                               who="甲")]
+    # ① 半年前那一件 —— 这一趟一件都没丢:数照报,退出码回绿。
+    assert _report_engagements_kept(
+        3, dropped, finished=2, run_since_seq=900, dropped_this_run=0) == 0
+    out = capsys.readouterr().out
+    assert "1 件半路被带走" in out, "账不许因为退绿就少一笔"
+    assert "本次开机以来" in out and "#900" in out, out
+
+    # ② 这一趟真的丢了一件 —— 期望非 0 的那一条判据。
+    assert _report_engagements_kept(
+        3, dropped, finished=2, run_since_seq=900, dropped_this_run=1) == 1
+    out = capsys.readouterr().out
+    assert "其中 1 件是本次开机以来的" in out, out
+
+
+def test_水位不在的时候不许悄悄放行(capsys):
+    """**"问不出来"过成绿灯,是这条命令最容易长出的下一个谎。**
+
+    `run_since_seq` 不在,只说明这个世界还没在这一版引擎上跑过一 tick(老世界、
+    刚导入、只被只读门开过)—— 它不是"没问题"。所以退出码照旧按一生算,
+    而且把"我为什么答不出最近那一段"印出来。
+    """
+    from anima_world.__main__ import _report_engagements_kept
+
+    dropped = [SimpleNamespace(payload={"verb": "打磨", "target": "bench:a"},
+                               who="甲")]
+    assert _report_engagements_kept(3, dropped, finished=2) == 1
+    out = capsys.readouterr().out
+    assert "还没在这一版引擎上跑过一 tick" in out and "run_since_seq" in out
+
+
+def test_水位是推第一tick时盖的_不是开世界时盖的(tmp_path, open_world):
+    """⚠️ **只读的门每开一次世界也走 `World.open`。** 拿它当"开机"的话,一次
+    10 秒的 `anima-world map` 会把水位推到最新,紧接着的 `doctor` 报一句
+    「本次开机以来 0 件」的绿勾 —— 而那句话什么也没度量。
+    """
+    from anima_world.__main__ import _run_since_seq
+    from anima_world.scheduler import Scheduler
+
+    world = _slow_world(tmp_path, open_world, name="mark1")
+    redis = world.scheduler.event_log._redis
+    world_id = world.scheduler.world_id
+    assert _run_since_seq(redis, world_id) is None, (
+        "开了世界还没推过一 tick —— 这时候答「本次开机以来」就是在编")
+    before = world.scheduler.event_log.count()
+    world.tick(1)
+    assert _run_since_seq(redis, world_id) == before
+    assert world.scheduler._run_marked is True
+    # 再 tick 不许把水位往前推:这一趟只有一个起点。
+    world.tick(5)
+    assert _run_since_seq(redis, world_id) == before
+    assert Scheduler.RUN_SINCE_SEQ == "run_since_seq"
+
+
+def test_水位是进程态_不进包(tmp_path, open_world):
+    """`.cyberworld` 是**分发物**,而这一格是**进程态**。带着走的话,一个刚装好、
+    一 tick 没跑过的世界会拿着别人那一趟的水位,于是 `doctor` 把上一个世界的一段
+    历史当成"本次开机以来" —— 和 `owner_pid` 那三格逐字同一条理由。"""
+    from anima_world.world_package import dump_world_records
+
+    world = _slow_world(tmp_path, open_world, name="mark2")
+    world.tick(1)
+    redis = world.scheduler.event_log._redis
+    world_id = world.scheduler.world_id
+    assert redis.hget(f"anima:{world_id}:meta", "run_since_seq"), (
+        "前提没摆成:世界里根本没有这一格,那这条测试什么也没验")
+    metas = [r for r in dump_world_records(redis=redis, world_id=world_id)
+             if r.get("kind") == "redis" and r.get("key") == "meta"]
+    assert metas, "包里应该有 :meta 那一行"
+    for row in metas:
+        body = row.get("value") or row.get("body") or {}
+        assert "run_since_seq" not in body, body
+        assert "owner_pid" not in body, body
+        assert "world_seed" in body, ("出生证明该在 —— 别把整行都剥掉", body)
