@@ -254,6 +254,20 @@ def test_sdist_excludes_tests_and_world_data():
 
     setuptools 默认会把 tests/ 扫进 sdist;wheel 不受影响(它只装
     `[tool.setuptools.packages.find]` 找到的包),所以这里专门盯 sdist。
+
+    ⚠️ **这条测试从前会替打包清单认罪**(2026-08-25 修)。`python -m build` 默认
+    起一个**隔离**构建环境,而起那个环境要去 PyPI 下 `setuptools>=77` 与 `wheel` ——
+    所以这条测试**从前是联网的**。2026-08-25 全量跑那趟它红了,红的原文是
+    `Could not fetch URL https://pypi.org/simple/setuptools/`(SSL EOF + 读超时),
+    而屏幕上打出来的那一行是 `FAILED …::test_sdist_excludes_tests_and_world_data`
+    —— 读起来是"sdist 里混进了不该带的东西",而真相是**这台机器那一刻上不了网**。
+    单独重跑 37 秒绿。和 `tests/test_autonomy.py` 那个 5 秒挂钟是同一族的病:
+    **判据脆到会替被测的东西认罪,比没有这条判据更坏。**
+
+    改法是**先严后松,而且分得清是哪一段坏的**:隔离环境起得来就照旧用它;起不来
+    (输出里根本没走到 `Building sdist`)就退回 `--no-isolation`,拿这个 venv 里
+    已经装好的 setuptools 构建 —— 清单该查的一格都不少。两条路都走不通才 skip,
+    而且 skip 的话**明说是这台机器,不给打包的结论**。
     """
     import pathlib
     import subprocess
@@ -265,12 +279,31 @@ def test_sdist_excludes_tests_and_world_data():
     assert build  # 仅用于存在性检查
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory() as out:
+
+    def _build(extra: list[str]) -> tuple[subprocess.CompletedProcess, str]:
         proc = subprocess.run(
-            [sys.executable, "-m", "build", "--sdist", "--outdir", out, str(root)],
+            [sys.executable, "-m", "build", "--sdist", "--outdir", out, str(root), *extra],
             capture_output=True, text=True,
         )
-        assert proc.returncode == 0, f"sdist 构建失败:\n{proc.stdout}\n{proc.stderr}"
+        return proc, f"{proc.stdout}\n{proc.stderr}"
+
+    with tempfile.TemporaryDirectory() as out:
+        proc, log = _build([])
+        if proc.returncode != 0 and "Building sdist" not in log:
+            # **一个字都没轮到构建** —— 坏在起隔离环境那一步(下 setuptools/wheel),
+            # 那是网络不是清单。退回本地已装好的构建后端再问一次。
+            proc, log = _build(["--no-isolation"])
+            if proc.returncode != 0 and "Building sdist" not in log:
+                pytest.skip(
+                    "这台机器上 `python -m build` 起不起来:隔离环境下不到 "
+                    "setuptools/wheel,--no-isolation 也没走到构建那一步。"
+                    "**这不是打包清单的结论** —— 换一台连得上 PyPI 的机器,"
+                    f"或先 `pip install -U setuptools wheel` 再看。\n{log}"
+                )
+        assert proc.returncode == 0, (
+            "sdist **真的构建失败了**(已经走到 `Building sdist` 那一步,"
+            f"所以这一条不是网络):\n{log}"
+        )
         (tarball,) = pathlib.Path(out).glob("*.tar.gz")
         names = tarfile.open(tarball).getnames()
 

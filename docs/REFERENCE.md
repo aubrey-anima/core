@@ -2,8 +2,15 @@
 
 > 本文档面向两类读者:想了解引擎能做什么的人,和要对接它的程序(宿主应用、运维台、创作台 anima-studio)。
 > 契约级别的权威定义永远以代码为准(见 [README](../README.md) 的契约表);本文是可查阅的展开说明。
-> 对应引擎版本:2.0(世界住 Redis,世界文件格式 3)。首发已并入原 [ROADMAP](ROADMAP.md)
-> 2.0–5.0 的四大机制,详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
+> ⚠️ **这一行原先写着「对应引擎版本:2.0」,而引擎已经 3.7.0**(2026-08-25 改)。
+> 世界住 Redis、世界文件格式 3 这两句仍然对;版本号别照抄这里 ——
+> 敲 `python -c "import anima_world; print(anima_world.__version__)"` 或
+> `anima-world contract --json`。**这份文档的两格由测试闸盯着**:每个公开方法
+> (`test_every_public_method_is_documented`)、每个配置键
+> (`test_every_declared_config_key_is_documented`)都必须在这里出现过且形参对得上,
+> 所以那两格跟得上代码;其余章节按需更新,已知的缺口列在 [FOR-STUDIO.md](FOR-STUDIO.md) §5。
+> 首发已并入 [ROADMAP](ROADMAP.md)(**设计存档,不是路线图**)2.0–5.0 的四大机制,
+> 详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
 > 想先理解"为什么是这样",读 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
