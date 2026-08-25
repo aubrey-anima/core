@@ -88,7 +88,8 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 ### Docs —— 回执(库里有而对方看不见,等于没有)
 
 - **`scheduler.max_agents` 补上了迟到三周的回执。** 能力 **2.0 就交付了**(`3254f36`,
-  2026-08-05 —— 判据 `git log --date=short --format='%h %ad' -1 3254f36`):`int`、默认 100、**`0` = 不限**、报错里带着
+  **写代码是 2026-08-05(`3254f36`),发出去是 2026-08-06 的 2.0.0 定版(`655988b`)** ——
+  第一版把这两个日子写成了一个,判据 `git log --no-walk --date=short --format='%h %ad %s' 3254f36 655988b`):`int`、默认 100、**`0` = 不限**、报错里带着
   `config set scheduler.max_agents N` 的解法。而到 2026-08-25 为止,REFERENCE 零行、
   FOR-STUDIO 零行、CHANGELOG 零行、issue #19 还开着 —— 一个照文档判断"这引擎有没有
   人数上限"的人,三周里拿到的答案是"没有这回事"。现在 REFERENCE 配置表有它,
