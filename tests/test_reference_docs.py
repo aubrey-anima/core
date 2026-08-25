@@ -365,3 +365,29 @@ def test_the_contract_storage_section_matches_the_code():
     payload = json.loads(done.stdout)["storage"]
     assert payload["backend"] == "redis"
     assert payload["key_prefix"] == "anima:{world_id}:"
+
+def test_every_declared_config_key_is_documented():
+    """声明了一个配置键,就必须在 REFERENCE 里说得出它是什么。
+
+    这道闸是被 `scheduler.max_agents` 逼出来的:它 **2.0 就交付了**(`3254f36`),
+    默认 100、`0 = 不限`、报错里带着 `config set` 解法 —— 而到 2026-08-25 为止,
+    `docs/REFERENCE.md` 和 `docs/FOR-STUDIO.md` 里**一个字都没有**,CHANGELOG 也没记。
+    整整三周,一个下游按文档判"这个引擎有没有人数上限"的人,得到的答案是"没有"。
+
+    ⚠️ **这正是"交付要回执"那条纪律没有闸的样子。** 公开方法有
+    `test_every_public_method_is_documented` 盯着,配置键此前一条都没有 ——
+    而配置键恰恰是**运营与作者**唯一够得着的那一面。
+
+    判据取"在 REFERENCE 里出现过",不取"在那张配置表里有一行":有几个键的家在正文
+    (`economy.player_allowance` 有一整段 ⚠️ 说明,进表反而会把那段话拆散)。
+    这道闸要挡的是**一个字都没有**,不是"没进表"。
+    """
+    from anima_world.config_store import _DEFAULTS
+
+    text = REFERENCE.read_text(encoding="utf-8")
+    mentioned = set(re.findall(r"`([A-Za-z][\w.]*)`", text))
+    missing = sorted(key for key in _DEFAULTS if key not in mentioned)
+    assert not missing, (
+        f"这些配置键在 REFERENCE 里一次都没出现:{missing}。"
+        "运营和作者只能从文档知道一个键存不存在 —— 声明了却不写,等于没交付。"
+    )

@@ -4157,6 +4157,7 @@ readline。
 | `llm.max_retries` | int | 2 | SDK 重试次数 |
 | `llm.background.model` | str | 空 | **背景槽**的模型:意图分类器与连续输出的每一步走它(便宜快模型)。空 = 用 `llm.model`。key 与端点共用主槽的 |
 | `scheduler.tick_rate` | float | 1/300 | 每现实秒的 tick 数;1/300 = 与现实 1:1,1.0 = 演示速度 |
+| `scheduler.max_agents` | int | 100 | 名册人数上限,**性能护栏**;`0` = 不限。撞上时 `Scheduler.register()` 抛 `RuntimeError`,而报错里带着解法(`config set scheduler.max_agents N`)—— 那一刻看报错的人正是需要这句话的人。⚠️ 它撞在**世界第一次开机**那一刻,离创作现场最远的一环:一个 120 人的世界可以管线全绿、体检全过、打包成功,然后开不了机。**这个数是运营的判断,不是引擎替他做的** —— 引擎只给一个默认值 |
 | `agent.idle_timeout` | float | 30.0 | 行为树 idle 看门狗阈值(秒) |
 | `world.minutes_per_tick` | int | 5 | 一 tick 代表的世界分钟(5 → 一天 288 tick) |
 | `world.travel_minutes_per_unit` | int | 60 | 步行横穿一个画布单位的世界分钟 |
