@@ -366,8 +366,17 @@ def test_the_contract_storage_section_matches_the_code():
     assert payload["backend"] == "redis"
     assert payload["key_prefix"] == "anima:{world_id}:"
 
+# 配置键的家默认是 REFERENCE 里**那张表上的一行**。少数几个键的家在正文,逐个列在
+# 这里并写清理由 —— 一份列得出名字的例外表比一道谁都满足得了的松闸诚实。
+_CONFIG_KEYS_DOCUMENTED_IN_PROSE = {
+    "economy.player_allowance":
+        "「玩家兜里的第一笔钱由世界给」那一段有整段 ⚠️ 说明(§经济),"
+        "塞进表里会把那段话拆散",
+}
+
+
 def test_every_declared_config_key_is_documented():
-    """声明了一个配置键,就必须在 REFERENCE 里说得出它是什么。
+    r"""声明了一个配置键,就必须在 REFERENCE 里说得出它是什么。
 
     这道闸是被 `scheduler.max_agents` 逼出来的:它 **2.0 就交付了**(`3254f36`),
     默认 100、`0 = 不限`、报错里带着 `config set` 解法 —— 而到 2026-08-25 为止,
@@ -378,16 +387,93 @@ def test_every_declared_config_key_is_documented():
     `test_every_public_method_is_documented` 盯着,配置键此前一条都没有 ——
     而配置键恰恰是**运营与作者**唯一够得着的那一面。
 
-    判据取"在 REFERENCE 里出现过",不取"在那张配置表里有一行":有几个键的家在正文
-    (`economy.player_allowance` 有一整段 ⚠️ 说明,进表反而会把那段话拆散)。
-    这道闸要挡的是**一个字都没有**,不是"没进表"。
+    ## 2026-08-25 同日修:第一版的判据答的不是它自己以为的那句话
+
+    第一版取"在 REFERENCE 里出现过"(`` `([A-Za-z][\w.]*)` `` 全文抓一遍),理由写着
+    "有几个键的家在正文,不该逼它们进表"。**那个理由今天仍然成立**,可那个抓法把
+    配置键和**提示词模板名**装进了同一个点号命名空间。2026-08-25 数了一遍:
+    REFERENCE 里反引号 token **1017** 个,带点的 **239** 个,其中只有 66 个是配置键
+    —— 剩下 **173** 个带点的 token 里,`chat.intent` / `contact.compose` /
+    `autonomy.decide` 这类**提示词模板名**占了 28 个
+    (`prompt_store._SAMPLE_VARS` 36 个模板里,有 28 个在 REFERENCE 里被反引号提过;
+    剩下 8 个是 `narrative.mock.<动作种类>`,文档里写的是那个尖括号占位)。
+    实测:往 `_DEFAULTS` 里塞一个**很像会有**的开关 `chat.intent_classifier`,
+    这道闸答**绿** —— 而满足它的那个反引号在提示词模板那一节,说的是一条模板的名字,
+    和"这个世界有没有这个开关"一个字都不相干。
+    **又一次:证据成立,而它证的不是你以为的那句话。**
+
+    现在的判据分两档,把两个约束一起满足:
+
+    - **默认档是"表上有它自己那一行"**(行首 `| ` + 反引号包着的键 + ` |`)。
+      提示词模板名占不了表格首格(2026-08-25 实测:36 个模板名一个都没占),
+      于是上面那个洞当场关死;而 66 个键里 65 个本来就有自己那一行,**一条假红都不多**。
+    - **例外档是 `_CONFIG_KEYS_DOCUMENTED_IN_PROSE`**,留给家在正文的那几个
+      (今天只有 `economy.player_allowance` 一个)。它**不是免检**:名字必须是真配置键
+      (一份比代码老的例外表会替一个不存在的键放行),而且那个键得**真的在 REFERENCE
+      里出现过** —— 例外表放行的是"不进表",不是"不写"。
+
+    这道闸要挡的仍然是**一个字都没有**;换掉的只是"什么样的一句话算数"。
+    有牙判据见 `test_the_config_key_gate_is_not_satisfied_by_a_prompt_template_name`。
     """
     from anima_world.config_store import _DEFAULTS
 
     text = REFERENCE.read_text(encoding="utf-8")
     mentioned = set(re.findall(r"`([A-Za-z][\w.]*)`", text))
-    missing = sorted(key for key in _DEFAULTS if key not in mentioned)
-    assert not missing, (
-        f"这些配置键在 REFERENCE 里一次都没出现:{missing}。"
-        "运营和作者只能从文档知道一个键存不存在 —— 声明了却不写,等于没交付。"
+    row_keys = set()
+    for line in text.split("\n"):
+        row = re.match(r"^\|\s*`([A-Za-z][\w.]*)`\s*\|", line)
+        if row:
+            row_keys.add(row.group(1))
+
+    stale = sorted(set(_CONFIG_KEYS_DOCUMENTED_IN_PROSE) - set(_DEFAULTS))
+    assert not stale, (
+        f"例外表里这些名字已经不是配置键了:{stale}。"
+        "一份比代码老的例外表会替一个不存在的键放行,删掉它们。"
     )
+
+    missing = sorted(
+        key for key in _DEFAULTS
+        if key not in row_keys and key not in _CONFIG_KEYS_DOCUMENTED_IN_PROSE
+    )
+    assert not missing, (
+        f"这些配置键在 REFERENCE 的配置表里没有自己那一行:{missing}。"
+        "运营和作者只能从文档知道一个键存不存在 —— 声明了却不写,等于没交付。"
+        "家确实在正文的,写进 _CONFIG_KEYS_DOCUMENTED_IN_PROSE 并说清理由;"
+        "⚠️ **在别处被反引号提过一次不算** —— 提示词模板名和配置键同一个命名空间。"
+    )
+
+    silent = sorted(key for key in _CONFIG_KEYS_DOCUMENTED_IN_PROSE if key not in mentioned)
+    assert not silent, (
+        f"这些键挂在「家在正文」的例外表上,而正文里一次都没出现:{silent}。"
+        "例外表放行的是「不进表」,不是「不写」。"
+    )
+
+
+def test_the_config_key_gate_is_not_satisfied_by_a_prompt_template_name(monkeypatch):
+    """判据自己也得站得住:一个**提示词模板名**不许替一个配置键说"有文档"。
+
+    这条钉的是上面那道闸 2026-08-25 当天被验收探针捅穿的那个洞 —— 那次探针往
+    `_DEFAULTS` 里加了一个 `chat.intent_classifier`,闸门 **1 passed**。
+
+    前提两条先自证(那个名字真的是模板名、它真的在 REFERENCE 里被反引号包着出现过),
+    然后塞一个同名的配置键进去:**老判据答绿,新判据必须答红**。
+
+    ⚠️ **这条测的不是 `chat.intent_classifier` 这个名字**,是"配置键和提示词模板
+    共用一个点号命名空间"这件事不再骗得过闸门。哪天那条模板改了名,把 victim 换成
+    `prompt_store._SAMPLE_VARS` 里任意一个在 REFERENCE 出现过的名字即可 ——
+    前提那两条 assert 会当场告诉你该换。
+    """
+    from anima_world import config_store, prompt_store
+
+    victim = "chat.intent_classifier"
+    assert victim in prompt_store._SAMPLE_VARS, (
+        f"前提没成立:{victim} 已经不是提示词模板名了,换一个再钉"
+    )
+    assert f"`{victim}`" in REFERENCE.read_text(encoding="utf-8"), (
+        f"前提没成立:REFERENCE 里没有 `{victim}` 这个 token,这条测不出那个洞"
+    )
+    assert victim not in config_store._DEFAULTS, "前提没成立:它已经是真配置键了"
+
+    monkeypatch.setitem(config_store._DEFAULTS, victim, True)
+    with pytest.raises(AssertionError, match=re.escape(victim)):
+        test_every_declared_config_key_is_documented()

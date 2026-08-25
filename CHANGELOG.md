@@ -27,9 +27,16 @@ never tagged and never went to PyPI — they ship as container images only, so t
 thing on the index is still **1.4.0** (Apache-2.0, 2026-08-04). A section under a version
 heading means "this version's engine, as built from this repo"; whether that build ever
 left the building is a separate question, answered in `CLAUDE.md` §当前状态.
-There is deliberately **no `[Unreleased]` section**: a change parked under `[Unreleased]`
-is a change that already shipped while telling the reader it hadn't — see 第五轮 below,
-which is where that particular lie got caught.
+A change parked under `[Unreleased]` used to be forbidden here — the rationale being that
+it is a change that already shipped while telling the reader it hadn't (see 第五轮 below,
+which is where that particular lie got caught). ⚠️ **2026-08-25 更正:那句禁令和这份文件
+的正文自相矛盾了整整一轮** —— 清欠账那一单在下面开了一个 `## [Unreleased]`,而这一段
+还写着"这里刻意没有 `[Unreleased]`"。**留着两句打架的话,比两句里哪一句都糟**:下一个人
+按这一段去找,会在版本标题下面找一个根本不在那儿的条目。现在的规矩是那一单实际在用的:
+**没有版本号可挂的改动**(这一轮改的全是判据与文档,`anima_world/` 一个字节没动,
+`__version__` 一格没抬)进 `[Unreleased]`,**定版时整段并进那个版本标题**;
+禁令原本要挡的那件事由另一句话挡住 —— 见下面那两段:**版本标题说的是这个仓库有什么,
+从来不是你的镜像有什么。**
 
 ⚠️ **That lie has a mirror image, and the mirror image is the one that is live today.**
 The rationale above used to end "…and everything under a version heading is in the running
@@ -119,6 +126,56 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
   一个都没关**。一句说得比做到的宽的话,而且它不会有任何一处报错:CHANGELOG 里
   没有闸,`git status` 只说这个文件改了。**判据必须是敲得出来的那一条**,
   写在句子里的"已经关掉"从来不是判据。
+
+### 第二轮(修复轮,2026-08-25)—— 上面那道新闸,自己就是它要挡的那种假话
+
+这一轮同样**没有一行引擎代码改动**。三条都是验收拿探针量出来的,不是读代码推的。
+
+- 🔴 **`test_every_declared_config_key_is_documented` 会被一个提示词模板名满足。**
+  第一版的判据是"这个键在 REFERENCE 里被反引号包着出现过",而 REFERENCE 里反引号
+  token 有 **1017** 个、带点的 **239** 个,其中只有 66 个是配置键 —— 剩下 **173** 个
+  带点 token 里,`prompt_store._SAMPLE_VARS` 那 36 个**提示词模板名**占了 28 个,
+  而 `contact.compose`(模板)与 `contact.compose.enabled`(配置)正好同族。
+  **这是现实的洞,不是理论的**:验收探针往 `_DEFAULTS` 里塞一个很像会有的开关
+  `chat.intent_classifier`,这道闸答 **1 passed** —— 满足它的那个反引号,
+  说的是一条提示词模板的名字,和"这个世界有没有这个开关"一个字都不相干。
+  **又一次:证据成立,而它证的不是你以为的那句话** —— 而这一次犯的人,
+  正是上面那一段刚写完"配置键此前一条闸都没有"的同一个人。
+  现在判据是**"配置表上有它自己那一行"**;家在正文的那一个
+  (`economy.player_allowance`,进表会把那整段 ⚠️ 说明拆散)走一张**列得出名字**的
+  例外表,而那张表**自己也上了闸**:名字不再是真配置键就红(防它比代码老)、
+  键在正文里一个字都没有也红(例外表放行的是"不进表",不是"不写")。
+  判据自己也钉了一条自测:`test_the_config_key_gate_is_not_satisfied_by_a_prompt_template_name`。
+  **两个方向都敲过**:同一个假开关,`git show HEAD:tests/test_reference_docs.py` 那版
+  **1 passed**、新版 **FAILED**(报文点名 `chat.intent_classifier`);
+  66 个真键 **65 个走表格行、1 个走例外表**,整个文件 **10 passed**。
+- **`_settle(world, predicate)` 的返回值,24 个调用点里 20 个丢掉了。**
+  谓词只求值一次、**不参与任何判断**,等待全在 `_drain` 里 —— 于是
+  `_settle(world, lambda: world.autonomy_stats()["failed"])` 读起来像"等到 failed 非零",
+  实际什么都不把,还挡在真正的 `assert` 前面替它顶了个名。
+  **一条看起来在把关、其实什么都不把的判据,出现了 20 次。**
+  那 20 处改成直呼 `_drain(world)`(等待一个字没少,少的只是那句假话),
+  其中 3 处连 `_drain` 都是多余的(循环体最后一句就是它)——直接删。
+  `_settle` 只留给**返回值真的被用上**的调用点,现在 5 处。整文件 **26 passed**。
+- **`tests/test_autonomy.py` 文件头写下 `_drain` 的射程,因为"全绿"证的不是那句话。**
+  验收量出 barrier 第一眼看见的 `pending` **每一次都是 0**(我复现:26 条里 24 条调过
+  `_drain`,其中 22 条引擎测试的每一次调用都是 0,只有那两条判据自测量到 1),
+  据此判"barrier 什么都没等"。**前半句我复现了,后半句我核伪了**:`_drain` 是两半,
+  ① 一次循环往返(顺带让排在前面的回调跑完)、② 到了那边再等掉眼前排着的 task。
+  把 `_drain` 整个改成 `return` → **9 failed / 17 passed**(所以 ① **承重**,
+  7 条引擎测试真的靠它);只把 ② 那段 `while pending: await asyncio.wait(pending)`
+  换成 `pass` → **2 failed / 24 passed**,红的正是那两条判据自测(所以 ② 在那 22 条
+  引擎测试上**一次都没走过**)。两句话都写进了文件头:**别说 barrier 没等**,
+  也**别拿"引擎那些测试还是绿的"当 `_drain` 的验收**。
+- **`test_packaging.py` 里那条"先严后松"的中间档,在这台机器上是死的。**
+  `.venv/bin/python -c "import setuptools"` 是 `ModuleNotFoundError`,于是
+  `--no-isolation` 一开口就是 `BackendUnavailable`,连 `Building sdist` 都到不了 ——
+  **真实行为是"联网就 pass、断网就 skip",没有中间档**。那一档留着仍然对
+  (换一台装了 setuptools 的机器它就活),但**它此刻没被任何一次运行证过**,
+  docstring 里照实说了。把"我写了一条退路"当成"这条退路走得通",是同一族的第三种。
+- **本文件抬头那句"这里刻意没有 `[Unreleased]`",和它下面那个 `[Unreleased]` 打了一整轮架。**
+  已改成这一单实际在用的规矩(见抬头)。**两句打架的话比其中任何一句都糟** ——
+  它不会红,只会让下一个人在版本标题下面找一个不在那儿的条目。
 
 ## [3.7.0] —— 同一件事,一把尺一句话 (2026-08-21)
 

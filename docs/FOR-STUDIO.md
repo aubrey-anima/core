@@ -839,6 +839,7 @@ social / stance / tools / intent / autonomy,并播了关系、创世记忆、钱
 | 跨实体相互作用**在规律那一层**表达不了 | 🟡 **半个洞已经填了,而括号里那个例子已经过期**(2026-08-25 复核)。**「挖矿让矿脉减少」2.0 起写得出来** —— 它是一次**能力**调用:`set` 写矿脉的量、`costs`/`consumes` 花掉她的量与材料(和橱窗里 `tend` 逐字同构)。仍然欠着的是**规律层的扇入**(一条规律读/写另一个实体的量,比如"井干了所以这一片的树都长得慢"),那要先设计扇入语义 —— 双缓冲下顺序会变成隐藏的语义(`rules.py` 设计第 3 条)。**没有排期**;真要写这类联动,今天的做法是**经 `world` 这个 owner 中转**(规律 A 写 `world.井水位`,规律 B 读它) |
 | `hidden` 的量绝对不可知(八卦链没接) | ❌ **仍然欠着,没有排期**(2026-08-25 复核)。判据:`git grep -n hidden -- anima_world/gossip.py` → **一行不印**,八卦这一层压根不认识可见性档位。⚠️ 这一条**不是 bug**:`hidden` 的语义就是"没有任何人感知得到",而"她从别人嘴里听说了一个 hidden 的量"要的是另一套东西(传闻的置信度 × 可见性),不是把闸打开 |
 | 逐轮 stance / tool_call 观测量没有 CLI 出口 | 等你们把它写进诉求文档并报进任务单(§6;⚠️ 这一行原先写的是「等你们提 issue」—— 那是在等一条不存在的通道,所以它等了很久) |
+| 🆕 **「这支引擎声明了哪些配置键」没有机器面** | ❌ **仍然欠着,没有排期**(2026-08-25 立)。判据:`anima-world contract --json` 的顶层键里**没有** `config`(实敲 11 段:`beats` `character_card` `chat_tools` `engine_version` `erasure` `invitations` `operation` `package` `report` `seed` `storage`);`anima-world config list` 答的是**某个跑着的世界的合并视图**(要 Redis),不是引擎的声明集。于是这一层上你们只能读 `docs/REFERENCE.md` 的配置表 —— 那张表**从 2026-08-25 起有闸盯着**(每个键必须有自己那一行,§3.31),所以它不会掉队,但**它是给人读的**。⚠️ **别自己抄一份键清单**:总图纪律第一条,手抄的镜像迟早和权威分叉,而分叉那天没人会发现。要开这扇门是 `contract --json` 的**加法** = 跨仓契约变更,走任务单 |
 | 定时轮次行动率偏稀(约三四天一次) | 🟡 **今天能自己调的那一半照旧**:`autonomy.decide` 是热改模板(`prompt` 那条命令看得见她收到什么),`autonomy.interval_ticks` / `max_per_day` 也是配置。**结构性改法(情境触发,而不是按钟点问)仍然欠着、没有排期**(2026-08-25 复核)。⚠️ **3.2.0**(2026-08-13,`99ed871`)顺手修掉了它最贵的一种浪费:**必然被拒的选项不再摆上菜单**(线上量出来的一轮是 63 次问 / 0 次动作 / 5 次失败,五次全是同一句「这会儿她身边没有人」)—— 那不只是白花一次调用,**她挑了、被拒了,而这次失败教不会她任何事**。判据 `git log --oneline -S'63 次问' -- anima_world/`(只有一条,就是 `99ed871`);机制是 `ToolSpec.requires_colocation` / `ToolSpec.requires_target_entity`(一个「跟前得有人」、一个「手边得有东西」,两条都只答**这一刻它有没有可能成**)。🔴 **这一格 2026-08-25 写的时候错了两次,都记在这儿。** ① 版本号第一版写的是「3.6.0」,**错了四个次版本** —— 照「这件事读起来像 3.6.0 那一单干的」填的,没去敲那条 `git log`。**在这份文档里填错一个版本号不是排版问题**:你们按版本号判「我这支引擎有没有这一格」,写宽了会让一台 3.2.0–3.5.0 的机器被当成没有它。② 机制的名字第一版写成 `ToolSpec` 身上一个叫 `requires_present_target` 的字段,**而它身上没有这个名字** —— 照隔壁那条 docstring 里「跟前得有人」几个字**造**出来的、一个听着很像的名字。逮住它的是本仓自己的闸 `tests/test_reference_docs.py::test_every_documented_class_member_exists`,全量那一趟当场红。**编出来的符号名比错的版本号更贵**:版本号错了人还会去查,而 `git grep requires_present_target` 什么都不印,读的人多半以为是自己这支引擎太老 |
 | **`validate world` 不是"开得起来吗"的全集** —— `kinds` 里的 `bands`、`emit` 三字段、能力里的 `rand()` 它一个都报不出来 | ✅ **已修,别再照这一行绕**(2026-08-20 复核):`validate world` / `world check` 现在都调 `_authored_ontology_errors`(= 开机那条路上同一个 `_precheck_ontology`),这三类一条不落地报。⚠️ **但只在不给 `--edit` 时** —— `--edit` 下这一摞整个不跑、照答 `loadable: true`,那是 3.6.0 的一个已知洞,见 §3.21 里那条 🔴。⚠️ 仍然不是全集的那一半是**引用完整性**(目标世界里有没有那个地点/物品/种类),它只有 `simulate --ticks 0 --world-file` 问得出 |
 | 能力(affordance)层没有骰子 —— "这一次采摘有三成掉空"写不出来 | 已认。要先给它一组自己的坐标(世界 / 种类+动词 / 施动者 / 对象 / tick),在那之前写了 `rand()` 会**开不了机**而不是静默给 0 |
@@ -3297,7 +3298,26 @@ WorldFileError: … 不认识的 type 'beat' …            # 退出码 1
 `tests/test_reference_docs.py::test_every_public_method_is_documented` 盯着,
 **配置键此前一条闸都没有** —— 而配置键恰恰是运营与作者唯一够得着的那一面。
 这一轮补上了:`test_every_declared_config_key_is_documented`
-(`_DEFAULTS` 里的每个键都必须在 REFERENCE 里出现过;加了它当场红,红的正是这一个键)。
+(`_DEFAULTS` 里的每个键都必须在 REFERENCE 里说得出来;加了它当场红,红的正是这一个键)。
+
+🔴 **同日第二轮把这道闸自己修了一次,而这一条对你们有用**:第一版的判据是
+"这个键在 REFERENCE 里被反引号提过一次",**而提示词模板名和配置键共用一个点号命名空间**
+—— `contact.compose` 是**模板**,`contact.compose.enabled` 是**配置**;实测往 `_DEFAULTS`
+里塞一个 `chat.intent_classifier`(它是模板名),那道闸答绿。现在的判据是
+**"REFERENCE 的配置表上有它自己那一行"**,唯一的例外(`economy.player_allowance`,
+家在正文)逐个列在测试里并写清理由。
+→ **对你们的意思是:REFERENCE 那张配置表现在是「这一版引擎声明了哪些配置键」的
+完整清单,而且有闸盯着它别掉队**(2026-08-25 实测 66 个键:65 个在表上,
+例外只有 `economy.player_allowance` 一个,家在表旁的正文里,写在测试里)。
+🔴 **但它仍然只是一份 markdown,这一层今天没有机器面** ——
+`contract --json` 里**没有**配置键这一段(实敲,顶层只有 `beats` / `character_card` /
+`chat_tools` / `engine_version` / `erasure` / `invitations` / `operation` / `package` /
+`report` / `seed` / `storage`),而 `anima-world config list` 答的是**某个跑着的世界的
+合并视图**(要 Redis),不是"这支引擎声明过哪些键"。
+**所以"这支引擎有没有某个开关"今天只能靠人读文档**,和你们最熟的那条纪律
+("判据是出口在不在,不是版本号")在这一层上还接不上。已记进 §5「已知的洞」;
+要开这扇门是 `contract --json` 的加法 = 跨仓契约变更,**等任务单,别自己拼一份清单**
+—— 手抄一份镜像的下场,总图第一条纪律写着。
 
 ### 你们要知道的三件
 

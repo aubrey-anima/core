@@ -9,6 +9,10 @@
 > (`test_every_public_method_is_documented`)、每个配置键
 > (`test_every_declared_config_key_is_documented`)都必须在这里出现过且形参对得上,
 > 所以那两格跟得上代码;其余章节按需更新,已知的缺口列在 [FOR-STUDIO.md](FOR-STUDIO.md) §5。
+> ⚠️ **配置键那一格的判据是"配置表上有它自己那一行"**(2026-08-25 收紧):此前取的是
+> "在这份文档里被反引号提过一次",而**提示词模板名和配置键共用一个点号命名空间**
+> (`contact.compose` 是模板,`contact.compose.enabled` 是配置),于是一条模板的名字
+> 就能替一个根本没写过的开关答"有文档"。家确实在正文的键**逐个列在测试里**并写清理由。
 > 首发已并入 [ROADMAP](ROADMAP.md)(**设计存档,不是路线图**)2.0–5.0 的四大机制,
 > 详见 [2.5](#25-记忆-20)~[2.8](#28-社交八卦与小团体)。
 > 想先理解"为什么是这样",读 [ARCHITECTURE.md](ARCHITECTURE.md)。

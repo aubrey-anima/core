@@ -8,6 +8,24 @@
 - 默认什么都不做、默认整个关着
 - 有上限,而且"被问"不算"用掉额度"
 - 找一个不在场的人是空动作,当场拒绝
+
+⚠️ **这个文件全绿,不等于 `_drain` 那条 barrier 走过**(2026-08-25 实测,`uptime`
+报 load≈8–10 的机器上;这一段是给下一个改 `_drain` 的人看的)。`_drain` 是两半:
+**① 往世界那条循环上投一个协程再等它回来**(一次往返,顺带让排在它前面的回调跑完)、
+**② 到了那边再等掉眼前排着的其余 task**。三条判据量下来:
+
+- 这个文件 26 条测试里有 **24 条调过 `_drain`**(22 条引擎的 + 下面那两条判据自测)。
+  barrier 第一眼看见的 pending:**那 22 条引擎测试的每一次调用都是 0**;
+  真等住过(pending=1)的只有那两条自测。
+- 把 `_drain` 整个改成 `return`:**9 failed / 17 passed** —— 所以 ① **是承重的**,
+  **7 条引擎测试**真的靠它。
+- 只把 ② 那段 `while pending: await asyncio.wait(pending)` 换成 `pass`:
+  **2 failed / 24 passed**,红的正是那两条自测 —— 所以 ② 在那 22 条上**一次都没走过**。
+
+**两个别读错的方向**:别据此说"barrier 什么都没等"(① 承重,拿掉当场红 7 条);
+也别拿"引擎那些测试还是绿的"当 `_drain` 的验收 —— 它们证的是 ①,
+② 的证据只有那两条自测。加一条新测试想靠 ② 的话,先按上面第一条量一眼 pending,
+别默认它走到了。
 """
 from __future__ import annotations
 
@@ -134,10 +152,23 @@ def _drain(world: World) -> None:
 
 
 def _settle(world: World, predicate):
-    """等**那一轮真的落地**,然后再看结论。
+    """等**那一轮真的落地**,然后再看结论 —— 只给**要用那个结论**的调用点。
 
-    没有 `timeout` 这个参数是有意的:一个能调的秒数会把"等够了"重新变成判据,
-    而这个文件 24 条测试全都靠它。
+    没有 `timeout` 这个参数是有意的:一个能调的秒数会把"等够了"重新变成判据。
+
+    ⚠️ **它不是 `assert`,也不重试。** `predicate` 只求值一次、**不参与任何判断**,
+    等待全在 `_drain` 里。2026-08-25 验收挑出来:24 个调用点里 **20 个把返回值丢了**,
+    于是 `_settle(world, lambda: world.autonomy_stats()["failed"])` 读起来像
+    "等到 failed 非零",而它什么都不把 —— **一条看起来在把关、其实什么都不把的判据,
+    出现了 20 次**,还挡在真正的 `assert` 前面替它顶了个名。
+    那 20 处已改成直呼 `_drain(world)`(等待一个字没少,少的只是那句假话)。
+    留在这儿的调用点只有一种形状:**返回值真的被用上** —— 现在 **5 处**,
+    其中 4 处用了返回值,第 5 处是那条自测(它要的恰恰是"等不到时它不给结论")。
+    ⚠️ **别拿 `grep -c '_settle(' tests/test_autonomy.py` 数调用点** ——
+    `def` 那行、`_drain` 的病历里那句、以及这段说明自己(含这一行)都会被命中,
+    真调用点只有 **5 处**,而这条命令答的是 **9**。
+    **一条会命中自己说明的判据,和"还有 9 处没改"在屏幕上长得一模一样** ——
+    要数就 `grep -n` 出来看行号:5 处在 `def _settle` 那一段之外。
     """
     _drain(world)
     return predicate()
@@ -180,7 +211,7 @@ def test_the_clock_never_waits_for_the_network(tmp_path):
         elapsed = time.monotonic() - started
 
         assert elapsed < 0.2, f"tick 被 LLM 拖住了({elapsed:.2f}s)"
-        _settle(world, lambda: llm.threads)
+        _drain(world)
         assert llm.threads and all(name != ticking for name in llm.threads), llm.threads
 
 
@@ -195,7 +226,7 @@ def test_doing_nothing_is_the_default_and_leaves_no_trace(tmp_path):
         _seat_player(world)
 
         world.tick(3)
-        _settle(world, lambda: world.autonomy_stats()["quiet"])
+        _drain(world)
 
         assert world.autonomy_stats()["acted"] == 0
         assert world.autonomy_stats()["quiet"] >= 1
@@ -238,7 +269,6 @@ def test_the_daily_cap_actually_caps(tmp_path):
         for _ in range(10):
             world.tick(1)
             _drain(world)          # 等那一轮落地,不是睡一个定数
-        _settle(world, lambda: world.autonomy_stats()["acted"] >= 2)
 
         mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
         assert mine, "一次都没主动"
@@ -262,7 +292,6 @@ def test_the_daily_cap_is_tracked_per_character(tmp_path):
         for _ in range(10):
             world.tick(1)
             _drain(world)          # 等那一轮落地,不是睡一个定数
-        _settle(world, lambda: world.autonomy_stats()["acted"] >= 2)
 
         mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
         by_agent: dict[str, int] = {}
@@ -279,7 +308,7 @@ def test_she_cannot_reach_out_to_somebody_who_is_not_there(tmp_path):
         _seat_player(world)   # 在场的是 p1,不是 p9
 
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["failed"])
+        _drain(world)
 
         assert world.autonomy_stats()["failed"] >= 1
         assert world.inbox("p9") == [] and world.inbox("p1") == []
@@ -302,7 +331,7 @@ def test_she_cannot_reach_out_to_someone_present_but_elsewhere(tmp_path):
         world.player_move("p1", elsewhere)   # p1 在场,但不在夏这儿
 
         world.tick(1)
-        _settle(world, lambda: llm.prompts)
+        _drain(world)
         assert "reach_out" not in llm.prompts[0], "她跟前一个人都没有,菜单还摆着去找人搭话"
 
         refused = world.act("夏", "reach_out", {"player_id": "p1", "text": "喂"})
@@ -326,7 +355,7 @@ def test_she_does_not_hail_someone_she_is_already_talking_with(tmp_path):
         ])
 
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["failed"])
+        _drain(world)
 
         assert world.inbox("p1") == [], "她把正在聊天的人当成了生客"
         assert "说过话" in str(world.autonomy_stats()["last"])
@@ -346,7 +375,6 @@ def test_the_hail_watermark_is_shared_with_the_idle_hail(tmp_path):
         for _ in range(4):
             world.tick(1)
             _drain(world)          # 等那一轮落地,不是睡一个定数
-        _settle(world, lambda: world.autonomy_stats()["failed"])
 
         mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
         assert mine == [], f"同一天里她开了两次口:{mine}"
@@ -359,7 +387,7 @@ def test_a_chat_only_capability_is_not_offered_in_a_timed_round(tmp_path):
     with world:
         _seat_player(world)
         world.tick(1)
-        _settle(world, lambda: llm.prompts)
+        _drain(world)
 
         menu = llm.prompts[0]
         assert "reach_out" in menu and "broadcast" in menu
@@ -377,7 +405,7 @@ def test_the_menu_drops_what_cannot_possibly_succeed_this_round(tmp_path):
     world, llm = _world(tmp_path, "无")
     with world:
         world.tick(1)   # 一个玩家都没坐下
-        _settle(world, lambda: llm.prompts)
+        _drain(world)
 
         menu = llm.prompts[0]
         assert "这会儿你身边没有别人" in menu, "前提没成立:这一轮她跟前是有人的"
@@ -409,7 +437,7 @@ def test_she_can_act_on_the_world_and_not_only_on_people(tmp_path):
         before = world.stock("tree:harbor_oak", "树高")
 
         world.tick(1)   # 到点了
-        _settle(world, lambda: world.autonomy_stats()["acted"])
+        _drain(world)
 
         assert world.autonomy_stats()["acted"] == 1, world.autonomy_stats()
         assert world.stock("tree:harbor_oak", "树高") > before, "她照料了那棵树,而树一点没长"
@@ -422,7 +450,7 @@ def test_a_capability_she_picked_that_is_not_on_this_surface_is_refused(tmp_path
         before = _where(world, "夏")
 
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["quiet"])
+        _drain(world)
 
         assert world.autonomy_stats()["acted"] == 0
         assert _where(world, "夏") == before
@@ -483,7 +511,7 @@ def test_a_broken_decision_call_never_takes_down_the_clock(tmp_path):
         world.chat_service._background_llm = Broken()
         _seat_player(world)
         world.tick(3)
-        _settle(world, lambda: world.autonomy_stats()["asked"] >= 1)
+        _drain(world)
 
         assert world.world_time().day >= 0        # 时钟还在
         assert world.autonomy_stats()["acted"] == 0
@@ -505,7 +533,7 @@ def test_a_crash_before_any_character_is_asked_is_recorded_not_swallowed(tmp_pat
         tools_mod.tools_for = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
         try:
             world.tick(1)
-            _settle(world, lambda: world.autonomy_stats()["last"])
+            _drain(world)
         finally:
             tools_mod.tools_for = real
 
@@ -566,7 +594,7 @@ def test_another_process_can_ask_whether_the_chain_ever_ran(tmp_path):
     with world:
         _seat_player(world)
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["asked"])
+        _drain(world)
         assert world.autonomy_stats()["asked"] >= 1, "前提没成立:这一轮没问过她"
 
     # 另一个 World 实例 = 另一个进程的替身:它自己的内存计数器是全 0。
@@ -584,7 +612,7 @@ def test_doctor_says_whether_she_ever_acted_on_her_own(tmp_path):
     with world:
         _seat_player(world)
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["asked"])
+        _drain(world)
 
     done = run_cli("doctor", "--world-id", "w")
     assert "定时轮次" in done.stdout, done.stdout
@@ -602,7 +630,7 @@ def test_doctor_tells_a_dead_chain_from_a_fresh_restart(tmp_path):
     with world:
         _seat_player(world)
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["asked"])
+        _drain(world)
         assert world.autonomy_stats().get("last_tick") is not None, "没记下上一轮在第几 tick"
 
     fresh = run_cli("doctor", "--world-id", "w")
@@ -634,14 +662,14 @@ def test_a_failure_keeps_its_own_line_after_later_rounds_go_quiet(tmp_path):
     with world:
         _seat_player(world)
         world.tick(1)
-        _settle(world, lambda: world.autonomy_stats()["failed"])
+        _drain(world)
         assert world.autonomy_stats()["failed"] >= 1, "前提没成立:这一轮没失败"
         failure = str(world.autonomy_stats()["last_failure"])
         assert failure and failure != "None", "失败没有留下自己那一格"
 
         # 再来两轮沉默 —— `last` 会被改写,`last_failure` 不该跟着没。
         world.tick(2)
-        _settle(world, lambda: world.autonomy_stats()["quiet"])
+        _drain(world)
         assert str(world.autonomy_stats()["last_failure"]) == failure, (
             "后面的沉默把那次失败的理由盖掉了"
         )

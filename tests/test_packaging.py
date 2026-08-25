@@ -268,6 +268,15 @@ def test_sdist_excludes_tests_and_world_data():
     (输出里根本没走到 `Building sdist`)就退回 `--no-isolation`,拿这个 venv 里
     已经装好的 setuptools 构建 —— 清单该查的一格都不少。两条路都走不通才 skip,
     而且 skip 的话**明说是这台机器,不给打包的结论**。
+
+    ⚠️ **而中间那一档在这台开发机上是死的,别以为它会走到**(2026-08-25 实测):
+    `.venv/bin/python -c "import setuptools"` 是 `ModuleNotFoundError`
+    (`pip list` 里只有 `build`),于是 `--no-isolation` 一开口就是
+    `BackendUnavailable: Cannot import 'setuptools.build_meta'`,连 `Building sdist`
+    都到不了。**这台机器上的真实行为是"联网就 pass、断网就 skip",没有中间档。**
+    留着那一档仍然对(换一台 `pip install setuptools` 过的机器它就活了,而 CI 上装了),
+    但**它此刻没有被任何一次运行证过** —— 想验它,先在这个 venv 里装一次 setuptools
+    再断网跑。把"我写了一条退路"当成"这条退路走得通",是这个仓库最爱犯的那种错。
     """
     import pathlib
     import subprocess
