@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from _worldfile import open_world_at, run_cli
 
+import asyncio
+import concurrent.futures
+import os
+import sys
 import threading
 import time
 
@@ -74,14 +78,68 @@ def _seat_player(world: World, agent_id: str = "夏", player_id: str = "p1") -> 
     world.player_move(player_id, _where(world, agent_id))
 
 
-def _settle(world: World, predicate, timeout: float = 5.0):
-    """等那条跑在世界自己循环上的轮次落地。轮询而不是 sleep 一个定数。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.02)
+# 这条 barrier 自己也是那条循环上的一个 task —— 认得出来,才不会两条 barrier
+# 互相等(一次 `_drain` 超时之后,上一条还悬在循环上)。
+_BARRIER_NAME = "anima-test-drain-barrier"
+
+# **兜底闸门,不是判据。** 只防死锁:跳了就明说是这台机器,绝不冒充引擎的结论。
+# 忙机器上调大它不会改变任何一条测试的答案(答案由下面那条事件判据给),
+# 所以它可以给得很宽。
+_ROUND_GUARD_SECONDS = float(os.environ.get("ANIMA_TEST_ROUND_GUARD", "60"))
+
+
+def _drain(world: World) -> None:
+    """等世界自己那条循环把手上排着的轮次跑完 —— **这是事件,不是挂钟**。
+
+    定时轮次由 tick 线程 `asyncio.run_coroutine_threadsafe` 丢到 `world._bridge._loop`
+    上,而 `world.tick(n)` 是同步的:它返回时,那 n 轮的 task 已经全在那条循环上排着了。
+    于是"落地没有"是一个**问得出来的事实** —— 往同一条循环上再投一个协程,
+    等掉它眼前排着的其余 task 即可。
+
+    ⚠️ **这里原先是一个 5 秒的挂钟**(`_settle(..., timeout=5.0)`):轮询到点就返回
+    `predicate()`,而那时那一轮多半还没落地,于是红的是**调用方自己的断言** ——
+    屏幕上写着「定时轮次没走通」。2026-08-25 四仓测试并行跑那趟,
+    `test_a_broken_decision_call_never_takes_down_the_clock` 就是这么红的
+    (同一份代码单跑 0.17 秒绿、整文件 24 项绿、独占重跑全绿)。
+    **它红出来的样子,和真的把时钟拖垮逐字相同** —— 而下一个看见它红的人多半在 CI 上,
+    没有第二台机器可以复核。判据脆到会替引擎认罪,比没有这条测试更坏。
+    """
+    loop = world._bridge._loop
+
+    async def _barrier() -> None:
+        current = asyncio.current_task()
+        if current is not None:
+            current.set_name(_BARRIER_NAME)
+        while True:
+            pending = [
+                task for task in asyncio.all_tasks()
+                if task is not current and task.get_name() != _BARRIER_NAME
+            ]
+            if not pending:
+                break
+            await asyncio.wait(pending)
+        # 轮次的收尾(`_on_autonomy_round_done` 把崩溃喂回 `autonomy_stats`)挂在
+        # task 的 done 回调上。它排在这条 barrier 被唤醒之前,但再让一次更保险:
+        # 让循环把手上剩下的回调也走完,再回话。
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run_coroutine_threadsafe(_barrier(), loop).result(_ROUND_GUARD_SECONDS)
+    except concurrent.futures.TimeoutError:
+        raise AssertionError(
+            f"世界自己那条循环 {_ROUND_GUARD_SECONDS:g} 秒没跑完手上的轮次。"
+            "**这不是引擎的结论**:要么这台机器太忙(把环境变量 "
+            "ANIMA_TEST_ROUND_GUARD 调大再看一次),要么那条循环上真的死锁了。"
+        ) from None
+
+
+def _settle(world: World, predicate):
+    """等**那一轮真的落地**,然后再看结论。
+
+    没有 `timeout` 这个参数是有意的:一个能调的秒数会把"等够了"重新变成判据,
+    而这个文件 24 条测试全都靠它。
+    """
+    _drain(world)
     return predicate()
 
 
@@ -161,9 +219,9 @@ def test_being_asked_is_not_the_same_as_using_up_the_quota(tmp_path):
 
         for _ in range(12):
             world.tick(1)
+            _drain(world)          # 等那一轮落地,不是睡一个定数
             if world.autonomy_stats()["acted"]:
                 break
-            time.sleep(0.05)
         assert _settle(world, lambda: world.inbox("p1")), (
             f"两次不做之后那一次主动被额度吃掉了:{world.autonomy_stats()}"
         )
@@ -179,7 +237,7 @@ def test_the_daily_cap_actually_caps(tmp_path):
 
         for _ in range(10):
             world.tick(1)
-            time.sleep(0.05)
+            _drain(world)          # 等那一轮落地,不是睡一个定数
         _settle(world, lambda: world.autonomy_stats()["acted"] >= 2)
 
         mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
@@ -203,7 +261,7 @@ def test_the_daily_cap_is_tracked_per_character(tmp_path):
 
         for _ in range(10):
             world.tick(1)
-            time.sleep(0.05)
+            _drain(world)          # 等那一轮落地,不是睡一个定数
         _settle(world, lambda: world.autonomy_stats()["acted"] >= 2)
 
         mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
@@ -287,7 +345,7 @@ def test_the_hail_watermark_is_shared_with_the_idle_hail(tmp_path):
 
         for _ in range(4):
             world.tick(1)
-            time.sleep(0.05)
+            _drain(world)          # 等那一轮落地,不是睡一个定数
         _settle(world, lambda: world.autonomy_stats()["failed"])
 
         mine = [e for e in world.inbox("p1") if e["payload"].get("reason") == "initiative"]
@@ -333,17 +391,24 @@ def test_she_can_act_on_the_world_and_not_only_on_people(tmp_path):
 
     判据照旧是"她的选择在世界里兑现":世界的量真的变了,不是日志里多一行。
     """
-    world, _ = _world(tmp_path, '〔tool:interact {"target": "tree:harbor_oak", "verb": "tend"}〕')
+    # ⚠️ `interval=2` 是承重的:默认的 `interval=1` 下**第一个 tick 就起一轮**,
+    # 而它会当场把那句脚本化的回复用掉、把树照料了 —— 于是下面那行"照料之前的读数"
+    # 取到的是**照料之后**的值,`树高 > before` 变成 `3.254 > 3.254`。它靠的是
+    # "取读数比那一轮跑得快"这场竞赛,平时赢、满载时输(40 路 busy loop 下八跑两红,
+    # 改判据之前之后一样红 —— **这条不是 `_settle` 的病,是同一族的另一处**)。
+    # 而它红出来的样子是「她照料了那棵树,而树一点没长」:一句在指控引擎的话。
+    world, _ = _world(tmp_path, '〔tool:interact {"target": "tree:harbor_oak", "verb": "tend"}〕',
+                      interval=2)
     with world:
         world.set_stocks("agent:夏", {"体力": 100, "手艺": 1.0})
         world._record_and_fan({
             "type": "item_transfer", "who": "夏",
             "payload": {"from": "__town__", "to": "夏", "item_id": "garden_shears", "qty": 1},
         })
-        world.tick(1)
+        world.tick(1)   # 不到点:一轮都不起
         before = world.stock("tree:harbor_oak", "树高")
 
-        world.tick(1)
+        world.tick(1)   # 到点了
         _settle(world, lambda: world.autonomy_stats()["acted"])
 
         assert world.autonomy_stats()["acted"] == 1, world.autonomy_stats()
@@ -375,7 +440,10 @@ def test_it_is_off_by_default(tmp_path, bare_seed):
     with world:
         _seat_player(world)
         world.tick(A_DAY)
-        time.sleep(0.2)
+        # 开关关着时 `_on_autonomy_due` 当场返回,压根不投轮次 —— 于是这里等的是
+        # "循环手上什么都没有"。它比睡 0.2 秒**强**:真投了轮次的话,这一等会一直
+        # 等到它落地,而不是睡完就下结论。
+        _drain(world)
 
         assert llm.prompts == [], "开关关着还去问她要不要做点什么 = 白花 LLM"
         assert world.inbox("p1") == []
@@ -395,7 +463,7 @@ def test_tools_off_means_autonomy_off(tmp_path):
         world.config_set("chat.tools.enabled", False)
         _seat_player(world)
         world.tick(2)
-        time.sleep(0.2)
+        _drain(world)   # 同上:等的是"循环手上什么都没有",不是睡够 0.2 秒
 
         assert llm.prompts == []
 
@@ -577,3 +645,112 @@ def test_a_failure_keeps_its_own_line_after_later_rounds_go_quiet(tmp_path):
         assert str(world.autonomy_stats()["last_failure"]) == failure, (
             "后面的沉默把那次失败的理由盖掉了"
         )
+
+
+# ---- 判据自己也得站得住 -----------------------------------------------------
+#
+# 这一节测的不是引擎,是上面那个 `_settle`。理由是它骗过一次:2026-08-25 四仓测试
+# 并行跑那趟,`test_a_broken_decision_call_never_takes_down_the_clock` FAILED,而
+# 同一份代码单跑 0.17 秒绿、整文件 24 项绿、独占重跑全绿 —— 红的是判据,不是代码。
+# **而一条抗故障用例失败,和真的把时钟拖垮,在屏幕上逐字相同。**
+
+
+class _GatedLLM:
+    """卡在一扇**由测试自己开的闸**上,而且不占着那条循环(用执行器等)。
+
+    要点是"这一轮什么时候落地由测试说了算" —— 不靠 `delay=` 睡一个定数。
+    满载的机器上,测试线程自己也可能被饿掉半秒:那样一来"睡 0.5 秒的一轮"会在
+    测试还没开口问之前就落了地,而这两条测试要的恰恰是"它还没落地"这个前提。
+    **用挂钟去搭一条证明挂钟不可信的测试,是同一个坑再踩一遍。**
+    """
+
+    def __init__(self, gate: threading.Event) -> None:
+        self._gate = gate
+        self.entered = threading.Event()   # 这一轮真的起来了(前提,不是结论)
+        self.threads: list[str] = []
+
+    async def complete(self, messages) -> str:
+        self.entered.set()
+        # `wait` 必须有上界:测试万一提前红了,闸就再没人开 —— 而执行器线程挂在
+        # 那儿的话,解释器退出时 `concurrent.futures` 的 atexit 会去 join 它,
+        # 于是 pytest 跑完了却不退出(一次真的挂死,就是这么来的)。
+        await asyncio.get_running_loop().run_in_executor(None, self._gate.wait, 60)
+        self.threads.append(threading.current_thread().name)
+        return "无"
+
+    async def stream(self, messages):
+        yield await self.complete(messages)
+
+
+def test_settling_waits_for_the_round_to_land_not_for_a_number(tmp_path):
+    """判据是「那一轮落地了」,不是「等够了几秒」。
+
+    把那一轮卡在闸上:闸开之前 `_settle` **不许回来**。挂钟判据做不到这条 ——
+    它到点就回来,把一个还没落地的空结论交给调用方的断言,而调用方的断言
+    写着「定时轮次没走通」。
+
+    ⚠️ 这条里的 0.3 秒只做**下界**用(证明它没有提前回来)。机器越忙它越容易成立,
+    所以这个数不会让这条测试假红 —— 和它替掉的那个 5 秒上界正好相反。
+    """
+    module = sys.modules[__name__]
+    original = module._ROUND_GUARD_SECONDS
+    module._ROUND_GUARD_SECONDS = max(original, 30.0)   # 这条测的是判据本身,不吃旋钮
+    gate = threading.Event()
+    world, _ = _world(tmp_path, "无")
+    llm = _GatedLLM(gate)
+    try:
+        world.chat_service._background_llm = llm
+        _seat_player(world)
+        world.tick(1)
+        assert llm.entered.wait(30), "前提没成立:这一轮压根没排上那条循环"
+
+        landed: list[object] = []
+        waiter = threading.Thread(
+            target=lambda: landed.append(_settle(world, lambda: llm.threads)),
+            daemon=True,
+        )
+        waiter.start()
+        waiter.join(0.3)
+        assert waiter.is_alive(), "闸还关着、那一轮还没落地,而 _settle 已经回来了"
+
+        gate.set()
+        waiter.join(60)   # 只防挂死,不参与判断
+        assert not waiter.is_alive(), "闸开了它还没回来"
+        assert landed and landed[0], f"落地了却交回一个空结论:{landed}"
+    finally:
+        gate.set()
+        module._ROUND_GUARD_SECONDS = original
+        world.close()
+
+
+def test_a_tripped_guard_says_it_is_the_machine_not_the_engine(tmp_path):
+    """兜底闸门跳了,说的必须是「这台机器」,不是「引擎没走通」。
+
+    这正是那 5 秒挂钟最贵的地方:等不到就返回一个空 `predicate()`,于是红出来的是
+    **调用方自己的断言** ——「定时轮次没走通:{...}」,一句在指控引擎的话,而真相是
+    这台机器那半秒没排上 CPU。现在等不到就当场说清是谁的问题,并且**不给结论**。
+    """
+    module = sys.modules[__name__]
+    original = module._ROUND_GUARD_SECONDS
+    gate = threading.Event()
+    world, _ = _world(tmp_path, "无")
+    llm = _GatedLLM(gate)
+    try:
+        world.chat_service._background_llm = llm
+        _seat_player(world)
+        world.tick(1)
+        assert llm.entered.wait(30), "前提没成立:这一轮压根没排上那条循环"
+
+        module._ROUND_GUARD_SECONDS = 0.05   # 闸还关着,所以它必跳
+        with pytest.raises(AssertionError, match="不是引擎的结论"):
+            _settle(world, lambda: llm.threads)
+
+        # 闸门跳了**不等于那一轮丢了** —— 这也是它不配当判据的理由:
+        # 它量的是这台机器的手速,不是世界做没做成那件事。
+        module._ROUND_GUARD_SECONDS = max(original, 30.0)
+        gate.set()
+        assert _settle(world, lambda: llm.threads), "闸门跳了,而那一轮其实照样落了地"
+    finally:
+        gate.set()
+        module._ROUND_GUARD_SECONDS = original
+        world.close()
