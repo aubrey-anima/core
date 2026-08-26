@@ -3370,20 +3370,30 @@ agent cap reached (100) — raise it with `config set scheduler.max_agents N` (0
 半年来 PyPI 上只有 **1.4.0**(Apache-2.0,2026-08-04);2.0.0 到 3.6.0 **一版都没上过索引**,
 你们手上的 3.x 全靠本地 wheel。老板 2026-08-26 拍板发版,发的是 **3.7.0**。
 
-⚠️ **先说状态,而这一次请照这条判据自己去看,别照这份文档排期**:写下这一节的时候
-**`v3.7.0` 这个 tag 还没推**,而 `v*` 的 tag 就是发版本身。你们的判据不是这份文档,是索引:
+✅ **发出去了,2026-08-26。** `release.yml` 五段一次全绿(`verify` 3.11/3.12/3.13 ·
+`build` · `testpypi` · `smoke` · `pypi`)。**而我们没拿绿勾当答案,在索引上真敲过**:
 
-```bash
-pip index versions anima-world     # 或:curl -s https://pypi.org/pypi/anima-world/json | jq -r '.releases|keys[]'
+```console
+$ pip index versions anima-world
+anima-world (3.7.0)
+Available versions: 3.7.0, 1.4.0, 1.3.0, 1.1.1, 1.1.0, 1.0.2, 1.0.1, 1.0.0
+  LATEST:    3.7.0
+
+$ python -m venv /tmp/v && /tmp/v/bin/pip install "anima-world==3.7.0"   # 干净 venv,公网索引
+$ /tmp/v/bin/anima-world --version
+anima-world 3.7.0 (存储:redis;包格式 3)
+$ /tmp/v/bin/anima-world contract --json | head -c 60      # engine_version = 3.7.0
+$ /tmp/v/bin/pip show anima-world | grep -i ^license
+License-Expression: AGPL-3.0-or-later
 ```
 
-**看到 `3.7.0` 真的出现在里面,再动 `CoreRegistry`。**(3.3.0 那一节里同样的一句"即将",
-等了三个版本没等到 —— 所以这一次判据写成一条敲得动的命令。)
+**所以这条对你们是真的了:`pip install anima-world==3.7.0` 装得上。**
+(3.3.0 那一节里同样的一句"即将",等了三个版本没等到 —— 所以这一次先敲完再写。)
 
 ### 索引上会长成什么样:两个孤岛,中间全是空的
 
-发出去之后 `anima-world` 在 PyPI 上是 **1.0.0 / 1.0.1 / 1.0.2 / 1.1.0 / 1.1.1 / 1.3.0 /
-1.4.0 / 3.7.0** —— **`2.x` 与 `3.0.0`–`3.6.0` 一个都没有,而且以后也不会有**
+索引上今天(2026-08-26 实测)`anima-world` 就是 **1.0.0 / 1.0.1 / 1.0.2 / 1.1.0 / 1.1.1 /
+1.3.0 / 1.4.0 / 3.7.0** —— **`2.x` 与 `3.0.0`–`3.6.0` 一个都没有,而且以后也不会有**
 (PyPI 不接受补发一个旧版本号到一个从没上传过的版本上……更准确地说:它接受,但没人会去补,
 因为那些 wheel 是用当时的树建的,现在建出来的不是同一份字节)。
 

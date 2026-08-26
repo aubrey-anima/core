@@ -553,6 +553,21 @@ here == where:` 把「世界压根不知道她在哪」印成了「她这会儿�
 
 ### 发版:3.7.0 是自 1.4.0 之后第一个真的上索引的版本(2026-08-26)
 
+✅ **发出去了。** tag `v3.7.0` 指着 `5f44a97`,`release.yml` 五段**一次全绿**
+(run `32941362138`):`verify` 3.11/3.12/3.13 · `build` · `testpypi` · **`smoke`** · `pypi`。
+**`smoke` 那一段是这条链上唯一"外面真的能用"的证据**(它从索引装回来再跑一个世界),
+而它此前一次都没跑绿过 —— 下面那一整节记的就是发版前把它逐条敲通的经过。
+
+**没拿绿勾当答案,在索引上又敲了一遍**:`pip index versions anima-world` → `LATEST: 3.7.0`;
+干净 venv 从公网 `pip install anima-world==3.7.0` → `anima-world --version` 答
+`anima-world 3.7.0 (存储:redis;包格式 3)`、`contract --json` 的
+`engine_version`/`storage.backend`/`beats.author_type`/`invitations.outcomes_api` 全对、
+`pip show` 那格是 `License-Expression: AGPL-3.0-or-later`、拿它真跑了一个世界(rc 0);
+PyPI 的 JSON 面自报 `latest=3.7.0`、`license_expression=AGPL-3.0-or-later`、
+wheel 与 sdist 两个文件都在;装出来那份橱窗 `cdn.animametaverse` **零命中**。
+⚠️ **索引上从此是两个孤岛**:`1.0.0…1.4.0` 与 `3.7.0`,`2.x`/`3.0.0–3.6.0` 中间全空,
+**而且以后也不会有** —— `pip install anima-world==3.4.0` 答"这个版本不存在",**不是坏了**。
+
 老板拍了 D2「做,发 pypi」。这一节记的是**发版前把整条管线在本地逐步复现验通**的结果 ——
 `release.yml` 的 `verify → build → testpypi → smoke → pypi` 里,**smoke 是唯一一个挂掉就把
 版本号烧在 TestPyPI 上的阶段**,而它此前从没跑绿过(v3.0.0 那次死在它前面的 `build`,

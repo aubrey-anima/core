@@ -32,7 +32,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   照旧英文(`World.open`)。英文世界靠 `label` 机制与英文种子,不靠引擎换语言。
 - **许可是 AGPL-3.0-or-later**(仓库自 2.0 起;⚠️ **但已经发出去的最后一版是 1.4.0,
   它是 Apache-2.0** —— 换许可那一版从没上过索引,所以到 2026-08-26 为止 PyPI 上一个
-  AGPL 的 anima-world 都没有,收不回来的那些全是 Apache 的。**3.7.0 会是第一个**
+  AGPL 的 anima-world 都没有,收不回来的那些全是 Apache 的。**3.7.0 是第一个,
+  2026-08-26 真的发出去了**(`pip show` 那格实测 `License-Expression: AGPL-3.0-or-later`)
   ——⚠️ 这句话原先写的是「3.3.0 会是第一个」,而 3.3.0 到 3.6.0 一版都没发出去:
   **一句没有日期的未来时,会以"现状"的身份被引用四个版本。**)。
   ⚠️ **同一个 off-by-one 还咬过一次,而咬的是唯一一份发出去的文本**:2026-08-19
@@ -437,25 +438,35 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
 `beat`。老世界照旧开得起来(没写 = 这一层整个缺席),而**写了节拍的新包在 3.6.0 上
 是开不了机的硬失败**(实测 `WorldFileError: 不认识的 type 'beat'`,退 1),
 所以**带节拍的包 `engine_min` 必须写 3.7.0** —— 和 3.6.0 的 `importance` 逐字同一种。
-⚠️ **3.4.0 到 3.7.0 都没打 tag、没发 PyPI,上线只走镜像** —— 下面这段"发布管线"的账
-一个字都没销。**2026-08-26 更新:老板拍了 D2「做,发 pypi」**,本轮把 `release.yml`
-的 `verify → build → testpypi → smoke → pypi` **在本地逐步复现验通了**(证据在
-CHANGELOG `## [3.7.0]` 的「发版」那一节:smoke 那几条断言逐条对 3.7.0 敲过、从构建出来的
-wheel 装进干净 venv、打真 Redis,**`release.yml` 一个字都不用改**)。**tag 仍然没打** ——
-扳机在调度台手上,而 `v*` 的 tag 就是发版本身。**这一节曾经停在 3.3.0 整整两个版本**:一份说着旧版本号的不变量文档,
+✅ **2026-08-26:`v3.7.0` 打了 tag,`3.7.0` 真的上了 PyPI —— 下面这段"发布管线"的账
+从今天起销了。** 老板拍 D2「做,发 pypi」,`release.yml` 五段**一次全绿**
+(`verify` 3.11/3.12/3.13 · `build` · `testpypi` · `smoke` · `pypi`,run `32941362138`,
+tag 指着 `5f44a97`)。**在索引上真敲过,不是看绿勾**:`pip index versions anima-world`
+→ `LATEST: 3.7.0`;干净 venv `pip install anima-world==3.7.0` 从公网装 →
+`anima-world --version` 答 `anima-world 3.7.0 (存储:redis;包格式 3)`、
+`contract --json` 的 `engine_version/storage.backend/beats.author_type` 全对、
+`pip show` 那格是 `License-Expression: AGPL-3.0-or-later`、拿它真跑了一个世界。
+⚠️ **3.4.0 / 3.5.0 / 3.6.0 仍然没上过索引,而且以后也不会有** —— 索引上是
+`1.0.0…1.4.0` 与 `3.7.0` 两个孤岛,中间全空。**这一节曾经停在 3.3.0 整整两个版本**:一份说着旧版本号的不变量文档,
 和它自己批评的那把"把上升报成下降的尺子"是同一类东西,所以定版时顺手改它。
-⚠️ **PyPI 上最新是 1.4.0(tag `v1.4.0`,2026-08-04 发出并成功)** —— 2.0.0 到 3.2.0
-**一版都没上过索引**:v3.0.0 那次 Release(run `31467060331`)死在 `release.yml` 的
+⚠️ **底下这一整段是 2026-08-26 之前的实况,留着当病历读**(它解释了为什么那条管线
+七个月发不出一版):当时 **PyPI 上最新是 1.4.0**(tag `v1.4.0`,2026-08-04 发出并成功),
+2.0.0 到 3.6.0 **一版都没上过索引**:v3.0.0 那次 Release(run `31467060331`)死在 `release.yml` 的
 冒烟步骤上,那一步还在用 1.x 的 `World.open('rel.db', force_mock_llm=True)`,
 而**没人会去改一条从没跑绿过的路**,所以往后每一版都会死在同一行。
 那条路 3.3.0 这一轮修了(两个 job 各起一个真 Redis service,形状照 `ci.yml` 的
 `package` job —— 那个每次推 main 都跑绿,是这仓里唯一被真 runner 证过的写法)。
 **tag 留给用户打**:`v*` 的 tag 就是发版扣动扳机,而 **PyPI 拒绝重复上传同一个版本号,
 第一次尝试就是唯一的一次尝试**(那个 workflow 自己的注释写的)—— 所以顺序是
-先看一次 CI 绿,再打 tag。
+先看一次 CI 绿,再打 tag。**2026-08-26 真走了一遍,这个顺序是对的**:先 `push origin main`
+等 CI 三个 python 全绿,再 `git tag -a v3.7.0` + `git push origin v3.7.0`。
 教训记在这儿而不是只记在 CHANGELOG:**一条测不到自己的发布管线,和一把把上升报成
 下降的尺子是同一类东西** —— README 的 PyPI 徽章一直亮着、CI 一路绿、许可从 2.0 起
 写着 AGPL,而徽章指着的那个索引停在 Apache 时代的 1.4.0,七个月没有一处报错。
+⚠️ **而那条管线最后能一次跑绿,不是因为它自己变好了** —— `smoke` 那几条断言
+**从没被真运行证过**(v3.0.0 死在它前面的 `build`),是发版前按它的真实条件
+在本地逐条敲了一遍才知道它们对。**下一次改 `World` 门面或 CLI,记得回来看一眼
+`release.yml`:它是这仓里唯一一条一年只跑几次、而跑挂了就烧版本号的路。**
 
 这一轮删掉的:`db.py`、`small_stores.py`、`graph.py`、全部 SQLite store 实现、
 Fernet/keyfile、db 格式联锁、`--db-path`。补上的:`RedisChatStore`(无 MySQL 时
