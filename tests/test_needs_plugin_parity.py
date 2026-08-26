@@ -14,6 +14,7 @@
 | `debug_prompt()` | ✅ 逐字节相同 | 同上 |
 | `state()` 的 `narrative_log` / `recent_events` / `runtime` | ❌ | 叙事跑在**线程池**上("时钟永不等网络"),它落在哪一 tick 由机器决定 |
 | 事件日志里 **`narrative` 那一支** | ❌ | 同上 |
+| **采样时机本身** | ❌ 除非先等池静下来 | 见 `_quiesce` —— 这道闸自己栽过一次 |
 | 事件日志里**其余全部**(按**多重集**比,不比次序) | ✅ 逐条相同 | 见下面那三段 |
 
 🔴 **这三行 2026-08-26 改过两次,而两次都是被证据推着走的 —— 值得逐字读一遍。**
@@ -51,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import time
 
 import pytest
 
@@ -63,6 +65,40 @@ GOLDEN = json.loads(
 #: `state()` 里由**线程池**喂的那三格。见模块 docstring 那张表 —— 它们对未改动的
 #: 引擎也不可复现,所以不进这道闸。
 ASYNC_KEYS = ("narrative_log", "recent_events", "runtime")
+
+
+def _quiesce(world, *, timeout: float = 30.0) -> None:
+    """**等线程池把手上的活干完,再采样。**
+
+    🔴 **这一条是这道闸自己的 bug,而它长成了这道闸最怕的样子**:2026-08-26
+    调度台在隔离树上连跑两趟全量 —— 第一趟 `test_提示词逐字节相同` 红、第二趟全绿、
+    单跑也绿。我自己在 30 个文件之后跑同一条,红的是 `test_基线自己是可复现的`
+    (同一个进程里连采两趟就不一样)。**同一棵树、同一条命令、两个答案。**
+
+    病根不是顺序依赖,是**采样时机**:反思、关系判定、叙事跑在 `ThreadPoolExecutor`
+    上("时钟永不等网络"),它们的产物落在第几 tick **由这台机器此刻忙不忙决定**。
+    全量跑的时候 CPU 紧,某个池产物在渲染提示词**之前**或**之后**落地 —— 而记忆
+    多一行、少一行,她的提示词就是另一份字节。**一条时好时坏的闸比没有更贵**,
+    这句话我在多重集那一条上说过,这次轮到我自己。
+
+    **修法是等它静下来,不是放宽 sha。** 这道闸比的本来就是"静止态":
+    同一个世界跑完 288 tick、尘埃落定之后长什么样。判据照 `test_erase_player`
+    里那个 `_quiesce` 同一手 —— **事件数连着几轮不动**就算落完
+    (`max_seq` 是所有池产物最终都要经过的那个窄口)。
+    """
+    log = world.scheduler.event_log
+    deadline = time.monotonic() + timeout
+    stable, last = 0, -1
+    while time.monotonic() < deadline:
+        now = log.max_seq()
+        stable = stable + 1 if now == last else 0
+        if stable >= 5:
+            return
+        last = now
+        time.sleep(0.05)
+    raise AssertionError(
+        "等了 30 秒线程池还没静下来 —— 这道闸比的是静止态,而这个世界没停"
+    )
 
 
 _RUNS = [0]
@@ -86,6 +122,7 @@ def _run(tmp_path):
         # 叙事跑在线程池上,而这道闸比的是 tick 线程算出来的东西。
         world.scheduler.narrative = None
         world.tick(GOLDEN["ticks"])
+        _quiesce(world)
         agents = sorted(world.scheduler.agents)
         state = {k: v for k, v in world.state().items() if k not in ASYNC_KEYS}
         return {
