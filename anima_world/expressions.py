@@ -329,6 +329,13 @@ def rewrite_source(
 
     if name_text is not None:
         for node in ast.walk(expression._tree):
+            # 命名空间那一层(`needs.energy`)整段换掉 —— 拿 `Name` 那一支去换的话
+            # 只会换掉点号左边的 `needs`,而她读到的是「needs 的 energy 不够」。
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                said = name_text(f"{node.value.id}.{node.attr}")
+                if said:
+                    edits.append((*span(node), said))
+                continue
             if isinstance(node, ast.Name):
                 said = name_text(node.id)
                 if said:
@@ -363,6 +370,52 @@ def _validate(node: ast.AST, source: str, names: set[str], *, dice: bool = False
         if isinstance(node.value, (int, float, str, bool)):
             return
         raise ExpressionError(f"{source!r} 里有不支持的常量 {node.value!r}")
+
+    if isinstance(node, ast.Attribute):
+        # **命名空间:`<插件id>.<事实名>` 就是一个自由变量,不是属性访问**(3.8.0)。
+        #
+        # 插件系统给这一层出了一道题:事实必须带命名空间(`needs.energy`),否则两个
+        # 插件各声明一个「灵力」就会在同一个 hash 里撞车,而撞车的样子是安静的。
+        # 而作者写的是一行算术,`ast` 把点号解析成 `Attribute` —— 这个求值器从前
+        # 一个字都不认它。
+        #
+        # **语法由这一层定死,只收一层**(`a.b` 收,`a.b.c` 拒):
+        #
+        # - 名字就是 `f"{value.id}.{attr}"` 那个**整串**,存储键与它逐字相同
+        #   (`stock:{owner}` 那个 hash 里的字段名就叫 `needs.energy`)。
+        #   于是规律层、感知层、`stocks.evaluate_due` 的 namespace **一行都不用改** ——
+        #   它们本来就是按字符串键查的。
+        # - **不是属性访问,也永远不会变成属性访问**:求值器只拿这个串去查
+        #   `namespace`,不碰任何 Python 对象的 `__getattr__`。这条是安全边界,
+        #   和"绝不 `eval`"同一级 —— 放开成真的属性访问,就等于把宿主进程里的
+        #   对象图交给作者写的字符串。
+        # - **两层不收**,理由是它没有意义而不是难做:事实只有 `<插件>.<键>` 这一种
+        #   形状,`a.b.c` 一定是作者写错了,而放行会让它变成一个永远读不到的名字
+        #   (运行期报「读了一个不存在的量」,而作者看不出错在哪一层)。
+        if not isinstance(node.ctx, ast.Load):
+            raise ExpressionError(f"{source!r} 里不能给名字赋值")
+        if not isinstance(node.value, ast.Name):
+            raise ExpressionError(
+                f"{source!r}:点号只收一层 —— `<插件id>.<事实名>`(比如 "
+                "`needs.energy`、`me_needs.energy`)。写成 `a.b.c` 的话中间那一层"
+                "指不到任何东西,而它会安静地变成一个永远读不到的名字"
+            )
+        if node.value.id == DICE_NAME:
+            raise ExpressionError(f"{source!r}:`rand` 是个函数,不是命名空间")
+        # 🔴 **下划线开头的一律拒,而这一条是安全边界不是洁癖。**
+        # `self.__class__` 在语法树上和 `needs.energy` 是同一种节点 —— 放行它,
+        # 这一层看上去就成了"属性访问",而 `tests/test_world_rules.py` 里那条
+        # 「设计者写的字符串会被求值」的判据当场变红(2026-08-26 真红过一次,
+        # 就是这一行加进来之前)。求值器其实只拿整串去查字典、碰不到任何对象,
+        # **但一条读起来像属性访问的语法迟早会被某个人实现成属性访问** ——
+        # 而事实名本来也不许以下划线开头,所以这里一个字都不损失。
+        if node.attr.startswith("_") or node.value.id.startswith("_"):
+            raise ExpressionError(
+                f"{source!r}:命名空间和事实名都不许以下划线开头 —— "
+                "这一层不是属性访问,`self.__class__` 这种写法在这儿没有意义"
+            )
+        names.add(f"{node.value.id}.{node.attr}")
+        return
 
     if isinstance(node, ast.Name):
         if not isinstance(node.ctx, ast.Load):
@@ -468,6 +521,13 @@ def _evaluate(
 ) -> Any:
     if isinstance(node, ast.Constant):
         return node.value
+
+    if isinstance(node, ast.Attribute):
+        # 命名空间那一层:整串当一个名字查,**不碰任何对象的属性**(见 `_validate`)。
+        key = f"{node.value.id}.{node.attr}"          # type: ignore[union-attr]
+        if key not in ns:
+            raise ExpressionError(f"{source!r} 读了一个不存在的量:{key}")
+        return ns[key]
 
     if isinstance(node, ast.Name):
         if node.id not in ns:

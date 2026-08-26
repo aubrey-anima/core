@@ -401,6 +401,43 @@ def test_重声明撤掉一个量_开机点它的名(tmp_path, caplog):
         scheduler.stop()
 
 
+def test_整个种类的量被清空_也要点名(tmp_path, caplog):
+    """🔴 **这条抓的是最大的那一次撤销,而它曾经落在盲区里。**
+
+    一个只改 `affordances`、body 里**干脆没写 `quantities`** 的编辑包 —— 重声明是
+    整行替换,所以那是"三个量全撤"。第一版这道门写的是"这个种类声明过量吗",
+    于是本体声明变成 `{}` 之后它整个不参与比对:`:stocks` / `:stock_visibility`
+    三行全留、继续进提示词,而开机与两扇离线门**都零输出**(2026-08-26 验收 A 实测)。
+
+    分得开这两件事的是 `builtin`:内置种类(`world` / `location`)一个量都不声明
+    是"它的量另有来路",而作者声明的种类一个量都不剩就是"全撤了"。
+    """
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w", client, world_file=_tree_world(tmp_path, _THREE),
+                          force_mock_llm=True).stop()
+    patch = tmp_path / "no-quantities.cyberworld"
+    patch.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "w"}\n'
+        + json.dumps({"kind": "author", "type": "kind", "body": {
+            "id": "tree",
+            "affordances": {"看一看": {}}}}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        scheduler = build_serve_scheduler("w", client, world_file=patch,
+                                          force_mock_llm=True)
+    try:
+        lines = [r.getMessage() for r in caplog.records
+                 if "dropped_quantities" in r.getMessage()]
+        assert lines, "整个种类的量被清空,而这条警告一个字都没说"
+        for name in ("树高", "湿度", "生长速度"):
+            assert name in lines[0], f"{name} 没被点名:{lines[0]}"
+    finally:
+        scheduler.stop()
+
+
 def test_没撤过量的世界一个字都不说(tmp_path, caplog):
     """**一句总在响的警告等于没有警告。** 原样重声明一遍,不许出声。"""
     import fakeredis

@@ -171,7 +171,8 @@ class Rule:
         return frozenset(names)
 
 
-def parse_rules(entries: Any, *, ticks_per_day: int = TICKS_PER_DAY()) -> list[Rule]:
+def parse_rules(entries: Any, *, ticks_per_day: int = TICKS_PER_DAY(),
+                namespace: str | None = None) -> list[Rule]:
     """把 JSON 里的规律列表编译成 `Rule`。**任何一条坏了就整体拒绝。**
 
     不逐条丢弃(那是种子里可选字段的宽容原则):规律是世界的物理法则,少一条不是
@@ -182,6 +183,11 @@ def parse_rules(entries: Any, *, ticks_per_day: int = TICKS_PER_DAY()) -> list[R
     真正在跑的那份由装载方喂进来。把 288 写死在这儿的下场是:一个把
     `minutes_per_tick` 调成 10 的世界里,`every: {"days": 1}` 一天跑两遍,而
     作者按"一天一次"写的常数因此翻倍 —— 世界照跑、日志干净,只有数是错的。
+
+    `namespace` 是**插件的 id**(3.8.0)。给了它,`set` 的键就**必须**写成
+    `<namespace>.<事实名>`,而且只准是这个命名空间的 —— 一个插件写不到别的插件
+    身上,这是插件系统那条"只写自己命名空间"的落点,而不是一句愿望。
+    不给(世界自己的规律)则一个字都没变:带点号的名字照旧被 `bad_output_name` 拒。
     """
     if entries is None:
         return []
@@ -208,7 +214,8 @@ def parse_rules(entries: Any, *, ticks_per_day: int = TICKS_PER_DAY()) -> list[R
         seen.add(rule_id)
 
         try:
-            rules.append(_parse_one(rule_id, label, entry, ticks_per_day))
+            rules.append(_parse_one(rule_id, label, entry, ticks_per_day,
+                                    namespace=namespace))
         except RuleError as exc:
             errors.extend(exc.errors)
 
@@ -273,7 +280,8 @@ def drift_warnings(rules: Iterable[Rule]) -> list[str]:
 
 
 def _parse_one(rule_id: str, label: str, entry: dict[str, Any],
-               ticks_per_day: int = TICKS_PER_DAY()) -> Rule:
+               ticks_per_day: int = TICKS_PER_DAY(),
+               *, namespace: str | None = None) -> Rule:
     errors: list[str] = []
 
     interval = _parse_interval(label, entry.get("every"), errors, ticks_per_day)
@@ -286,7 +294,7 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any],
     else:
         for key, source in raw_outputs.items():
             name = str(key)
-            problem = bad_output_name(name)
+            problem = bad_output_name(name, namespace=namespace)
             if problem:
                 errors.append(f"{label}.set.{name}:{problem}")
                 continue
@@ -408,7 +416,7 @@ def _parse_edge(label: str, raw: Any, errors: list[str]) -> str:
     return value
 
 
-def bad_output_name(name: str) -> str | None:
+def bad_output_name(name: str, *, namespace: str | None = None) -> str | None:
     """`set` 的目标是不是一个这条规律**写得到**的量。写不到就当场拒。
 
     这道闸是踩出来的,而且踩的是最坏的形状。一条规律只能写**它自己那个 owner** 的量,
@@ -431,6 +439,24 @@ def bad_output_name(name: str) -> str | None:
     """
     if not name.strip():
         return "量名不能为空"
+    if namespace is not None:
+        # **插件只写自己的命名空间。** 这道门是"越界开不了机"那条纪律的落点 ——
+        # 放行的样子和量名拼错逐字同一种:安静地在别人的命名空间里建一个量,
+        # 而那个插件的规律永远读不到它。
+        prefix = f"{namespace}."
+        if not name.startswith(prefix):
+            return (
+                f"插件 `{namespace}` 只写得到自己的命名空间:`{name}` 要写成 "
+                f"`{prefix}<事实名>`。写不到别的插件身上,也写不到内核的量上 ——"
+                "放行的话它会安静地在别处建一个量,而这个插件的规律永远读不到它"
+            )
+        local = name[len(prefix):]
+        if not local.strip():
+            return f"`{name}` 后面没有事实名"
+        for mark in (":", "."):
+            if mark in local:
+                return f"事实名里不能有 `{mark}`:`{name}`"
+        return None
     if name.startswith(WORLD_PREFIX):
         return (
             f"写不到全局量:`{name}` 只会在这条规律自己的 owner 名下建一个叫这个名字的量。"

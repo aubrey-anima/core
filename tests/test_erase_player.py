@@ -746,13 +746,85 @@ def test_预演只数不删(world):
     assert world.stocks(owner) == seeded, "dry_run 删了他的量"
 
 
-def test_没有量表的世界也报0_不是缺席(world, monkeypatch):
-    """**缺席和 0 是两件事。** 一支不查这一格的引擎是整格**没有**,
-    而报 0 是在说"我查过了,他身上没有量" —— 下游按 `.get("facts", 0)` 读,
-    两者分得开的前提是新引擎**永远**给这一格。"""
+def test_没有量表的世界报null_不是0(world, monkeypatch):
+    """**三档,三句话**(2026-08-26 验收 B 挑出来的,上一版把三句压成了两句):
+
+    | 取值 | 说的是 |
+    |---|---|
+    | 整格缺席 | 这支引擎够不着玩家量表(3.7.0 及更早) |
+    | `null` | **我没查成** —— 没有量表 / 读它抛了异常 |
+    | `0` | 我查过了,他身上没有量 |
+
+    压成两句的代价很具体:一份合规回执说"查过了,他身上没有量",而那行体力还
+    留在世界里 —— 成功的回执 + 没抹的数据 + 干净的日志。
+    """
     monkeypatch.setattr(world.scheduler, "stock_store", None, raising=False)
     receipt = world.erase_player("ghost-nostock")
-    assert "facts" in receipt and receipt["facts"] == 0
+    assert "facts" in receipt, "这一格不许缺席 —— 缺席是给老引擎的那一档"
+    assert receipt["facts"] is None, "没有量表要说「我没查成」,不是「他身上没有量」"
+
+
+def test_读量表抛异常时_报null而且照样删(world, monkeypatch):
+    """**数不出来 ≠ 不该删。** 上一版在读失败那条路上 `return 0` 并且就此返回 ——
+    一次读异常同时买到两样最坏的东西:回执说没有,数据也没抹。"""
+    world.player_move("ghost-boom", "cafe", display_name="阿檀")
+    owner = _player_stock_owner(world, "ghost-boom")
+    assert world.stocks(owner), "夹具前提没成立"
+
+    # `RedisStockStore` 有 `__slots__`,打不进补丁 —— 套一层壳,只让 `of` 摔一次。
+    real = world.scheduler.stock_store
+
+    class _ReadBoom:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def of(self, who):
+            if who == owner:
+                raise RuntimeError("这台 Redis 这一刻不肯说话")
+            return real.of(who)
+
+    monkeypatch.setattr(world.scheduler, "stock_store", _ReadBoom(), raising=False)
+    receipt = world.erase_player("ghost-boom")
+
+    assert receipt["facts"] is None, "数不出来必须报 null —— 报 0 是一句谎"
+    monkeypatch.undo()
+    assert world.stocks(owner) == {}, "数不出来不等于不该删 —— 那行量还在"
+
+
+def test_跨版本续跑不漏删量表(world):
+    """🔴 **3.7.0 起头、3.8.0 续完** —— 换镜像那一刻正是这个窗口。
+
+    验收 A 实测过上一版:`carried` 非空 → 量表那一件整个不跑 → 回执
+    `phase="done"` + `facts=0`,而他那几行量原样在库里。**而引擎自己的契约说
+    0 = 「我查过了他身上没有量」。**
+
+    这里把那个进度键**原样造出来**:`counts` 只有五格(3.7.0 写得出的那五格),
+    没有 `facts`。
+    """
+    world.player_move(PID, "cafe", display_name="阿檀")
+    owner = _player_stock_owner(world, PID)
+    seeded = len(world.stocks(owner))
+    assert seeded >= 1, "夹具前提没成立"
+    before, _, _ = _dead_corner(world)
+
+    # 一片停在半路(这一趟是 3.8.0 跑的,所以进度键里有 facts)……
+    partial = world.erase_player(PID, reason="用户要求删除", limit=before + 1)
+    assert partial["phase"] == _PARTIAL
+    # ……把它改写成 **3.7.0 写得出的样子**:五格,没有 `facts`。
+    row = world.erasure_progress.load(PID)
+    row["counts"] = {k: v for k, v in (row.get("counts") or {}).items() if k != "facts"}
+    world.erasure_progress.save(PID, row)
+    # 顺手把量表放回去 —— 3.7.0 那一片压根不会删它。
+    world.scheduler.stock_store.set_many(owner, {"体力": 100.0}, tick=0)
+    assert world.stocks(owner)
+
+    done = world.erase_player(PID, reason="用户要求删除", resume=True)
+
+    assert done["phase"] == _DONE
+    assert world.stocks(owner) == {}, "续跑漏删了量表 —— 换镜像那一刻就是这条路"
+    assert done["facts"] >= 1, (
+        f"续跑答 {done['facts']} —— 0 在这一格上的意思是「我查过了他身上没有量」"
+    )
 
 
 def test_量表这一格也是幂等的(world):

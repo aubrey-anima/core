@@ -771,6 +771,25 @@ _ERASE_PHASE_PARTIAL = "partial"
 _ERASE_PHASE_DONE = "done"
 
 
+def _carried_facts(carried: dict[str, Any]) -> int | None:
+    """进度键里带过来的那一格 `facts` —— **它是「前面几片一共删了几个」。**
+
+    三种取值,三句话:
+
+    - **缺席**(3.7.0 起的头,进度键里根本没有这一格)→ **0**。老引擎那一片
+      一个量都删不掉,所以它对总数的贡献确实是 0 —— 而这一趟的总数由**这一片**
+      补齐:`_erase_player_facts` 幂等,续跑时它会把那 5 个一次删掉并数出来。
+      ⚠️ 这一格 2026-08-26 我第一版写成了 `None`,**那是错的**:它把"上一片没删"
+      说成了"我说不出总数",而总数明明说得出。
+    - **`None`**(前面某一片真的没查成)→ 照旧 `None`,**黏的**:一趟里有一片
+      没查成,整趟就说不出来。拿一个查成了的片去盖掉它,回执上再也看不出那一片
+      出过事。
+    - **数** → 原样。
+    """
+    value = carried.get("facts", 0)
+    return None if value is None else int(value)
+
+
 def _mentions_pid(value: Any, pid: str) -> bool:
     """载荷的任何深度上有没有一个字符串值**恰等于**这个 id。恰等于,不是包含 ——
     子串匹配会把 `aubrey-player` 认成 `aubrey`(`forget_player` 那条同款教训)。"""
@@ -6504,14 +6523,21 @@ class World:
         返回回执 `{player_id, reason, forget, events, conversations, messages,
         memories_dropped, memories_redacted, facts, names, names_skipped, dry_run,
         seq, resume_seq, phase}`;`seq` 有值 = 审计事件写下了 = 这趟走到了尽头。
-        `facts` 是 **3.8.0 加的第十五格**:他身上那张量表删了几个量
-        (**零也报 0** —— 老引擎是整格**缺席**,下游一律 `.get("facts", 0)`)。
+        `facts` 是 **3.8.0 加的第十五格**:他身上那张量表删了几个量。**三档**,
+        而它们是三句不同的话:**整格缺席** = 这支引擎够不着玩家量表(3.7.0 及更早,
+        下游一律 `.get("facts")`);**`null`** = 我没查成(没有量表 / 读它抛了异常 /
+        这一趟是老引擎起的头);**`0`** = 我查过了,他身上没有量。
+        ⚠️ **数不出来不等于不删** —— 读失败照样删,只是回执上说不出删了几个。
         `dry_run=True` 一个字节都不写(所以数不出 `forget.chat_state`,并且比真跑
         少数一条 —— 真跑会把 `forget` 刚追加的那条 `player_departed` 里的名字也抹掉);
         预演**读**进度键但不写它。真跑的计数跨片累加,预演只数这一趟看过的窗口。
-        转录、记忆与量表**在第一趟就删掉,而且早于那个长循环**(它们便宜、有界,
-        又是这条链上最私密的一份);续跑不重做它们,计数从进度键里带过来 ——
-        所以**续跑那次回执里的 `forget` 是第一片那次的原件**,不是重新数出来的。
+        转录与记忆**在第一趟就删掉,而且早于那个长循环**(它们便宜、有界,又是这条
+        链上最私密的一份);续跑不重做它们,计数从进度键里带过来 —— 所以**续跑那次
+        回执里的 `forget` 是第一片那次的原件**,不是重新数出来的。
+        ⚠️ **量表那一件不一样:它每一片都跑**(它幂等、便宜)。挂在第一片那个分支里
+        会漏掉一整类现实情形 —— 一趟 3.7.0 起头、3.8.0 续完的抹除(**换镜像那一刻
+        正是它**):`carried` 非空于是那一件整个不跑,回执答 `done` + `facts: 0`,
+        而他那几行量原样躺在世界里。
         ⚠️ **审计事件 `player_erased` 的载荷一个字没加**:它是已经发出去的事件形状,
         而回执是同步返回值 —— 加格便宜,改事件贵。要机器读 `facts` 就读回执。
         CLI 出口:`anima-world player erase`(不带 `--yes` 只数)。
@@ -6561,7 +6587,9 @@ class World:
             return {
                 "player_id": pid, "reason": reason, "forget": None,
                 "events": 0, "conversations": 0, "messages": 0,
-                "memories_dropped": 0, "memories_redacted": 0, "facts": 0,
+                # `facts` 是 `None` 而不是 0:这一趟**一个字都没写,也一个字都没查**,
+                # 而 0 在这一格上有一个明确的意思(见下面那段)。
+                "memories_dropped": 0, "memories_redacted": 0, "facts": None,
                 "names": 0, "names_skipped": 0,
                 "dry_run": bool(dry_run), "seq": None,
                 "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
@@ -6586,16 +6614,28 @@ class World:
             "messages": int(base.get("messages") or 0),
             "memories_dropped": int(base.get("memories_dropped") or 0),
             "memories_redacted": int(base.get("memories_redacted") or 0),
-            # **零也要报 0,不许缺席** —— 缺席和 0 在这条链上是两件事:
-            # 一个老引擎**没有这一格**(下游 `.get("facts", 0)` 回落),
-            # 而一个新引擎报 0 是在说"我查过了,他身上没有量"。
-            "facts": int(base.get("facts") or 0),
+            # **这一格有三档,而它们是三句不同的话**(2026-08-26 验收 B 挑出来的:
+            # 上一版把「没查成」也报成 0,于是一份合规回执会说"查过了,他身上没有量",
+            # 而那行体力还留在世界里 —— 成功的回执 + 没抹的数据 + 干净的日志,
+            # 正是这个仓库最怕的那一类):
+            #
+            #   缺席(整格没有) = 这支引擎的抹除**够不着**玩家量表(3.7.0 及更早)
+            #   `null`          = **我没查成** —— 这个世界没有量表 / 读它抛了异常 /
+            #                     这一趟是老引擎起的头(进度键里根本没有这一格)
+            #   `0`             = **我查过了,他身上没有量**
+            #
+            # 本仓 CLAUDE.md 那条「数不出来给 null 加一个词,绝不给 0」在这儿的落法。
+            # ⚠️ **`None` 是黏的**:一趟里有一片没查成,整趟就说不出来 —— 拿一个
+            # 查成了的片去盖掉它,回执上就再也看不出那一片出过事。
+            "facts": _carried_facts(base),
             "names": len(names), "names_skipped": len(skipped),
             "dry_run": bool(dry_run), "seq": None,
             "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
         }
 
-        def _counts() -> dict[str, int]:
+        def _counts() -> dict[str, Any]:
+            # ⚠️ `facts` 可能是 `None`(没查成),所以这里**不许**统一 int() ——
+            # 那会把"我没查成"折成 0,而 0 在这一格上是一句肯定句。
             return {k: receipt[k] for k in _ERASE_COUNT_KEYS}
 
         # ── 历史:改写,不删行 ─────────────────────────────────────────────
@@ -6643,7 +6683,20 @@ class World:
                     his_seqs, dry_run=dry_run)
                 receipt["memories_redacted"] = memory.redact_summaries(
                     replacements, dry_run=dry_run)
-            receipt["facts"] = self._erase_player_facts(pid, dry_run=dry_run)
+
+
+        # 🔴 **量表这一件在每一片都跑,不跟转录和记忆挤在第一片那个分支里**
+        # (2026-08-26 验收 A 挑出来的,而它的现实触发条件正是换镜像那一刻):
+        # 一趟 3.7.0 起头、3.8.0 续完的抹除,`carried` 非空,于是这一句整个不跑 ——
+        # 回执答 `phase="done"` + `facts=0`,而他那 5 行量原样躺在世界里。
+        # **引擎自己的契约说 0 = 「我查过了他身上没有量」**,那就是一句谎。
+        # 挪出来是安全的:它**幂等**(hash 已经没了就答 0),而它便宜、有界 ——
+        # 一次 `HGETALL` 加一次 `DEL`,和那个 O(全量事件) 的循环不是一个量级。
+        answered = self._erase_player_facts(pid, dry_run=dry_run)
+        receipt["facts"] = (
+            None if receipt["facts"] is None or answered is None
+            else int(receipt["facts"]) + int(answered)
+        )
 
         examined = 0
         resume_from = start_at
@@ -6794,7 +6847,7 @@ class World:
         names -= set(skipped)
         return names, skipped, his_seqs, scanned_through
 
-    def _erase_player_facts(self, pid: str, *, dry_run: bool) -> int:
+    def _erase_player_facts(self, pid: str, *, dry_run: bool) -> int | None:
         """**他身上那张量表** —— 抹除此前整个够不着的一格(收件箱 D39)。
 
         引擎给每个玩家开量表,和角色**同一个命名空间**(`Scheduler.stock_owner_of`
@@ -6821,29 +6874,47 @@ class World:
           世界里所有人的「体力」从感知里一起抹掉,而且日志干净。这一条是任务单里
           写反了的一格,记在这儿免得下一个人照着删。
 
-        返回**删掉了几个量**(hash 里的字段数),`dry_run=True` 时只数不删。
-        幂等:第二趟 hash 已经没了,`of()` 答空,回执报 0 ——
-        **0 不是缺席**,它是"我查过了,他身上没有量"。
+        返回**删掉了几个量**(hash 里的字段数),`dry_run=True` 时只数不删;
+        幂等(第二趟 hash 已经没了,`of()` 答空 → 0)。
+
+        🔴 **数不出来答 `None`,不答 0** —— 这两句话差着这个仓库最怕的那一类错:
+        一份合规回执说"我查过了,他身上没有量",而那行体力还留在世界里
+        (成功的回执 + 没抹的数据 + 干净的日志)。答不出来的两条路是**没有量表**
+        与**读它抛了异常**。本仓 CLAUDE.md 那条「数不出来给 null 加一个词,
+        绝不给 0」在这儿的落法。
+
+        🔴 **而"数不出来"不等于"不该删"。** 上一版在读失败那条路上 `return 0`
+        并且**就此返回** —— 于是一次读异常同时买到两样最坏的东西:回执说没有,
+        数据也没抹。现在数与删是两件事,各自守着:数失败照删,删失败照说。
         """
         scheduler = self.scheduler
         store = getattr(scheduler, "stock_store", None)
         if store is None:
-            return 0
+            # 没有量表这一层的世界(老世界 / 没接本体的宿主):**我没查成**,
+            # 不是"他身上没有量"。
+            return None
         owner = scheduler.stock_owner_of(f"{scheduler.PLAYER_PREFIX}{pid}")
+        count: int | None
         try:
             count = len(store.of(owner))
-        except Exception:  # noqa: BLE001 - 数不出来不该掀翻整趟抹除
-            logger.warning("读 %r 的量表失败", owner, exc_info=True)
-            return 0
+        except Exception:  # noqa: BLE001 - 数不出来不该掀翻整趟抹除,也不该拦住删
+            logger.warning("读 %r 的量表失败 —— 回执这一格报 null(没查成),"
+                           "但照删", owner, exc_info=True)
+            count = None
         if dry_run:
             return count
-        store.delete(owner)
+        try:
+            store.delete(owner)
+        except Exception:  # noqa: BLE001 - 删不掉更要说出来
+            logger.warning("删 %r 的量表失败", owner, exc_info=True)
+            count = None
         visibility = getattr(scheduler, "visibility_store", None)
         if visibility is not None:
             try:
                 visibility.unplace(owner)
             except Exception:  # noqa: BLE001 - 同上
                 logger.warning("撤 %r 在可见性表上那一行失败", owner, exc_info=True)
+                count = None
         return count
 
     def _erase_recent_window(self, pid: str, replacements: dict[str, str]) -> None:

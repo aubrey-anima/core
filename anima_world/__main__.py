@@ -2656,18 +2656,26 @@ def _dropped_quantities(
 
 
 def _declared_quantities_by_kind(kinds: Any) -> dict[str, set[str]]:
-    """`{种类: {量名}}`,**只收真的声明过量的种类**。
+    """`{种类: {量名}}` —— 这一层管得着的那些种类。
 
-    ⚠️ **声明本身就是开关,这一层也不例外**(`_undeclared_stock_names` 逐字同构):
-    一个量都不声明的种类,它的量另有来路 —— `world` 的季节与雨势写在作者的
-    `stock_visibility` / `stocks` 段里,从来不属于任何种类声明。把那种种类算进来,
-    内置橱窗开机第一句就是三条假警报(实测 `{"world": ["季节","雨势","雨天数"]}`),
-    而**一句会误报的警告等于没有这条警告**。
+    ⚠️ **声明本身就是开关,而这道门的判据是 `builtin`,不是"有没有量"。**
 
-    代价说清楚:作者把一个种类重声明成**一个量都不剩**时,这里一个字都不说 ——
-    那是同一条开关规则的另一面,不是漏。
+    | 种类 | 一个量都不声明时,那是什么意思 |
+    |---|---|
+    | **内置**(`world` / `location` / `agent` / `player`) | **它的量另有来路** —— `world` 的季节与雨势写在作者的 `stock_visibility` / `stocks` 段里,从来不属于任何 `kinds` 声明。算进来的话内置橱窗开机第一句就是三条假警报(实测 `{"world": ["季节","雨势","雨天数"]}`),而**一句会误报的警告等于没有这条警告** |
+    | **作者声明的**(`tree` …) | **作者把这个种类的量全撤了** —— 而这恰恰是这条警告要抓的**最大**一次撤销 |
+
+    🔴 **第一版这道门写的是 `if k.quantities`,于是第二行整个落进盲区**
+    (2026-08-26 验收 A 实测:一个只改 `affordances`、body 里干脆没写 `quantities`
+    的编辑包 —— 整行替换 = 三个量全撤 —— 开机与两扇离线门**都零输出**,而那三行
+    照旧进提示词)。我当时在 docstring 里把它写成"不是漏,是同一条开关规则的另一面"
+    ——**那句是错的**,而且错得正好盖住了这个功能最该说话的那一次。
+    `builtin` 这一格分得开这两件事,所以它才是那道门。
     """
-    return {kid: set(k.quantities) for kid, k in kinds.items() if k.quantities}
+    return {
+        kid: set(k.quantities) for kid, k in kinds.items()
+        if k.quantities or not k.builtin
+    }
 
 
 def _live_dropped_quantities(
@@ -5597,13 +5605,17 @@ def run_player(args: argparse.Namespace) -> int:
             print(json.dumps(receipt, ensure_ascii=False, indent=2, default=str))
             return 0
         verb = "抹了" if args.yes else "要抹"
+        # 量表那一格**零也印**,而**「数不出来」印的是另一句话**:
+        # 「他身上没有量」(0)· 「我没查成」(null)· 「这一版引擎不查这个」
+        # (这句话整个不出现)—— 三件事,屏幕上必须分得开。
+        facts = receipt.get("facts")
+        said_facts = (f"他身上的量 {facts} 个" if facts is not None
+                      else "他身上的量 数不出来(见日志)")
         print(f"[player] {receipt['player_id']} —— {verb}:"
               f"事件改写 {receipt['events']} 条、"
               f"会话 {receipt['conversations']} 场 {receipt['messages']} 条消息、"
               f"记忆删 {receipt['memories_dropped']} 行改 {receipt['memories_redacted']} 行、"
-              # 量表那一格**零也印**:「他身上没有量」和「这一版引擎不查这个」
-              # 在屏幕上必须分得开,而后者的样子是这句话整个不出现。
-              f"他身上的量 {receipt.get('facts', 0)} 个"
+              f"{said_facts}"
               f"(显示名 {receipt['names']} 个,跳过 {receipt['names_skipped']} 个)。")
         # 分片与续跑那两格。**没做完必须说出来** —— 一趟停在半路而只印一行计数,
         # 读的人会把它当成做完了,而这条路上"以为做完了"是不可逆的那一边。
