@@ -751,8 +751,11 @@ _ERASED_NAME = "(已注销)"
 # 判定事件的 `as`/`target` 与账本的 `from`/`to` 是仅有的四个不带后缀的。
 _ERASE_ID_KEYS = frozenset({"as", "target", "from", "to"})
 #: 回执里跨片累加的那几格(进度键里存的也是这几格)。
+#: ⚠️ **`facts` 是 3.8.0 加的第六格**,而老进度键里没有它 —— 一趟 3.7.0 起头、
+#: 3.8.0 续完的抹除读回来的 `counts` 只有五格,所以取值一律 `.get(k) or 0`。
 _ERASE_COUNT_KEYS = (
     "events", "conversations", "messages", "memories_dropped", "memories_redacted",
+    "facts",
 )
 #: 改写多少条落一次水位。**按批,不按条** —— 每条一次 Redis 往返是这个仓库
 #: 明说过的反面教材(`catch_up_projection` 那条)。和 `_iter_event_log` 的一页同宽。
@@ -6423,6 +6426,12 @@ class World:
         - **事件不删行,原地改写**:`seq` 在 Redis 后端是列表下标,删一行后面全错位,
           「对账即重放」当场碎掉。改写做两件事:他的显示名全域换成「(已注销)」,
           涉他事件的原文字段(`_ERASE_TEXT_KEYS`)抹成「(已抹除)」。
+        - **他身上那张量表整个删**(3.8.0,收件箱 D39)。引擎给每个玩家开量表,
+          和角色同一个命名空间(`agent:player:<id>`);此前抹除整个够不着它,
+          于是一个"已经抹掉"的人在世界里还留着一行体力、一行手艺,而**回执上
+          没有一格会提到这件事**。删的是他那个 hash 与 `stock_places` 上他那一行
+          (那一行装着他的显示名);**`stock_visibility` 一个字不动** ——
+          那张表按种类声明,他和每个角色共用同一行。见 `_erase_player_facts`。
         - **不透明 id 保留,不换假名。** 换假名曾是第一版设计,被跨进程折叠否决:
           落后的进程折了真名 delta、再折到假名 `player_departed`,真名关系成了
           没人清得掉的幽灵 —— 而假名映射一旦落库(哪怕落在事件里)就等于没抹。
@@ -6493,14 +6502,18 @@ class World:
         - `resume_seq` —— 还没看完时下一趟从哪儿接着看;看到头了是 `None`。
 
         返回回执 `{player_id, reason, forget, events, conversations, messages,
-        memories_dropped, memories_redacted, names, names_skipped, dry_run, seq,
-        resume_seq, phase}`;`seq` 有值 = 审计事件写下了 = 这趟走到了尽头。
+        memories_dropped, memories_redacted, facts, names, names_skipped, dry_run,
+        seq, resume_seq, phase}`;`seq` 有值 = 审计事件写下了 = 这趟走到了尽头。
+        `facts` 是 **3.8.0 加的第十五格**:他身上那张量表删了几个量
+        (**零也报 0** —— 老引擎是整格**缺席**,下游一律 `.get("facts", 0)`)。
         `dry_run=True` 一个字节都不写(所以数不出 `forget.chat_state`,并且比真跑
         少数一条 —— 真跑会把 `forget` 刚追加的那条 `player_departed` 里的名字也抹掉);
         预演**读**进度键但不写它。真跑的计数跨片累加,预演只数这一趟看过的窗口。
-        转录与记忆**在第一趟就删掉,而且早于那个长循环**(它们便宜、有界,又是这条
-        链上最私密的一份);续跑不重做它们,计数从进度键里带过来 —— 所以**续跑那次
-        回执里的 `forget` 是第一片那次的原件**,不是重新数出来的。
+        转录、记忆与量表**在第一趟就删掉,而且早于那个长循环**(它们便宜、有界,
+        又是这条链上最私密的一份);续跑不重做它们,计数从进度键里带过来 ——
+        所以**续跑那次回执里的 `forget` 是第一片那次的原件**,不是重新数出来的。
+        ⚠️ **审计事件 `player_erased` 的载荷一个字没加**:它是已经发出去的事件形状,
+        而回执是同步返回值 —— 加格便宜,改事件贵。要机器读 `facts` 就读回执。
         CLI 出口:`anima-world player erase`(不带 `--yes` 只数)。
         """
         pid = str(player_id or "").strip()
@@ -6548,7 +6561,7 @@ class World:
             return {
                 "player_id": pid, "reason": reason, "forget": None,
                 "events": 0, "conversations": 0, "messages": 0,
-                "memories_dropped": 0, "memories_redacted": 0,
+                "memories_dropped": 0, "memories_redacted": 0, "facts": 0,
                 "names": 0, "names_skipped": 0,
                 "dry_run": bool(dry_run), "seq": None,
                 "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
@@ -6573,6 +6586,10 @@ class World:
             "messages": int(base.get("messages") or 0),
             "memories_dropped": int(base.get("memories_dropped") or 0),
             "memories_redacted": int(base.get("memories_redacted") or 0),
+            # **零也要报 0,不许缺席** —— 缺席和 0 在这条链上是两件事:
+            # 一个老引擎**没有这一格**(下游 `.get("facts", 0)` 回落),
+            # 而一个新引擎报 0 是在说"我查过了,他身上没有量"。
+            "facts": int(base.get("facts") or 0),
             "names": len(names), "names_skipped": len(skipped),
             "dry_run": bool(dry_run), "seq": None,
             "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
@@ -6626,6 +6643,7 @@ class World:
                     his_seqs, dry_run=dry_run)
                 receipt["memories_redacted"] = memory.redact_summaries(
                     replacements, dry_run=dry_run)
+            receipt["facts"] = self._erase_player_facts(pid, dry_run=dry_run)
 
         examined = 0
         resume_from = start_at
@@ -6775,6 +6793,58 @@ class World:
         skipped = sorted(n for n in names if len(n) < 2 or n in agent_names)
         names -= set(skipped)
         return names, skipped, his_seqs, scanned_through
+
+    def _erase_player_facts(self, pid: str, *, dry_run: bool) -> int:
+        """**他身上那张量表** —— 抹除此前整个够不着的一格(收件箱 D39)。
+
+        引擎给每个玩家开量表,和角色**同一个命名空间**(`Scheduler.stock_owner_of`
+        的 docstring 写着这条为什么必须):owner 是 `agent:player:<id>`,住在
+        `anima:{world_id}:stock:agent:player:<id>` 这个 hash 里,由
+        `_touch_player` → `seed_actor_quantities` 播下,此后被能力的 `costs`、
+        规律、`me_*` 读写。**它是这个人在这个世界里留下的一份数据**,而
+        `erase_player` 的 docstring 从 3.5.0 起就承诺"把这个人的交互数据从世界里
+        抹掉" —— 那句话在这一格上一直是假的:2026-08-26 量到线上 night-tide **36**
+        行、lighthouse-bay **23** 行,而回执里 `stock` 一格都没有。
+
+        抹三样,都按 **owner** 走,一样都不许按**种类**走:
+
+        - `stock:agent:player:<id>` 整个 hash(`RedisStockStore.delete(owner)`
+          顺带把他从 `stock_owners` 那个索引集合里摘掉 —— 留着索引会让
+          `owners()` 报出一个空壳 owner)。
+        - `stock_places` 上他那一行(`unplace`)。**它装着他的显示名** ——
+          `_settle_player_places` 写进去的 `label` 就是 `display_name`,而抹除
+          全篇都在做的事就是把那个名字从世界里拿掉。跑着的世界靠
+          `_sweep_ghost_players` 迟早会扫掉它,**而抹除多半跑在一次性容器里**
+          (壳的异步作业),那种进程一 tick 都不推:不显式删,那行名字就永远留着。
+        - ⚠️ **`stock_visibility` 一个字都不动。** 那张表是按**种类**声明的
+          (`(agent, 体力)`),玩家和每一个角色**共用同一行** —— 删掉它等于把这个
+          世界里所有人的「体力」从感知里一起抹掉,而且日志干净。这一条是任务单里
+          写反了的一格,记在这儿免得下一个人照着删。
+
+        返回**删掉了几个量**(hash 里的字段数),`dry_run=True` 时只数不删。
+        幂等:第二趟 hash 已经没了,`of()` 答空,回执报 0 ——
+        **0 不是缺席**,它是"我查过了,他身上没有量"。
+        """
+        scheduler = self.scheduler
+        store = getattr(scheduler, "stock_store", None)
+        if store is None:
+            return 0
+        owner = scheduler.stock_owner_of(f"{scheduler.PLAYER_PREFIX}{pid}")
+        try:
+            count = len(store.of(owner))
+        except Exception:  # noqa: BLE001 - 数不出来不该掀翻整趟抹除
+            logger.warning("读 %r 的量表失败", owner, exc_info=True)
+            return 0
+        if dry_run:
+            return count
+        store.delete(owner)
+        visibility = getattr(scheduler, "visibility_store", None)
+        if visibility is not None:
+            try:
+                visibility.unplace(owner)
+            except Exception:  # noqa: BLE001 - 同上
+                logger.warning("撤 %r 在可见性表上那一行失败", owner, exc_info=True)
+        return count
 
     def _erase_recent_window(self, pid: str, replacements: dict[str, str]) -> None:
         """本进程的内存事件窗口跟着改 —— 只读门不该还端着抹掉之前的原文。"""

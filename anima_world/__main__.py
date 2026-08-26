@@ -5380,7 +5380,10 @@ def run_player(args: argparse.Namespace) -> int:
         print(f"[player] {receipt['player_id']} —— {verb}:"
               f"事件改写 {receipt['events']} 条、"
               f"会话 {receipt['conversations']} 场 {receipt['messages']} 条消息、"
-              f"记忆删 {receipt['memories_dropped']} 行改 {receipt['memories_redacted']} 行"
+              f"记忆删 {receipt['memories_dropped']} 行改 {receipt['memories_redacted']} 行、"
+              # 量表那一格**零也印**:「他身上没有量」和「这一版引擎不查这个」
+              # 在屏幕上必须分得开,而后者的样子是这句话整个不出现。
+              f"他身上的量 {receipt.get('facts', 0)} 个"
               f"(显示名 {receipt['names']} 个,跳过 {receipt['names_skipped']} 个)。")
         # 分片与续跑那两格。**没做完必须说出来** —— 一趟停在半路而只印一行计数,
         # 读的人会把它当成做完了,而这条路上"以为做完了"是不可逆的那一边。
@@ -5887,6 +5890,7 @@ def contract_payload() -> dict[str, Any]:
     """
     import anima_world
     from anima_world.api import (
+        _ERASE_COUNT_KEYS,
         _ERASE_PHASE_DONE,
         _ERASE_PHASE_NOT_STARTED,
         _ERASE_PHASE_PARTIAL,
@@ -6087,6 +6091,12 @@ def contract_payload() -> dict[str, Any]:
             "resume_command": "player erase --yes --resume",
             "shard_params": ["since_seq", "limit"],
             "phases": [_ERASE_PHASE_NOT_STARTED, _ERASE_PHASE_PARTIAL, _ERASE_PHASE_DONE],
+            # 回执上**跨片累加**的那几格。3.8.0 多了第六格 `facts`(他身上那张量表
+            # 删了几个量,收件箱 D39)—— **这一格缺席 = 这支引擎的抹除够不着玩家
+            # 量表**,而它够不着的时候不报错,只是把一行体力留在世界里。
+            # 消费方一律 `.get("erasure", {}).get("receipt_count_keys", [])`,
+            # 读回执时一律 `receipt.get("facts", 0)`:老引擎是**缺席**不是 `null`。
+            "receipt_count_keys": list(_ERASE_COUNT_KEYS),
             # 进度键的形状。**镜像端要跟的是这一格加 `storage.volatile_keys`**:
             # 打包必须跳过它 —— 它装着正要被抹掉的那些名字。
             "progress_key": "anima:{world_id}:erasure:{player_id}",

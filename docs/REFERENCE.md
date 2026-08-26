@@ -2425,6 +2425,36 @@ anima-world config set presence.enforce_colocation true --world-id w   # ③ 再
 反思里提了他一句,删整行等于把别人的记忆也抹掉一角);**账本一个字不动** —— 钱和物品
 是世界的账,不是他的话,守恒不许破。
 
+##### 3.8.0 补上的一格:**他身上那张量表**(回执 `facts`)
+
+引擎给**每个玩家**开量表,和角色**同一个命名空间**(`Scheduler.stock_owner_of`:
+`me_*` 读的是"一个人身上的量",而这件事对两种人是同一件),owner 是
+`agent:player:<id>`,住在 `anima:{world_id}:stock:agent:player:<id>`。
+它由 `_touch_player` → `seed_actor_quantities` 播下,此后被能力的 `costs`、规律、
+`me_*` 读写 —— **它是这个人在这个世界里留下的一份数据**。
+
+而抹除在 3.7.0 之前**整个够不着它**:回执十四格里一格都不提量。2026-08-26 量到
+线上 night-tide **36** 行、lighthouse-bay **23** 行 `anima:*:stock:agent:player:*`,
+每一行都属于某个"已经抹掉"的人。**它不是"抹得不够干净",是回执上看不出这件事
+发生过** —— 而回执正是宿主写进合规记录的那份。
+
+3.8.0 起抹三样,都按 **owner** 走:
+
+| 抹什么 | 键 | 为什么 |
+|---|---|---|
+| 他那张量表 | `stock:agent:player:<id>`(整个 hash) | 他留下的数据本身;顺带从 `stock_owners` 索引集合里摘掉(留着索引会让 `owners()` 报出一个空壳 owner) |
+| 他站在哪、叫什么 | `stock_places` 上他那一行 | **那一行的 `label` 就是他的显示名**(`_settle_player_places` 写的)。跑着的世界靠 `_sweep_ghost_players` 迟早扫掉它,**而抹除多半跑在一次性容器里** —— 那种进程一个 tick 都不推 |
+| ⚠️ **`stock_visibility` 一个字不动** | — | 那张表的主键是 **(种类, 量名)**,玩家和世界里每一个角色**共用同一行**。跟着他一起删,等于把所有人的「体力」从感知里一起抹掉,而世界照跑、日志干净 |
+
+回执因此**多第十五格 `facts`** —— 删了几个量。**零也报 0,不许缺席**:老引擎是整格
+**没有**(下游一律 `.get("facts", 0)`),而新引擎报 0 是在说"我查过了,他身上没有量"。
+`dry_run=True` 只数不删;**第一片就做完**(和转录、记忆同一批,便宜且有界),
+续跑的计数从进度键里带过来,不重数。⚠️ **审计事件 `player_erased` 的载荷一个字没加**:
+回执是同步返回值,加格便宜;事件是已经发出去的形状,改它贵。
+消费方按 `contract --json` 的 `erasure.receipt_count_keys` 探测这一格在不在,
+别比版本号。判据 `tests/test_erase_player.py::test_他身上那张量表跟着抹掉_而回执有facts一格`
+(把删除那两行注掉,它和另外三条当场红)。
+
 三条明说的边界:**名字太短(单字)或与某个角色重名的不替换**(替换会把她们的名字和
 世界的文本一起绞碎,回执里的 `names_skipped` 数着);**别的进程的内存事件窗口
 (≤200 条)不归这里管**,重启或滑出后消失(本进程的那份当场跟着改);**抹除后落库的
@@ -3094,6 +3124,7 @@ anima-world contract --json | jq '.erasure.resume_command'
 | `phases` | `["not_started", "partial", "done"]` | `phase` 的闭集 |
 | `progress_key` | `anima:{world_id}:erasure:{player_id}` | 进度键(也在 `storage.volatile_keys` 里) |
 | `progress_ttl_seconds` | `86400` | 进度键活多久 |
+| `receipt_count_keys` | `["events", "conversations", "messages", "memories_dropped", "memories_redacted", "facts"]` | 回执上**跨片累加**的那几格。**`facts` 缺席 = 这支引擎的抹除够不着玩家量表**(3.7.0 及更早),而它够不着的时候不报错,只是把一行体力留在世界里。读回执一律 `.get("facts", 0)` |
 | `gloss` | 一段人话 | **会随版本长,别拿它做判断** |
 
 ⚠️ **那三格命令里的 `--yes` 一个都不能少,照它原样敲。** 这条命令**默认是预演**
@@ -3182,7 +3213,7 @@ from anima_world.api import World
 | `world.answer_invitation(player_id, invite_seq, accept)` | **他自己按下的那一下** —— 引擎里唯一一处替玩家点头的入口,而它拿到的正是他点的那一下(§2.9.6.7)。`invite_seq` 就是那条 `agent_invites` 的 `seq`。`accept=True`:**在这一刻重查一遍闸**(他可能已经走开、她可能睡了或手上有了别的事),过了才落 `invitation_settled{accepted}` 并真的去做,做不成落 `expired` 并把原因写进 `note` —— 决定与执行之间世界还在跑,和 `act()` 的"在执行时校验,不在决定时"同一条。⚠️ **重查的是闸,不是人心**:开口那一刻点过头的人写在事件的 `consented` 里,答复时原样带回 —— 否则他按一下"好"就要去等一次模型,而她这一次改主意的话,他收到的是一条 `expired`。`accept=False`:落 `declined`,**并且只有这一支**动关系、进她的记忆(纯算术,一次模型都不调);他没答挂到 ttl 那一支是**错过**不是拒绝,一个字都不写。回 `{"ok","outcome",…}`,**这扇门只吐得出四种**:`"gone"`(**这份邀请已经有过结局了** —— 答过了 / 过期了 / 她自己收回去了,三种都走这一支)/ `"declined"` / `"accepted"` / `"expired"`。⚠️ **不是 `together.INVITE_OUTCOMES` 全集**:那个元组里的 `cancelled` 是**她自己收回**,唯一来源是 `Scheduler.cancel_invitations()`,这扇门一次都不会返回它 —— 它照旧出现在下面那格 `settled` 里(那一格答的是"上一次是怎么结束的")。这里 3.6.0 曾写作"∈ `INVITE_OUTCOMES` 或 `gone`",宣称五选一而门只吐四种:下游照着写的那个 `match` 会有一支永远进不去,而它看上去像是在防守。3.6.0 补了三格,答的是同一个问题的三个粒度 —— **到底是谁不在场**:`settled`(只在 `"gone"` 时给)是那次的结局本身,于是"她收回了"和"你上次点的是不去"在报文里分得开(旧版本两种给同一句话,而那句话把她走开这条真因排除在外);`absent` ∈ `agent`/`player`/`both`/`unknown` 是**机器读的那一格**(旧版只有一句人话,宿主要判断到底怪谁就得去 `in` 一个中文子串);`gate` 是挡下来的那道闸的**名字**(当面没成的那一族有四个取值,按族分支读 `together.COLOCATION_GATES`,别写 `== "player_not_here"`;§2.9.6.7)。⚠️ **`"gone"` 只有一种形状**:不论是他按之前就结了、还是按的过程中被结了(和 `settle_invitation` 撞车),报文都带同一句人话与同一格 `settled` —— 3.6.0 有一版在后一条路上另写了一句光秃秃的「这份邀请已经不在了」且不给 `settled`,于是同一件事在两条路上长得不一样,而下游没办法知道自己碰上的是哪一条。⚠️ **`reason` 有意没动** —— 它是闸自己的分类(`declined`),下游按现有取值交过活了,这里只加不改。⚠️ **这三格答的是"这一刻办不办得成",不是"她还等不等你"**:她按作息表溜达开时这一支给的仍是 `expired`,`INVITE_OUTCOMES` 一个字没加 —— 见 §2.9.6.7 末尾那条"走开算不算不等你"。**重复答复不报错**(两个设备同时点同一份是常态);替**别人**答抛 `ToolCallError` |
 | `world.contact_forecast(agent_id=None)` | **此刻**每对 (角色, 玩家) 算出来是多少,含没触发的与被冷却挡下的。调 `contact.threshold` 用 —— 只看已发生的那份,一个永远不触发的配置和一个刚好差一点的配置长得一模一样。只读:不占额度、不写冷却、不发事件,且**和真轮次共用同一个判定函数** |
 | `world.forget_player(player_id, *, reason="", dry_run=False)` | **一个人离开了这个世界**(§2.9.10)。往日志里追加一条 `player_departed` 事实,由折叠端和世界自己去响应它:关系(两个方向)、联系冷却、姿态、静音、回头找你、他教过的规则,一并作废;**历史一个字不改**(事件、记忆、转录、账本全留着 —— 她记得这个人来过,只是不再等他)。回执 `{player_id, reason, relations, edges, contact, chat_state, dry_run, seq}`(`edges` 是关系图上撤掉的边 —— 它是一张自己的表,折叠端碰不到,不显式撤的话 `cliques()` 里会坐着一个不存在的人)。**幂等**;`dry_run=True` 一个字节都不写。CLI 出口 `anima-world player forget` |
-| `world.erase_player(player_id, *, reason="", dry_run=False, since_seq=None, limit=None, resume=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq, resume_seq, phase}`。**幂等**;`dry_run=True` 一个字节都不写(但**读**进度键)。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账)。3.5.0 的 `since_seq` / `limit` / `resume` **分的是改写那一遍,收名字那一遍永远要看全量**,所以它们不让请求变快;买到的是"一趟被杀在半路还能续、而且名字不丢"(进度键 `anima:{world_id}:erasure:{player_id}`,带 TTL、**不进包**)与"一次调用的写入量有上限"。`phase` 是 `not_started`/`partial`/`done` —— **这个人的抹除处在哪一步**,不是"抹干净了没有";`seq` 有值 = 走到了日志尽头。长期解仍是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮,而且**它也不是完整解**:自由文本里的名字不带 id)。CLI 出口 `anima-world player erase` |
+| `world.erase_player(player_id, *, reason="", dry_run=False, since_seq=None, limit=None, resume=False)` | **法务抹除:把这个人的交互数据从世界里抹掉**(§2.9.10.1;《拟人化互动办法》第十六条的引擎侧出口)。和 `forget_player`(告别,历史一个字不动)是两个动作 —— 这个内部先走一遍 forget,再动历史:转录**整场删**(会话/消息/逐轮观测量)、**由他而起的记忆删行**(`event_seq` 指向涉他事件的)、**旁及他的记忆只换名字**、事件**不删行只原地改写**(他的显示名 → 「(已注销)」,涉他事件的原文字段 → 「(已抹除)」)。**账本不动**(钱与物品是世界的账,守恒不许破);**不透明 id 保留、不换假名**(换假名会和跨进程折叠竞态,而假名映射一旦落库就等于没抹 —— 所以宿主应以不透明 id 作 `player_id`)。回执 `{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, facts, names, names_skipped, dry_run, seq, resume_seq, phase}` —— `facts` 是 **3.8.0 加的第十五格**:他身上那张量表(`agent:player:<id>`,和角色同一个命名空间)删了几个量,**零也报 0**(老引擎是整格缺席,下游 `.get("facts", 0)`);同一趟顺带撤掉 `stock_places` 上他那一行(它装着他的显示名),而 `stock_visibility` **一个字不动**(那张表按种类声明,他和每个角色共用同一行)。**幂等**;`dry_run=True` 一个字节都不写(但**读**进度键)。⚠️ **`dry_run` 也是 O(全量事件) 的两遍全表扫描,绝不许在 event loop / tick 线程上同步调** —— 它不是"数一下"(`player_engagement` 那句是一次 SELECT,这一条是整本账)。3.5.0 的 `since_seq` / `limit` / `resume` **分的是改写那一遍,收名字那一遍永远要看全量**,所以它们不让请求变快;买到的是"一趟被杀在半路还能续、而且名字不丢"(进度键 `anima:{world_id}:erasure:{player_id}`,带 TTL、**不进包**)与"一次调用的写入量有上限"。`phase` 是 `not_started`/`partial`/`done` —— **这个人的抹除处在哪一步**,不是"抹干净了没有";`seq` 有值 = 走到了日志尽头。长期解仍是按 `player_id` 建事件索引(动 `storage` 契约,不在这一轮,而且**它也不是完整解**:自由文本里的名字不带 id)。CLI 出口 `anima-world player erase` |
 | `world.player_engagement(player_id)` | **他跟这个世界处得有多深**(§2.9.10.2)—— 依赖预警(第十条)要的那笔账,散在三处的数据拢到一起:`{player_id, conversations, messages, agents, first_seen, last_seen, span_days, relationships[], closest, contacts}`。**给数不给结论** —— 阈值与干预是宿主的判断(引擎不触达用户),而一个「依赖指数」会被做成进度条(同 `relationship_summary` 那条纪律)。`agents` 单独一格:只黏着一个角色和跟五个都熟是两种依赖。时间戳是**墙钟**(合规按真实时间算,世界 tick 和真实时间没有固定比率)。⚠️ 转录归 MySQL 的世界里这是一次 SELECT,别放进 tick 循环。CLI 出口 `anima-world engagement` |
 | `world.persona_drift(agent_id, *, baseline_n=None, player_id=None)` | **她还是不是她**(§2.9.12)—— 人设漂移的尺子。把她说过的话按时间排开,拿她自己最早那几条当基线,后面的走 CUSUM(单条抖动没有意义,CUSUM 专认持续的小偏移)。**纯计数、不调模型**,所以同一段转录跑一百遍给同一个答案 ——能进 CI(`anima-world drift` 漂了退 1),也能当体检。七个特征里 `sycophancy`(迎合度)单独有一格,它同时是合规项(第八条五:不得过度迎合用户)。**样本不够时 `ok=False` 并说出为什么** ——在 5 条消息上宣布「人设很稳」比不测更坏。测的是**文风**不是人格:当报警器,别当结论。CLI 出口 `anima-world drift` |
 | `world.relationship_summary(agent_id, other_id)` | **她这会儿把这个人当什么** —— 一句人话、一个粗档、和一条出处(§2.9.11)。`{agent_id, other_id, agent_name, other_name, exists, met, band, band_name, summary, axes:{sentiment,trust,affection,respect}, last_change}`。**`met` 和 `exists` 不是一回事**:`met` = 这两个说过话(联系态上有 `last_contact_tick`),`exists` = 判定折过一条 `sentiment_delta`。判定跑在对话关闭时,所以 `met=True, exists=False` 是一个真实且常见的中间态(§2.9.11 第 4 条)。`band`/`band_name` 走 `memory_triggers.band()` / `BAND_NAMES`,**和引擎自己认的是同一个函数**;⚠️ **`exists` 是 False 时这两格是 `None` / `""`,不是「不远不近」那一档** —— 空白不是一个档位,它是**还没有值**,拿 0.0 去查档表查出来的那一格是引擎自己编的(宿主自己决定画成"还没开始"还是不画)。`last_change` = 上一次改变它的那条事件 `{seq, tick, delta, direction, conversation_id, summary}`,查不到就 `conversation_id: None` + `summary: ""`(**不编**);整段关系没有来往时是 `None`。`exists` 是 False 时四个轴都是 0.0 —— 那是**没有来往**,不是敌意。玩家的 `other_name` 取的是**最近一次来往**那行记下的名字(联系态每个角色一行,而人是会改名的),所以同一个玩家在这份名单上永远只有一个称呼。CLI 出口 `anima-world relationship` |
@@ -3569,7 +3600,10 @@ anima-world player erase --world-id w --player u1 --reason 用户要求删除 --
 用户行使删除权时走这一条(《拟人化互动办法》第十六条)。它**先做一遍
 `player forget`**(朝前看的先断),再动历史:转录整场删、由他而起的记忆删行、
 旁及他的记忆只换名字、事件原地改写(名字 → 「(已注销)」,原文 → 「(已抹除)」)。
-**账本不动。** 设计、取舍与三条边界见 §2.9.10.1 —— 尤其**不透明 id 保留、不换假名**
+**账本不动。** 3.8.0 起还删掉**他身上那张量表**(`agent:player:<id>`,和角色同一个
+命名空间)与 `stock_places` 上他那一行(它装着他的显示名),回执多一格 `facts`;
+`stock_visibility` **一个字不动**(那张表按种类声明,他和每个角色共用同一行)。
+设计、取舍与三条边界见 §2.9.10.1 —— 尤其**不透明 id 保留、不换假名**
 这一条对宿主有要求:`player_id` 应该是不透明 id。
 
 | 参数 | 默认 | 说明 |
@@ -3580,7 +3614,7 @@ anima-world player erase --world-id w --player u1 --reason 用户要求删除 --
 | `--since-seq` | 不给 | 从这条 seq 之后接着抹(续跑给上一趟回执里的 `resume_seq`)。真抹时**不许越过已完成的水位**,越了退 2 |
 | `--limit` | 不给 | 这一趟最多看多少**条事件**。⚠️ 它封住的是改写那一遍,收名字那一遍永远要看全量 |
 | `--resume` | - | 只把上一趟没做完的接着做完;**没有未完成的就什么都不做**,绝不顺手开一趟新的 |
-| `--json` | - | 回执:`{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, names, names_skipped, dry_run, seq, resume_seq, phase}` |
+| `--json` | - | 回执:`{player_id, reason, forget, events, conversations, messages, memories_dropped, memories_redacted, facts, names, names_skipped, dry_run, seq, resume_seq, phase}`(`facts` = 3.8.0,他身上那张量表删了几个量;**零也报 0**) |
 
 **没做完会说出来**(3.5.0):停在半路时印一行"还没到日志尽头:接着跑
 `--since-seq N`(或者直接 `--resume`)",而且**不印 `player_erased`** ——

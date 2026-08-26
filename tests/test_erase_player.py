@@ -208,7 +208,7 @@ def test_抹除是幂等的(world):
     # 一个显示名收进来,于是被判进 `skipped`。**数据是对的,坏的是回执** ——
     # 而文档承诺的是"第二次跑各格都是 0",宿主拿它写合规断言会红。
     counted = ("events", "conversations", "messages", "memories_dropped",
-               "memories_redacted", "names", "names_skipped")
+               "memories_redacted", "facts", "names", "names_skipped")
     for attempt in range(2, 6):
         again = world.erase_player("ghost-5")
         zeros = {key: again[key] for key in counted}
@@ -670,3 +670,143 @@ def test_cli_没做完要说出来(tmp_path):
                   "--yes", "--limit", str(before + 1)).stdout
     assert "还没到日志尽头" in out and "--resume" in out
     assert "player_erased" not in out, "半途印出审计事件 = 说它抹完了"
+
+
+# ── 他身上那张量表(3.8.0,收件箱 D39)────────────────────────────────────────
+#
+# 引擎给**每个玩家**开量表,和角色同一个命名空间(`Scheduler.stock_owner_of`
+# 写着这条为什么必须):owner 是 `agent:player:<id>`。而 `erase_player` 的
+# docstring 从 3.5.0 起就承诺"把这个人的交互数据从世界里抹掉" —— 那句话在这一格上
+# 一直是假的。2026-08-26 线上量到 night-tide 36 行、lighthouse-bay 23 行,
+# 而回执上一格都没有:**它不是"抹得不够干净",是"回执上看不出这件事发生过"**。
+
+
+def _player_stock_owner(world, pid: str) -> str:
+    return world.scheduler.stock_owner_of(f"{world.scheduler.PLAYER_PREFIX}{pid}")
+
+
+def test_他身上那张量表跟着抹掉_而回执有facts一格(world):
+    """量表整个没了、owner 索引上也没了,而回执**数得出**删了几个。"""
+    world.player_move("ghost-facts", "cafe", display_name="阿檀")
+    owner = _player_stock_owner(world, "ghost-facts")
+    seeded = world.stocks(owner)
+    assert len(seeded) >= 1, "夹具前提没成立:橱窗里 agent 一个量都没声明?"
+
+    receipt = world.erase_player("ghost-facts", reason="用户要求删除")
+
+    assert receipt["facts"] == len(seeded), (
+        f"回执数出的量表条数不对:{receipt['facts']} vs {len(seeded)}"
+    )
+    assert world.stocks(owner) == {}, "他身上的量还在"
+    assert owner not in world.stock_owners(), (
+        "hash 删了而 owner 索引没删 —— `owners()` 会报出一个空壳"
+    )
+
+
+def test_可见性表按种类声明_一行都不许动(world):
+    """**这一格最容易删错。** `stock_visibility` 的主键是(种类, 量名),
+    玩家和世界里每一个角色**共用同一行** —— 跟着他一起删掉,等于把所有人的
+    「体力」从感知里一起抹掉,而世界照跑、日志干净。"""
+    world.player_move("ghost-vis", "cafe", display_name="阿檀")
+    before = world.scheduler.visibility_store.rules_map()
+    assert ("agent", "体力") in before, "夹具前提没成立"
+
+    world.erase_player("ghost-vis")
+
+    assert world.scheduler.visibility_store.rules_map() == before, (
+        "抹一个玩家动了按种类声明的可见性表"
+    )
+
+
+def test_他站在哪与叫什么也从可见性表上撤下来(world):
+    """`stock_places` 那一行的 label **就是他的显示名** —— 抹除全篇在做的就是
+    把那个名字从世界里拿掉。跑着的世界靠 `_sweep_ghost_players` 迟早会扫掉它,
+    **而抹除多半跑在一次性容器里**:那种进程一个 tick 都不推。"""
+    world.player_move("ghost-place", "cafe", display_name="阿檀")
+    owner = _player_stock_owner(world, "ghost-place")
+    world.scheduler.visibility_store.place(owner, "cafe", "阿檀")
+    assert world.scheduler.visibility_store.place_of(owner) == "cafe", "夹具前提没成立"
+
+    world.erase_player("ghost-place")
+
+    assert world.scheduler.visibility_store.place_of(owner) is None, "他还站在咖啡店里"
+    assert "阿檀" not in json.dumps(
+        world.scheduler.visibility_store.labels(), ensure_ascii=False
+    ), "他的显示名还挂在可见性表上"
+
+
+def test_预演只数不删(world):
+    world.player_move("ghost-facts-dry", "cafe", display_name="阿檀")
+    owner = _player_stock_owner(world, "ghost-facts-dry")
+    seeded = world.stocks(owner)
+
+    preview = world.erase_player("ghost-facts-dry", dry_run=True)
+
+    assert preview["facts"] == len(seeded)
+    assert world.stocks(owner) == seeded, "dry_run 删了他的量"
+
+
+def test_没有量表的世界也报0_不是缺席(world, monkeypatch):
+    """**缺席和 0 是两件事。** 一支不查这一格的引擎是整格**没有**,
+    而报 0 是在说"我查过了,他身上没有量" —— 下游按 `.get("facts", 0)` 读,
+    两者分得开的前提是新引擎**永远**给这一格。"""
+    monkeypatch.setattr(world.scheduler, "stock_store", None, raising=False)
+    receipt = world.erase_player("ghost-nostock")
+    assert "facts" in receipt and receipt["facts"] == 0
+
+
+def test_量表这一格也是幂等的(world):
+    world.player_move("ghost-facts-twice", "cafe", display_name="阿檀")
+    first = world.erase_player("ghost-facts-twice")
+    assert first["facts"] >= 1
+    again = world.erase_player("ghost-facts-twice")
+    assert again["facts"] == 0
+
+
+def test_续跑不把量表数第二遍(world):
+    """转录、记忆、量表**第一片就做完**;续跑的计数从进度键里带过来。
+    重做一遍的话同一批会被数两次,而回执正是宿主写进合规记录的那份。"""
+    world.player_move(PID, "cafe", display_name="阿檀")
+    before, _, _ = _dead_corner(world)
+    seeded = len(world.stocks(_player_stock_owner(world, PID)))
+    assert seeded >= 1
+
+    partial = world.erase_player(PID, reason="用户要求删除", limit=before + 1)
+    assert partial["phase"] == _PARTIAL
+    assert partial["facts"] == seeded
+
+    done = world.erase_player(PID, reason="用户要求删除", resume=True)
+    assert done["phase"] == _DONE
+    assert done["facts"] == seeded, "续跑把量表又数了一遍"
+
+
+def test_cli_量表那一格印在屏幕上_零也印(tmp_path):
+    """**零也印**:「他身上没有量」和「这一版引擎不查这个」在屏幕上必须分得开,
+    而后者的样子是这句话整个不出现。"""
+    db = tmp_path / "w.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        world.player_move("cli-facts", "cafe", display_name="阿檀")
+        seeded = len(world.stocks(_player_stock_owner(world, "cli-facts")))
+    assert seeded >= 1
+
+    done = run_cli("player", "erase", "--world-id", "w", "--player", "cli-facts",
+                   "--yes", "--json")
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["facts"] == seeded
+
+    # 第二趟:什么都没了,那一格照旧印 0。
+    again = run_cli("player", "erase", "--world-id", "w", "--player", "cli-facts",
+                    "--yes")
+    assert "他身上的量 0 个" in again.stdout, again.stdout
+
+
+def test_契约报得出这一格_老引擎是缺席不是null(tmp_path):
+    """消费方按 `receipt_count_keys` 探测,不比版本号。"""
+    from anima_world.api import _ERASE_COUNT_KEYS
+
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    payload = json.loads(out.stdout)
+    assert payload["erasure"]["receipt_count_keys"] == list(_ERASE_COUNT_KEYS)
+    assert "facts" in payload["erasure"]["receipt_count_keys"]
