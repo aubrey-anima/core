@@ -26,6 +26,15 @@
 也别拿"引擎那些测试还是绿的"当 `_drain` 的验收 —— 它们证的是 ①,
 ② 的证据只有那两条自测。加一条新测试想靠 ② 的话,先按上面第一条量一眼 pending,
 别默认它走到了。
+
+⚠️ **上面那三个数是同日晚些时候重新量过的**(`test_the_clock_never_waits_for_the_network`
+当天改成用 `_GatedLLM` 之后):**9 / 17 与 2 / 24 一位没动**。这一句不是凑数 ——
+**这三个数是在一份已经不存在的文件上量的**,而它们旁边没有任何一处会因为文件变了而变红,
+所以改这个文件的人有义务顺手复量一次。复量的两条命令写在这儿,省得下一个人自己拼:
+
+    T=$(mktemp -d) && git archive HEAD | tar -x -C $T && cp tests/test_autonomy.py $T/tests/
+    # ① 在 $T 里给 `_drain` 开头插一行 `return`  → 预期 9 failed / 17 passed
+    # ② 在 $T 里把那段 `while True: … await asyncio.wait(pending)` 换成 `pass` → 预期 2 failed / 24 passed
 """
 from __future__ import annotations
 
@@ -36,7 +45,6 @@ import concurrent.futures
 import os
 import sys
 import threading
-import time
 
 import pytest
 
@@ -46,19 +54,23 @@ A_DAY = 288
 
 
 class DecidingLLM:
-    """按脚本替她做决定,并记下**是哪条线程**在调 LLM。"""
+    """按脚本替她做决定,并记下**是哪条线程**在调 LLM。
 
-    def __init__(self, *replies: str, delay: float = 0.0) -> None:
+    ⚠️ **这里曾经有一个 `delay=` 旋钮**(`time.sleep(self.delay)`),给
+    `test_the_clock_never_waits_for_the_network` 用来"让 LLM 慢半秒,看 `tick()`
+    花了多久"。2026-08-25 连它一起拿掉了:一个"睡几秒"的旋钮就是一把挂钟,而这个
+    文件里已经有两条判据栽在挂钟上。要卡住一次调用,用下面的 `_GatedLLM` ——
+    **那一轮什么时候落地由测试说了算,不由这台机器的手速说了算。**
+    """
+
+    def __init__(self, *replies: str) -> None:
         self.replies = list(replies)
-        self.delay = delay
         self.threads: list[str] = []
         self.prompts: list[str] = []
 
     def _next(self, messages) -> str:
         self.threads.append(threading.current_thread().name)
         self.prompts.append("\n".join(m["content"] for m in messages))
-        if self.delay:
-            time.sleep(self.delay)
         return self.replies.pop(0) if self.replies else "无"
 
     async def stream(self, messages):
@@ -68,14 +80,48 @@ class DecidingLLM:
         return self._next(messages)
 
 
-def _world(tmp_path, *replies: str, delay: float = 0.0, interval: int = 1,
+class _GatedLLM:
+    """卡在一扇**由测试自己开的闸**上,而且不占着那条循环(用执行器等)。
+
+    要点是"这一轮什么时候落地由测试说了算" —— 不靠睡一个定数。满载的机器上,
+    测试线程自己也可能被饿掉半秒:那样一来"睡 0.5 秒的一轮"会在测试还没开口问
+    之前就落了地,而用得着它的那几条测试要的恰恰是"它**还没**落地"这个前提。
+    **用挂钟去搭一条证明挂钟不可信的测试,是同一个坑再踩一遍。**
+
+    ⚠️ 它原先住在文件末尾那节"判据自己也得站得住"里,只服务两条自测。
+    2026-08-25 起 `test_the_clock_never_waits_for_the_network` 也用它,
+    所以搬到这儿和 `DecidingLLM` 并排 —— **它现在是这个文件的第二种 LLM 替身,
+    不是自测的私产。**
+    """
+
+    def __init__(self, gate: threading.Event) -> None:
+        self._gate = gate
+        self.entered = threading.Event()   # 这一轮真的起来了(前提,不是结论)
+        self.threads: list[str] = []
+
+    async def complete(self, messages) -> str:
+        self.entered.set()
+        # `wait` 必须有上界:测试万一提前红了,闸就再没人开 —— 而执行器线程挂在
+        # 那儿的话,解释器退出时 `concurrent.futures` 的 atexit 会去 join 它,
+        # 于是 pytest 跑完了却不退出(一次真的挂死,就是这么来的)。
+        # ⚠️ **这个数不参与任何判断**:它到点只是把这条调用放走,而每条用到它的
+        # 测试都在"这次调用做完了没有"这个**事实**上下结论,不在秒数上。
+        await asyncio.get_running_loop().run_in_executor(None, self._gate.wait, 60)
+        self.threads.append(threading.current_thread().name)
+        return "无"
+
+    async def stream(self, messages):
+        yield await self.complete(messages)
+
+
+def _world(tmp_path, *replies: str, interval: int = 1,
            enabled: bool = True, agents: int = 1) -> tuple[World, DecidingLLM]:
     """默认**一个角色**的世界:脚本化的回复是全局按调用顺序弹出的一个列表,
     多角色时哪句话落在谁身上取决于处理顺序 —— 单角色让每条测试的断言不用猜顺序。
     需要验证"每个角色各自有自己的额度"这类跨角色行为时显式传 `agents=3`。
     """
     world = open_world_at(str(tmp_path / "w.db"), agents=agents, force_mock_llm=True)
-    llm = DecidingLLM(*replies, delay=delay)
+    llm = DecidingLLM(*replies)
     world.chat_service._background_llm = llm
     world.config_set("chat.tools.enabled", True)
     world.config_set("autonomy.enabled", enabled)
@@ -199,20 +245,50 @@ def test_she_comes_looking_for_you_on_her_own(tmp_path):
 def test_the_clock_never_waits_for_the_network(tmp_path):
     """引擎最老的一条不变量。加挂钩最容易破的就是它。
 
-    LLM 调用故意慢半秒:`tick()` 必须立刻返回,而且那次调用必须发生在**别的线程**上。
+    判据是一个**事实**,不是一个秒数:把那次 LLM 调用卡在一扇只有测试开得了的闸上,
+    于是"时钟等没等网络"变成一个问得出来的问题 ——
+    **`tick()` 回来的那一刻,那次调用做完了没有?**
+
+    - 没做完(健康):时钟先回来了,网络还在别的线程上挂着。
+    - 做完了(破了):它只可能是被那次调用本身放回来的 —— 要么调用就发生在
+      tick 线程上,要么 tick 在等那一轮的结果。两种都是"时钟等了网络"。
+
+    ⚠️ **这里原先是 `assert elapsed < 0.2`**(让 LLM 睡 0.5 秒,量 `tick()` 花了多久)。
+    它和同一个文件里已经修掉的 `_settle` 5 秒挂钟是同族,而且更险:红出来的原话是
+    「tick 被 LLM 拖住了(0.31s)」—— **一句在指控引擎的话**,而真相多半是这台机器
+    那 0.3 秒没排上 CPU。下一个看见它红的人多半在 CI 上,没有第二台机器可以复核。
+    (2026-08-25 改。`_GatedLLM` 里那个 60 秒上界只防挂死:它到点只是把调用放走,
+    **不参与判断** —— 判断读的是 `llm.threads` 这个列表空不空。)
     """
-    world, llm = _world(tmp_path, "无", delay=0.5)
-    with world:
+    gate = threading.Event()
+    world, _ = _world(tmp_path, "无")
+    llm = _GatedLLM(gate)
+    try:
+        world.chat_service._background_llm = llm
         _seat_player(world)
 
         ticking = threading.current_thread().name
-        started = time.monotonic()
         world.tick(1)
-        elapsed = time.monotonic() - started
+        finished_when_the_clock_came_back = list(llm.threads)
 
-        assert elapsed < 0.2, f"tick 被 LLM 拖住了({elapsed:.2f}s)"
+        assert not finished_when_the_clock_came_back, (
+            "`tick()` 回来的时候,那次 LLM 调用**已经做完了** —— 而它卡在一扇"
+            f"测试还没开的闸上,所以只能是时钟自己等到了它:{finished_when_the_clock_came_back}"
+        )
+
+        # 前提(不是结论):那一轮真的起来了,所以上面那句"还没做完"不是句空话。
+        assert llm.entered.wait(_ROUND_GUARD_SECONDS), (
+            f"这一轮 {_ROUND_GUARD_SECONDS:g} 秒都没排上那条循环。**这不是引擎的结论** ——"
+            "要么这台机器太忙(调大 ANIMA_TEST_ROUND_GUARD 再看一次),要么那条循环死锁了"
+        )
+
+        gate.set()
         _drain(world)
-        assert llm.threads and all(name != ticking for name in llm.threads), llm.threads
+        assert llm.threads, "闸开了,那次调用却始终没做完 —— 上面那条断言因此什么都没证"
+        assert all(name != ticking for name in llm.threads), llm.threads
+    finally:
+        gate.set()
+        world.close()
 
 
 def test_doing_nothing_is_the_default_and_leaves_no_trace(tmp_path):
@@ -681,33 +757,10 @@ def test_a_failure_keeps_its_own_line_after_later_rounds_go_quiet(tmp_path):
 # 并行跑那趟,`test_a_broken_decision_call_never_takes_down_the_clock` FAILED,而
 # 同一份代码单跑 0.17 秒绿、整文件 24 项绿、独占重跑全绿 —— 红的是判据,不是代码。
 # **而一条抗故障用例失败,和真的把时钟拖垮,在屏幕上逐字相同。**
-
-
-class _GatedLLM:
-    """卡在一扇**由测试自己开的闸**上,而且不占着那条循环(用执行器等)。
-
-    要点是"这一轮什么时候落地由测试说了算" —— 不靠 `delay=` 睡一个定数。
-    满载的机器上,测试线程自己也可能被饿掉半秒:那样一来"睡 0.5 秒的一轮"会在
-    测试还没开口问之前就落了地,而这两条测试要的恰恰是"它还没落地"这个前提。
-    **用挂钟去搭一条证明挂钟不可信的测试,是同一个坑再踩一遍。**
-    """
-
-    def __init__(self, gate: threading.Event) -> None:
-        self._gate = gate
-        self.entered = threading.Event()   # 这一轮真的起来了(前提,不是结论)
-        self.threads: list[str] = []
-
-    async def complete(self, messages) -> str:
-        self.entered.set()
-        # `wait` 必须有上界:测试万一提前红了,闸就再没人开 —— 而执行器线程挂在
-        # 那儿的话,解释器退出时 `concurrent.futures` 的 atexit 会去 join 它,
-        # 于是 pytest 跑完了却不退出(一次真的挂死,就是这么来的)。
-        await asyncio.get_running_loop().run_in_executor(None, self._gate.wait, 60)
-        self.threads.append(threading.current_thread().name)
-        return "无"
-
-    async def stream(self, messages):
-        yield await self.complete(messages)
+#
+# ⚠️ 这两条用的 `_GatedLLM` **搬到文件开头去了**(和 `DecidingLLM` 并排):
+# 2026-08-25 同日 `test_the_clock_never_waits_for_the_network` 也改成用它,
+# 于是它不再是这一节的私产。
 
 
 def test_settling_waits_for_the_round_to_land_not_for_a_number(tmp_path):
