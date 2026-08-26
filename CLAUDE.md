@@ -124,7 +124,12 @@ pip install -e ".[dev]"
 #   `.venv/bin/pip show anima-world | sed -n 2p` 与 `.venv/bin/anima-world --version`
 
 python3.13 -m pytest -q               # fakeredis,无需真 Redis;addopts 已屏蔽 ROS 插件
-# 最近一次实跑:**1872 passed / 19 skipped**(2026-08-26,插件系统第 0 期那一轮,rc=0 ——
+# 最近一次实跑:**1906 passed / 19 skipped**(2026-08-26,插件系统第 1 期收尾,rc=0,
+#   390 秒;起跑 `uptime` load **3.27**、收尾未量。上一趟是 **1872 / 19**(同日,第 0 期)。
+#   这 **+34** 是插件系统那两半的判据(`test_plugins.py` 24 · 需求搬家的逐位闸 5 · 其余散在
+#   needs / world_rules / startup 几处)。⚠️ 照旧**不是独占跑的**。
+#   (下面这一段是第 0 期那一趟的记录,留着当秒数那条教训的标本。)
+# 上上趟:**1872 passed / 19 skipped**(2026-08-26,插件系统第 0 期那一轮,rc=0 ——
 #   起跑 `uptime` load **3.77**、收尾 **6.04**,347 秒。⚠️ **它同样不是独占的**:
 #   机器上照旧挂着那个 204% CPU 的活和一个 85% 的世界容器(`ps -eo pcpu` 现看的),
 #   只是这一趟起跑时的排队比上一趟浅一半 —— **所以 342 秒和 347 秒这两个数之间
