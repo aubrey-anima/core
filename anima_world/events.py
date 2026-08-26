@@ -127,7 +127,10 @@ SUBSCRIBABLE_EVENTS: dict[str, dict[str, object]] = {
         "numbers": ["minutes", "arrive_at"],
         "parties": ["player_id"],
         "note": "`arrive_at` 是**到达的那个 tick**,不是时长。在途的人"
-                "**不在任何地方** —— 「他现在在哪」在这两个 tick 之间是没有答案的",
+                "**不在任何地方** —— 「他现在在哪」在这两个 tick 之间是没有答案的。"
+                "⚠️ **`player_id` 只有玩家那条路带**(`api.py` 那处);角色出发那条"
+                "(`scheduler.py` 那处)没有这一格 —— **缺席 = 出发的是角色**,"
+                "而她是谁在事件顶层的 `who` 上(和 `item_consume.qty` 同一种读法)",
     },
     "agent_join": {
         "gloss": "一个角色进了这个世界(创世的那批 `ts=0`,后来的是节拍或宿主加的)",

@@ -116,6 +116,12 @@ Python 侧的对外接口是 `anima_world/api.py` 的 `World` 门面(加上 CLI)
 
 ```bash
 pip install -e ".[dev]"
+# ⚠️ **`pip show anima-world` 的版本号是 editable 那份 dist-info 的快照,不是代码。**
+#   2026-08-26 验收 C 在这个 venv 上量到它答 `3.0.0`,而 `anima_world.__version__`
+#   是 3.8.0 —— 陈的是元数据,承重的是后者(platform 的互验自己就印这句话)。
+#   引擎不读它,**但人眼会**,而"版本号"正是这个仓库最不该有两个答案的东西。
+#   改过 `__version__` 就顺手 `pip install -e .` 刷一次;判据是这两个数相等:
+#   `.venv/bin/pip show anima-world | sed -n 2p` 与 `.venv/bin/anima-world --version`
 
 python3.13 -m pytest -q               # fakeredis,无需真 Redis;addopts 已屏蔽 ROS 插件
 # 最近一次实跑:**1872 passed / 19 skipped**(2026-08-26,插件系统第 0 期那一轮,rc=0 ——

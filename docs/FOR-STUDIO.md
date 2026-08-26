@@ -3530,8 +3530,8 @@ $ redis-cli --scan --pattern 'anima:*:stock:agent:player:*' | wc -l
 
 | 留下的 | 后果 |
 |---|---|
-| `:stocks` 里那个值 | 留着;规律不再更新它 |
-| `:stock_visibility` 里那一行 | 留着,**顶着旧 label 与旧分档继续进提示词** —— `perception` 读的是 stocks ∩ visibility,**它不问 `:kinds`** |
+| `stock:<owner>` 里那个值(**真键就叫这个**,没有一个叫 `:stocks` 的 hash) | 留着;规律不再更新它 |
+| `:visibility` 里那一行(**真键就叫这个** —— 作者层那个段才叫 `stock_visibility`) | 留着,**顶着旧 label 与旧分档继续进提示词** —— `perception` 读的是 stocks ∩ visibility,**它不问 `:kinds`** |
 
 **同一份文件里写两条同 id 的 `kind` 会当场报错,所以这件事只可能跨两次开机发生** ——
 也就是说,它必然安静:作者在工作台上看到的声明里没有那个量,而她的提示词里有。
@@ -3583,7 +3583,7 @@ $ anima-world contract --json | jq '.config["scheduler.max_agents"]'
 }
 ```
 
-顶层十二段,`config` 是新的那一段,66 个键逐键一行。
+顶层**十三**段(`operation` / `engine_version` / `storage` / `chat_tools` / **`config`** / **`plugins`** / `package` / `report` / `seed` / `character_card` / `erasure` / `invitations` / `beats`),`config` 与 `plugins` 是这一版新的两段,66 个配置键逐键一行。**要现看就敲 `anima-world contract --json | jq 'keys'`** —— 照文档抄清单,抄漏一段的样子是读它的人以为那一段不存在。
 
 ### ✅ 你们那条"它一报出来就自动优先"是真的 —— 我替你们敲过了
 

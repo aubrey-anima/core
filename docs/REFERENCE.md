@@ -2185,8 +2185,8 @@ world.answer_invitation("p1", invite_seq, True)    # 他自己按下的那一下
 
 | 留下的 | 后果 |
 |---|---|
-| `:stocks` 里那个值 | 留着;规律不再更新它 |
-| `:stock_visibility` 里那一行 | 留着,**继续进提示词**,顶着旧 label 与旧分档 —— `perception` 读的是 stocks ∩ visibility 的交集,**它不问 `:kinds`** |
+| `stock:<owner>` 里那个值(**真键就叫这个**,没有一个叫 `:stocks` 的 hash) | 留着;规律不再更新它 |
+| `:visibility` 里那一行(**真键就叫这个** —— 作者层那个段才叫 `stock_visibility`) | 留着,**继续进提示词**,顶着旧 label 与旧分档 —— `perception` 读的是 stocks ∩ visibility 的交集,**它不问 `:kinds`** |
 | `world_rules` 里引用它的规律 | 非内置种类会**当场开不了机**(`resolve` 的量名闸);而 `agent` 与 `action`/`not_action` 选择器那几条**那道闸够不着**,照旧安静地跑 |
 
 同一份文件里写两条同 id 的 `kind` 会当场报错,所以这件事**只可能跨两次开机发生** ——
@@ -4300,9 +4300,12 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 ```
 
 **不连 Redis、不建世界**(跑不了世界也要答得出,和 `world inspect` 同一类)。
-顶层十二段:`engine_version` · `storage` · `chat_tools` · **`config`** · `package` ·
-`report` · `seed` · `character_card` · `erasure` · `invitations` · `beats` ·
-`operation`。
+顶层**十三**段:`operation` · `engine_version` · `storage` · `chat_tools` ·
+**`config`** · **`plugins`** · `package` · `report` · `seed` · `character_card` ·
+`erasure` · `invitations` · `beats`。
+⚠️ **这份清单是"顶层有什么"的权威**,照它写探测器 —— 上一版漏了 `plugins`
+(2026-08-26 验收 C 挑的),而一份漏了一段的清单会让读它的人以为那一段不存在。
+判据敲得动:`anima-world contract --json | jq 'keys'`。
 
 ⚠️ **消费方按段/格在不在做能力探测,别比版本号**(全员纪律)。
 **新加的格在老引擎上是「缺席」,不是 `null`** —— 一律
