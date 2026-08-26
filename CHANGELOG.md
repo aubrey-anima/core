@@ -67,11 +67,11 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
-## [3.8.0] —— 插件系统第 0 期:先把三件今天就错着的补上 (2026-08-26)
+## [3.8.0] —— 插件系统第 0 期:先把今天就错着的那几件补上 (2026-08-26)
 
 任务单 `docs/任务单/2026-08-26-插件系统-第0期.md`,设计稿 `docs/设计-插件系统.md` §10 第 0 期。
 **这一期不加任何新的作者记录类型**(`type:"plugin"` 是第 1 期),做的是三件"插件系统
-迟早要踩、而今天就已经错着"的事,外加一张下游要订的表。
+迟早要踩、而今天就已经错着"的事,外加一张第 1 期的触发器要订的表。
 
 ⚠️ **为什么抬到 3.8.0 而不是挂在 `[Unreleased]` 下面**:`3.7.0` 2026-08-26 **真的上了
 PyPI**,而这一轮往 `contract --json` 里加了两段、往抹除回执里加了一格。不抬版号的话,
