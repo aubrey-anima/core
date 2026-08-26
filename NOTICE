@@ -7,5 +7,12 @@ Licensed under the GNU Affero General Public License, version 3 or later
 (AGPL-3.0-or-later). You should have received a copy of the license in the
 LICENSE file; if not, see <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-Releases up to and including 1.3.0 were published under the Apache License 2.0
-and remain available under that license.
+Releases up to and including 1.4.0 were published under the Apache License 2.0
+and remain available under that license. 1.4.0 (2026-08-04) is the last of them:
+everything from 2.0 onwards is AGPL-3.0-or-later, and 3.7.0 is the first such
+release to reach PyPI — 2.0.0 through 3.6.0 never left the building.
+
+(This sentence said "1.3.0" until 2026-08-26. It was off by one, and the version
+it was off by is the one users actually get from `pip install anima-world`. The
+same off-by-one was corrected in README / CLAUDE.md / docs/FOR-STUDIO.md on
+2026-08-19; this file — the only one that ships inside the package — was missed.)

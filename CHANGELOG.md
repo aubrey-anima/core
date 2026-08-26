@@ -23,10 +23,14 @@ must still mount — if it refused, the change wasn't additive and belongs in a 
 spot rather than silently written to.
 
 ⚠️ **A released heading here does not mean a released artifact.** 3.4.0 through 3.6.0 were
-never tagged and never went to PyPI — they ship as container images only, so the newest
-thing on the index is still **1.4.0** (Apache-2.0, 2026-08-04). A section under a version
-heading means "this version's engine, as built from this repo"; whether that build ever
-left the building is a separate question, answered in `CLAUDE.md` §当前状态.
+never tagged and never went to PyPI — they shipped as container images only. **3.7.0 is the
+first version since 1.4.0 meant to actually reach the index** (2026-08-26, decision D2), and
+therefore the first AGPL-3.0-or-later release: everything on PyPI up to and including 1.4.0
+is Apache-2.0. ⚠️ **The tag is the trigger, and this file is written before it is pulled** —
+until `v3.7.0` is pushed, the newest thing on the index is still **1.4.0** (2026-08-04).
+A section under a version heading means "this version's engine, as built from this repo";
+whether that build ever left the building is a separate question, answered in
+`CLAUDE.md` §当前状态.
 A change parked under `[Unreleased]` used to be forbidden here — the rationale being that
 it is a change that already shipped while telling the reader it hadn't (see 第五轮 below,
 which is where that particular lie got caught). ⚠️ **2026-08-25 更正:那句禁令和这份文件
@@ -34,7 +38,10 @@ which is where that particular lie got caught). ⚠️ **2026-08-25 更正:那�
 还写着"这里刻意没有 `[Unreleased]`"。**留着两句打架的话,比两句里哪一句都糟**:下一个人
 按这一段去找,会在版本标题下面找一个根本不在那儿的条目。现在的规矩是那一单实际在用的:
 **没有版本号可挂的改动**(这一轮改的全是判据与文档,`anima_world/` 一个字节没动,
-`__version__` 一格没抬)进 `[Unreleased]`,**定版时整段并进那个版本标题**;
+`__version__` 一格没抬)进 `[Unreleased]`,**定版时整段并进那个版本标题**
+(⚠️ **2026-08-26 这条规矩第一次真的被执行了**:发 3.7.0 时那一段整个并进了
+`## [3.7.0]` 底下的「发版前那一轮」,所以**此刻这份文件里没有 `[Unreleased]`**
+—— 上面那句"下面开了一个"讲的是 08-25 到 08-26 之间那一段时间);
 禁令原本要挡的那件事由另一句话挡住 —— 见下面那两段:**版本标题说的是这个仓库有什么,
 从来不是你的镜像有什么。**
 
@@ -60,188 +67,7 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
-## [Unreleased] —— 两条会替引擎认罪的判据,以及一笔迟到三周的回执 (2026-08-25)
-
-清欠账那一单(`../../docs/任务单/2026-08-25-清欠账.md` —— ⚠️ **任务单住在调度台目录,不在本仓**;
-上面 3.7.0 那一节把它写成 `docs/任务单/…`,照那条 `ls` 会一无所获)。**没有一行引擎代码改动**:
-这一版动的全是**判据**与**回执** —— 而这两样烂掉的样子,恰恰是这个仓库最怕的
-"照跑但给错东西"的文档版与测试版。
-
-### Fixed —— 判据自己在撒谎(两处,都不是引擎的病)
-
-- **`tests/test_autonomy.py` 那 24 条共用的 `_settle()`,判据是一个 5 秒挂钟。**
-  2026-08-25 四仓测试并行跑那趟,`test_a_broken_decision_call_never_takes_down_the_clock`
-  FAILED,而同一份代码单跑 0.17 秒绿、整文件绿、独占重跑全绿。到点就返回一个**还没
-  落地**的空 `predicate()`,于是红出来的是**调用方自己的断言**——「定时轮次没走通」。
-  **它红出来的样子和真的把时钟拖垮逐字相同**,而下一个看见它红的人多半在 CI 上,
-  没有第二台机器可以复核。现在按事件等:`_drain()` 往世界自己那条循环上再投一个协程,
-  等掉它眼前排着的 task(`tick(n)` 是同步的,返回时那 n 轮已经全排上了)。
-  `timeout` 参数一并删掉 —— 留一个能调的秒数,等于把"等够了"重新变成判据。
-  剩下的那个数只当**兜底闸门**(`ANIMA_TEST_ROUND_GUARD`,默认 60 秒),而且
-  **跳了就当场说清是这台机器,不给结论**。
-- **同族的另一处**:`test_she_can_act_on_the_world_and_not_only_on_people` 默认
-  `interval=1`,第一个 tick 就起一轮、当场用掉那句脚本化的回复并把树照料了,
-  而"照料之前的读数"取在它后面 —— `树高 > before` 靠的是一场竞赛。改成 `interval=2`。
-  判据(同机、40 路 busy loop 满载、整文件各 6 趟):**改前 6 趟里 2 趟红**
-  (`assert 3.254 > 3.254`)、13–17 秒;**改后 6 趟全绿**、5–9 秒。
-- **同一个文件里剩下的最后一处真挂钟(同日第二轮补掉)**:
-  `test_the_clock_never_waits_for_the_network` 的 `assert elapsed < 0.2`
-  —— 让 LLM 睡 0.5 秒,量 `tick()` 花了多久。上一轮量到"现敲有余量、load 20.5 下连跑
-  6 趟全绿"就放过了它,**而余量不是判据**:它和上面那条同族,**红出来的原话是
-  「tick 被 LLM 拖住了(0.31s)」—— 一句在指控引擎的话**,真相多半是这台机器那 0.3 秒
-  没排上 CPU。现在判据是一个**事实**:把那次调用卡在一扇只有测试开得了的闸上,问
-  **`tick()` 回来的那一刻,那次调用做完了没有**。没做完 = 时钟先回来了;做完了 = 它
-  只可能是被那次调用本身放回来的。三条判据:① 兜底闸门 `ANIMA_TEST_ROUND_GUARD`
-  从 1 拧到 600(600 倍)—— 两趟都 **26 passed**(改之前那个 `0.2` 就是答案本身:
-  在 `git archive HEAD` 的临时树上把它拧成 `0.0`、**引擎一个字不碰** → 当场 **1 failed**);
-  ② 反向突变 —— 在临时树上给 `_on_autonomy_due` 的 `future` 加一句 `.result()`
-  (= 时钟真的在那儿等网络)→ 当场 **1 failed**,而且报的是
-  「`tick()` 回来的时候,那次 LLM 调用**已经做完了**……:['anima-chat-loop']」,
-  指着的是对的东西;③ `grep -n '^import time' tests/test_autonomy.py` → **0 行**
-  (`DecidingLLM` 的 `delay=` 旋钮一并删掉 —— **一个"睡几秒"的旋钮就是一把挂钟**,
-  留着就是给下一条测试留一个坑)。`_GatedLLM` 从文件末尾那节自测里搬到开头,
-  和 `DecidingLLM` 并排:它现在是这个文件的第二种 LLM 替身,不再是自测的私产。
-  ⚠️ 顺手复量了文件头那三个 `_drain` 的数(它们是在一份已经不存在的文件上量的,
-  而没有一处会因为文件变了而变红):**9 / 17 与 2 / 24 一位没动**,复量命令写进了文件头。
-
-### Docs —— `docs/ARCHITECTURE.md` 逐节核过一遍,盖十个章而不是一个数
-
-上一轮只把那句假的版本戳(「对应引擎版本 1.0.0(db 格式 1)」)**拿掉了没盖新的**,
-理由是"没逐节核过就盖,等于把一句烂话换成一句新的烂话"。这一轮把那件事做完了 ——
-而**核完发现"盖一个数"本身就是错的做法**:十节漂的距离差着两个数量级,
-§10 整节是 1.0.0 的病历,§4 停在 1.x 的 6 步帧,而 §2 的道理一个字都没错。
-所以抬头换成一张**逐节盖章表**:一节一个日期、**一条敲得动的判据**。
-
-逐节的处置(全部现敲复核过):
-
-- **§1**:那段示例 `World.open("saves/world.db")` —— **照着敲会当场报错**。换成今天真跑得动的
-  三行,并把实跑输出贴上(⚠️ `tick` 那一格是 **462** 不是 288:创世把时钟拨到了
-  `world.start_time`,而 `tick(n)` 是**再推 n 下** —— 两个数看上去都很像对的)。
-- **§2**:道理一个字没动,**衬底从 SQL 表名换成 Redis 键**;补上第二条分家线
-  (`mysql=` 的四样)与"她带不带得进上下文"那条可验的判据。
-- **§3**:线程形态**重新实测** —— 多了一条 `anima-chat-loop`(`open` 就起,聊天/自主/contact
-  全跑在它上面)。🔴 更要紧的是**第 1 条硬约束今天整个反过来了**:上一版写"一个运行中的
-  世界**独占**它的 `world.db`",而今天世界住 Redis、**很多进程可以同时驱动它**
-  (`RedisLock`)。代价换了形状没有消失,换成了投影水位那条。
-- **§4**:一帧从 **6 步**改成今天的 **15 步**(规律、长过程收尾、邀请结算、自主、contact、
-  量与位置各自的结算全是 2.0 之后长出来的),每一步为什么排在那儿也一并写清。
-  日切那一节补上"固化与衰减是 if/else 不是两段都跑"。
-- **§5**:三个池仍然对,但**漏了第五个执行体**,而 2.0 之后最要紧的几件事都跑在它上面。
-- **§6**:原先只有"需求带 + 作者的树"。补上 2.0 之后的三层(本体与四种代价、感知、
-  自主轮次)和"拒绝是四类不是一类"。
-- **§7**:地图上画着 `db.py` 与 `graph.py`,**两个文件今天都不存在**;契约那张表补上
-  `world_file.py`、注明 `lib/worldSeed.js` 已删。
-- **§8**:🔴 **九条不变量里四条讲的是已经不存在的东西**(Fernet 密钥随 db 搬迁、
-  `executescript()` 的事务、`DB_FORMAT_VERSION` 联锁、`world_seed.json` 是唯一 package data)。
-  **一份写着四条作废不变量的"关键不变量"清单,比没有这一节更坏。** 这一节因此不再列清单
-  —— 病根不是那四条写错了,是**它从一开始就是 `CLAUDE.md` 的一份镜像**,而镜像必然、
-  且安静地烂掉。现在只留指路牌 + 三条"属于为什么而不属于是什么"的。
-- **§9**:图里的 `world.db` 换成 Redis;"协作只有两种"补一句 —— 系统里**确实有 HTTP**,
-  只是它不在引擎里(读的人会照那句话去世界容器上找门)。
-- **§10**:🔴 **有意保持原样,并在抬头钉死它是 1.0.0 的病历。** 删掉等于把"当初为什么
-  这么做"一起删了;而那几笔债的形状在 Redis 上一样会长出来 —— 投影那一笔**真的又长了一次**,
-  已就地接上今天的判据(`tests/test_cross_process_projection.py`)。"还欠的"四条逐条现敲复核,
-  **四条今天仍然成立**,其中"经济没有劳动"那条只剩一半(工资 2.0 之后按真上过班的 tick 数发)。
-
-🔴 **顺带交代一条这份文档特有的、会咬人的事实**:`tests/test_reference_docs.py`
-**只读 `REFERENCE.md` 与 `FOR-STUDIO.md`**(判据 `git grep -n '_DOCS_DIR /' tests/test_reference_docs.py`
-→ 两行),所以 ARCHITECTURE 上**没有任何一道闸** —— 在这里写一个不存在的符号名、
-画一个删掉的模块,测试一条都不会红。`db.py` 就是这么在地图上多画了半年的。
-那张逐节盖章表是这道缺失的闸的**替代品**:它不会自己变红,但它给了下一个人一条一条去敲的路。
-
-### Added —— 一道此前完全不存在的闸
-
-- **`test_every_declared_config_key_is_documented`**:`config_store._DEFAULTS` 里的
-  每个键都必须在 `docs/REFERENCE.md` 里出现过。**加上它当场红**,红的正是下面那一个键。
-  公开方法早有闸(`test_every_public_method_is_documented`),**配置键此前一条都没有**
-  —— 而配置键恰恰是运营与作者唯一够得着的那一面。
-
-### Docs —— 回执(库里有而对方看不见,等于没有)
-
-- **`scheduler.max_agents` 补上了迟到三周的回执。** 能力 **2.0 就交付了**(`3254f36`,
-  **写代码是 2026-08-05(`3254f36`),发出去是 2026-08-06 的 2.0.0 定版(`655988b`)** ——
-  第一版把这两个日子写成了一个,判据 `git log --no-walk --date=short --format='%h %ad %s' 3254f36 655988b`):`int`、默认 100、**`0` = 不限**、报错里带着
-  `config set scheduler.max_agents N` 的解法。而到 2026-08-25 为止,REFERENCE 零行、
-  FOR-STUDIO 零行、CHANGELOG 零行、issue #19 还开着 —— 一个照文档判断"这引擎有没有
-  人数上限"的人,三周里拿到的答案是"没有这回事"。现在 REFERENCE 配置表有它,
-  FOR-STUDIO 新增 §3.31 逐条对账那份诉求。
-  ⚠️ **实测补一条你们会关心的**:这个数**进不进包取决于有没有人动过它** ——
-  没人动过就一个字都没有(创世不播引擎默认值),在那个世界上 `config set` 过就住进
-  `:config`、**跟着导出的包走**(实测 `zcat pkg | grep -c max_agents` → `1` 对 `0`)。
-- **FOR-STUDIO §5「已知的洞」整表复核。** 四行把「排 1.4.0」当排期写,而 1.4.0 是
-  2026-08-04 发出去的那一版,那个里程碑再也不会到来。⚠️ 这不是一句假承诺,是
-  **一个已经不存在的坐标系里的真承诺** —— 更难发现,因为字面上没有一处错。
-  逐行换成今天的实况并带上复核日期与敲得动的判据:autonomy 统计 / 感知 / 东西身上的量
-  三格**已经到了**(`doctor` / `prompt --json` 的 `perception` 块 / `ontology --json`
-  的 `values`);`rule_stats` 与**她身上的**量仍然没有 CLI 出口;「挖矿让矿脉减少」
-  2.0 起用**能力**写得出来,欠的是**规律层的扇入**。
-- **GitHub issue 清账(2026-08-25 真的关了,判据 `gh issue list --state open` → 只剩 #8)。**
-  六个"做完没关"的:**#19** 人数上限(2.0 `3254f36`)· **#13** 角色会来找你
-  (1.2.0 访客模型 → 3.2.0 在场进 Redis → 3.6.0 邀请门)· **#15/#16/#17/#18**
-  chat-agent 四条(1.3.0,四个开关默认关)。每个 issue 上留一条**关掉之前**写的对账:
-  落在哪一版、怎么开、判据是哪条命令,以及**它和 issue 原文差在哪儿**
-  —— #15/#16/#18 都写着"每轮发一个事件",而那条被有意否决了(理由在本文件 1.3.0 末尾
-  「一处对 issue 文本的偏离(有意)」),观测量落在 `messages` 行上;#15 还差在
-  不走 OpenAI 原生 `tools=`(没有 key 是默认状态)。**#8 是真 open,一个字没动**
-  —— 它问的是"下一个主版本落地时,已有的世界怎么办",那是一条**还没有答案的政策**,
-  不是一件做完没关的事。
-  🔴 **这一条自己就是一次现场教训,记在这儿**:上一轮写下这段话的人**先把账记好了**
-  ——「六个关掉」这句话写进 CHANGELOG 躺在工作树上等着被提交,而那一刻**七个 issue
-  一个都没关**。一句说得比做到的宽的话,而且它不会有任何一处报错:CHANGELOG 里
-  没有闸,`git status` 只说这个文件改了。**判据必须是敲得出来的那一条**,
-  写在句子里的"已经关掉"从来不是判据。
-
-### 第二轮(修复轮,2026-08-25)—— 上面那道新闸,自己就是它要挡的那种假话
-
-这一轮同样**没有一行引擎代码改动**。三条都是验收拿探针量出来的,不是读代码推的。
-
-- 🔴 **`test_every_declared_config_key_is_documented` 会被一个提示词模板名满足。**
-  第一版的判据是"这个键在 REFERENCE 里被反引号包着出现过",而 REFERENCE 里反引号
-  token 有 **1017** 个、带点的 **239** 个,其中只有 66 个是配置键 —— 剩下 **173** 个
-  带点 token 里,`prompt_store._SAMPLE_VARS` 那 36 个**提示词模板名**占了 28 个,
-  而 `contact.compose`(模板)与 `contact.compose.enabled`(配置)正好同族。
-  **这是现实的洞,不是理论的**:验收探针往 `_DEFAULTS` 里塞一个很像会有的开关
-  `chat.intent_classifier`,这道闸答 **1 passed** —— 满足它的那个反引号,
-  说的是一条提示词模板的名字,和"这个世界有没有这个开关"一个字都不相干。
-  **又一次:证据成立,而它证的不是你以为的那句话** —— 而这一次犯的人,
-  正是上面那一段刚写完"配置键此前一条闸都没有"的同一个人。
-  现在判据是**"配置表上有它自己那一行"**;家在正文的那一个
-  (`economy.player_allowance`,进表会把那整段 ⚠️ 说明拆散)走一张**列得出名字**的
-  例外表,而那张表**自己也上了闸**:名字不再是真配置键就红(防它比代码老)、
-  键在正文里一个字都没有也红(例外表放行的是"不进表",不是"不写")。
-  判据自己也钉了一条自测:`test_the_config_key_gate_is_not_satisfied_by_a_prompt_template_name`。
-  **两个方向都敲过**:同一个假开关,`git show HEAD:tests/test_reference_docs.py` 那版
-  **1 passed**、新版 **FAILED**(报文点名 `chat.intent_classifier`);
-  66 个真键 **65 个走表格行、1 个走例外表**,整个文件 **10 passed**。
-- **`_settle(world, predicate)` 的返回值,24 个调用点里 20 个丢掉了。**
-  谓词只求值一次、**不参与任何判断**,等待全在 `_drain` 里 —— 于是
-  `_settle(world, lambda: world.autonomy_stats()["failed"])` 读起来像"等到 failed 非零",
-  实际什么都不把,还挡在真正的 `assert` 前面替它顶了个名。
-  **一条看起来在把关、其实什么都不把的判据,出现了 20 次。**
-  那 20 处改成直呼 `_drain(world)`(等待一个字没少,少的只是那句假话),
-  其中 3 处连 `_drain` 都是多余的(循环体最后一句就是它)——直接删。
-  `_settle` 只留给**返回值真的被用上**的调用点,现在 5 处。整文件 **26 passed**。
-- **`tests/test_autonomy.py` 文件头写下 `_drain` 的射程,因为"全绿"证的不是那句话。**
-  验收量出 barrier 第一眼看见的 `pending` **每一次都是 0**(我复现:26 条里 24 条调过
-  `_drain`,其中 22 条引擎测试的每一次调用都是 0,只有那两条判据自测量到 1),
-  据此判"barrier 什么都没等"。**前半句我复现了,后半句我核伪了**:`_drain` 是两半,
-  ① 一次循环往返(顺带让排在前面的回调跑完)、② 到了那边再等掉眼前排着的 task。
-  把 `_drain` 整个改成 `return` → **9 failed / 17 passed**(所以 ① **承重**,
-  7 条引擎测试真的靠它);只把 ② 那段 `while pending: await asyncio.wait(pending)`
-  换成 `pass` → **2 failed / 24 passed**,红的正是那两条判据自测(所以 ② 在那 22 条
-  引擎测试上**一次都没走过**)。两句话都写进了文件头:**别说 barrier 没等**,
-  也**别拿"引擎那些测试还是绿的"当 `_drain` 的验收**。
-- **`test_packaging.py` 里那条"先严后松"的中间档,在这台机器上是死的。**
-  `.venv/bin/python -c "import setuptools"` 是 `ModuleNotFoundError`,于是
-  `--no-isolation` 一开口就是 `BackendUnavailable`,连 `Building sdist` 都到不了 ——
-  **真实行为是"联网就 pass、断网就 skip",没有中间档**。那一档留着仍然对
-  (换一台装了 setuptools 的机器它就活),但**它此刻没被任何一次运行证过**,
-  docstring 里照实说了。把"我写了一条退路"当成"这条退路走得通",是同一族的第三种。
-- **本文件抬头那句"这里刻意没有 `[Unreleased]`",和它下面那个 `[Unreleased]` 打了一整轮架。**
-  已改成这一单实际在用的规矩(见抬头)。**两句打架的话比其中任何一句都糟** ——
-  它不会红,只会让下一个人在版本标题下面找一个不在那儿的条目。
-
-## [3.7.0] —— 同一件事,一把尺一句话 (2026-08-21)
+## [3.7.0] —— 同一件事,一把尺一句话 (2026-08-21 定版;2026-08-26 发版前又走了两轮)
 
 排雷单(`docs/任务单/2026-08-21-排雷.md`)。**升次版号是因为行为变了**,不是因为
 加了作者层字段:`presence.enforce_colocation` 开着的世界里,"他在不在她跟前"这个
@@ -542,6 +368,231 @@ here == where:` 把「世界压根不知道她在哪」印成了「她这会儿�
 - `intent` 那扇门的回执多一格 `detail["gate"]`(只加);`reason` 多两个取值。
 - `together.GATE_LABELS` 多一行 `player_in_transit`;`COLOCATION_GATES` 五条。
 - `api._where_unknown_line()` 降成一层转发,留着名字是当病历用(见它自己的 docstring)。
+
+
+### 发版前那一轮:两条会替引擎认罪的判据,以及一笔迟到三周的回执 (2026-08-25)
+
+清欠账那一单(`../../docs/任务单/2026-08-25-清欠账.md` —— ⚠️ **任务单住在调度台目录,不在本仓**;
+上面 3.7.0 那一节把它写成 `docs/任务单/…`,照那条 `ls` 会一无所获)。**没有一行引擎代码改动**:
+这一版动的全是**判据**与**回执** —— 而这两样烂掉的样子,恰恰是这个仓库最怕的
+"照跑但给错东西"的文档版与测试版。
+
+### Fixed —— 判据自己在撒谎(两处,都不是引擎的病)
+
+- **`tests/test_autonomy.py` 那 24 条共用的 `_settle()`,判据是一个 5 秒挂钟。**
+  2026-08-25 四仓测试并行跑那趟,`test_a_broken_decision_call_never_takes_down_the_clock`
+  FAILED,而同一份代码单跑 0.17 秒绿、整文件绿、独占重跑全绿。到点就返回一个**还没
+  落地**的空 `predicate()`,于是红出来的是**调用方自己的断言**——「定时轮次没走通」。
+  **它红出来的样子和真的把时钟拖垮逐字相同**,而下一个看见它红的人多半在 CI 上,
+  没有第二台机器可以复核。现在按事件等:`_drain()` 往世界自己那条循环上再投一个协程,
+  等掉它眼前排着的 task(`tick(n)` 是同步的,返回时那 n 轮已经全排上了)。
+  `timeout` 参数一并删掉 —— 留一个能调的秒数,等于把"等够了"重新变成判据。
+  剩下的那个数只当**兜底闸门**(`ANIMA_TEST_ROUND_GUARD`,默认 60 秒),而且
+  **跳了就当场说清是这台机器,不给结论**。
+- **同族的另一处**:`test_she_can_act_on_the_world_and_not_only_on_people` 默认
+  `interval=1`,第一个 tick 就起一轮、当场用掉那句脚本化的回复并把树照料了,
+  而"照料之前的读数"取在它后面 —— `树高 > before` 靠的是一场竞赛。改成 `interval=2`。
+  判据(同机、40 路 busy loop 满载、整文件各 6 趟):**改前 6 趟里 2 趟红**
+  (`assert 3.254 > 3.254`)、13–17 秒;**改后 6 趟全绿**、5–9 秒。
+- **同一个文件里剩下的最后一处真挂钟(同日第二轮补掉)**:
+  `test_the_clock_never_waits_for_the_network` 的 `assert elapsed < 0.2`
+  —— 让 LLM 睡 0.5 秒,量 `tick()` 花了多久。上一轮量到"现敲有余量、load 20.5 下连跑
+  6 趟全绿"就放过了它,**而余量不是判据**:它和上面那条同族,**红出来的原话是
+  「tick 被 LLM 拖住了(0.31s)」—— 一句在指控引擎的话**,真相多半是这台机器那 0.3 秒
+  没排上 CPU。现在判据是一个**事实**:把那次调用卡在一扇只有测试开得了的闸上,问
+  **`tick()` 回来的那一刻,那次调用做完了没有**。没做完 = 时钟先回来了;做完了 = 它
+  只可能是被那次调用本身放回来的。三条判据:① 兜底闸门 `ANIMA_TEST_ROUND_GUARD`
+  从 1 拧到 600(600 倍)—— 两趟都 **26 passed**(改之前那个 `0.2` 就是答案本身:
+  在 `git archive HEAD` 的临时树上把它拧成 `0.0`、**引擎一个字不碰** → 当场 **1 failed**);
+  ② 反向突变 —— 在临时树上给 `_on_autonomy_due` 的 `future` 加一句 `.result()`
+  (= 时钟真的在那儿等网络)→ 当场 **1 failed**,而且报的是
+  「`tick()` 回来的时候,那次 LLM 调用**已经做完了**……:['anima-chat-loop']」,
+  指着的是对的东西;③ `grep -n '^import time' tests/test_autonomy.py` → **0 行**
+  (`DecidingLLM` 的 `delay=` 旋钮一并删掉 —— **一个"睡几秒"的旋钮就是一把挂钟**,
+  留着就是给下一条测试留一个坑)。`_GatedLLM` 从文件末尾那节自测里搬到开头,
+  和 `DecidingLLM` 并排:它现在是这个文件的第二种 LLM 替身,不再是自测的私产。
+  ⚠️ 顺手复量了文件头那三个 `_drain` 的数(它们是在一份已经不存在的文件上量的,
+  而没有一处会因为文件变了而变红):**9 / 17 与 2 / 24 一位没动**,复量命令写进了文件头。
+
+### Docs —— `docs/ARCHITECTURE.md` 逐节核过一遍,盖十个章而不是一个数
+
+上一轮只把那句假的版本戳(「对应引擎版本 1.0.0(db 格式 1)」)**拿掉了没盖新的**,
+理由是"没逐节核过就盖,等于把一句烂话换成一句新的烂话"。这一轮把那件事做完了 ——
+而**核完发现"盖一个数"本身就是错的做法**:十节漂的距离差着两个数量级,
+§10 整节是 1.0.0 的病历,§4 停在 1.x 的 6 步帧,而 §2 的道理一个字都没错。
+所以抬头换成一张**逐节盖章表**:一节一个日期、**一条敲得动的判据**。
+
+逐节的处置(全部现敲复核过):
+
+- **§1**:那段示例 `World.open("saves/world.db")` —— **照着敲会当场报错**。换成今天真跑得动的
+  三行,并把实跑输出贴上(⚠️ `tick` 那一格是 **462** 不是 288:创世把时钟拨到了
+  `world.start_time`,而 `tick(n)` 是**再推 n 下** —— 两个数看上去都很像对的)。
+- **§2**:道理一个字没动,**衬底从 SQL 表名换成 Redis 键**;补上第二条分家线
+  (`mysql=` 的四样)与"她带不带得进上下文"那条可验的判据。
+- **§3**:线程形态**重新实测** —— 多了一条 `anima-chat-loop`(`open` 就起,聊天/自主/contact
+  全跑在它上面)。🔴 更要紧的是**第 1 条硬约束今天整个反过来了**:上一版写"一个运行中的
+  世界**独占**它的 `world.db`",而今天世界住 Redis、**很多进程可以同时驱动它**
+  (`RedisLock`)。代价换了形状没有消失,换成了投影水位那条。
+- **§4**:一帧从 **6 步**改成今天的 **15 步**(规律、长过程收尾、邀请结算、自主、contact、
+  量与位置各自的结算全是 2.0 之后长出来的),每一步为什么排在那儿也一并写清。
+  日切那一节补上"固化与衰减是 if/else 不是两段都跑"。
+- **§5**:三个池仍然对,但**漏了第五个执行体**,而 2.0 之后最要紧的几件事都跑在它上面。
+- **§6**:原先只有"需求带 + 作者的树"。补上 2.0 之后的三层(本体与四种代价、感知、
+  自主轮次)和"拒绝是四类不是一类"。
+- **§7**:地图上画着 `db.py` 与 `graph.py`,**两个文件今天都不存在**;契约那张表补上
+  `world_file.py`、注明 `lib/worldSeed.js` 已删。
+- **§8**:🔴 **九条不变量里四条讲的是已经不存在的东西**(Fernet 密钥随 db 搬迁、
+  `executescript()` 的事务、`DB_FORMAT_VERSION` 联锁、`world_seed.json` 是唯一 package data)。
+  **一份写着四条作废不变量的"关键不变量"清单,比没有这一节更坏。** 这一节因此不再列清单
+  —— 病根不是那四条写错了,是**它从一开始就是 `CLAUDE.md` 的一份镜像**,而镜像必然、
+  且安静地烂掉。现在只留指路牌 + 三条"属于为什么而不属于是什么"的。
+- **§9**:图里的 `world.db` 换成 Redis;"协作只有两种"补一句 —— 系统里**确实有 HTTP**,
+  只是它不在引擎里(读的人会照那句话去世界容器上找门)。
+- **§10**:🔴 **有意保持原样,并在抬头钉死它是 1.0.0 的病历。** 删掉等于把"当初为什么
+  这么做"一起删了;而那几笔债的形状在 Redis 上一样会长出来 —— 投影那一笔**真的又长了一次**,
+  已就地接上今天的判据(`tests/test_cross_process_projection.py`)。"还欠的"四条逐条现敲复核,
+  **四条今天仍然成立**,其中"经济没有劳动"那条只剩一半(工资 2.0 之后按真上过班的 tick 数发)。
+
+🔴 **顺带交代一条这份文档特有的、会咬人的事实**:`tests/test_reference_docs.py`
+**只读 `REFERENCE.md` 与 `FOR-STUDIO.md`**(判据 `git grep -n '_DOCS_DIR /' tests/test_reference_docs.py`
+→ 两行),所以 ARCHITECTURE 上**没有任何一道闸** —— 在这里写一个不存在的符号名、
+画一个删掉的模块,测试一条都不会红。`db.py` 就是这么在地图上多画了半年的。
+那张逐节盖章表是这道缺失的闸的**替代品**:它不会自己变红,但它给了下一个人一条一条去敲的路。
+
+### Added —— 一道此前完全不存在的闸
+
+- **`test_every_declared_config_key_is_documented`**:`config_store._DEFAULTS` 里的
+  每个键都必须在 `docs/REFERENCE.md` 里出现过。**加上它当场红**,红的正是下面那一个键。
+  公开方法早有闸(`test_every_public_method_is_documented`),**配置键此前一条都没有**
+  —— 而配置键恰恰是运营与作者唯一够得着的那一面。
+
+### Docs —— 回执(库里有而对方看不见,等于没有)
+
+- **`scheduler.max_agents` 补上了迟到三周的回执。** 能力 **2.0 就交付了**(`3254f36`,
+  **写代码是 2026-08-05(`3254f36`),发出去是 2026-08-06 的 2.0.0 定版(`655988b`)** ——
+  第一版把这两个日子写成了一个,判据 `git log --no-walk --date=short --format='%h %ad %s' 3254f36 655988b`):`int`、默认 100、**`0` = 不限**、报错里带着
+  `config set scheduler.max_agents N` 的解法。而到 2026-08-25 为止,REFERENCE 零行、
+  FOR-STUDIO 零行、CHANGELOG 零行、issue #19 还开着 —— 一个照文档判断"这引擎有没有
+  人数上限"的人,三周里拿到的答案是"没有这回事"。现在 REFERENCE 配置表有它,
+  FOR-STUDIO 新增 §3.31 逐条对账那份诉求。
+  ⚠️ **实测补一条你们会关心的**:这个数**进不进包取决于有没有人动过它** ——
+  没人动过就一个字都没有(创世不播引擎默认值),在那个世界上 `config set` 过就住进
+  `:config`、**跟着导出的包走**(实测 `zcat pkg | grep -c max_agents` → `1` 对 `0`)。
+- **FOR-STUDIO §5「已知的洞」整表复核。** 四行把「排 1.4.0」当排期写,而 1.4.0 是
+  2026-08-04 发出去的那一版,那个里程碑再也不会到来。⚠️ 这不是一句假承诺,是
+  **一个已经不存在的坐标系里的真承诺** —— 更难发现,因为字面上没有一处错。
+  逐行换成今天的实况并带上复核日期与敲得动的判据:autonomy 统计 / 感知 / 东西身上的量
+  三格**已经到了**(`doctor` / `prompt --json` 的 `perception` 块 / `ontology --json`
+  的 `values`);`rule_stats` 与**她身上的**量仍然没有 CLI 出口;「挖矿让矿脉减少」
+  2.0 起用**能力**写得出来,欠的是**规律层的扇入**。
+- **GitHub issue 清账(2026-08-25 真的关了,判据 `gh issue list --state open` → 只剩 #8)。**
+  六个"做完没关"的:**#19** 人数上限(2.0 `3254f36`)· **#13** 角色会来找你
+  (1.2.0 访客模型 → 3.2.0 在场进 Redis → 3.6.0 邀请门)· **#15/#16/#17/#18**
+  chat-agent 四条(1.3.0,四个开关默认关)。每个 issue 上留一条**关掉之前**写的对账:
+  落在哪一版、怎么开、判据是哪条命令,以及**它和 issue 原文差在哪儿**
+  —— #15/#16/#18 都写着"每轮发一个事件",而那条被有意否决了(理由在本文件 1.3.0 末尾
+  「一处对 issue 文本的偏离(有意)」),观测量落在 `messages` 行上;#15 还差在
+  不走 OpenAI 原生 `tools=`(没有 key 是默认状态)。**#8 是真 open,一个字没动**
+  —— 它问的是"下一个主版本落地时,已有的世界怎么办",那是一条**还没有答案的政策**,
+  不是一件做完没关的事。
+  🔴 **这一条自己就是一次现场教训,记在这儿**:上一轮写下这段话的人**先把账记好了**
+  ——「六个关掉」这句话写进 CHANGELOG 躺在工作树上等着被提交,而那一刻**七个 issue
+  一个都没关**。一句说得比做到的宽的话,而且它不会有任何一处报错:CHANGELOG 里
+  没有闸,`git status` 只说这个文件改了。**判据必须是敲得出来的那一条**,
+  写在句子里的"已经关掉"从来不是判据。
+
+### 第二轮(修复轮,2026-08-25)—— 上面那道新闸,自己就是它要挡的那种假话
+
+这一轮同样**没有一行引擎代码改动**。三条都是验收拿探针量出来的,不是读代码推的。
+
+- 🔴 **`test_every_declared_config_key_is_documented` 会被一个提示词模板名满足。**
+  第一版的判据是"这个键在 REFERENCE 里被反引号包着出现过",而 REFERENCE 里反引号
+  token 有 **1017** 个、带点的 **239** 个,其中只有 66 个是配置键 —— 剩下 **173** 个
+  带点 token 里,`prompt_store._SAMPLE_VARS` 那 36 个**提示词模板名**占了 28 个,
+  而 `contact.compose`(模板)与 `contact.compose.enabled`(配置)正好同族。
+  **这是现实的洞,不是理论的**:验收探针往 `_DEFAULTS` 里塞一个很像会有的开关
+  `chat.intent_classifier`,这道闸答 **1 passed** —— 满足它的那个反引号,
+  说的是一条提示词模板的名字,和"这个世界有没有这个开关"一个字都不相干。
+  **又一次:证据成立,而它证的不是你以为的那句话** —— 而这一次犯的人,
+  正是上面那一段刚写完"配置键此前一条闸都没有"的同一个人。
+  现在判据是**"配置表上有它自己那一行"**;家在正文的那一个
+  (`economy.player_allowance`,进表会把那整段 ⚠️ 说明拆散)走一张**列得出名字**的
+  例外表,而那张表**自己也上了闸**:名字不再是真配置键就红(防它比代码老)、
+  键在正文里一个字都没有也红(例外表放行的是"不进表",不是"不写")。
+  判据自己也钉了一条自测:`test_the_config_key_gate_is_not_satisfied_by_a_prompt_template_name`。
+  **两个方向都敲过**:同一个假开关,`git show HEAD:tests/test_reference_docs.py` 那版
+  **1 passed**、新版 **FAILED**(报文点名 `chat.intent_classifier`);
+  66 个真键 **65 个走表格行、1 个走例外表**,整个文件 **10 passed**。
+- **`_settle(world, predicate)` 的返回值,24 个调用点里 20 个丢掉了。**
+  谓词只求值一次、**不参与任何判断**,等待全在 `_drain` 里 —— 于是
+  `_settle(world, lambda: world.autonomy_stats()["failed"])` 读起来像"等到 failed 非零",
+  实际什么都不把,还挡在真正的 `assert` 前面替它顶了个名。
+  **一条看起来在把关、其实什么都不把的判据,出现了 20 次。**
+  那 20 处改成直呼 `_drain(world)`(等待一个字没少,少的只是那句假话),
+  其中 3 处连 `_drain` 都是多余的(循环体最后一句就是它)——直接删。
+  `_settle` 只留给**返回值真的被用上**的调用点,现在 5 处。整文件 **26 passed**。
+- **`tests/test_autonomy.py` 文件头写下 `_drain` 的射程,因为"全绿"证的不是那句话。**
+  验收量出 barrier 第一眼看见的 `pending` **每一次都是 0**(我复现:26 条里 24 条调过
+  `_drain`,其中 22 条引擎测试的每一次调用都是 0,只有那两条判据自测量到 1),
+  据此判"barrier 什么都没等"。**前半句我复现了,后半句我核伪了**:`_drain` 是两半,
+  ① 一次循环往返(顺带让排在前面的回调跑完)、② 到了那边再等掉眼前排着的 task。
+  把 `_drain` 整个改成 `return` → **9 failed / 17 passed**(所以 ① **承重**,
+  7 条引擎测试真的靠它);只把 ② 那段 `while pending: await asyncio.wait(pending)`
+  换成 `pass` → **2 failed / 24 passed**,红的正是那两条判据自测(所以 ② 在那 22 条
+  引擎测试上**一次都没走过**)。两句话都写进了文件头:**别说 barrier 没等**,
+  也**别拿"引擎那些测试还是绿的"当 `_drain` 的验收**。
+- **`test_packaging.py` 里那条"先严后松"的中间档,在这台机器上是死的。**
+  `.venv/bin/python -c "import setuptools"` 是 `ModuleNotFoundError`,于是
+  `--no-isolation` 一开口就是 `BackendUnavailable`,连 `Building sdist` 都到不了 ——
+  **真实行为是"联网就 pass、断网就 skip",没有中间档**。那一档留着仍然对
+  (换一台装了 setuptools 的机器它就活),但**它此刻没被任何一次运行证过**,
+  docstring 里照实说了。把"我写了一条退路"当成"这条退路走得通",是同一族的第三种。
+- **本文件抬头那句"这里刻意没有 `[Unreleased]`",和它下面那个 `[Unreleased]` 打了一整轮架。**
+  已改成这一单实际在用的规矩(见抬头)。**两句打架的话比其中任何一句都糟** ——
+  它不会红,只会让下一个人在版本标题下面找一个不在那儿的条目。
+
+### 发版:3.7.0 是自 1.4.0 之后第一个真的上索引的版本(2026-08-26)
+
+老板拍了 D2「做,发 pypi」。这一节记的是**发版前把整条管线在本地逐步复现验通**的结果 ——
+`release.yml` 的 `verify → build → testpypi → smoke → pypi` 里,**smoke 是唯一一个挂掉就把
+版本号烧在 TestPyPI 上的阶段**,而它此前从没跑绿过(v3.0.0 那次死在它前面的 `build`,
+所以那条路上的断言一次都没被真运行证过)。
+
+- **smoke 那几条断言逐条对 3.7.0 敲过,全部成立,`release.yml` 一个字都不用改。**
+  条件按它的真实形状摆:`python -m build` 出来的 wheel → 装进一个干净 venv(依赖从
+  PyPI 真下)→ 打一台真 Redis,**不是在工作树里跑**。`World.open(id, redis=…,
+  force_mock_llm=True)` / `state()['agents']` 三个人 / `tick(100)` / `memories(...)` 非空 /
+  重开一次 `state()['world_time']['tick']` 还等于那个数 / `anima-world --help` /
+  `simulate --redis … --llm mock` / `contract --json` —— 连敲三趟,趟趟绿,每趟约 1 秒。
+- **`pip show` 那一格换了名字而 grep 照样中。** PEP 639 之后元数据里是
+  `License-Expression: AGPL-3.0-or-later`,不再是 `License:`;那一步的
+  `grep -E "^(Name|Version|License|Requires)"` 是前缀匹配,所以它匹配得到。
+  (1.4.0 也是 PEP 639 出的,PyPI 上那一版报的是 `license_expression: Apache-2.0`。)
+- **TestPyPI 那条 `--index-url` 的老隐患这次是空的。** 它让 pip 把 TestPyPI 排在前面,
+  真正的危险是那边有一个版本号更高的同名包。实测:TestPyPI 上 `redis` 最高 2.10.6、
+  `openai` 最高 0.11.5(两个都低于本包的下限 `>=5.0` / `>=1.30`),`httpx` 压根没有 ——
+  三个依赖都只能从 `--extra-index-url` 那侧的 PyPI 解出来。**这一条会变,复核别省。**
+- **3.7.0 这个版本号在两个索引上都还是空的**(PyPI 与 TestPyPI 上 `anima-world` 都停在
+  1.4.0,各 7 个版本)。v3.0.0 那次 `testpypi` 是 `skipped` —— 它死在 `build` 第 8 步,
+  **一个字节都没上传过**,所以没有烧掉任何版本号。
+
+#### Fixed —— 装进包里的那份许可声明,漏在了三周前那次更正之外
+
+- **`NOTICE` 写着「Releases up to and including 1.3.0 were published under the Apache
+  License 2.0」—— 差一版,而差的那一版正是此刻用户 `pip install anima-world` 装到的
+  那一版。** 3.3.0 那一轮(见下面 `## [3.3.0]` 的同名条目)查出这个 off-by-one 并跑遍了
+  **四份**文档:README、CLAUDE.md、FOR-STUDIO、2.0.0 那节 CHANGELOG。**`NOTICE` 不在那四份里,
+  而它是唯一一份真的随 wheel 和 sdist 发出去的** —— 另外四份都只住在仓库里。
+  一份对外的许可声明少说一版,和 `README` 少说一版不是同一件事的两个副本:
+  前者是**装在分发物里的**那句话。
+- **`README` 与 `CLAUDE.md` 里「3.3.0 是照 AGPL 发的第一版」是一句已经过期的未来时。**
+  3.3.0 到 3.6.0 一版都没上过索引,第一版是 3.7.0。README 尤其要紧:它就是 PyPI 的
+  项目页正文,那句话会印在页面上。
+- **新增两道闸(`tests/test_packaging.py`)**:① `NOTICE`(装进包的)与 `README`(印在
+  PyPI 上的)必须说同一个 Apache 截止版本 —— 这一条**加上当场红**,红的正是上面那一格;
+  ② `pyproject.toml` 的 `license` / `license-files` 与 `LICENSE` 正文必须对得上
+  (SPDX 串写着 AGPL 而 `LICENSE` 里躺着别的许可,今天没有任何一处会报错)。
+  ⚠️ **两道闸都只读文本、不建包**,所以它们不会像 sdist 那条一样被网络拖成假红。
 
 ## [3.6.0] —— 她点你的名时,你得自己答 (2026-08-20)
 

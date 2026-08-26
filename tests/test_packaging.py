@@ -462,3 +462,92 @@ def test_抹掉一个世界不碰别的世界(tmp_path):
     drop_world(client, "alpha", confirm=True)
     assert not list(client.scan_iter(match="anima:alpha:*"))
     assert list(client.scan_iter(match="anima:alphabet:*")), "把另一个世界一起抹了"
+
+
+# ── 许可:装进分发物里的那句话 ────────────────────────────────────────────────
+# 这两条不建包、不联网、不碰 Redis —— 纯文本比对。理由见下面各自的 docstring:
+# 它们要挡的那个 bug 已经真的发生过一次,而当时全量 1839 项一条都没红。
+
+
+def _repo_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[1]
+
+
+def test_装进包的许可声明和印在_PyPI_上的说同一版():
+    """`NOTICE` 与 `README.md` 必须报同一个「Apache 到哪一版为止」。
+
+    **这条闸挡的是一个真发生过、而且发生了两次的错。** 2026-08-19 查出四份文档把
+    Apache 的截止版本写少了一版(写 1.3.0,而 `v1.4.0` 也是 Apache 并且真的上了
+    PyPI),于是跑遍了 README / CLAUDE.md / FOR-STUDIO / 2.0.0 那节 CHANGELOG ——
+    **`NOTICE` 不在那四份里**,它一直写着 1.3.0 直到 2026-08-26 发版前。
+
+    为什么单挑这两份来对:**它们是仅有的两份会离开这个仓库的许可文本。**
+    `NOTICE` 随 wheel 与 sdist 装进分发物(`license-files`),`README.md` 是
+    `Description-Content-Type: text/markdown` 的正文 —— 也就是 PyPI 项目页上那段字。
+    其余几份写错了只是仓库里的话,这两份写错了是**发出去的话**。
+
+    ⚠️ 这条闸认的是那两个句式。改写句子会让它红 —— **那是有意的**:一句对外的
+    许可声明被重写时,值得有人再读一遍它说的是不是真的。
+    """
+    import re
+
+    root = _repo_root()
+    notice = (root / "NOTICE").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+
+    m_notice = re.search(
+        r"Releases up to and including (\d+\.\d+\.\d+) were published under the Apache",
+        notice,
+    )
+    m_readme = re.search(
+        r"直到 (\d+\.\d+\.\d+),PyPI 上发出的每一个版本都是 Apache-2\.0",
+        readme,
+    )
+    assert m_notice, (
+        "`NOTICE` 里那句 Apache 声明不见了或被改写了。它是**装进 wheel 的**那份许可"
+        "声明 —— 改写之前请确认新句子说的仍然是真的,然后把这条闸的句式一起改。"
+    )
+    assert m_readme, (
+        "`README.md` 里那句 Apache 声明不见了或被改写了。README 就是 PyPI 项目页"
+        "正文 —— 同上。"
+    )
+    assert m_notice.group(1) == m_readme.group(1), (
+        f"两份**会发出去**的许可声明说的不是同一版:"
+        f"NOTICE 说到 {m_notice.group(1)} 为止,README 说到 {m_readme.group(1)} 为止。"
+        f"许可这种事不能靠约等于,尤其当差的那一版恰好是用户 `pip install` 装到的那一版。"
+    )
+
+
+def test_许可这件事三个地方说的是同一件事():
+    """`pyproject.toml` 的 SPDX 串、`license-files` 清单、`LICENSE` 正文,三者对得上。
+
+    元数据里写 `license = "AGPL-3.0-or-later"` 而 `LICENSE` 文件里躺着别的许可,
+    **今天没有任何一处会报错** —— `twine check` 不读 `LICENSE` 的正文,PyPI 也不读。
+    页面上会照 SPDX 串印一个许可名,而随包发出去的是另一份文本。
+
+    `license-files` 那一格同样承重:漏掉一个名字,那个文件就**不进 wheel 的
+    `dist-info/licenses/`**,而包照样构建成功、`twine check` 照样 PASSED。
+    """
+    import tomllib
+
+    root = _repo_root()
+    with (root / "pyproject.toml").open("rb") as fh:
+        cfg = tomllib.load(fh)
+
+    spdx = cfg["project"]["license"]
+    assert spdx == "AGPL-3.0-or-later", f"pyproject 的许可串变成了 {spdx!r}"
+
+    declared = cfg["project"]["license-files"]
+    assert sorted(declared) == ["LICENSE", "NOTICE"], (
+        f"`license-files` 是 {declared!r} —— 少一个名字,那个文件就不进 "
+        f"wheel 的 dist-info/licenses/,而构建与 `twine check` 都不会说一个字。"
+    )
+    for name in declared:
+        assert (root / name).is_file(), f"`license-files` 里的 {name} 不存在"
+
+    head = (root / "LICENSE").read_text(encoding="utf-8")[:400].upper()
+    assert "GNU AFFERO GENERAL PUBLIC LICENSE" in head and "VERSION 3" in head, (
+        "`pyproject.toml` 说这个包是 AGPL-3.0-or-later,而 `LICENSE` 的正文不是 "
+        "AGPL v3 —— 元数据上那个名字和随包发出去的那份文本是两样东西,"
+        "没有任何工具会替你对这一格。"
+    )
