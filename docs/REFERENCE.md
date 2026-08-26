@@ -104,7 +104,7 @@
 
 | 问题 | 权威在哪 | 怎么问 |
 |---|---|---|
-| **投影器折得动哪几种** | `anima_world/projection.py` 的 `_apply_*` 处理器 | `git grep -n 'def _apply_' -- anima_world/projection.py` —— ⚠️ **别用 `-c`**:它把分发器 `_apply_event` 自己也数进去(答 18,而处理器是 17)。**一个差一的数比没有数更坏**,它看上去像个读数 |
+| **投影器折得动哪几种** | `anima_world/projection.py` 的 `_apply_*` 处理器 | `git grep -n 'def _apply_' -- anima_world/projection.py` —— **要看那张单子,别看那个数**:两条命令都答 **18**,而处理器是 **17**(多出来的是分发器 `_apply_event` 自己)。`-c` 只给一个数,它看上去像个读数;`-n` 把 `_apply_event` 那一行摆在眼前,减得掉。**一个差一的数比没有数更坏** |
 | **世界里真的在发哪几种** | 代码里那些 `{"type": "…"}` 字面量 | 数它们要用 `ast` 不能用 grep(见下面那条 ⚠️) |
 | **插件订得到哪几种** | `anima_world/events.py` 的 **`SUBSCRIBABLE_EVENTS`**,经 `contract --json` 的 `plugins.subscribable_events` 报出 | §2.1.1 |
 
