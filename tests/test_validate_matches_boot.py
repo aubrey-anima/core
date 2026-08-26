@@ -641,3 +641,64 @@ def test_编辑包里的坏节拍_照样红(tmp_path):
     ok2, errors2 = _check_says(
         _write(tmp_path / "beat_edit_ok.cyberworld", [_MANIFEST, _beat()]), edit=True)
     assert ok2 is True, errors2
+
+
+# ── 八、撤掉的量:离线这两扇门答得比开机窄,而窄在哪必须说出来(3.8.0)──────────
+#
+# 开机能拿新声明去比**目标世界库里**留着什么(`dropped_quantities:` 那一行);
+# 校验器手上没有那个世界,只比得了这份文件自己写下的东西。**说窄了不要紧,
+# 假装查过了才要紧** —— 那正是 `--edit` 上一版那句 warning 的病。
+
+
+def _warnings(path: str, *, edit: bool = False) -> tuple[list[str], list[str]]:
+    """两扇门的 `warnings`,一起取回来 —— 这一族的判据是"两扇门说同一句话"。"""
+    args = [path, "--json"] + (["--edit"] if edit else [])
+    v = json.loads(run_cli("validate", "world", *args).stdout)
+    c = json.loads(run_cli("world", "check", *args).stdout)
+    return list(v["warnings"]), list(c["warnings"])
+
+
+_VIS_STALE = {"kind": "author", "type": "visibility",
+              "body": {"kind": "tree", "key": "生长速度", "visible": "here",
+                       "label": "生长速度"}}
+
+
+def test_同一份文件里的陈旧可见性行_两扇门都点名(tmp_path):
+    """`kinds` 里划掉了 `生长速度`,而 `stock_visibility` 里那一行还留着 ——
+    **那一行会照旧进提示词**,而这份文件在今天的两扇门上是全绿的。"""
+    path = _write(tmp_path / "stale.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, _tree_kind(), _OAK, _VIS_STALE])
+    assert _validate_says(path)[0] and _check_says(path)[0], "它不该是错误,只是警告"
+    for label, said in zip(("validate world", "world check"), _warnings(path)):
+        hit = [w for w in said if "dropped_quantities" in w]
+        assert hit, f"{label} 对一行陈旧的可见性声明一个字都没说"
+        assert 'dropped_quantities: {"tree": ["生长速度"]}' in hit[0], hit[0]
+
+
+def test_没有陈旧行的文件_两扇门都不说这句(tmp_path):
+    """**一句总在响的警告等于没有警告。**"""
+    path = _write(tmp_path / "clean.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, _tree_kind(), _OAK])
+    for label, said in zip(("validate world", "world check"), _warnings(path)):
+        assert not [w for w in said if "dropped_quantities" in w], label
+
+
+def test_编辑包里那一格离线答不了_两扇门明说而不是装作查过(tmp_path):
+    """一次编辑包**通常只带那条重声明的 `kind`** —— 目标世界里被撤掉的是哪几个量,
+    离线没有任何办法知道。`--edit` 那句总结逐字列着"包自己肚子里那几件已经查过了",
+    而这一格不在里面:**一句说得比做到的宽的话,和一盏假绿灯是同一件事。**"""
+    path = _write(tmp_path / "edit.cyberworld", [_MANIFEST, _tree_kind()])
+    for label, said in zip(("validate world", "world check"),
+                           _warnings(path, edit=True)):
+        hit = [w for w in said if "重声明是整行替换" in w]
+        assert hit, f"{label} --edit 没说「撤掉了哪些量」这一格离线答不了"
+        assert "不裁剪" in hit[0] and "dropped_quantities" in hit[0], hit[0]
+        assert "tree" in hit[0], f"{label} 说了有这一格,却没说是哪个种类"
+
+
+def test_不带量的编辑包不说这句(tmp_path):
+    """只改地点、只改规律的编辑包不该被喊 —— 它一个量都没重声明。"""
+    path = _write(tmp_path / "loc.cyberworld", [_MANIFEST, _YARD])
+    for label, said in zip(("validate world", "world check"),
+                           _warnings(path, edit=True)):
+        assert not [w for w in said if "重声明是整行替换" in w], label

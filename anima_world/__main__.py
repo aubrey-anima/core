@@ -1850,7 +1850,8 @@ def build_serve_scheduler(
             _warn_unresolved_rule_names(stock_store, scheduler.world_rules)
         else:
             _apply_ontology(scheduler.ontology, stock_store, visibility_store,
-                            tick=scheduler.clock, redeclare_kinds=redeclared_kinds)
+                            tick=scheduler.clock, redeclare_kinds=redeclared_kinds,
+                            rules=scheduler.world_rules)
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -2570,8 +2571,205 @@ def _load_ontology(
     return ontology_store.load(rules=rules, locations=locations, items=items)
 
 
+def _format_dropped_quantities(dropped: dict[str, list[str]]) -> str:
+    """`dropped_quantities: {"tree": ["生长速度"]}` —— **一行,而且机器读得到。**
+
+    这个 token 是承重的:三条路(开机的 `logger.warning`、`world check` 的
+    `warnings[]`、`validate world`)印的是**同一个函数**的输出,于是下游拿
+    `grep -o 'dropped_quantities: .*'` 在哪一条上都取得到同一份 JSON。
+    印一句纯人话的下场是每条路各写一遍措辞,而三份措辞里迟早只有一份跟着代码走。
+    """
+    return "dropped_quantities: " + json.dumps(
+        {k: sorted(v) for k, v in sorted(dropped.items())}, ensure_ascii=False)
+
+
+def _dropped_quantities(
+    declared: dict[str, set[str]], *,
+    stock_rows: Any = (), visibility_pairs: Any = (), rules: Any = (),
+) -> dict[str, list[str]]:
+    """**一个种类不再声明、而世界里还留着的那些量。**
+
+    重声明一个种类是**整行替换**(`_seed_ontology` 的合并粒度),所以作者从
+    `kinds` 里划掉一个量,这一层就当它不存在了 —— **而存储那一侧一格都不裁剪**:
+    量还躺在 `:stocks` 里,可见性行还躺在 `:stock_visibility` 里,而
+    `perception` 读的正是这两张表的交集(`perception.py` 不问 `:kinds`)。
+    下场是她的提示词里继续出现一个**这个世界已经不承认的量**,顶着旧 label、
+    旧分档,规律再也不更新它,**而没有任何一处会报错**。
+
+    同一份文件里写两条同 id 的 `kind` 会当场报错,所以这件事只可能**跨两次开机**
+    发生 —— 也就是它必然安静。
+
+    ⚠️ **这一版只吭声,不裁剪。** 裁剪归第 1 期(插件在自己的命名空间里做),
+    理由和 `seed.kind_keys` 那一格逐字同一笔账:收严会让**写过额外键的已发布世界
+    开不了机**,而那个代价要由一次显式的换钉去付,不是由一次升级安静地付。
+
+    三个来源,而**它们各自安静的程度不同**:
+
+    | 来源 | 今天会怎样 |
+    |---|---|
+    | `:stocks` 里那个量 | 留着,规律不再更新它;`hidden` 的那些只是占地方 |
+    | `:stock_visibility` 里那一行 | 留着,**继续进提示词**,顶着旧 label 与旧分档 —— 这一支是真正会骗人的那一支 |
+    | `world_rules` 里引用它的规律 | **非内置种类会当场开不了机**(`resolve` 的 `_check_rule_quantities`),所以这里报得出的只有内置种类(`agent`)与 `action`/`not_action` 选择器那几条 —— 恰恰是那道闸够不着的地方 |
+    """
+    dropped: dict[str, set[str]] = {}
+
+    def note(kind_id: str, keys: Any) -> None:
+        # **不在 `declared` 里就一个字都不说** —— 那是"这个种类的量另有来路",
+        # 不是"这些量被撤掉了"。这道门放在这儿而不是放在每个调用点上:三个来源
+        # 各判一次的话,漏掉任何一处的样子都是一条假警报,而假警报没有红字。
+        if kind_id not in declared:
+            return
+        extra = {str(k) for k in keys} - declared[kind_id]
+        if extra:
+            dropped.setdefault(kind_id, set()).update(extra)
+
+    # ① 量表。
+    for kind_id, keys in stock_rows or ():
+        note(str(kind_id), keys)
+
+    # ② 可见性表。**这一支是会骗人的那一支** —— 它就是进提示词的那张表。
+    for kind_id, key in visibility_pairs or ():
+        note(str(kind_id), [key])
+
+    # ③ 规律。`world_` 前缀读的是世界那一份量(另一个 owner),内置日历名不是量。
+    from anima_world.rules import BUILTIN_NAMES, WORLD_PREFIX
+
+    for rule in rules or ():
+        selector = getattr(rule, "selector_kind", None)
+        if selector == "kind":
+            kind_id = str(getattr(rule, "selector_value", ""))
+        elif selector in ("action", "not_action"):
+            kind_id = "agent"
+        else:
+            continue          # `owner` 指的是一个实例,量表那一支已经数过它了
+        if kind_id not in declared:
+            continue
+        # `reads` 是方法不是属性(表达式里读到的那些名字现算),`outputs` 是
+        # 「量名 → 表达式」的表 —— 写的那一半在键上。
+        names = set(getattr(rule, "outputs", {}) or {}) | set(rule.reads())
+        note(kind_id, {
+            n for n in names
+            if n not in BUILTIN_NAMES and not n.startswith(WORLD_PREFIX)
+        })
+
+    return {k: sorted(v) for k, v in dropped.items()}
+
+
+def _declared_quantities_by_kind(kinds: Any) -> dict[str, set[str]]:
+    """`{种类: {量名}}`,**只收真的声明过量的种类**。
+
+    ⚠️ **声明本身就是开关,这一层也不例外**(`_undeclared_stock_names` 逐字同构):
+    一个量都不声明的种类,它的量另有来路 —— `world` 的季节与雨势写在作者的
+    `stock_visibility` / `stocks` 段里,从来不属于任何种类声明。把那种种类算进来,
+    内置橱窗开机第一句就是三条假警报(实测 `{"world": ["季节","雨势","雨天数"]}`),
+    而**一句会误报的警告等于没有这条警告**。
+
+    代价说清楚:作者把一个种类重声明成**一个量都不剩**时,这里一个字都不说 ——
+    那是同一条开关规则的另一面,不是漏。
+    """
+    return {kid: set(k.quantities) for kid, k in kinds.items() if k.quantities}
+
+
+def _live_dropped_quantities(
+    ontology: Any, stock_store: Any, visibility_store: Any, rules: Any = (),
+) -> dict[str, list[str]]:
+    """开机那一侧的适配器:把三张真表喂给 `_dropped_quantities`。
+
+    量表**按种类批量取**(一次 pipeline),别逐个 owner 往返 —— 那正是
+    `RedisStockStore` 的说明里点名的 72ms/tick。
+    """
+    declared = _declared_quantities_by_kind(ontology.kinds)
+    stock_rows: list[tuple[str, Any]] = []
+    for kind_id in declared:
+        try:
+            rows = stock_store.snapshot_kind(kind_id)
+        except Exception:  # noqa: BLE001 - 一句警告不值一次开不了机
+            logger.warning("数 %r 的量表失败", kind_id, exc_info=True)
+            continue
+        stock_rows.extend((kind_id, values) for values in rows.values())
+    try:
+        pairs = list(visibility_store.rules_map())
+    except Exception:  # noqa: BLE001 - 同上
+        logger.warning("读可见性表失败", exc_info=True)
+        pairs = []
+    return _dropped_quantities(
+        declared, stock_rows=stock_rows, visibility_pairs=pairs, rules=rules)
+
+
+def _authored_dropped_quantities(authored: dict[str, Any] | None) -> list[str]:
+    """离线那一侧:**同一份文件里**已经打架的那几个量。
+
+    ⚠️ **它答得比开机那一侧窄,而窄在哪必须说清楚**:开机能拿新声明去比**目标世界
+    库里**留着什么,而校验器手上没有那个世界 —— 它只比得了这份文件自己写下的
+    `stock_visibility` / `rules` 有没有指着一个同一份文件的 `kinds` 已经不声明的量。
+    一次编辑包**通常只带那条重声明的 `kind`**,于是这一支多半一个字都说不出来;
+    那一格由 `_edit_dropped_quantity_gap_warnings` 明说"离线答不了",而不是假装查过。
+
+    它仍然值得有,因为它抓得住一种真实写法:作者手改一份**完整**的世界文件,
+    把 `kinds` 里的量划掉却忘了删 `stock_visibility` 里那一行 —— 那一行会照旧
+    进提示词,而这份文件在今天的两扇门上是全绿的。
+    """
+    if not authored:
+        return []
+    from anima_world.ontology import OntologyError, parse_kinds
+    from anima_world.rules import RuleError, parse_rules
+
+    try:
+        kinds = parse_kinds([dict(k) for k in (authored.get("kinds") or [])
+                             if isinstance(k, dict)])
+    except (OntologyError, Exception):  # noqa: BLE001 - 坏声明由别的闸报,这里闭嘴
+        return []
+    declared = _declared_quantities_by_kind(kinds)
+    if not declared:
+        return []
+    pairs = [
+        (str(row.get("kind") or ""), str(row.get("key") or ""))
+        for row in _seed_entry_dicts(authored, "stock_visibility")
+    ]
+    try:
+        rules = parse_rules(authored.get("rules"))
+    except (RuleError, Exception):  # noqa: BLE001 - 同上
+        rules = []
+    dropped = _dropped_quantities(declared, visibility_pairs=pairs, rules=rules)
+    if not dropped:
+        return []
+    return [
+        "这份文件里有几个量,`kinds` 已经不声明了而别处还引用着 —— 引擎**不裁剪**:"
+        "`stock_visibility` 里那一行会照旧进提示词,顶着旧 label 与旧分档,"
+        "而规律再也不更新它。" + _format_dropped_quantities(dropped)
+    ]
+
+
+def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list[str]:
+    """一次编辑里,**「你撤掉了哪些量」这一格离线答不了** —— 照 `me_X` 那条先例说出来。
+
+    重声明一个种类是整行替换,所以一次编辑随时可能撤掉量;而**撤掉的量今天不裁剪**,
+    它会顶着旧 label 继续进提示词。要知道具体撤了哪几个,得拿新声明去比**目标世界
+    库里**留着什么 —— 那份东西不在这个包里。
+
+    **说出来而不是假装查过了**:`--edit` 那句总结逐字列着"包自己肚子里那几件已经
+    查过了",而这一格恰恰不在里面。一句说得比做到的宽的话,和一盏假绿灯是同一件事。
+    """
+    if not authored:
+        return []
+    rows = [k for k in (authored.get("kinds") or []) if isinstance(k, dict)]
+    named = sorted({str(row.get("id") or "?") for row in rows if row.get("quantities")})
+    if not named:
+        return []
+    return [
+        f"这是一次编辑(--edit),而其中 {len(named)} 个种类重声明了量"
+        f"({'、'.join(named[:5])}{'…' if len(named) > 5 else ''})—— **重声明是整行替换**,"
+        "所以目标世界里那些**这份声明没写**的量会被撤掉;而引擎今天**不裁剪**它们:"
+        "值留在 `:stocks` 里、行留在 `:stock_visibility` 里,**顶着旧 label 继续进提示词**。"
+        "「具体撤掉了哪几个」离线答不了(要比的是目标世界库里留着什么)。"
+        "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问,开机会印一行 "
+        "`dropped_quantities:`"
+    ]
+
+
 def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
-                    *, tick: int = 0, redeclare_kinds: Any = ()) -> None:
+                    *, tick: int = 0, redeclare_kinds: Any = (),
+                    rules: Any = ()) -> None:
     """把本体声明兑现成量、可见性、位置。**三样都只填缺,不覆盖。**
 
     每次开机都跑,不只创世 —— 它表达的是一条不变量:**一个实体存在,它声明过的量
@@ -2588,6 +2786,10 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
     都写在种类声明里。声明改了而镜像不改,同一个量会有两个答案 —— 而她读到的是
     镜像那个。所以这几个种类的可见性行照新声明重写,其余的照旧只填缺(作者显式写
     在 `stock_visibility` 段里的那些因此仍然赢)。
+
+    `rules` 是这个世界真正在跑的那份规律,只给 `_dropped_quantities` 用:一条作用在
+    `agent` 上的规律引用了一个已经不声明的量,`resolve` 那道闸**够不着**
+    (内置种类的量不归本体层声明),所以只有这里说得出。
     """
     from anima_world.ontology import seed_quantities, visibility_declarations
 
@@ -2621,6 +2823,24 @@ def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
         # 等于"永远看不见"。
         if entity.location and visibility_store.place_of(entity.id) is None:
             visibility_store.place(entity.id, entity.location, entity.name)
+
+    # **撤掉的量今天不裁剪,但必须吭声。** 见 `_dropped_quantities`:一个种类
+    # 不再声明的量照旧躺在 `:stocks` 与 `:stock_visibility` 里,而 `perception`
+    # 读的正是这两张表的交集 —— 于是它顶着旧 label 继续进提示词,规律再也不更新它,
+    # 一处不报错。同一份文件里两条同 id 的 kind 会当场报错,所以这件事只可能
+    # **跨两次开机**发生,也就是它必然安静。
+    #
+    # ⚠️ **这一句只在真有留下来的量时才响**(和 `_warn_unresolved_rule_names`
+    # 同一条纪律):一句总在响的警告等于没有警告。
+    dropped = _live_dropped_quantities(ontology, stock_store, visibility_store, rules)
+    if dropped:
+        logger.warning(
+            "有几个量这个世界已经不声明了,而它们还留在库里 —— 这一版引擎**不裁剪**:"
+            "`:stocks` 里的值留着(规律不再更新它)、`:stock_visibility` 里的行留着"
+            "(**顶着旧 label 继续进提示词**)。要它们消失,把量加回声明再抹,"
+            "或者等插件命名空间那一期的裁剪。%s",
+            _format_dropped_quantities(dropped),
+        )
 
 
 def _seed_stock_places(world_seed: dict[str, Any] | None, store: Any,
@@ -5817,6 +6037,7 @@ def run_validate(args: argparse.Namespace) -> int:
                 + _authored_drift_warnings(authored)
                 + _authored_unreachable_requirements(authored)
                 + _authored_media_warnings(authored)
+                + _authored_dropped_quantities(authored)
             )
             errors += _authored_ontology_errors(authored, edit=edit)
             if edit:
@@ -5835,6 +6056,7 @@ def run_validate(args: argparse.Namespace) -> int:
                 )
                 warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_stock_kind_gap_warnings(authored)
+                warnings += _edit_dropped_quantity_gap_warnings(authored)
                 warnings += _edit_location_media_warnings(authored)
         return _report_validation("world", args.path, errors, warnings, args.json)
 
@@ -6891,6 +7113,7 @@ def run_world_check(args: argparse.Namespace) -> int:
                 + _authored_drift_warnings(authored)
                 + _authored_unreachable_requirements(authored)
                 + _authored_media_warnings(authored)
+                + _authored_dropped_quantities(authored)
             )
             errors += _authored_ontology_errors(authored, edit=payload["edit"])
             if payload["edit"]:
@@ -6903,6 +7126,7 @@ def run_world_check(args: argparse.Namespace) -> int:
                 )
                 warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_stock_kind_gap_warnings(authored)
+                warnings += _edit_dropped_quantity_gap_warnings(authored)
                 warnings += _edit_location_media_warnings(authored)
         payload["errors"] = errors
         payload["warnings"] = warnings

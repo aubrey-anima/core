@@ -330,3 +330,137 @@ def test_malformed_rich_seed_sections_degrade_instead_of_stranding_the_world(tmp
         assert any("importance" in m for m in messages)
     finally:
         scheduler.stop()
+
+
+# ── 重声明撤掉的量:不裁剪,但必须吭声(3.8.0,设计-插件系统 §7)────────────────
+#
+# 重声明一个种类是**整行替换**,所以作者从 `kinds` 里划掉一个量,本体层就当它不存在
+# 了 —— **而存储那一侧一格都不裁剪**:量还躺在 `:stocks` 里,可见性行还躺在
+# `:stock_visibility` 里,而 `perception` 读的正是这两张表的交集(它不问 `:kinds`)。
+# 下场是那个量顶着旧 label 继续进她的提示词,规律再也不更新它,一处不报错。
+#
+# 同一份文件里两条同 id 的 `kind` 会当场报错,所以这件事**只可能跨两次开机**发生 ——
+# 也就是它必然安静。这一版只吭声不裁剪(裁剪归插件命名空间那一期)。
+
+
+def _tree_world(tmp_path, quantities: dict) -> pathlib.Path:
+    return pathlib.Path(write_seed_file(tmp_path / "tree.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "kinds": [{"id": "tree", "quantities": quantities}],
+        "entities": [{"id": "tree:oak", "name": "老橡树", "location": "cafe"}],
+    }))
+
+
+_THREE = {
+    "树高": {"default": 1.0, "visibility": "here", "label": "树高"},
+    "湿度": {"default": 0.5, "visibility": "here", "label": "湿度"},
+    "生长速度": {"default": 0.05, "visibility": "here", "label": "生长速度"},
+}
+_TWO = {k: v for k, v in _THREE.items() if k != "生长速度"}
+
+
+def _redeclare(tmp_path, client, quantities: dict) -> pathlib.Path:
+    """一次**明示的编辑**:只带一条重声明的 `kind`,别的段一个字不写。"""
+    patch = tmp_path / "patch.cyberworld"
+    patch.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "w"}\n'
+        + json.dumps({"kind": "author", "type": "kind",
+                      "body": {"id": "tree", "quantities": quantities}},
+                     ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return patch
+
+
+def test_重声明撤掉一个量_开机点它的名(tmp_path, caplog):
+    """评审 2 实测的那条:`{树高,湿度,生长速度}` → `{树高,湿度}` → 点名 `生长速度`。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w", client, world_file=_tree_world(tmp_path, _THREE),
+                          force_mock_llm=True).stop()
+    patch = _redeclare(tmp_path, client, _TWO)
+
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        scheduler = build_serve_scheduler("w", client, world_file=patch,
+                                          force_mock_llm=True)
+    try:
+        lines = [r.getMessage() for r in caplog.records
+                 if "dropped_quantities" in r.getMessage()]
+        assert lines, "撤掉一个量,开机一个字都没说"
+        assert 'dropped_quantities: {"tree": ["生长速度"]}' in lines[0], lines[0]
+        # **不裁剪** —— 这一版只吭声。裁掉了就该改这条用例,而不是让它悄悄过。
+        assert "生长速度" in scheduler.stock_store.of("tree:oak"), (
+            "这一期不该裁剪(裁剪归插件命名空间那一期)"
+        )
+        assert ("tree", "生长速度") in scheduler.visibility_store.rules_map(), (
+            "可见性行也不该被裁掉 —— 它正是那个量还进得了提示词的原因"
+        )
+    finally:
+        scheduler.stop()
+
+
+def test_没撤过量的世界一个字都不说(tmp_path, caplog):
+    """**一句总在响的警告等于没有警告。** 原样重声明一遍,不许出声。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    build_serve_scheduler("w", client, world_file=_tree_world(tmp_path, _THREE),
+                          force_mock_llm=True).stop()
+    patch = _redeclare(tmp_path, client, _THREE)
+
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True).stop()
+    assert not [r for r in caplog.records if "dropped_quantities" in r.getMessage()]
+
+
+def test_内置橱窗开机不许报这条(caplog):
+    """**这是那道假警报的判据。** 内置种类(`world` / `location`)的量另有来路 ——
+    作者写在 `stock_visibility` / `stocks` 段里,从来不属于任何 `kinds` 声明。
+    把它们算进来,橱窗开机第一句就是三条假警报(实测
+    `{"world": ["季节","雨势","雨天数"]}`),而**一句会误报的警告等于没有这条警告**。
+    """
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        scheduler = build_serve_scheduler("w", client, force_mock_llm=True)
+        scheduler.stop()
+        # 第二次开机(它会把作者层再走一遍)照样不许说。
+        build_serve_scheduler("w", client, force_mock_llm=True).stop()
+    assert not [r for r in caplog.records if "dropped_quantities" in r.getMessage()]
+
+
+def test_作用在agent上的规律那一支_resolve够不着而这里说得出(tmp_path, caplog):
+    """`resolve` 的量名闸**只查非内置种类**(内置种类的量不归本体层声明),
+    所以一条 `for_each: {"kind": "agent"}` 的规律引用了一个已经不声明的量时,
+    开机照旧成功 —— 只有这一条警告说得出。"""
+    import fakeredis
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    seed = pathlib.Path(write_seed_file(tmp_path / "agent.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "kinds": [{"id": "agent", "quantities": {
+            "体力": {"default": 100.0, "visibility": "self", "label": "体力"},
+            "干劲": {"default": 1.0, "visibility": "self", "label": "干劲"},
+        }}],
+        "rules": [{"id": "泄气", "every": {"days": 1}, "for_each": {"kind": "agent"},
+                   "set": {"干劲": "干劲 - 0.01"}}],
+    }))
+    build_serve_scheduler("w", client, world_file=seed, force_mock_llm=True).stop()
+
+    patch = tmp_path / "drop.cyberworld"
+    patch.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "w"}\n'
+        + json.dumps({"kind": "author", "type": "kind", "body": {
+            "id": "agent",
+            "quantities": {"体力": {"default": 100.0, "visibility": "self",
+                                    "label": "体力"}}}}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="anima_world.__main__"):
+        build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True).stop()
+    lines = [r.getMessage() for r in caplog.records if "dropped_quantities" in r.getMessage()]
+    assert lines and "干劲" in lines[0], lines
