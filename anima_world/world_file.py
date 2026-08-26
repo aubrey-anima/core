@@ -96,6 +96,10 @@ AUTHOR_SECTIONS: dict[str, str] = {
     "visibility": "stock_visibility",
     "place": "stock_places",
     "beat": "beats",
+    # 🆕 3.8.0:插件。**作者层第十三个段。** 和 `beat` 逐字同一种情形 ——
+    # 一支不认识这个 type 的老引擎见到它是**开不了机的硬失败**(`WorldFileError`),
+    # 所以带 `plugin` 记录的包 `engine_min` 必须写 3.8.0。
+    "plugin": "plugins",
 }
 # 那两个**不是一列条目而是一个对象**的段,和 `config` 同类:一份而不是一条。
 AUTHOR_OBJECT_TYPES: dict[str, str] = {

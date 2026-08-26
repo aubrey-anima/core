@@ -790,7 +790,8 @@ class RedisVisibilityStore:
         self._places = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:stock_places")
 
     def declare(self, owner_kind: str, key: str, visibility: str,
-                label: str | None = None, bands: Any = None) -> None:
+                label: str | None = None, bands: Any = None,
+                notes: Any = None) -> None:
         from anima_world.perception import VISIBILITIES, band_errors
 
         if visibility not in VISIBILITIES:
@@ -816,7 +817,21 @@ class RedisVisibilityStore:
         # `"bands": null` 只会让"这个量分没分档"多出一种写法。
         if bands:
             row["bands"] = [[float(t), str(w)] for t, w in bands]
+        # 🆕 3.8.0:**这一档是什么感觉。** 和 `bands` 并排存,**不并进它** ——
+        # `perception.band_word` 是已发布契约,它按 `for threshold, word in bands`
+        # 解包,多一列当场 ValueError。而那是运行期的,样子是"她这一轮没有感知块"。
+        if notes and any(str(n or "").strip() for n in notes):
+            row["band_notes"] = [str(n or "") for n in notes]
         self._rules.put(f"{owner_kind}\x00{key}", row)
+
+    def undeclare(self, owner_kind: str, key: str) -> int:
+        """撤掉一行可见性声明 —— **插件裁剪与卸载唯一的出口**(3.8.0)。
+
+        ⚠️ 内核那一层**没有**这扇门,而那是有意的:本体层撤掉的量今天不裁剪
+        (收严会让写过额外键的已发布世界开不了机)。插件不同 —— 它在**自己的
+        命名空间**里裁自己的,一个字都碰不到别人。
+        """
+        return self._rules.drop(f"{owner_kind}\x00{key}")
 
     def declarations(self) -> list[dict[str, Any]]:
         return sorted(
@@ -840,6 +855,18 @@ class RedisVisibilityStore:
             (str(r["kind"]), str(r["key"])): str(r["label"])
             for r in self._rules.all().values()
             if r.get("label")
+        }
+
+    def notes_map(self) -> dict[tuple[str, str], list[str]]:
+        """分过档的量,**每一档那句描述**。没写描述的量不在这张表里。
+
+        和 `bands_map` 分成两张表:`bands` 是已发布契约(镜像端读它),而描述是
+        3.8.0 新加的一列 —— 并进去会让每一个读 `bands` 的地方都得先学会跳过第三项。
+        """
+        return {
+            (str(r["kind"]), str(r["key"])): [str(n) for n in r["band_notes"]]
+            for r in self._rules.all().values()
+            if r.get("band_notes")
         }
 
     def bands_map(self) -> dict[tuple[str, str], list[list[Any]]]:
@@ -1798,6 +1825,41 @@ class RedisNeedsStore:
         row.update({need: float(values.get(need, 1.0)) for need in NEEDS})
         row["updated_tick"] = int(tick)
         self._rows.put(agent_id, row)
+
+
+class RedisPluginStore:
+    """**这个世界此刻装着哪些插件** —— 一个 hash,一行一个插件。
+
+    ⚠️ **行里存的是「装的是哪一版、有哪几个事实名」,不是声明本身。** 声明的权威是
+    世界文件里那条 `plugin` 记录;库里再存一份就是第二真相源,而两份声明对不上的
+    那天没有一处会报错(她照着库里那份跑,作者读的是文件那份)。
+
+    那为什么还要这一行:**裁剪只有它答得出**。升级时要知道"上一版有、这一版没有的
+    是哪几个事实",而那件事文件里那份声明说不出来 —— 它只说得出这一版有什么。
+
+    它**不是易失键**:插件是世界的内容(和 `:kinds` 同一类),跟着 `.cyberworld`
+    走,重启不该让世界忘了自己装过什么。
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:plugins")
+
+    def get(self, plugin_id: str) -> dict[str, Any] | None:
+        return self._rows.get(plugin_id)
+
+    def put(self, plugin_id: str, row: dict[str, Any]) -> None:
+        self._rows.put(plugin_id, row)
+
+    def drop(self, plugin_id: str) -> int:
+        return self._rows.drop(plugin_id)
+
+    def all(self) -> dict[str, Any]:
+        return self._rows.all()
+
+    def __len__(self) -> int:
+        return len(self._rows)
 
 
 class RedisCliqueStore:

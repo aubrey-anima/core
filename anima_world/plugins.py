@@ -48,7 +48,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping
 
 from anima_world.expressions import Expression, ExpressionError, compile_expression
@@ -201,7 +201,8 @@ class Plugin:
 
 
 def parse_plugins(
-    entries: Any, *, ticks_per_day: int = 288, subscribable: Iterable[str] = (),
+    entries: Any, *, ticks_per_day: int = 288,
+    subscribable: Iterable[str] | None = None,
 ) -> list[Plugin]:
     """把 `plugin` 记录编译成 `Plugin`。**任何一条坏了就整体拒绝,一次列全。**
 
@@ -211,6 +212,10 @@ def parse_plugins(
     `subscribable` 是第 0 期那张白名单(`events.SUBSCRIBABLE_EVENTS`)。触发器订的
     事件必须在它上面,**或者**是任何插件的 `<id>.<type>` —— 后者由调用方在装载时
     连着依赖一起查(这里只认白名单与"带点号的插件事件"这个形状)。
+    ⚠️ **缺省是引擎那张真表,不是空集。** 空集当缺省的下场很具体:一个忘了传它的
+    调用方会把**每一个**合法的触发器都判成"订不到",而报错里那句"可订的是 []"
+    看上去像是这一版引擎一个事件都不许订 —— 一句会把人指向错误方向的报错,
+    比不报错还贵。要真的验空集就显式传 `subscribable=()`。
     """
     if entries is None:
         return []
@@ -220,6 +225,10 @@ def parse_plugins(
     errors: list[str] = []
     plugins: list[Plugin] = []
     seen: dict[str, str] = {}
+    if subscribable is None:
+        from anima_world.events import SUBSCRIBABLE_EVENTS
+
+        subscribable = SUBSCRIBABLE_EVENTS
     known = set(subscribable)
 
     for index, entry in enumerate(entries):
@@ -324,8 +333,14 @@ def _parse_one(
     raw_rules = entry.get("rules")
     if raw_rules is not None:
         try:
-            rules = tuple(parse_rules(raw_rules, ticks_per_day=ticks_per_day,
-                                      namespace=plugin_id))
+            # **规律 id 也进命名空间。** 它是节流水位的键(`_rule_last_run`)与骰子的
+            # 第二个坐标 —— 和世界自己一条同名的规律撞上,两条会共用一个水位,
+            # 于是其中一条永远少跑,而没有一处会报错。
+            rules = tuple(
+                replace(rule, id=f"{plugin_id}.{rule.id}")
+                for rule in parse_rules(raw_rules, ticks_per_day=ticks_per_day,
+                                        namespace=plugin_id)
+            )
         except RuleError as exc:
             errors.extend(f"{label}.{e}" for e in exc.errors)
     for rule in rules:
@@ -456,18 +471,8 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any) -> Fact:
                     errors.append(f"{label}.range:下限 {low} 比上限 {high} 还大")
         raw_bands = spec.get("bands")
         if raw_bands is not None:
-            problems = band_errors(raw_bands, label=label)
-            if problems:
-                errors.extend(problems)
-            else:
-                bands = parse_bands(raw_bands)
-                # **第三项是描述**,而 `parse_bands` 只收前两项(它是老契约,
-                # 只加不改)。所以第三项在这里单独摘,按档位对齐。
-                notes = [
-                    str(row[2]).strip() if isinstance(row, (list, tuple)) and len(row) > 2
-                    and row[2] is not None else ""
-                    for row in raw_bands
-                ]
+            bands, notes, problems = _parse_banded(label, raw_bands)
+            errors.extend(problems)
 
     if errors:
         raise PluginError(errors)
@@ -478,6 +483,41 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any) -> Fact:
         unit=str(spec.get("unit") or "").strip(), bands=bands,
         band_notes=tuple(notes), values=tuple(values), low=low, high=high,
     )
+
+
+def _parse_banded(
+    label: str, raw: Any,
+) -> tuple[tuple[tuple[float, str], ...], list[str], list[str]]:
+    """插件的 `bands`:**[阈值, 档词] 或 [阈值, 档词, 这一档是什么感觉]**。
+
+    第三项是这一期给作者的那件东西(老板原话:「数字可以加入别名,95 是亲密无间,
+    然后加入描述」)。它**只加不改** —— 老的两项写法一个字不变,而 `perception`
+    那份 `band_errors` / `parse_bands` 是**已发布的契约**,收的就是两项,所以这里
+    先把第三项摘掉再交给它:**判断仍然只有一份**,这一层只多认一列。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return (), [], [f"{label}.bands 必须是一个数组:[[阈值, 词] 或 [阈值, 词, 描述], …]"]
+    trimmed: list[Any] = []
+    notes: list[str] = []
+    problems: list[str] = []
+    for index, row in enumerate(raw):
+        if isinstance(row, (list, tuple)) and len(row) == 3:
+            note = row[2]
+            if note is not None and not isinstance(note, str):
+                problems.append(
+                    f"{label}.bands[{index}][2]:描述要是一句话(字符串),"
+                    f"收到 {type(note).__name__}"
+                )
+                note = ""
+            trimmed.append([row[0], row[1]])
+            notes.append(str(note or "").strip())
+        else:
+            trimmed.append(row)
+            notes.append("")
+    problems.extend(band_errors(trimmed, label=label))
+    if problems:
+        return (), [], problems
+    return parse_bands(trimmed), notes, []
 
 
 def _as_float(label: str, what: str, raw: Any, errors: list[str], fallback: float) -> float:
@@ -738,3 +778,234 @@ def version_tuple(version: str) -> tuple[int, ...]:
         digits = "".join(ch for ch in part if ch.isdigit())
         out.append(int(digits) if digits else 0)
     return tuple(out) or (0,)
+
+
+# ── 装 / 升 / 卸 ────────────────────────────────────────────────────────────
+#
+# 三件事共用一份"这个插件此刻装的是什么"的记录(`:plugins` 那个 hash),而**记录
+# 里存的是事实名清单,不是声明本身** —— 声明的权威是世界文件那一份,库里存一份
+# 拷贝就是第二真相源。记清单是为了**裁剪**:升级时要知道"上一版有而这一版没有的
+# 是哪几个",而那件事只有记录答得出。
+
+
+@dataclass
+class InstallReport:
+    """一次装载干了什么。**每一格都要说得出话** —— 静默的装载分不出"装上了"和"跳过了"。"""
+
+    installed: list[str] = field(default_factory=list)     # 头一回装
+    upgraded: list[tuple[str, str, str]] = field(default_factory=list)   # (id, 旧, 新)
+    unchanged: list[str] = field(default_factory=list)     # 同版本,只填缺
+    dropped_facts: dict[str, list[str]] = field(default_factory=dict)    # 裁剪掉的
+    seeded: int = 0                                        # 填了几个默认值
+
+
+def install_plugins(
+    plugins: Iterable[Plugin], *, store: Any, stock_store: Any, visibility_store: Any,
+    owners_of: Any, tick: int = 0, bodies: Mapping[str, Any] | None = None,
+) -> InstallReport:
+    """把一组(已经排好序的)插件装进这个世界。**幂等。**
+
+    `owners_of(bearer)` 由调用方给:它知道这个世界此刻有哪些 agent、哪些地点、
+    哪个种类有哪些实例。**这一层不去猜** —— 猜的话它就得认识调度器、地点表和本体,
+    而那正是"内核不认识任何具体系统"要挡的方向。
+
+    ⚠️ **`agent` 那一支在这里只装"已经在册的"。** 后来才出现的人(节拍 `agent_join`、
+    重启中途加入、第一次露面的玩家)走 `Scheduler.seed_actor_quantities` —— 那是
+    **玩家与角色唯一共同的窄口**,本体层的量早就挂在那儿了,插件的事实跟着走同一条。
+    两处各写一遍的话,漏掉任何一处的样子都是安静的:`me_qi.灵力` 恒为 0,
+    她做什么都被拒,而回执只说"你做不了"。
+
+    **升级 = 同 id 更高 version**:声明里没了的事实**裁剪**(删值、删可见性行)并
+    记进 `dropped_facts`;**低于已装版本当场拒绝** —— 一次"降级"在这一层不是回退,
+    是拿旧声明去覆盖新数据,而那不可逆。
+    """
+    report = InstallReport()
+    errors: list[str] = []
+    for plugin in plugins:
+        row = store.get(plugin.id) or None
+        if row is not None:
+            was = str(row.get("version") or "")
+            if version_tuple(was) > version_tuple(plugin.version):
+                errors.append(
+                    f"插件 `{plugin.id}`:这个世界里装的是 {was},而文件里是 "
+                    f"{plugin.version} —— **不降级**。降级不是回退,是拿旧声明去盖"
+                    "新数据(上一版新加的事实会被当成「声明里没了」裁掉),而那不可逆"
+                )
+                continue
+    if errors:
+        raise PluginError(errors)
+
+    for plugin in plugins:
+        row = store.get(plugin.id) or None
+        was = str((row or {}).get("version") or "")
+        had = set((row or {}).get("facts") or ())
+
+        # ① 可见性:声明的镜像,**每次都照新声明重写**(和 `_apply_ontology` 里
+        #    `redeclare_kinds` 那一半逐字同一条理由:镜像不跟着改,同一个量会有
+        #    两个答案,而她读到的是镜像那个)。
+        for fact in plugin.facts.values():
+            if fact.visibility == "hidden":
+                continue
+            # `state` 借 `bands` 那条路进感知:档位就是它的序号,档词就是值名。
+            # **一套渲染,不是两套** —— 两套的下场是同一个世界里"档"和"状态"在
+            # 提示词里读起来是两种东西,而作者写的时候把它们当同一件事。
+            bands = fact.bands
+            notes = fact.band_notes
+            if fact.shape == "state":
+                bands = tuple((float(i), name) for i, (name, _n) in enumerate(fact.values))
+                notes = tuple(note for _n, note in fact.values)
+            visibility_store.declare(
+                fact.owner_kind, fact.qualified, fact.visibility,
+                fact.label or fact.key, bands=bands, notes=notes)
+
+        # ② 默认值:**只填缺,不覆盖**(创世那条纪律)。
+        for fact in plugin.facts.values():
+            if fact.bearer == "agent":
+                continue          # 走 `seed_actor_quantities` 那个窄口
+            for owner in owners_of(fact.bearer):
+                have = stock_store.of(owner)
+                if fact.qualified in have:
+                    continue
+                stock_store.set_many(owner, {fact.qualified: fact.default}, tick=int(tick))
+                report.seeded += 1
+
+        # ③ 裁剪:上一版有、这一版没有的那几个。**这是插件系统和今天的本体层最大
+        #    的一处不同** —— 本体层不裁剪(收严会让已发布世界开不了机,`kind_keys`
+        #    那笔账),而插件在**自己的命名空间**里裁自己的,谁都不会被误伤。
+        gone = sorted(had - set(plugin.facts))
+        if gone:
+            report.dropped_facts[plugin.id] = gone
+            _prune_facts(plugin.id, gone, stock_store=stock_store,
+                         visibility_store=visibility_store, owners_of=owners_of)
+
+        # **声明原文存进库,编译在读取侧** —— 和 `RedisRulesStore` / `RedisOntologyStore`
+        # 逐字同一条。理由是"世界"这个东西住在键前缀里,不住在世界文件里:一个从
+        # `--world-file` 建起来的世界,下一次开机手上没有那份文件,而它的规律、种类、
+        # 插件都得照旧跑。**世界文件是来源,库是世界。**
+        # 摘出来的那几格(version / facts / …)是**派生的**,存它们只为一件事:
+        # 裁剪要知道"上一版有哪几个事实",而那件事新声明说不出来。
+        store.put(plugin.id, {
+            "id": plugin.id, "version": plugin.version, "label": plugin.label,
+            "facts": sorted(plugin.facts),
+            "bearers": sorted(plugin.bearers()),
+            "rules": len(plugin.rules), "triggers": len(plugin.triggers),
+            "reads": sorted(plugin.reads),
+            "body": dict((bodies or {}).get(plugin.id) or {}),
+        })
+        if row is None:
+            report.installed.append(plugin.id)
+        elif was != plugin.version:
+            report.upgraded.append((plugin.id, was, plugin.version))
+        else:
+            report.unchanged.append(plugin.id)
+    return report
+
+
+#: 事实住在哪些 owner 名下 —— 裁剪与卸载都要扫这些。
+_PRUNE_KINDS = ("agent", "world", "location")
+
+
+def _prune_facts(
+    plugin_id: str, keys: Iterable[str], *, stock_store: Any, visibility_store: Any,
+    owners_of: Any,
+) -> int:
+    """把这几个事实从这个世界里删干净:值、owner 索引、可见性行。"""
+    qualified = [f"{plugin_id}.{key}" for key in keys]
+    if not qualified:
+        return 0
+    dropped = 0
+    seen: set[str] = set()
+    for bearer in _PRUNE_KINDS:
+        for owner in owners_of(bearer):
+            seen.add(owner)
+    # `entity:*` 那一支的 owner 名单由调用方给(它认识本体);这里再兜一次底,
+    # 拿 owner 索引扫一遍 —— 一个被裁掉的事实留在某个实例身上,下场和"撤掉的量
+    # 还进提示词"逐字相同。
+    try:
+        seen.update(stock_store.owners())
+    except Exception:  # noqa: BLE001 - 扫不动名单不该掀翻装载
+        logger.warning("扫 owner 名单失败,插件裁剪只能按已知 bearer 走", exc_info=True)
+    for owner in sorted(seen):
+        have = stock_store.of(owner)
+        for name in qualified:
+            if name in have:
+                stock_store.delete(owner, name)
+                dropped += 1
+    for name in qualified:
+        for kind in set(_PRUNE_KINDS) | {
+            k for (k, key) in visibility_store.rules_map() if key == name
+        }:
+            try:
+                visibility_store.undeclare(kind, name)
+            except AttributeError:      # 老的可见性 store 没有这扇门
+                break
+    return dropped
+
+
+def remove_plugin(
+    plugin_id: str, *, store: Any, stock_store: Any, visibility_store: Any,
+    owners_of: Any, dry_run: bool = False,
+) -> dict[str, Any]:
+    """卸掉一个插件:它的事实、可见性行、记录。**它的规律与触发器随记录一起消失**
+    (它们不落库 —— 权威是世界文件那份声明,库里只记"装的是哪一版")。
+
+    ⚠️ **不删别的插件的东西**,一个字都不碰:命名空间就是这条边界的落点。
+    ⚠️ **它抹不掉历史** —— 这个插件发过的事件留在日志里,和 `forget_player` 一条。
+    日志是唯一的真相,而"这个世界曾经装过这个插件"是一件真的发生过的事。
+    """
+    row = store.get(plugin_id)
+    if row is None:
+        return {"plugin": plugin_id, "found": False, "facts": 0,
+                "keys": [], "dry_run": bool(dry_run)}
+    keys = sorted(row.get("facts") or ())
+    if dry_run:
+        qualified = [f"{plugin_id}.{key}" for key in keys]
+        count = 0
+        try:
+            owners = sorted(stock_store.owners())
+        except Exception:  # noqa: BLE001
+            owners = []
+        for owner in owners:
+            have = stock_store.of(owner)
+            count += sum(1 for name in qualified if name in have)
+        return {"plugin": plugin_id, "found": True, "facts": count,
+                "keys": keys, "dry_run": True}
+    dropped = _prune_facts(plugin_id, keys, stock_store=stock_store,
+                           visibility_store=visibility_store, owners_of=owners_of)
+    store.drop(plugin_id)
+    return {"plugin": plugin_id, "found": True, "facts": dropped,
+            "keys": keys, "dry_run": False}
+
+
+def stored_bodies(store: Any) -> list[dict[str, Any]]:
+    """库里那几个插件的**声明原文**,按 id 排序。
+
+    ⚠️ **一行没有 `body` 的记录会被跳过并点名。** 那种行只可能来自一次半截的写入
+    (或者一份手改过的库),而一个"记着装过、却说不出装的是什么"的插件是最坏的
+    形状:`plugin list` 报得出它,规律和触发器却一条都不跑,世界照跑、日志干净。
+    """
+    out: list[dict[str, Any]] = []
+    for plugin_id, row in sorted((store.all() or {}).items()):
+        body = (row or {}).get("body")
+        if not isinstance(body, dict) or not body:
+            logger.warning(
+                "插件 %r 在库里只有一行记录、没有声明原文 —— 它的规律与触发器"
+                "这一趟一条都不会跑。拿它的世界文件重新装一次(`--world-file`)",
+                plugin_id,
+            )
+            continue
+        out.append(dict(body))
+    return out
+
+
+def merge_bodies(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """库里那几份 + 文件里那几份,按 id 去重,**文件里那份赢**。
+
+    和 `kinds` 逐字同一条理由:插件是**法不是状态** —— 它身上没有任何会随时间漂的
+    东西(会漂的是它的事实,而那些住在量表里,这里一个字都不碰)。反过来的话,
+    一个跑着的世界里的插件永远升不了级。
+    """
+    out = [dict(row) for row in incoming]
+    have = {str(row.get("id") or "") for row in out}
+    out += [dict(row) for row in existing if str(row.get("id") or "") not in have]
+    return out

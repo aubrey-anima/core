@@ -448,6 +448,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="as_json", help="机器可读输出"
     )
 
+    # ── plugin(3.8.0)──────────────────────────────────────────────────────
+    plugin_cmd = sub.add_parser(
+        "plugin",
+        help="这个世界装着哪些插件(list),以及卸掉一个(remove)",
+    )
+    plugin_commands = plugin_cmd.add_subparsers(dest="plugin_command")
+    plugin_list = plugin_commands.add_parser(
+        "list", help="装着哪几个:id / 版本 / 几个事实 / 几条规律 / 几个触发器 / 装载顺序",
+    )
+    _add_world_args(plugin_list)
+    plugin_list.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
+    plugin_remove = plugin_commands.add_parser(
+        "remove",
+        help="卸掉一个插件:删它全部的事实、可见性行与那一行记录(它的规律与触发器"
+             "随记录一起消失)。不带 --yes 只数",
+    )
+    _add_world_args(plugin_remove)
+    plugin_remove.add_argument("plugin", help="要卸的插件 id")
+    plugin_remove.add_argument(
+        "--yes", action="store_true",
+        help="真卸。不带它只数要删多少 —— 和 `world drop` / `player erase` 同一个习惯",
+    )
+    plugin_remove.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+
     drift_cmd = sub.add_parser(
         "drift",
         help="她还是不是她:人设漂移的尺子(纯计数,不调模型;含迎合度这一格)",
@@ -858,7 +886,36 @@ def authored_layer_errors(
         + world_card_errors(authored)
         + world_location_media_errors(authored)
         + world_beat_errors(authored)
+        + world_plugin_errors(authored)
     )
+
+
+def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
+    """作者写下的插件立不立得住 —— **和开机同一份判断**(3.8.0)。
+
+    这是那条纪律的第 N 次落点,写在这儿是因为它每一次都被忘掉一半:
+    **新增一种开机失败,就必须同一轮把它补进离线那两扇门。** 3.7.0 收节拍时
+    第一版只收了段没补门,于是 `world check` 对一份开不了机的文件照答
+    `loadable: true` —— 而同一版的上一个 commit 刚为同一种假绿修过三格。
+
+    ⚠️ **和 `complete` 无关**:插件声明**没有跨引用**(它读的是自己的命名空间与
+    `reads` 里点名的那几个,而那几个必须由同一份文件里的别的插件提供)——
+    所以一次编辑(`--edit`)里它照查。这一格和 `world_beat_errors` 逐字同构。
+    """
+    if not authored:
+        return []
+    entries = authored.get("plugins")
+    if entries is None:
+        return []
+    from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.plugins import PluginError, order_plugins, parse_plugins
+
+    try:
+        plugins = parse_plugins(entries, subscribable=SUBSCRIBABLE_EVENTS)
+        order_plugins(plugins)
+    except PluginError as exc:
+        return list(exc.errors)
+    return []
 
 
 def world_beat_errors(authored: dict[str, Any] | None) -> list[str]:
@@ -1514,7 +1571,7 @@ def build_serve_scheduler(
         RedisEconomyStore, RedisEventLog, RedisKnowledgeGraph, RedisLocationStore,
         RedisMemoryStore, RedisNeedsStore, RedisCliqueStore, RedisPromptStore,
         RedisBeatsStore, RedisOntologyStore, RedisReflectionStore,
-        RedisRulesStore, RedisStockStore,
+        RedisPluginStore, RedisRulesStore, RedisStockStore,
         RedisVisibilityStore,
         clock_key, current_action_key, decode_action, decode_plan, encode_action,
         encode_plan, events_key,
@@ -1804,6 +1861,8 @@ def build_serve_scheduler(
     # 量与规律。
     scheduler.stock_store = stock_store
     scheduler.visibility_store = visibility_store
+    plugin_store = RedisPluginStore(redis, world_id)
+    scheduler.plugin_store = plugin_store
     with shared_lock:
         # **播种是创世那一刻的事,不是"这张表恰好还空着"的事。**
         #
@@ -1852,6 +1911,13 @@ def build_serve_scheduler(
             _apply_ontology(scheduler.ontology, stock_store, visibility_store,
                             tick=scheduler.clock, redeclare_kinds=redeclared_kinds,
                             rules=scheduler.world_rules)
+        # 插件(3.8.0)。**排在本体之后**:插件的事实挂在 bearer 身上,而"这个世界
+        # 有哪些实例"是本体答的;而且它要拿 `visibility_store` 写自己那几行镜像,
+        # 那张表刚被 `_apply_ontology` 对齐过。
+        _install_plugins(
+            scheduler, plugin_store, stock_store, visibility_store, location_store,
+            world_seed if seed_author_layer else None,
+        )
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -2628,12 +2694,15 @@ def _dropped_quantities(
     dropped: dict[str, set[str]] = {}
 
     def note(kind_id: str, keys: Any) -> None:
+        # 带点号的键是**插件命名空间**里的事实(`needs.energy`),不归本体这一层管 ——
+        # 它们的撤销由插件自己的裁剪处理并报 `dropped_facts`。不滤掉的话,一个装了
+        # 插件的世界开机第一句就是一堆假警报(`agent` 声明里当然没有 `needs.energy`)。
         # **不在 `declared` 里就一个字都不说** —— 那是"这个种类的量另有来路",
         # 不是"这些量被撤掉了"。这道门放在这儿而不是放在每个调用点上:三个来源
         # 各判一次的话,漏掉任何一处的样子都是一条假警报,而假警报没有红字。
         if kind_id not in declared:
             return
-        extra = {str(k) for k in keys} - declared[kind_id]
+        extra = {str(k) for k in keys if "." not in str(k)} - declared[kind_id]
         if extra:
             dropped.setdefault(kind_id, set()).update(extra)
 
@@ -2787,6 +2856,80 @@ def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list
         "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问,开机会印一行 "
         "`dropped_quantities:`"
     ]
+
+
+def _install_plugins(
+    scheduler: Any, plugin_store: Any, stock_store: Any, visibility_store: Any,
+    location_store: Any, world_seed: dict[str, Any] | None,
+) -> None:
+    """把插件装进这个世界,并把它的规律与触发器接到调度器上(3.8.0)。
+
+    **两个来源,文件里那份赢**:库里那几行(这个世界上一次装的,和 `:kinds` /
+    `:world_rules` 同一类持久声明)与作者层这一份(`--world-file` 或创世)。
+    没有作者层的普通重启只走前者 —— 于是一个从 `--world-file` 建起来的世界,
+    下一次开机手上没有那份文件,它的插件照旧在跑。
+
+    ⚠️ **没有插件的世界这里是两次判空**:一次 `hgetall` 加一次 `.get`。
+    "声明本身就是开关"在这一层的落法 —— 不写 `plugin` 的世界行为逐位不变。
+    """
+    from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.plugins import (
+        install_plugins, merge_bodies, order_plugins, parse_plugins, stored_bodies,
+    )
+
+    incoming = [
+        dict(row) for row in ((world_seed or {}).get("plugins") or [])
+        if isinstance(row, dict)
+    ]
+    bodies = merge_bodies(stored_bodies(plugin_store), incoming)
+    if not bodies:
+        return
+    ticks_per_day = max(1, 1440 // max(1, scheduler._minutes_per_tick()))
+    plugins = order_plugins(parse_plugins(
+        bodies, ticks_per_day=ticks_per_day, subscribable=SUBSCRIBABLE_EVENTS))
+
+    def owners_of(bearer: str) -> list[str]:
+        """这个 bearer 此刻有哪些 owner。**这一层认识世界,插件那一层不认识。**"""
+        if bearer == "world":
+            return ["world"]
+        if bearer == "agent":
+            return list(stock_store.owners("agent"))
+        if bearer == "location":
+            return [f"location:{row['id']}" for row in (location_store.all() or ())
+                    if row.get("id")]
+        kind = bearer.split(":", 1)[1]
+        ontology = scheduler.ontology
+        if ontology is None:
+            return []
+        return [entity.id for entity in ontology.entities.values()
+                if entity.kind == kind]
+
+    report = install_plugins(
+        plugins, store=plugin_store, stock_store=stock_store,
+        visibility_store=visibility_store, owners_of=owners_of,
+        tick=scheduler.clock, bodies={str(b.get("id")): b for b in bodies},
+    )
+    scheduler.plugins = list(plugins)
+    # 规律接进那条已经在跑的路(`stocks.evaluate_due`)—— **不另起一个求值器**:
+    # 双缓冲、节流水位、骰子、"两条规律抢同一个量"那句警告,插件一样得吃到。
+    for plugin in plugins:
+        scheduler.world_rules.extend(plugin.rules)
+    by_event: dict[str, list[Any]] = {}
+    for plugin in plugins:
+        for trigger in plugin.triggers:
+            by_event.setdefault(trigger.event, []).append(trigger)
+    scheduler._triggers_by_event = by_event
+    # 已经在册的人补上插件那几格(后来的人走 `seed_actor_quantities` 那个窄口)。
+    for agent_id in list(scheduler.agents):
+        scheduler.seed_actor_plugin_facts(agent_id)
+    if report.installed or report.upgraded or report.dropped_facts:
+        logger.info(
+            "插件:装了 %s;升级 %s;同版本 %s;种了 %d 个默认值%s",
+            report.installed or "—",
+            [f"{i}:{a}→{b}" for i, a, b in report.upgraded] or "—",
+            report.unchanged or "—", report.seeded,
+            f";裁剪 dropped_facts: {report.dropped_facts}" if report.dropped_facts else "",
+        )
 
 
 def _apply_ontology(ontology: Any, stock_store: Any, visibility_store: Any,
@@ -6162,6 +6305,15 @@ def contract_payload() -> dict[str, Any]:
     )
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
     from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.plugins import (
+        BEARER_FORMS,
+        DEFAULT_TEXT_MAX_CHARS,
+        DEFERRED_SHAPES,
+        EFFECTS,
+        FACT_SHAPES,
+        PLUGIN_ID_PATTERN,
+        RESERVED_IDS,
+    )
     from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
     from anima_world.world_package import PACKAGE_FORMAT_VERSION
     from anima_world.character_card import (
@@ -6450,6 +6602,43 @@ def contract_payload() -> dict[str, Any]:
             "subscribable_events": {
                 name: dict(spec) for name, spec in SUBSCRIBABLE_EVENTS.items()
             },
+            # 🆕 3.8.0 第 1 期。**这一格缺席 = 这支引擎不认 `plugin` 记录**
+            # (3.7.0 及更早,而它见到那种记录是**开不了机的硬失败** ——
+            # 和 `beat` 逐字同一种情形,所以带 `plugin` 记录的包 `engine_min`
+            # 必须写 3.8.0)。一律 `d.get("plugins", {}).get("author_type")`。
+            "author_type": "plugin",
+            "world_file_section": "plugins",
+            "storage_key": "anima:{world_id}:plugins",
+            "id_pattern": PLUGIN_ID_PATTERN,
+            "reserved_ids": sorted(RESERVED_IDS),
+            # 🔴 **这一版收的事实形状,不是设计稿那张表。** 设计稿说的是这套架构
+            # 装得下什么,契约说的是**这一版引擎收不收** —— 差着 `timer` 与 `text`
+            # 两种,它们写了**开不了机**并点名(理由各不相同,见 `plugins.py`)。
+            "fact_shapes": list(FACT_SHAPES),
+            "deferred_fact_shapes": {k: v for k, v in sorted(DEFERRED_SHAPES.items())},
+            "bearer_forms": list(BEARER_FORMS),
+            "effects": list(EFFECTS),
+            # 表达式里的命名空间语法。**一层,不是属性访问**(见
+            # `expressions._validate` 那段:它是安全边界)。`me_` 前缀读的是
+            # 施动者身上那一份,和内核的量逐字同构。
+            "namespace_syntax": "<plugin>.<fact>",
+            "actor_namespace_syntax": "me_<plugin>.<fact>",
+            "state_in_expressions": "ordinal",
+            "text_max_chars_default": DEFAULT_TEXT_MAX_CHARS,
+            "read_command": "plugin list",
+            "remove_command": "plugin remove <id> --yes",
+            "gloss": (
+                "插件 = 作者层第十三个段(`{\"kind\": \"author\", "
+                "\"type\": \"plugin\", \"body\": {…}}`)。事实的存储键是 "
+                "`<id>.<key>`,**住在今天的量表里**(`stock:{owner}`),不新造存储。"
+                "三条边界:只写自己的命名空间(越界开不了机)· 读别人的要 `reads` "
+                "声明(未声明开不了机)· 依赖图定装载顺序(缺依赖、成环当场报)。"
+                "⚠️ **`state` 在表达式里是序号**(按 `values` 顺序从 0 起),"
+                "不是那个词 —— 和字符串比大小是**加载期错误**,报错里会告诉作者"
+                "该写几。⚠️ 触发器**队列在 tick 开头快照、drain 一遍**,"
+                "自己 emit 的落进下一 tick:没有同轮递归,代价是滞后一轮"
+                "(和规律那一层的双缓冲同一笔账)"
+            ),
         },
         "beats": {
             "schema_version": None,
@@ -6492,6 +6681,104 @@ def contract_payload() -> dict[str, Any]:
             },
         },
     }
+
+
+def run_plugin(args: argparse.Namespace) -> int:
+    """`anima-world plugin list / remove` —— 这个世界装着哪些插件,以及卸掉一个。
+
+    **`remove` 默认是预演**(和 `world drop` / `player erase` 同一个习惯):不带
+    `--yes` 只数要删多少,一个字节都不写。⚠️ 任务单里写的是 `--dry-run`,而这个
+    CLI 上"危险操作默认预演、`--yes` 才动手"已经是两处的既有习惯 —— **同一把
+    CLI 上两种约定,比哪一种都糟**:照另一处的记忆敲下去的人会真的删掉东西。
+    """
+    from anima_world.plugins import remove_plugin
+
+    redis, world_id, mysql = _world_args(args)
+    command = getattr(args, "plugin_command", None)
+    if command not in {"list", "remove"}:
+        print("[plugin] 只有 list / remove 两个子命令", file=sys.stderr)
+        return 2
+    if not _world_exists(redis, world_id):
+        print(f"[plugin] 还没有 {world_id!r} 这个世界。", file=sys.stderr)
+        return 2
+
+    from anima_world.api import World
+
+    world = World.open(world_id, redis=redis, mysql=mysql, force_mock_llm=True)
+    try:
+        scheduler = world.scheduler
+        store = scheduler.plugin_store
+        if command == "list":
+            rows = [
+                {
+                    "id": plugin.id, "version": plugin.version, "label": plugin.label,
+                    "facts": sorted(plugin.facts), "bearers": sorted(plugin.bearers()),
+                    "rules": len(plugin.rules), "triggers": len(plugin.triggers),
+                    "reads": sorted(plugin.reads),
+                    # **装载顺序是答案的一部分**:依赖图定的那个顺序决定"我读的那个
+                    # 量在我第一次求值时在不在库里",而它不是字母序。
+                    "order": index,
+                }
+                for index, plugin in enumerate(scheduler.plugins)
+            ]
+            if getattr(args, "as_json", False):
+                print(json.dumps({"operation": "plugin list", "world_id": world_id,
+                                  "plugins": rows}, ensure_ascii=False, indent=2))
+                return 0
+            if not rows:
+                print("[plugin] 这个世界一个插件都没装。")
+                return 0
+            for row in rows:
+                head = f"{row['id']} {row['version']}"
+                print(f"  {head:<24}{row['label'] or '—'}")
+                counts = (f"事实 {len(row['facts'])} · 规律 {row['rules']} · "
+                          f"触发器 {row['triggers']} · 挂在 {'、'.join(row['bearers'])}")
+                print(f"    {onboarding.dim(counts)}")
+                if row["reads"]:
+                    print(f"    {onboarding.dim('读别人的:' + '、'.join(row['reads']))}")
+            return 0
+
+        receipt = remove_plugin(
+            args.plugin, store=store, stock_store=scheduler.stock_store,
+            visibility_store=scheduler.visibility_store,
+            owners_of=lambda bearer: _plugin_owners(scheduler, bearer),
+            dry_run=not args.yes,
+        )
+    finally:
+        world.close()
+
+    if getattr(args, "as_json", False):
+        print(json.dumps(receipt, ensure_ascii=False, indent=2))
+        return 0 if receipt["found"] else 2
+    if not receipt["found"]:
+        print(f"[plugin] 这个世界没装 {args.plugin!r}。", file=sys.stderr)
+        return 2
+    verb = "卸了" if args.yes else "要卸"
+    print(f"[plugin] {receipt['plugin']} —— {verb}:"
+          f"事实 {len(receipt['keys'])} 种、{receipt['facts']} 处值。")
+    if not args.yes:
+        print("[plugin] (没带 --yes:世界一个字节都没动)")
+    else:
+        print("[plugin] 它的规律与触发器随这一行记录一起消失了;"
+              "历史一个字没动 —— 它发过的事件还在日志里。")
+    return 0
+
+
+def _plugin_owners(scheduler: Any, bearer: str) -> list[str]:
+    """这个 bearer 此刻有哪些 owner。**和装载那一处同一份判断**。"""
+    if bearer == "world":
+        return ["world"]
+    if bearer == "agent":
+        return list(scheduler.stock_store.owners("agent"))
+    if bearer == "location":
+        store = scheduler.location_store
+        return [f"location:{row['id']}" for row in ((store.all() if store else []) or ())
+                if row.get("id")]
+    kind = bearer.split(":", 1)[1] if ":" in bearer else bearer
+    ontology = scheduler.ontology
+    if ontology is None:
+        return []
+    return [e.id for e in ontology.entities.values() if e.kind == kind]
 
 
 def run_contract(args: argparse.Namespace) -> int:
@@ -6546,6 +6833,11 @@ def run_contract(args: argparse.Namespace) -> int:
                               '不是「某个世界现在是什么」—— 后者问 config list')}")
     subscribable = payload["plugins"]["subscribable_events"]
     print(f"  可订事件       {', '.join(sorted(subscribable))}")
+    plugins_seg = payload["plugins"]
+    print(f"  插件           作者层 type `{plugins_seg['author_type']}`   "
+          f"事实形状 {plugins_seg['fact_shapes']}   "
+          f"效果 {plugins_seg['effects']}   "
+          f"命名空间 {plugins_seg['namespace_syntax']}")
     print(f"  {onboarding.dim('               策展表不是全集 —— 内部事件不在上面;'
                               '进了就拿不掉,所以宁少勿多')}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
@@ -7446,6 +7738,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_location(args)
     if args.command == "player":
         return run_player(args)
+    if args.command == "plugin":
+        return run_plugin(args)
     if args.command == "report":
         return run_report(args)
     if args.command == "validate":

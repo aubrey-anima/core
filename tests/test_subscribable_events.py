@@ -126,8 +126,10 @@ def test_契约照原样报出来():
     assert set(section) == set(SUBSCRIBABLE_EVENTS)
     for name, spec in SUBSCRIBABLE_EVENTS.items():
         assert section[name] == spec, name
-    # **这一期 `plugins` 段只有这一格** —— 别的等第 1 期。
-    assert list(payload["plugins"]) == ["subscribable_events"]
+    # ⚠️ 这里曾经断言 `plugins` 段**只有这一格** —— 那是第 0 期的实况,
+    # 而第 1 期把这一段扩到了十几格。**断言"只有这一格"是在钉一个会长的东西**,
+    # 而它长的那天红出来的话指的是一个假问题。要钉的是**这一格还在**(只加不改)。
+    assert "subscribable_events" in payload["plugins"]
 
 
 def test_人看的那一份也印得出():

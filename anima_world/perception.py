@@ -107,6 +107,12 @@ class Perception:
     # **两张表**:那个是**东西**的名字(老橡树),这两个是**量**的名字(树高)。
     # 合成一张的话它们互相盖 —— 要么每棵树都叫"树高",要么每个量都叫"老橡树",
     # 而两种都只是提示词里读着别扭,不报错。
+    # 🆕 3.8.0:**这一档是什么感觉。** 档词回答"多少",描述回答"那是什么滋味" ——
+    # 老板那句「95 是亲密无间,然后加入描述」要的正是后半句。它和 `*_words` 并列,
+    # **不是替换**:没写描述的量在这两个字典里根本不出现,于是**没有描述的世界
+    # 提示词逐字节不变**(那条有一条单独的测试钉着)。
+    own_notes: dict[str, str] = field(default_factory=dict)
+    here_notes: dict[str, dict[str, str]] = field(default_factory=dict)
     own_labels: dict[str, str] = field(default_factory=dict)
     here_labels: dict[str, dict[str, str]] = field(default_factory=dict)
     public_labels: dict[str, str] = field(default_factory=dict)
@@ -158,6 +164,11 @@ class Perception:
                     "here": {k: dict(v) for k, v in self.here_labels.items()},
                     "public": dict(self.public_labels),
                 },
+                # 只加不改的一格(3.8.0):描述是**给她的**,数字仍然是给宿主的契约。
+                "notes": {
+                    "own": dict(self.own_notes),
+                    "here": {k: dict(v) for k, v in self.here_notes.items()},
+                },
                 "verbs": {k: list(v) for k, v in self.verbs.items()},
                 "names": dict(self.labels),
                 "glosses": dict(self.glosses),
@@ -196,6 +207,7 @@ class Perception:
         body = _describe(
             self.here.get(owner, {}), self.here_words.get(owner, {}),
             self.units.get(owner, {}), self.here_labels.get(owner, {}),
+            self.here_notes.get(owner, {}),
         )
         verbs = self.verbs.get(owner)
         # id 只在她**真能对它做点什么**时才露出来:那是 `interact` 的参数,不是装饰。
@@ -222,6 +234,17 @@ class Perception:
             lines.append(f"- 这里还有 {self.overflow} 样别的东西,你没细看")
         if self.public:
             lines.append(f"- 人人都知道:{self.describe_public()}")
+        # **描述单占一节,紧跟在感知之后**,而且只列**她自己身上**有描述的那几样。
+        # 挤进上面那一行的话,一行里会同时有"多少"和"那是什么滋味",而她读到的
+        # 是一段越来越长、越来越难分主次的话。别人身上那几句跟在档词后面(见
+        # `describe_here`)—— 那是她**看出来的**,不是她**体会到的**,两者不该并排。
+        if self.own_notes:
+            lines.append("")
+            for key in sorted(self.own_notes):
+                said = self.own_labels.get(key) or key
+                word = self.own_words.get(key)
+                head = f"{said} {word}" if word else said
+                lines.append(f"- {head} —— {self.own_notes[key]}")
         try:
             return template.format(lines="\n".join(lines))
         except (KeyError, IndexError, ValueError):
@@ -231,7 +254,7 @@ class Perception:
 
 def _describe(
     values: dict[str, float], words: dict[str, str], units: dict[str, str] | None = None,
-    labels: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None, notes: dict[str, str] | None = None,
 ) -> str:
     """一档量渲染成提示词里的正文:**`label` 换名字,`bands` 换值。**
 
@@ -247,9 +270,12 @@ def _describe(
     **排序按量名(key),不按 label。** 她读到的次序于是不随作者改一个字而变,
     而次序不确定的提示词是没法 diff 的。
     """
-    units, labels = units or {}, labels or {}
+    units, labels, notes = units or {}, labels or {}, notes or {}
     return "、".join(
         readout_text(key, values[key], words.get(key), units.get(key, ""), labels.get(key))
+        # 🆕 3.8.0:别人身上那句描述**跟在档词后面**,用括号收着 —— 它是她**看出来
+        # 的**,和自己那一节(体会到的)不是一回事,所以措辞与位置都不同。
+        + (f"({notes[key]})" if notes.get(key) else "")
         for key in sorted(values)
     )
 
@@ -314,6 +340,22 @@ def band_word(bands: Any, value: float) -> str | None:
         else:
             break            # 阈值升序,后面的更够不着
     return str(chosen)
+
+
+def band_note(bands: Any, notes: Any, value: float) -> str:
+    """这个值落在哪一档,那一档写了什么描述。没写(或没分档)就是空串。
+
+    **和 `band_word` 挑的是同一档**,所以两句话永远说的是同一件事 —— 各自再算
+    一遍"落在第几档"的话,某个刚好等于阈值的值上,词和描述会来自两档。
+    """
+    if not bands or not notes:
+        return ""
+    chosen = 0
+    for position, row in enumerate(bands):
+        if float(value) >= float(row[0]):
+            chosen = position
+    notes = list(notes)
+    return str(notes[chosen]) if chosen < len(notes) else ""
 
 
 def parse_bands(raw: Any) -> tuple[tuple[float, str], ...]:
@@ -518,8 +560,19 @@ def perceive(
     label_rules = getattr(visibility, "labels_map", None)
     label_rules = label_rules() if callable(label_rules) else {}
 
+    notes_rules = getattr(visibility, "notes_map", None)
+    notes_rules = notes_rules() if callable(notes_rules) else {}
+
     def word_of(kind: str, key: str, value: float) -> str | None:
         return band_word(bands_of(bands_rules, kind, key), value) if bands_rules else None
+
+    def note_of(kind: str, key: str, value: float) -> str:
+        """这一档那句描述。**没写就是空串,而空串不进任何一个字典** ——
+        「没有描述的世界提示词逐字节不变」这条整个挂在这一句上。"""
+        if not notes_rules:
+            return ""
+        return band_note(bands_of(bands_rules, kind, key),
+                         notes_rules.get((kind, key)) or (), value)
 
     def name_of(kind: str, key: str) -> str:
         # 和量名一样的 label 不留 —— 本体那条路上没写 label 的量存的就是量名本身
@@ -538,6 +591,9 @@ def perceive(
             word = word_of("agent", key, value)
             if word:
                 result.own_words[key] = word
+            note = note_of("agent", key, value)
+            if note:
+                result.own_notes[key] = note
             name = name_of("agent", key)
             if name:
                 result.own_labels[key] = name
@@ -575,6 +631,12 @@ def perceive(
                 }
                 if words:
                     result.here_words[owner] = words
+                seen_notes = {
+                    key: note for key, value in seen.items()
+                    if (note := note_of(kind, key, value))
+                }
+                if seen_notes:
+                    result.here_notes[owner] = seen_notes
                 names = {key: name for key in seen if (name := name_of(kind, key))}
                 if names:
                     result.here_labels[owner] = names

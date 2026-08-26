@@ -30,11 +30,13 @@ from anima_world.beats import (
 from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.chat_service import DEFAULT_ADDRESS
 from anima_world.events import EventLog
+from anima_world.expressions import ExpressionError
 from anima_world import memory_store as memory_store_mod
 from anima_world.narrative import NarrativeProvider
 from anima_world.perception import why_not_perceivable
 from anima_world import together as together_mod
 from anima_world.projection import project_events
+from anima_world.stocks import clock_names
 from anima_world.types import Event
 from anima_world.world_time import (
     DEFAULT_MINUTES_PER_TICK,
@@ -45,6 +47,35 @@ from anima_world.world_time import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _event_numbers(event: dict[str, Any]) -> dict[str, float]:
+    """一条事件里**读得出数的那几格** → 触发器命名空间里的 `event.<格>`。
+
+    ⚠️ **只收数,不收别的。** 表达式那一层只做算术与比较,一个字符串进去的下场是
+    运行期 `TypeError`,而那的样子是"这条触发器安静地跳过了"。所以在**进命名空间
+    之前**就把非数的滤掉:读不到的名字会当场报"读了一个不存在的量",作者看得懂;
+    一个悄悄跳过的触发器他看不懂。
+
+    嵌套一层也收(`changed` / `me_delta` 那种「量名 → 数」的表),写成
+    `event.<格>` 读不到,得写 `event.<格>` 的子键 —— 而两层点号这一版不收,
+    所以嵌套那一层**摊平成 `<格>_<子键>`**:`event.changed_树高`。
+    """
+    out: dict[str, float] = {}
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        return out
+    for key, value in payload.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            out[f"event.{key}"] = float(value)
+        elif isinstance(value, dict):
+            for sub, inner in value.items():
+                if isinstance(inner, bool) or not isinstance(inner, (int, float)):
+                    continue
+                out[f"event.{key}_{sub}"] = float(inner)
+    return out
 
 # The `events.ts` column carries two different time bases — see
 # `world_time.WALL_CLOCK_FLOOR` for the full statement of the rule. Restoring
@@ -290,6 +321,18 @@ class Scheduler:
         self.stock_store: Any | None = None
         self.visibility_store: Any | None = None   # 可见性声明 + 东西在哪(perception)
         self.world_rules: list[Any] = []
+        # 插件(3.8.0)。`plugins` 是**这一次开机装着的那几个**(声明的权威是世界
+        # 文件,库里那份 `:plugins` 只记"装的是哪一版、有哪几个事实名")。
+        self.plugin_store: Any | None = None
+        self.plugins: list[Any] = []
+        # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
+        # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
+        self._triggers_by_event: dict[str, list[Any]] = {}
+        # 🔴 **队列在 tick 开头快照、drain 一遍;触发器自己 emit 的落进下一 tick。**
+        # 这条是这一层的"双缓冲",理由和规律那一层逐字相同:同轮递归让"A 先跑还是
+        # B 先跑"变成隐藏的语义,而两个互相 emit 的触发器会当场把 tick 线程转死 ——
+        # 而时钟卡住的样子是整个世界停了,没有一处报错。
+        self._trigger_queue: list[dict[str, Any]] = []
         # 本体:这个世界里能有什么东西。`None` = 作者没声明过种类,这一层不启用
         # (声明本身就是开关,和认知层同构)。
         self.ontology: Any | None = None
@@ -525,6 +568,11 @@ class Scheduler:
 
         整份写回会把跑了三十天的人倒带回创世体力(创世那条纪律踩过两次)。
         """
+        # **插件那几格先种,而且不受本体那道早退管**(3.8.0):一个没写 `kinds` 的
+        # 世界 `ontology` 是 None —— 本体层整个缺席是对的,而插件层和它无关。
+        # 把这一句放在早退后面的下场是安静的:`me_qi.灵力` 恒为 0,他做什么都被拒,
+        # 而回执只说"你做不了"。
+        self.seed_actor_plugin_facts(actor_id)
         ontology = self.ontology
         store = self.stock_store
         if ontology is None or store is None:
@@ -539,6 +587,29 @@ class Scheduler:
         # 逐个量填,不是逐个人填 —— 加了一个新属性的世界重启时,老角色只会补上新的
         # 那一个,而不是被跳过(跳过的话 `me_手艺` 恒为 0,门永远关着)。
         missing = {k: v for k, v in declared.items() if k not in have}
+        if missing:
+            store.set_many(owner, missing, tick=int(self.clock))
+
+    def seed_actor_plugin_facts(self, actor_id: str) -> None:
+        """挂在 `agent` 身上的**插件事实**在这儿落地。只填缺,不覆盖(锁内)。
+
+        为什么和本体那一半挤在同一个窄口:**理由逐字相同**。角色可以在世界跑起来
+        之后才出现(节拍 `agent_join`、重启中途加入),玩家走的是另一条窄口
+        (`World._touch_player`)而用的是这同一份 —— 装载那一遍只装得到"已经在册的",
+        后来的人一个都盖不着。少了这一步的样子不是"他被拒绝",是 `me_qi.灵力`
+        恒为 0:世界里每一件要灵力的事他都做不了,而回执只说"你做不了"。
+        """
+        store = self.stock_store
+        if store is None or not self.plugins:
+            return
+        owner = self.stock_owner_of(actor_id)
+        have = store.of(owner)
+        missing = {
+            fact.qualified: fact.default
+            for plugin in self.plugins
+            for fact in plugin.facts.values()
+            if fact.bearer == "agent" and fact.qualified not in have
+        }
         if missing:
             store.set_many(owner, missing, tick=int(self.clock))
 
@@ -1550,6 +1621,12 @@ class Scheduler:
             #     —— 它是纯算术 + SQL,没有 LLM,和 needs/economy 同一类。
             #     (autonomy 正相反:那条要打网络,必须丢到别的线程去。)
             self._evaluate_world_rules()
+
+            # 3.62 插件的触发器:因一件事而变。**紧跟规律** —— 它和规律同一类
+            #      (纯算术,写的都是量);排在规律之后是因为规律读的是这一轮开始前
+            #      的快照,而触发器写下的量要等下一轮才被规律看见 —— 和双缓冲那条
+            #      纪律是同一句话。
+            self._drain_plugin_triggers()
 
             # 3.65 到点的长过程:椅子做好了、孩子生下来了。**必须早于行为树** ——
             #      占用她的那件事在这里解除,不然她这一 tick 还被当成在忙,
@@ -4225,7 +4302,19 @@ class Scheduler:
 
     def _record_and_deliver(self, event: dict[str, Any]) -> dict[str, Any]:
         self._deliver(event)
-        return self._record_event(event)
+        recorded = self._record_event(event)
+        self._enqueue_for_triggers(recorded or event)
+        return recorded
+
+    def _enqueue_for_triggers(self, event: dict[str, Any]) -> None:
+        """有人订这种事件吗 —— 有就排进队,**这一 tick 不处理**(见 `_trigger_queue`)。
+
+        没有插件的世界这里是一次字典判空:和规律那一层同一条,常开也不花钱。
+        """
+        if not self._triggers_by_event:
+            return
+        if str(event.get("type") or "") in self._triggers_by_event:
+            self._trigger_queue.append(dict(event))
 
     def _travel_minutes(self, origin: str | None, destination: str | None) -> float | None:
         """How long the walk takes, or None when it can't be measured (no map,
@@ -4655,6 +4744,91 @@ class Scheduler:
                 # 作息都没有(演示世界现在就是),那样这条路就永远走不到。
                 self._maybe_hail_player(agent)
             return True
+
+    def _drain_plugin_triggers(self) -> None:
+        """把上一 tick 攒下的那批事件交给订它们的触发器,**drain 一遍就停**。
+
+        🔴 **快照 + 一遍,是这一层唯一的结构性决定。** 触发器自己 `emit` 出来的事件
+        进的是**下一批** —— 于是"两个互相 emit 的触发器"各跑一轮就停下来,而不是
+        把 tick 线程转死。同轮递归的下场不是算错,是**世界停了**,而停住的世界
+        没有一处会报错(时钟不动、日志不长、健康检查照旧说 ok)。
+        代价是滞后一轮,和规律那一层的双缓冲逐字同一笔账。
+
+        **写入攒到最后一次性落库**,和 `stocks.evaluate_due` 同一条:一个 owner 一次
+        往返是这个仓库明说过的反面教材。
+        """
+        if not self._trigger_queue or self.stock_store is None:
+            return
+        batch, self._trigger_queue = self._trigger_queue, []
+        pending: dict[str, dict[str, float]] = {}
+        emitted: list[dict[str, Any]] = []
+        for event in batch:
+            for trigger in self._triggers_by_event.get(str(event.get("type") or ""), ()):
+                try:
+                    self._fire_trigger(trigger, event, pending, emitted)
+                except ExpressionError as exc:
+                    # 运行期降级:一条算不出来的触发器不该掀翻 tick(规律那条纪律)。
+                    # 但绝不无声。
+                    logger.warning("触发器 %s.%s 算不出来:%s",
+                                   trigger.plugin, trigger.id, exc)
+        if pending:
+            self.stock_store.write_round(pending, tick=self.clock)
+        for event in emitted:
+            self._record_and_deliver(event)
+
+    def _fire_trigger(
+        self, trigger: Any, event: dict[str, Any],
+        pending: dict[str, dict[str, float]], emitted: list[dict[str, Any]],
+    ) -> None:
+        """一个触发器对一条事件。**当事人从事件上取,不从这一刻的世界上猜。**
+
+        白名单(`events.SUBSCRIBABLE_EVENTS`)每条都标了 `parties` —— 那正是这一格
+        存在的理由:一条事件落在谁头上,只有它自己说得出。拿"此刻在场的人"去猜的话,
+        一件三分钟前发生的事会算在刚走进来的人头上,而没有一处会报错。
+        """
+        owner = self._trigger_bearer(trigger, event)
+        if owner is None:
+            return
+        values = {k: v for k, (v, _t) in self.stock_store.snapshot(owner).items()}
+        if not values and trigger.bearer == "agent":
+            return          # 这个人身上一个量都没有 = 插件还没种到他头上
+        namespace: dict[str, Any] = {
+            **values,
+            **clock_names(self.clock, self._minutes_per_tick()),
+            "dt": 0, "now": self.clock,
+            **_event_numbers(event),
+        }
+        for condition in trigger.conditions:
+            if not condition.evaluate(namespace):
+                return
+        for name, expression in trigger.sets:
+            pending.setdefault(owner, {})[name] = float(expression.evaluate(namespace))
+        for spec in trigger.emits:
+            emitted.append({
+                "type": spec["type"], "who": event.get("who"), "loc": event.get("loc"),
+                "payload": {**spec["payload"], "plugin": trigger.plugin,
+                            "trigger": trigger.id, "because": event.get("type"),
+                            **({"text": spec["text"]} if spec.get("text") else {})},
+            })
+
+    def _trigger_bearer(self, trigger: Any, event: dict[str, Any]) -> str | None:
+        """这条事件落在哪个 owner 身上。答不出就是 `None` —— **不猜**。"""
+        if trigger.bearer == "world":
+            return "world"
+        if trigger.bearer == "location":
+            loc = str(event.get("loc") or "")
+            return f"location:{loc}" if loc else None
+        who = str(event.get("who") or "")
+        if trigger.bearer == "agent":
+            return self.stock_owner_of(who) if who else None
+        # `entity:<kind>` —— 事件载荷里那个"对象"。
+        kind = trigger.bearer.split(":", 1)[1]
+        payload = event.get("payload") or {}
+        for key in ("target", "entity"):
+            target = str(payload.get(key) or "")
+            if target.split(":", 1)[0] == kind:
+                return target
+        return None
 
     def _evaluate_world_rules(self) -> None:
         """把到点的规律跑一遍(world-rules)。
