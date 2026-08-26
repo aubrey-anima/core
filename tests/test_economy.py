@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from _needs import set_need
 from _worldfile import read_seed_file, bundled_seed, open_world_at
 
 import json
@@ -61,8 +62,7 @@ def test_genesis_stipend_and_default_shelf(world):
 def test_hungry_agent_at_cafe_buys_a_meal(world):
     world.config_set("needs.enabled", "true")
     world.tick(1)
-    brain = world.scheduler.agents["夏"]  # 夏在咖啡店
-    brain.agent.blackboard.write("need.hunger", 0.05)
+    set_need(world, "夏", "hunger", 0.05)   # 夏在咖啡店
     before_stock = {r["item_id"]: r["quantity"] for r in world.shop("cafe")}
     before_balance = world.balance("夏")
     world.tick(1)

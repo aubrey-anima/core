@@ -4024,7 +4024,13 @@ class World:
         return why
 
     def rules(self) -> list[dict[str, Any]]:
-        """这个世界的规律(编译过的,只读视图)。"""
+        """**这个世界自己写的**规律(编译过的,只读视图)。
+
+        ⚠️ **插件带来的规律不在这里**(3.8.0)。它们和世界自己的规律跑在同一个引擎、
+        同一份双缓冲、同一条节流水位上 —— 混在一起**跑**是对的,混在一起**报**不是:
+        这是作者问"我这个世界写了哪些规律"的地方,而出厂的 `needs` 插件一个人就带
+        七条。问插件那一份用 `anima-world plugin list`。
+        """
         return [
             {
                 "id": rule.id,
@@ -4036,6 +4042,7 @@ class World:
                 "reads": sorted(rule.reads()),
             }
             for rule in self.scheduler.world_rules
+            if rule.id not in self.scheduler.plugin_rule_ids
         ]
 
     def rule_stats(self) -> dict[str, Any]:
@@ -7591,6 +7598,29 @@ class World:
             machine_config.set_value(key, value)
             return
         store.set(key, value)
+        self._refresh_factory_plugins(key)
+
+    def _refresh_factory_plugins(self, key: str) -> None:
+        """改到"装不装某个出厂插件"那张表里的键 → **当场重装一遍**(3.8.0)。
+
+        为什么要有这一步:`needs.enabled` 从前是**每 tick 现读**的,而"装不装一个
+        插件"是**装载期**的事。两者对不上的话,`config set needs.enabled true`
+        之后世界要重开一次才生效 —— 而 REFERENCE §6 逐字承诺过这些键"全部支持
+        热更新"。**一句写在文档里、而代码不再兑现的承诺,比没有这句话贵。**
+
+        ⚠️ **这道钩子里没有一个具体插件的名字**:它读 `FACTORY_PLUGINS` 那张表
+        (id → 开关键)。出厂插件多起来时这里一个字都不用改。
+
+        ⚠️ **关掉不删数据。** 关掉只是让它的规律不再跑,量表里那几个值原样留着 ——
+        再打开就从那儿接着走。删掉的话,"关一下再开"会把她的精力悄悄补满,
+        而那是这条链上最不该由一次配置改动造成的事。
+        """
+        from anima_world.__main__ import FACTORY_SWITCH_KEYS, refresh_plugins
+
+        if key not in FACTORY_SWITCH_KEYS:
+            return
+        with self.scheduler._lock:
+            refresh_plugins(self.scheduler)
 
     def prompt_list(self) -> list[dict[str, Any]]:
         store = self.scheduler.prompt_store

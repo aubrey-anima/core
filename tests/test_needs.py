@@ -9,22 +9,86 @@ import pytest
 
 from anima_world.api import World
 from anima_world.bt_nodes import Blackboard, NeedAction, Status
-from anima_world.needs import NEEDS, RELEASE, URGENT, settle
+from anima_world.needs import NEEDS, PLUGIN_ID, RELEASE, URGENT, factory_plugin, mood_of
 
 
-def test_settle_decays_and_restores():
-    values = {"energy": 1.0, "hunger": 1.0, "social": 1.0}
-    after = settle(values, 96, None)  # 8 世界小时无所事事
+# ⚠️ **`settle()` 3.8.0 起不存在了。** 曲线没变,变的是**谁来跑它**:衰减与恢复
+# 现在是 `needs` 这个**出厂插件**的六条规律,跑在世界自己那条规律引擎上
+# (设计稿 §9 的第一个搬家对象)。所以下面两条从"调那个纯函数"改成**求值那几条
+# 真的会跑的规律** —— 测的仍然是同一件事,只是从函数换成了声明。
+# 逐位不变那条由 `tests/test_needs_plugin_parity.py` 单独钉着。
+
+
+def _settle(values: dict, elapsed: int, action: str | None) -> dict:
+    """拿**出厂插件真的声明的那几条规律**把需求推进 `elapsed` 个 tick。
+
+    选择器怎么挑那条规律,这里照 `stocks.evaluate_due` 的语义走:
+    `{"action": X}` 只对正在做 X 的人,`{"not_action": [...]}` 是它们的补集。
+    """
+    from anima_world.plugins import parse_plugins
+
+    plugin = parse_plugins([factory_plugin()])[0]
+    namespace = {f"{PLUGIN_ID}.{k}": float(v) for k, v in values.items()}
+    namespace["dt"] = elapsed
+    out = dict(values)
+    for rule in plugin.rules:
+        if rule.selector_kind == "action":
+            fires = rule.selector_value == action
+        elif rule.selector_kind == "not_action":
+            fires = action not in rule.selector_value.split("\x00")
+        else:
+            fires = True
+        if not fires:
+            continue
+        for key, expression in rule.outputs.items():
+            out[key.split(".", 1)[1]] = expression.evaluate(namespace, dice=lambda: 0.0)
+    out["mood"] = mood_of(out)
+    return out
+
+
+def test_声明的那几条规律_会衰减也会恢复():
+    after = _settle({"energy": 1.0, "hunger": 1.0, "social": 1.0}, 96, None)
     assert after["energy"] < 1.0 and after["hunger"] < 1.0 and after["social"] < 1.0
-    slept = settle({"energy": 0.2, "hunger": 1.0, "social": 1.0}, 96, "sleep")
+    slept = _settle({"energy": 0.2, "hunger": 1.0, "social": 1.0}, 96, "sleep")
     assert slept["energy"] > 0.9, "睡 8 小时应基本回满精力"
-    assert 0.0 <= min(v for k, v in slept.items()) and max(slept.values()) <= 1.0
+    assert 0.0 <= min(slept.values()) and max(slept.values()) <= 1.0
+
+
+def test_一个量永远只被一条规律写_两条会抢():
+    """🔴 **六条规律必须划分所有人。** 两条规律抢同一个量的话,后写的赢而谁也
+    看不见谁(双缓冲)—— 一个看起来对、算出来错的语义。`social` 有两个恢复动作,
+    而单数的 `not_action` 排不掉两个,那正是它 3.8.0 改收一列的理由。
+    """
+    from anima_world.plugins import parse_plugins
+
+    plugin = parse_plugins([factory_plugin()])[0]
+    for action in (None, "sleep", "eat", "chat", "idle_social", "work"):
+        wrote: dict[str, str] = {}
+        for rule in plugin.rules:
+            if rule.selector_kind == "action":
+                fires = rule.selector_value == action
+            elif rule.selector_kind == "not_action":
+                fires = action not in rule.selector_value.split("\x00")
+            else:
+                fires = True
+            if not fires:
+                continue
+            for key in rule.outputs:
+                assert key not in wrote, (
+                    f"她在做 {action!r} 时,{key} 被 {wrote.get(key)} 和 {rule.id} "
+                    "两条规律一起写 —— 后写的赢,而谁也看不见谁"
+                )
+                wrote[key] = rule.id
+        assert len(wrote) == len(NEEDS), (
+            f"她在做 {action!r} 时,只有 {sorted(wrote)} 被写到 —— 漏掉的那条"
+            "从此永远不衰减,而没有一处会报错"
+        )
 
 
 def test_mood_is_the_weakest_need():
-    low_social = settle({"energy": 1.0, "hunger": 1.0, "social": 0.1}, 0, None)
-    fine = settle({"energy": 0.9, "hunger": 0.9, "social": 0.9}, 0, None)
-    assert low_social["mood"] < fine["mood"]
+    low_social = mood_of({"energy": 1.0, "hunger": 1.0, "social": 0.1})
+    fine = mood_of({"energy": 0.9, "hunger": 0.9, "social": 0.9})
+    assert low_social < fine
 
 
 def test_need_action_leaf_fires_below_threshold_and_is_inert_without_values():
@@ -160,11 +224,26 @@ def test_disabled_by_default_blackboard_stays_clean(world):
     assert world.needs("夏") == {}, "needs.enabled 默认关,行为与 v2 逐 tick 一致"
 
 
+def _set_need(world, agent_id: str, need: str, value: float) -> None:
+    """把一条需求按到某个值。**写量表,不写黑板**(3.8.0)。
+
+    ⚠️ 黑板那几格从今天起是**派生的**:每 tick 从量表折一次。往黑板上写等于
+    写一份下一 tick 就会被盖掉的拷贝 —— 而它盖回来的样子是"我明明改了,
+    世界不认",没有一处报错。**值住在量表里,和树高、灵力同一张表。**
+    """
+    from anima_world.needs import PLUGIN_ID
+
+    world.scheduler.stock_store.set_many(
+        world.scheduler.stock_owner_of(agent_id),
+        {f"{PLUGIN_ID}.{need}": float(value)}, tick=int(world.scheduler.clock),
+    )
+    world.scheduler.agents[agent_id].agent.blackboard.write(f"need.{need}", float(value))
+
+
 def test_urgent_hunger_overrides_duty(world):
     world.config_set("needs.enabled", "true")
     world.tick(1)  # 结算一次,need.* 上黑板
-    brain = world.scheduler.agents["夏"]
-    brain.agent.blackboard.write("need.hunger", 0.05)
+    _set_need(world, "夏", "hunger", 0.05)
     # 把时间拨到夏的值班窗口内,证明吃饭压过 duty
     world.scheduler.clock = 8 * 60 // 5 + 288  # 第二天 08:00
     world.tick(1)
@@ -180,7 +259,7 @@ def test_needs_persist_across_reopen(tmp_path):
     with open_world_at(db, force_mock_llm=True) as world:
         world.config_set("needs.enabled", "true")
         world.tick(1)
-        world.scheduler.agents["夏"].agent.blackboard.write("need.hunger", 0.33)
+        _set_need(world, "夏", "hunger", 0.33)
     with open_world_at(db, force_mock_llm=True) as reopened:
         reopened.tick(1)
         hunger = reopened.needs("夏")["hunger"]

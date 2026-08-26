@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+from _needs import set_need
 from _worldfile import open_world_at
 
 import pytest
@@ -99,7 +100,7 @@ def test_the_body_can_interrupt_and_she_resumes_after(world):
     remaining = len(world.intent(agent))
     assert remaining, "还没走完就空了,这条测试没在验它想验的"
 
-    blackboard.write("need.hunger", URGENT - 0.05)
+    set_need(world, agent, "hunger", URGENT - 0.05)
     world.tick(1)
 
     assert blackboard.read("_selected_action_id") == "eat", (
@@ -107,7 +108,7 @@ def test_the_body_can_interrupt_and_she_resumes_after(world):
     )
     assert len(world.intent(agent)) == remaining, "被打断时队列被吃掉了"
 
-    blackboard.write("need.hunger", 0.9)
+    set_need(world, agent, "hunger", 0.9)
     _run_until_done(world, agent)
     assert world.intent(agent) == [], "吃完之后没接着走完"
 

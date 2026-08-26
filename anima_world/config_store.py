@@ -381,7 +381,11 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     # R5 夜间固化:趁她睡着的时候衰减、清扫、反思。默认关(改变留存 = 行为变更)。
     "memory.consolidation.enabled": (False, "bool", "memory", False, "Consolidate memories at each world-day rollover (decay + prune + reflect)"),
     "memory.consolidation.prune_below": (0.0, "float", "memory", False, "Strength below which a non-anchored memory is pruned during consolidation (0 = never prune)"),
-    "needs.enabled": (False, "bool", "needs", False, "Need curves (energy/hunger/social) drive behavior"),
+    # 3.8.0 起它的意思是**装不装 `needs` 这个出厂插件**(曲线搬进了插件的六条规律,
+    # 见 `needs.factory_plugin`)。行为一个字没变,而"它决定的是什么"变了 ——
+    # 所以描述跟着改。⚠️ 它**照旧是热的**:`World.config_set` 上有一道通用钩子
+    # (`FACTORY_SWITCH_KEYS`),改到它就当场重装一遍。
+    "needs.enabled": (False, "bool", "needs", False, "Install the built-in `needs` plugin: energy/hunger/social curves drive behavior"),
     "economy.enabled": (False, "bool", "economy", False, "Items, money, shops and price drift"),
     "economy.daily_wage": (20.0, "float", "economy", False, "Per-agent daily wage from the town treasury"),
     # 玩家第一次出现在这个世界里时兜里有多少。**默认 0 = 这个世界不给**,声明本身

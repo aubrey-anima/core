@@ -2858,6 +2858,50 @@ def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list
     ]
 
 
+def _factory_plugins(scheduler: Any) -> list[dict[str, Any]]:
+    """出厂内置插件 —— **这一版只有一个:`needs`**(设计稿 §9 的第一个搬家对象)。
+
+    ⚠️ **开关仍然是 `needs.enabled`,而且只有它。** 设计稿提过一个
+    `plugins.default` 名单,这一轮**有意没做**:两个开关必须永远说同一句话,
+    而"两处判断迟早给出不同答案"是这个仓库反复栽的那一跤。一个世界里
+    `needs.enabled=false` 而 `plugins.default` 里有 needs,该听谁的?
+    没有第二个开关就没有这个问题。
+
+    ⚠️ **开关照旧是热的**,而这一格是有代价换来的:`needs.enabled` 从前每 tick 现读,
+    而"装不装一个插件"是**装载期**的事。两者对不上的话,`config set needs.enabled
+    true` 之后世界要重开一次才生效 —— 而 REFERENCE §6 逐字承诺过"全部支持热更新"。
+    所以 `World.config_set` 上有一道**通用**的钩子(`FACTORY_SWITCH_KEYS`):
+    改到这张表里的键就重装一遍。⚠️ **它是一张表,不是一个 `if needs`** ——
+    出厂插件多起来时,那道钩子一个字都不用改。
+    """
+    store = getattr(scheduler, "config_store", None)
+    if store is None or not store.get("needs.enabled", default=False):
+        return []
+    from anima_world.needs import factory_plugin
+
+    return [factory_plugin()]
+
+
+#: 出厂插件的 id → 决定它装不装的那个配置键。**`World.config_set` 读这张表**,
+#: 于是那道热更新的钩子里没有一个具体插件的名字。
+FACTORY_PLUGINS: dict[str, str] = {"needs": "needs.enabled"}
+FACTORY_SWITCH_KEYS = frozenset(FACTORY_PLUGINS.values())
+
+
+def refresh_plugins(scheduler: Any) -> None:
+    """按此刻的配置把插件重装一遍(**不读作者层**)。
+
+    `World.config_set` 改到 `FACTORY_SWITCH_KEYS` 里的键时走这条。它拿不到世界文件
+    (那是开机那一刻的东西),所以只重放**库里那几行 + 出厂那几个** —— 而作者写的
+    插件本来就在库里(声明原文存库、编译在读取侧),所以这一趟不会把它们弄丢。
+    """
+    plugin_store = getattr(scheduler, "plugin_store", None)
+    if plugin_store is None or scheduler.stock_store is None:
+        return
+    _install_plugins(scheduler, plugin_store, scheduler.stock_store,
+                     scheduler.visibility_store, scheduler.location_store, None)
+
+
 def _install_plugins(
     scheduler: Any, plugin_store: Any, stock_store: Any, visibility_store: Any,
     location_store: Any, world_seed: dict[str, Any] | None,
@@ -2881,7 +2925,25 @@ def _install_plugins(
         dict(row) for row in ((world_seed or {}).get("plugins") or [])
         if isinstance(row, dict)
     ]
-    bodies = merge_bodies(stored_bodies(plugin_store), incoming)
+    # **出厂插件排在最前面,而世界文件里的同 id 声明赢**(`merge_bodies` 的方向)——
+    # 于是作者要改出厂的 needs,写一份同 id 更高 version 的声明就行,不必先卸掉它。
+    # 🔴 **出厂插件那几个 id 上,`_factory_plugins` 是唯一权威** —— 库里那一行是
+    # 上一次装的**痕迹**(留着是为了裁剪和 `plugin list`),不是"该不该装"的答案。
+    # 不滤掉的话,`needs.enabled` 关掉之后它会从库里自己活回来,而关掉的人看到的是
+    # "我明明关了"。
+    stored = [row for row in stored_bodies(plugin_store)
+              if str(row.get("id") or "") not in FACTORY_PLUGINS]
+    bodies = merge_bodies(stored, incoming)
+    bodies = merge_bodies(_factory_plugins(scheduler), bodies)
+    # 每次重装都从头建 —— 这个函数在开机和 `config set` 两条路上都会被调,
+    # 而"接着上一次的名单往上加"会让关掉一个开关之后它的规律还在跑。
+    scheduler.plugins = []
+    scheduler._triggers_by_event = {}
+    scheduler.world_rules = [
+        rule for rule in scheduler.world_rules
+        if rule.id not in scheduler.plugin_rule_ids
+    ]
+    scheduler.plugin_rule_ids = set()
     if not bodies:
         return
     ticks_per_day = max(1, 1440 // max(1, scheduler._minutes_per_tick()))
@@ -2914,6 +2976,9 @@ def _install_plugins(
     # 双缓冲、节流水位、骰子、"两条规律抢同一个量"那句警告,插件一样得吃到。
     for plugin in plugins:
         scheduler.world_rules.extend(plugin.rules)
+    scheduler.plugin_rule_ids = {
+        rule.id for plugin in plugins for rule in plugin.rules
+    }
     by_event: dict[str, list[Any]] = {}
     for plugin in plugins:
         for trigger in plugin.triggers:

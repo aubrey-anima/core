@@ -207,6 +207,10 @@ class Scheduler:
         self.meta_store = meta_store
         # 需求 / 小团体 / 反思水位 / 经济:由 build_serve_scheduler 注入 Redis 版;
         # 裸 Scheduler()(单元测试)没有它们,和以前的无 db 路径同一个形状。
+        # ⚠️ **3.8.0 起没有人写它了。** 需求的值搬进了量表(和树高、灵力同一张表),
+        # 而 `:needs` 那张老检查点表是"内存态每天落一次盘"的产物 —— 内存态没有了。
+        # 这一格留着是因为**老世界里那张表还在**:它是那个世界当时的账,删它是抹
+        # 历史不是升级。谁都不读它,也谁都不再写它。
         self.needs_store: Any | None = None
         self.clique_store: Any | None = None
         self.reflection_store: Any | None = None
@@ -328,6 +332,11 @@ class Scheduler:
         # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
         # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
         self._triggers_by_event: dict[str, list[Any]] = {}
+        # 哪几条规律是插件带来的。**`world_rules` 里两种混在一起跑是对的**
+        # (同一个引擎、同一份双缓冲、同一条水位),而**读出口要分得开** ——
+        # `World.rules()` 是作者问"我这个世界写了哪些规律"的地方,把插件那七条
+        # 混进去,他会去找七条他从没写过的规律。插件那一份问 `plugin list`。
+        self.plugin_rule_ids: set[str] = set()
         # 🔴 **队列在 tick 开头快照、drain 一遍;触发器自己 emit 的落进下一 tick。**
         # 这条是这一层的"双缓冲",理由和规律那一层逐字相同:同轮递归让"A 先跑还是
         # B 先跑"变成隐藏的语义,而两个互相 emit 的触发器会当场把 tick 线程转死 ——
@@ -1654,6 +1663,15 @@ class Scheduler:
             #    old loop only reached the BT through the idle watchdog, so a
             #    duty that starts at 08:00 could never fire.
             needs_enabled = self._needs_enabled()
+            # 🔴 **一整批一次取回来,不是每个人一次。** 需求的值 3.8.0 起住在量表里,
+            # 而下面那个循环要逐个把它折上黑板 —— 在循环**里面**读的话就是
+            # "每个人每 tick 一次 HGETALL",正是 `RedisStockStore` 说明里点名的
+            # 那个 72ms/tick 的形状(`tests/test_world_rules.py` 那把计数尺子
+            # 当场逮到过:3 个角色 120 tick = 370 次 `of`)。
+            needs_values = (
+                self.stock_store.snapshot_kind("agent")
+                if needs_enabled and self.stock_store is not None else {}
+            )
             for brain in list(self.agents.values()):
                 bb = brain.agent.blackboard
                 bb.write("time.day", now.day)
@@ -1661,7 +1679,7 @@ class Scheduler:
                 bb.write("time.minute", now.minute)
                 bb.write("time.minute_of_day", now.minute_of_day)
                 if needs_enabled:
-                    self._settle_agent_needs(brain)
+                    self._settle_agent_needs(brain, needs_values)
                 # 世界的量 → 黑板(只放她感知得到的)。树里没有按量分支的叶子时,
                 # 这里是一次字典判空。
                 self._settle_stock_watches(brain)
@@ -2100,7 +2118,9 @@ class Scheduler:
                 },
             })
 
-    def _settle_agent_needs(self, brain: BrainLike) -> None:
+    def _settle_agent_needs(
+        self, brain: BrainLike, batch: dict[str, dict[str, Any]] | None = None
+    ) -> None:
         """needs-v3: advance one agent's need curves by tick_delta (lock held).
 
         Pure arithmetic on the blackboard; the agent_needs table is only a
@@ -2109,17 +2129,26 @@ class Scheduler:
 
         bb = brain.agent.blackboard
         agent_id = brain.agent.id
-        if bb.read("need.energy") is None:
-            values = (
-                self.needs_store.load(agent_id)
-                if self.event_log is not None
-                else {n: 1.0 for n in needs_mod.NEEDS}
-            )
+        store = self.stock_store
+        if store is None:
+            return
+        # 🔴 **3.8.0:值住在量表里,这一段只把它折成黑板上那几格。**
+        # 推进(衰减 + 恢复)是 `needs` 出厂插件的六条规律干的,跑在 3.6 那一步;
+        # 这一步在 3.4(每个角色的循环里),读到的就是这一 tick 刚算完的那份。
+        # **行为树读的仍然是黑板** —— 它是"她做决定时看到的世界",而那一层
+        # 一个字都不该知道量表长什么样。
+        owner = self.stock_owner_of(agent_id)
+        if batch is None:
+            values = store.of(owner)          # 单独调它的那几处(测试、节拍)
         else:
-            values = {n: bb.read(f"need.{n}") for n in needs_mod.NEEDS}
+            values = {k: v for k, (v, _t) in (batch.get(owner) or {}).items()}
+        settled: dict[str, float] = {
+            need: float(values.get(f"{needs_mod.PLUGIN_ID}.{need}", 1.0))
+            for need in needs_mod.NEEDS
+        }
+        settled["mood"] = needs_mod.mood_of(settled)
         action = self._current_action.get(agent_id)
         kind = action.kind if action else None
-        settled = needs_mod.settle(values, self.tick_delta, kind)
         # 世界自己声明的那笔债(熬夜攒的睡眠债是标准用法)把心气儿往下拖。
         # **只改 mood,不改三条需求** —— mood 是派生值、从不落库,所以拖它不会
         # 在存储里留下第二份真相;拖 energy 则会被下一次 `settle` 当成"她真的
@@ -2129,12 +2158,9 @@ class Scheduler:
             penalty_key = str(
                 self.config_store.get("needs.mood_penalty_stock", default="") or ""
             ).strip()
-        if penalty_key and self.stock_store is not None:
-            try:
-                debt = self.stock_store.of(f"agent:{agent_id}").get(penalty_key)
-            except Exception:  # noqa: BLE001 - 读不到量不该让 tick 停摆
-                logger.warning("读不到 %s 的 %s", agent_id, penalty_key, exc_info=True)
-                debt = None
+        if penalty_key:
+            # 上面那次 `of()` 已经把这个人的整张量表读回来了 —— 债也在里面。
+            debt = values.get(penalty_key)
             if debt is not None:
                 settled["mood"] = needs_mod.drag_mood(settled["mood"], debt)
         for key, value in settled.items():
@@ -3979,19 +4005,16 @@ class Scheduler:
             self.visibility_store.unplace(entity_id)
 
     def _persist_all_needs(self) -> None:
-        if not self._needs_enabled() or self.event_log is None:
-            return
-        from anima_world import needs as needs_mod
+        """**3.8.0 起什么都不做,而这一格有意留着一个空函数。**
 
-        for agent_id, brain in self.agents.items():
-            bb = brain.agent.blackboard
-            if bb.read("need.energy") is None:
-                continue
-            values = {n: bb.read(f"need.{n}") for n in needs_mod.NEEDS}
-            try:
-                self.needs_store.persist(agent_id, values, self.clock)
-            except Exception:  # noqa: BLE001 - a checkpoint is best-effort
-                logger.warning("needs persist failed for %s", agent_id, exc_info=True)
+        需求的值搬进量表之后,它**本来就是持久的**(和树高、灵力同一张表、同一条
+        写回路)—— 从前那份 `:needs` 检查点是"内存态每天落一次盘"的产物,而内存态
+        没有了。留着这个名字是因为它有三个调用点(日切、关闭、`checkpoint()`),
+        而把一件"不再需要做的事"从三处删掉,比留一个说得清为什么的空壳更容易漏。
+        ⚠️ **`:needs` 那个老键不动**:一个从 3.7.0 升上来的世界里它还在,而它是
+        那个世界当时的账 —— 删它是抹历史,不是升级。新值一律走量表。
+        """
+        return
 
     def _minutes_per_tick(self) -> int:
         if self.config_store is not None:

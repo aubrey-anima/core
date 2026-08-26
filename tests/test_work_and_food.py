@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+from _needs import set_need
 from _worldfile import open_world_at
 
 import json
@@ -78,7 +79,7 @@ def test_what_you_eat_is_what_you_get(tmp_path):
         )
 
         brain = world.scheduler.agents["夏"]
-        brain.agent.blackboard.write("need.hunger", 0.1)
+        set_need(world, "夏", "hunger", 0.1)
         world.scheduler._record_event({
             "type": "item_consume", "who": "夏",
             "payload": {"who": "夏", "item_id": "big_bowl", "source": "test"},
@@ -94,7 +95,7 @@ def test_an_item_with_no_restores_changes_nothing(tmp_path):
         world.config_set("needs.enabled", "true")
         world.tick(1)
         brain = world.scheduler.agents["夏"]
-        brain.agent.blackboard.write("need.hunger", 0.3)
+        set_need(world, "夏", "hunger", 0.3)
 
         world.scheduler._record_event({
             "type": "item_consume", "who": "夏",

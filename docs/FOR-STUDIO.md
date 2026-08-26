@@ -3762,3 +3762,41 @@ $ anima-world contract --json | jq '.plugins | {author_type, fact_shapes, effect
 | **tool** | 方言那一层加一条:`plugins.author_type` 探测(缺席 = 这支 core 不认插件,把插件那一屏关掉并说清为什么)。作者层校验照 `id_pattern` / `reserved_ids` / `fact_shapes` 判,**别硬编码**。出包时带 `plugin` 记录 → `engine_min` 写 3.8.0 |
 | **platform** | **一件都不用改。** 新键 `anima:{w}:plugins` 是**持久**世界内容(和 `:kinds` 同一类),**不进 `volatile_keys`** —— 所以 `test/contract.test.js` 那条 deepEqual 不会红,而打包/装包按前缀扫,新 hash 自己跟着走 |
 | **player** | **一件都不用改。** `readouts` 已经数据驱动;`notes`(那句描述)是 `Perception.to_dict()` **新加**的一段,**建议不进玩家屏** —— 它是写给她的,不是写给玩家的 |
+
+---
+
+## 3.38 needs 是第一个出厂插件了(3.8.0 第 1 期下半)
+
+**对你们最实的一句**:`needs.enabled` 那个键的**意思**变了,**行为一个字没变**。
+它现在说的是"装不装 `needs` 这个出厂插件",而不是"跑不跑那段硬编码"。
+
+```console
+$ anima-world plugin list --world-id w --json | jq '.plugins[] | {id, version, facts, rules}'
+{"id":"needs","version":"1.0.0","facts":["energy","hunger","social"],"rules":7}
+```
+
+| | 从前 | 3.8.0 |
+|---|---|---|
+| 值住哪儿 | 黑板 + `:needs` 检查点表 | **量表** `stock:agent:<id>` 的 `needs.energy` / `needs.hunger` / `needs.social` |
+| 谁推进它 | 引擎里一段 Python | 出厂插件的六条规律 |
+| `needs.enabled` | 每 tick 现读 | 装不装这个插件;**照旧是热的**(引擎侧有钩子),改完不必重开世界 |
+| 曲线常数 / `URGENT` / `RELEASE` | | **一个字没改** |
+
+### 你们要不要做什么:**基本不用**
+
+- **试炼与体检那条路一个字不用改**:`needs(agent)` 还是那个出口,四个数还是那四个。
+- **出包不受影响**:出厂插件**不进 `.cyberworld` 的作者层** —— 它是引擎自带的,
+  作者的世界文件里不该出现一条 `needs` 的 `plugin` 记录。
+- 🔴 **有一处会咬人,如果你们的工具直接写过黑板**:`need.*` 那几格从今天起是
+  **派生的**(每 tick 从量表折一次),写它下一 tick 就被盖回去,而**没有一处报错**。
+  要按住一条需求,写量表:`stock` 里的 `needs.hunger`。
+- **作者想改出厂 needs 的曲线**,写一份**同 id 更高 version** 的 `plugin` 记录进
+  他自己的世界文件就行(文件里那份赢),不必先卸掉它。⚠️ 那份包 `engine_min` 要写 3.8.0。
+
+### 一条给校验器的:`not_action` 现在收一列动作
+
+`{"not_action": ["chat", "idle_social"]}` —— 纯加法,老的字符串写法一个字没变。
+它是被 needs 搬家逼出来的:`social` 有两个恢复动作,而"这两件都没在做"用单数的
+`not_action` 写不出来,硬写出来的两条规律会**抢同一个量**(后写的赢,谁也看不见谁)。
+
+**platform / player 照旧一件都不用改。**

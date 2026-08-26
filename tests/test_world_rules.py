@@ -399,19 +399,48 @@ def test_the_engine_scales_to_many_entities(tmp_path):
         f"往存储上的往返次数随实体数涨了:10 棵 {few} vs 1000 棵 {many} —— "
         "这正是逐个 owner 查询/提交那一版的形状"
     )
-    # 10 = 120 tick / `every.ticks: 12`。**每轮一次,不是每棵一次。**
-    assert many["snapshot_kind"] == 10, many
-    assert many["write_round"] == 10, many
-    # 逐个 owner 的那几个门,这一整段 tick 里一次都不该被走到。⚠️ 哨子架在整个
-    # store 上,所以将来**别的**子系统若真需要在 tick 上逐个 owner 写,这张名单
-    # 就是该改的地方 —— 那时上面那句"逐格相同"仍然是承重的那一条。
-    for per_owner in ("snapshot", "snapshot_many", "set", "set_many"):
+    # **每次开门都是一整批,而且次数只跟 tick 数走,不跟实体数走。**
+    #
+    # ⚠️ **这里从前写死着 `== 10`(120 tick / `every.ticks: 12`),3.8.0 改成了上界。**
+    # 理由是那个 10 已经不是这套代码的读数了:needs 从一段 Python 搬成了**出厂插件**
+    # 的六条规律(设计稿 §9),那六条**每 tick 都到点**,于是 `snapshot_kind` 从
+    # 10 变成 250(10 + 120 条规律 + 120 次需求折上黑板的批量读)。
+    # **写死一个会随出厂插件增减而变的数,红起来指的是一个假问题**;而这条尺子要
+    # 量的那件事一个字没变 —— 它在上面那句 `many == few` 里,**那才是承重的**。
+    # 这里补的是第二条:**每 tick 的开门次数有个常数上限**,退回"逐个 owner"
+    # 那一版会当场把它撑破(每轮 1000 次)。
+    ticks = 120
+    for door, cap in (("snapshot_kind", 3), ("write_round", 2),
+                      ("snapshot_many", 2), ("of", 2)):
+        assert many.get(door, 0) <= ticks * cap, (
+            f"`{door}` 被打了 {many.get(door, 0)} 次,超过了每 tick {cap} 次的上限:{many}"
+        )
+    # **规律那条路上一次都不该被走到的那几个门。**
+    #
+    # ⚠️ `snapshot_many` 3.8.0 起从这张名单上拿掉了,而且不该在上面:它**收一列
+    # owner、一次 pipeline 问完**(`{"action": …}` 那种选择器走的就是它),和
+    # `set`/`set_many` 那种一次一个人的门不是一回事。它从前碰巧一次都没被走到,
+    # 于是被顺手写进了"禁"的那一列 —— **"今天没出现"和"出现了就是坏"是两句话。**
+    # ⚠️ `of` 同样不在这张名单上,**而且从来就不在**:感知那一层一直在用它读
+    # "她自己身上有什么"(每次拼提示词一次,不是每 tick 一次)。上面那条上界管着它。
+    for per_owner in ("snapshot", "set", "set_many"):
         assert per_owner not in many, (
             f"tick 里出现了逐个 owner 的 {per_owner}:{many}"
         )
     # 干的活当然要随实体数涨 —— 涨的该是求值次数,不是往返次数。这两个数分得开,
     # 这条尺子才算量对了东西。
-    assert (few_stats["evaluated"], many_stats["evaluated"]) == (10 * 10, 1000 * 10)
+    #
+    # ⚠️ **比的是差,不是绝对值**(3.8.0 改):这个世界里除了那 N 棵树,还有出厂
+    # `needs` 插件那六条规律在每 tick 对每个角色求值(3 个角色 × 120 tick × 每人
+    # 每轮 3 条 = 1080)。那 1080 **和树的棵数一点关系都没有**,所以它在两趟里
+    # 逐位相同,减掉之后剩下的正好是树那一份。
+    # 写死绝对值的话,这条尺子会因为"出厂插件多了一个"而红,而它红的那件事和
+    # "往返次数随实体数涨了没有"毫无关系 —— **一个指着假问题的红,比不红更贵。**
+    grew = many_stats["evaluated"] - few_stats["evaluated"]
+    assert grew == (1000 - 10) * 10, (
+        f"多出来的 990 棵树该带来 {(1000 - 10) * 10} 次求值,实得 {grew};"
+        f"few={few_stats['evaluated']} many={many_stats['evaluated']}"
+    )
 
 
 def test_batching_did_not_change_the_numbers(tmp_path):

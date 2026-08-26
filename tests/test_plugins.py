@@ -347,14 +347,23 @@ def test_无插件的世界_提示词逐字节不变(tmp_path):
     db = tmp_path / "demo.db"
     redis_for(db)
     with open_world_at(str(db), force_mock_llm=True) as world:
-        assert world.scheduler.plugins == [], "橱窗不该带插件"
-        assert world.scheduler._triggers_by_event == {}
+        # 橱窗自己**没有一条作者写的 `plugin` 记录**;`needs` 是**出厂**那一个
+        # (3.8.0 起它也是插件了,见 §9 的第一个搬家对象),而它三个事实全是
+        # `hidden` —— 今天的 needs 一格都不进感知块,搬家没有动这一点。
+        authored = [p.id for p in world.scheduler.plugins if p.id != "needs"]
+        assert authored == [], f"橱窗带上了作者插件:{authored}"
+        assert world.scheduler._triggers_by_event == {}, "橱窗一个触发器都不该有"
         agent_id = next(iter(world.scheduler.agents))
         blocks = world.debug_prompt(agent_id)
     rendered = json.dumps(blocks, ensure_ascii=False, sort_keys=True)
-    # 插件那两格在一个没有插件的世界里**根本不出现**(不是"出现但是空的")
+    # 插件那两格在一个没有作者插件的世界里**根本不出现**(不是"出现但是空的")
     assert "band_notes" not in rendered
     assert "plugin" not in rendered
+    # 出厂 needs 搬家之后,她的提示词里**一个 `needs.` 都不许有** —— 那三个量
+    # 是 `hidden`,而"没声明 = 感知不到"是这一层的默认值。
+    assert "needs." not in rendered, "需求搬家把它自己搬进提示词里去了"
+    # 🔴 **逐字节那一半由 `tests/test_needs_plugin_parity.py` 钉**:那份基线是
+    # 插件系统落地**之前**旧路真跑出来的,而 `test_提示词逐字节相同` 拿它比 sha256。
 
 
 # ── 契约 ────────────────────────────────────────────────────────────────────

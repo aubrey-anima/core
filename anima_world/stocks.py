@@ -123,7 +123,11 @@ def evaluate_due(
     for rule in due_rules:
         if rule.selector_kind != "not_action":
             continue
-        busy = set(action_owners(rule.selector_value)) if action_owners else set()
+        # `not_action` 收一列动作(3.8.0,内部用 `\x00` 连)—— 排掉的是**它们的并集**。
+        busy: set[str] = set()
+        if action_owners:
+            for name in rule.selector_value.split("\x00"):
+                busy |= set(action_owners(name))
         action_owners_by_rule[rule.id] = [
             owner for owner in owners_by_kind.get(AGENT_KIND, []) if owner not in busy
         ]

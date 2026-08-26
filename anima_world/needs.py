@@ -14,6 +14,9 @@ from __future__ import annotations
 
 NEEDS = ("energy", "hunger", "social")
 
+#: 出厂插件的 id。**它是命名空间** —— 三个量在量表里叫 `needs.energy` 这样。
+PLUGIN_ID = "needs"
+
 # 每 tick(默认 5 世界分钟)的衰减:一天不睡精力见底、约 18 小时饿透、
 # 一天半不社交就孤独。
 DECAY_PER_TICK = {"energy": 1.0 / 288, "hunger": 1.0 / 216, "social": 1.0 / 432}
@@ -49,20 +52,19 @@ def restores(action_kind: str | None) -> frozenset[str]:
     return frozenset(RESTORE_PER_TICK.get(action_kind or "", {}))
 
 
-def settle(
-    values: dict[str, float], elapsed_ticks: int, action_kind: str | None
-) -> dict[str, float]:
-    """把需求推进 elapsed_ticks:衰减 + 当前动作的恢复,clamp 到 [0,1]。
-    纯函数;mood 现算不入 values 存储。"""
-    restore = RESTORE_PER_TICK.get(action_kind or "", {})
-    out: dict[str, float] = {}
-    for need in NEEDS:
-        value = float(values.get(need, 1.0))
-        value -= DECAY_PER_TICK[need] * elapsed_ticks
-        value += restore.get(need, 0.0) * elapsed_ticks
-        out[need] = max(0.0, min(1.0, value))
-    out["mood"] = 0.2 + 0.8 * min(out[n] for n in NEEDS)
-    return out
+def mood_of(values: dict[str, float]) -> float:
+    """三条需求 → 心气儿。**木桶效应**:最低的那条说了算。
+
+    ⚠️ **它永不存储**(第二真相源那条教训):存下来的话,某个进程改了 energy 而
+    没重算 mood,世界里就有两个互相矛盾的答案,而两个都"看上去正常"。
+    现算是廉价的 —— 三个数取一次 min。
+
+    ⚠️ **推进那一半 3.8.0 起不在这个模块里了。** 衰减与恢复现在是 `needs` 这个
+    **出厂插件**的六条规律(见 `factory_plugin`),跑在世界自己那条规律引擎上。
+    从前住在这儿的 `settle()` 因此退役 —— 曲线的三个常数一个字没改(还在上面
+    那两张表里),换的是**谁来跑它**。
+    """
+    return 0.2 + 0.8 * min(float(values[need]) for need in NEEDS)
 
 
 def drag_mood(mood: float, debt: float) -> float:
@@ -87,3 +89,66 @@ def drag_mood(mood: float, debt: float) -> float:
     except (TypeError, ValueError):
         return mood
     return max(0.0, min(1.0, float(mood) - max(0.0, min(1.0, owed))))
+
+
+# ── 出厂插件:needs 是第一个搬出去的内置系统(3.8.0,设计稿 §9)─────────────────
+#
+# 🔴 **这一段是这个模块存在方式的整个转身。** 从前它是"引擎替所有世界写死的三个量
+# 加两张表";现在它是**一份声明** —— 和作者自己写的插件用**同一种形状**、走同一条
+# 装载路、吃同一个规律引擎。设计稿那句检验标准只有一条:**形状对不对,不看例子,
+# 看能不能把出厂的东西用同一形状搬出去。**
+#
+# 曲线的三个常数一个字没改(上面那两张表就是它们的家),搬的是**谁来跑它** ——
+# 从 `Scheduler._settle_agent_needs` 里那段 Python,变成六条规律。
+#
+# ⚠️ **为什么每个量要两条规律。** 今天的 `settle()` 一次做两件事:总是衰减,
+# 而且**如果她正在做那件恢复动作**就再加一份。规律层没有"读她此刻在做什么"这种
+# 表达式,只有选择器 —— 所以拆成**互不相交**的两条:`{"action": …}` 那条是
+# 「正在做的人」(衰减 + 恢复),`{"not_action": [...]}` 那条是它的补集(只衰减)。
+# 两条**划分**了所有人,所以永远不会抢同一个量。
+# `social` 有两个恢复动作,于是它是三条,而那正是 `not_action` 从单数变成
+# 一列的理由(见 `rules._parse_selector`)。
+
+
+def _decay(need: str) -> str:
+    return f"{PLUGIN_ID}.{need} - {DECAY_PER_TICK[need]!r} * dt"
+
+
+def _fact(need: str) -> dict:
+    """三个量的声明。**`hidden` 是有意的** —— 今天 needs 一格都不进感知块
+    (她的饿由行为树的紧急带表达,不由提示词里一行数字表达),而
+    "没声明 = 感知不到"正是这一层的默认值。改成 `self` 会当场改变每个世界的提示词。
+    """
+    return {"bearer": "agent", "shape": "number", "default": 1.0,
+            "range": [0.0, 1.0], "visibility": "hidden", "label": need}
+
+
+def factory_plugin() -> dict:
+    """出厂的 needs 插件声明。**每次现算,不做成模块级常量** ——
+    调用方会把它塞进世界文件那条合并路,而一份被人就地改过的常量会跟着世界跑。
+    """
+    rules: list[dict] = []
+    for need in NEEDS:
+        restoring = sorted(
+            action for action, table in RESTORE_PER_TICK.items() if need in table
+        )
+        for action in restoring:
+            gain = RESTORE_PER_TICK[action][need]
+            rules.append({
+                "id": f"{need}_{action}", "every": {"ticks": 1},
+                "for_each": {"action": action},
+                "set": {f"{PLUGIN_ID}.{need}":
+                        f"clamp({_decay(need)} + {gain!r} * dt, 0.0, 1.0)"},
+            })
+        # 补集:此刻没在做任何一件恢复这条需求的事 —— 只衰减。
+        rules.append({
+            "id": f"{need}_decay", "every": {"ticks": 1},
+            "for_each": ({"not_action": restoring} if restoring
+                         else {"kind": "agent"}),
+            "set": {f"{PLUGIN_ID}.{need}": f"clamp({_decay(need)}, 0.0, 1.0)"},
+        })
+    return {
+        "id": PLUGIN_ID, "version": "1.0.0", "label": "需求",
+        "facts": {need: _fact(need) for need in NEEDS},
+        "rules": rules,
+    }

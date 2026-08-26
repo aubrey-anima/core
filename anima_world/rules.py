@@ -516,8 +516,30 @@ def _parse_selector(label: str, raw: Any, errors: list[str]) -> tuple[str, str]:
     if key not in _SELECTOR_KINDS:
         errors.append(f"{label}:for_each 不认 {key!r},只认 {list(_SELECTOR_KINDS)}")
         return ("owner", "world")
+    # 🆕 3.8.0:`not_action` 收**一列**动作 —— `{"not_action": ["chat", "idle_social"]}`。
+    #
+    # 它是被 needs 搬家逼出来的,而那件事说明了这个补集为什么必须能收多个:
+    # 「社交这个量,在聊天时回一点、在闲坐时回另一点、其余时候一直掉」——
+    # 三条规律要**划分**所有人,而单数的 `not_action` 只排得掉一个动作,于是
+    # 「不聊天」那一条会连「闲坐」的人一起算进去,和第二条**抢同一个量**。
+    # 抢同一个量的下场写在 `evaluate_due` 里:后写的赢,而谁也看不见谁(双缓冲)。
+    # **一个看起来对、算出来错的语义,比当场报错坏得多。**
+    #
+    # 只给 `not_action`,不给 `action`:两条 `action` 的规律作用在**互不相交**的
+    # 名单上,本来就不会抢;而"这些动作里的任何一个"写成两条规律更好读。
+    if key == "not_action" and isinstance(value, (list, tuple)):
+        names = [str(v).strip() for v in value if str(v or "").strip()]
+        if not names:
+            errors.append(f"{label}:for_each.not_action 是空的 —— "
+                          "一个什么都不排除的补集就是「所有人」,直接写 "
+                          '{"kind": "agent"}')
+            return ("owner", "world")
+        # 内部表示仍然是一个字符串(`Rule` 是冻的、进得了缓存),用 `\x00` 连 ——
+        # 动作名是作者写的标识符,里面不会有这个字节。
+        return (key, "\x00".join(names))
     if not isinstance(value, str) or not value.strip():
-        errors.append(f"{label}:for_each.{key} 必须是非空字符串")
+        errors.append(f"{label}:for_each.{key} 必须是非空字符串"
+                      "(`not_action` 也收一列动作名)")
         return ("owner", "world")
     return (key, value.strip())
 
