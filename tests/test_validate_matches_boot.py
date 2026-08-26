@@ -702,3 +702,50 @@ def test_不带量的编辑包不说这句(tmp_path):
     for label, said in zip(("validate world", "world check"),
                            _warnings(path, edit=True)):
         assert not [w for w in said if "重声明是整行替换" in w], label
+
+
+# ── 九、通用的那一条:**新开一种开机失败,三扇门必须一起认**(3.8.0 第 1 期)────
+
+
+def test_三扇门都走同一份判断_而检查器是一张看得见的表():
+    """🔴 **这一条是通用的,上面那些是逐条枚举的。**
+
+    这个仓库反复栽的那一跤:**新增一种开机失败,忘了把它接进离线那两扇门。**
+    3.7.0 收节拍时第一版就这样(收了段没补门,于是 `world check` 对一份开不了机的
+    文件照答 `loadable: true`),而同一版的上一个 commit 刚为同一种假绿修过三格。
+    ⚠️ **上面那张逐条枚举的夹具不会替你发现这件事** —— 它是一条一条写的,
+    你开一种新的开机失败,它一条都不红。
+
+    所以这条**不枚举案例,枚举结构**,钉两件:
+
+    1. 检查器是一张**看得见的表**(`AUTHORED_LAYER_CHECKS`),而不是一串写死的
+       `+` —— 从前是后者,于是"忘了加一个"只表现为少了一行,没有一处会红。
+    2. **三扇门都走 `authored_layer_errors`**:开机(`build_serve_scheduler`)、
+       `validate world`、`world check`。只要这一条成立,往那张表里加一行就
+       **自动**同时进三扇门 —— 那正是这条纪律想要的东西。
+    """
+    import ast
+    import inspect
+
+    from anima_world import __main__ as main_mod
+
+    checks = [f.__name__ for f in main_mod.AUTHORED_LAYER_CHECKS]
+    assert len(checks) >= 4, f"这张表自己空了:{checks}"
+    assert "world_plugin_errors" in checks, "第 1 期新开的那种开机失败没进表"
+
+    # `authored_layer_errors` 真的**遍历那张表**,而不是又写了一串 `+`。
+    body = inspect.getsource(main_mod.authored_layer_errors)
+    assert "AUTHORED_LAYER_CHECKS" in body, (
+        "`authored_layer_errors` 没读那张表 —— 那张表就成了摆设,"
+        "而摆设正是这条纪律要防的东西"
+    )
+
+    # 三扇门都走它。**按源码里出现过判**:这三个函数是那三扇门的入口。
+    # ⚠️ 开机那扇门的入口不是 `build_serve_scheduler` 本身,是它调的
+    # `_load_world_file` —— 那是"作者层第一次被读进来"的地方,闸就在那儿。
+    for door in ("_load_world_file", "run_validate", "run_world_check"):
+        source = inspect.getsource(getattr(main_mod, door))
+        assert "authored_layer_errors" in source, (
+            f"`{door}` 没走 `authored_layer_errors` —— 它会和另外两扇门分叉,"
+            "而分叉那天两边都不报错"
+        )

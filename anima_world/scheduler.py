@@ -328,6 +328,9 @@ class Scheduler:
         # 插件(3.8.0)。`plugins` 是**这一次开机装着的那几个**(声明的权威是世界
         # 文件,库里那份 `:plugins` 只记"装的是哪一版、有哪几个事实名")。
         self.plugin_store: Any | None = None
+        self.edge_store: Any | None = None
+        #: 边类型名(带命名空间)→ 它的声明。`link` 那一刻查约束靠它。
+        self.edge_types: dict[str, Any] = {}
         self.plugins: list[Any] = []
         # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
         # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
@@ -613,11 +616,15 @@ class Scheduler:
             return
         owner = self.stock_owner_of(actor_id)
         have = store.of(owner)
+        # `actor` = 角色 + 玩家(今天的语义);`player` = 只玩家。**分它们的是那个
+        # 前缀,不是两张表** —— 两种人的量住在同一个命名空间里。
+        is_player = actor_id.startswith(self.PLAYER_PREFIX)
+        wanted = {"actor", "player"} if is_player else {"actor"}
         missing = {
             fact.qualified: fact.default
             for plugin in self.plugins
             for fact in plugin.facts.values()
-            if fact.bearer == "agent" and fact.qualified not in have
+            if fact.bearer in wanted and fact.qualified not in have
         }
         if missing:
             store.set_many(owner, missing, tick=int(self.clock))
@@ -678,6 +685,11 @@ class Scheduler:
             # 触发器不受影响:它只认 conversation 与 state_change 的三种 kind,
             # 位移事件改写后本来就被它丢掉(memory_triggers.py:65-76)。
             self._apply_memory_trigger(event)
+            # **插件的触发器在这里入队** —— 落库那一处,也就是"发生过"在这个引擎里
+            # 的定义。挂在两个包装函数中的一个上,等于让"订得到吗"取决于发它的人
+            # 碰巧调了哪一个(第 1 期就是这么让五种事件死掉的,见
+            # `_enqueue_for_triggers` 的说明)。
+            self._enqueue_for_triggers(event)
             self.recent_events.append(self._stream_event(event))
             self._event_signal.set()
             self._event_signal.clear()
@@ -4112,12 +4124,37 @@ class Scheduler:
             return
         if not restores:
             return
+        # 🔴 **写量表,再顺手把黑板刷一下 —— 反过来那一半会被下一 tick 盖掉。**
+        #
+        # 3.8.0 起需求的**真值住在量表里**,黑板那几格是每 tick 折一次的**派生值**
+        # (`_settle_agent_needs`)。第一版这里只写黑板,于是一碗面吃下去、
+        # 下一 tick 就没了 —— 2026-08-26 验收 A 在同一个世界上量出来的:
+        # 旧路吃完 0.6、走一 tick 还有 0.5954;新路吃完 0.6、走一 tick **0.2454**。
+        # 而吃完那一刻**黑板 0.6、量表 0.1**:同一件事两个答案,两边都不报错 ——
+        # 正是 `needs.py` 自己点名的「第二真相源」。
+        # ⚠️ `tests/test_work_and_food.py` 当时照绿,是因为它在事件落库之后
+        # **一个 tick 都不走**就断言;那条用例同轮补了一次 `tick(1)`。
+        from anima_world import needs as needs_mod
+
+        store = self.stock_store
+        if store is None:
+            return
+        owner = self.stock_owner_of(who)
+        have = store.of(owner)
         bb = brain.agent.blackboard
+        fresh: dict[str, float] = {}
         for need, amount in restores.items():
-            current = bb.read(f"need.{need}")
+            key = f"{needs_mod.PLUGIN_ID}.{need}"
+            current = have.get(key)
             if not isinstance(current, (int, float)) or not isinstance(amount, (int, float)):
                 continue
-            bb.write(f"need.{need}", max(0.0, min(1.0, float(current) + float(amount))))
+            value = max(0.0, min(1.0, float(current) + float(amount)))
+            fresh[key] = value
+            # 黑板同一刻也刷 —— 这一 tick 之内还有人读它(行为树的迟滞),
+            # 而它下一 tick 会从量表折回同一个数。两处写的是同一个值,不是两份真相。
+            bb.write(f"need.{need}", value)
+        if fresh:
+            store.set_many(owner, fresh, tick=int(self.clock))
 
     def _beat_needs(self, agent_id: str, need: str) -> float | None:
         brain = self.agents.get(agent_id)
@@ -4325,14 +4362,27 @@ class Scheduler:
 
     def _record_and_deliver(self, event: dict[str, Any]) -> dict[str, Any]:
         self._deliver(event)
-        recorded = self._record_event(event)
-        self._enqueue_for_triggers(recorded or event)
-        return recorded
+        return self._record_event(event)
 
     def _enqueue_for_triggers(self, event: dict[str, Any]) -> None:
         """有人订这种事件吗 —— 有就排进队,**这一 tick 不处理**(见 `_trigger_queue`)。
 
         没有插件的世界这里是一次字典判空:和规律那一层同一条,常开也不花钱。
+
+        🔴 **它挂在 `_record_event` 上,而这一格是第 1 期的一个真 bug**
+        (2026-08-26 验收 C 实测):第一版挂在 `_record_and_deliver` 上,
+        而**十种可订事件里有五种根本不走那条路** —— `entity_interaction`、
+        `entity_spawn`、`entity_destroy`、`item_consume`、`payment` 直接调
+        `_record_event`,`state_change` 一半一半。于是订 `entity_interaction` 的
+        触发器在 288 tick 里:事件真发了 4 次、触发 0 次、值一格没动、
+        **一处不报错**,而 `plugin list` 照旧印着「触发器 1」。
+        **那正是 FOR-STUDIO §3.37 与 REFERENCE §10.1 唯一的例子。**
+
+        挂在**落库**那一处是唯一站得住的地方:白名单说的是"这个世界里发生了什么",
+        而"发生了"在这个引擎里的定义就是**进了日志**。挂在两个包装函数中的一个上,
+        等于让"订得到吗"取决于发它的人碰巧调了哪一个 —— 而那件事没有任何一处写着。
+        判据 `tests/test_plugins.py::test_白名单里每一种事件都真的到得了触发器`:
+        它**逐条**走完 `SUBSCRIBABLE_EVENTS`,每加一种新事件都必须跟着补一条。
         """
         if not self._triggers_by_event:
             return
@@ -4826,6 +4876,8 @@ class Scheduler:
                 return
         for name, expression in trigger.sets:
             pending.setdefault(owner, {})[name] = float(expression.evaluate(namespace))
+        for spec in trigger.links:
+            self.apply_edge_effect(spec, namespace, event, owner)
         for spec in trigger.emits:
             emitted.append({
                 "type": spec["type"], "who": event.get("who"), "loc": event.get("loc"),
@@ -4833,6 +4885,82 @@ class Scheduler:
                             "trigger": trigger.id, "because": event.get("type"),
                             **({"text": spec["text"]} if spec.get("text") else {})},
             })
+
+    def apply_edge_effect(
+        self, spec: dict[str, Any], namespace: dict[str, Any],
+        event: dict[str, Any] | None = None, owner: str | None = None,
+    ) -> bool:
+        """`link` / `unlink` / `transfer` —— **内核执行,插件只是组合它们**。
+
+        约束在这里查,不在声明里劝:`exclusive`(起点唯一)/ `exclusive_to`
+        (终点唯一)。放行的样子是安静的 —— 两条 `member_of` 同时挂着,
+        `plugin list` 看不出来,而提示词里她同时是两个门派的人。
+
+        返回**这次到底动了没有**。⚠️ 它是承重的:一个"什么都没做"的 `link`
+        和一个"建成了"的 `link` 在日志上长得一样,而调用方要拿它决定发不发事件。
+        """
+        store = self.edge_store
+        if store is None:
+            return False
+        kind = spec.get("op")
+        edge_type = str(spec.get("type") or "")
+        declared = self.edge_types.get(edge_type)
+        src = self._resolve_node(spec.get("from"), namespace, event, owner)
+        dst = self._resolve_node(spec.get("to"), namespace, event, owner)
+        if not edge_type or (kind != "unlink" and (not src or not dst)):
+            return False
+        if kind == "unlink":
+            if src and dst:
+                return bool(store.unlink(edge_type, src, dst))
+            # 只给了一端 = 把这一端上这个类型的边全断掉(`退出师门`那种写法)。
+            rows = store.of_src(edge_type, src) if src else store.of_dst(edge_type, dst)
+            for a, b, _facts in rows:
+                store.unlink(edge_type, a, b)
+            return bool(rows)
+        if kind == "transfer":
+            rows = store.of_dst(edge_type, dst) if spec.get("by_dst") else                 store.of_src(edge_type, src)
+            moved = False
+            for a, b, facts in rows:
+                store.unlink(edge_type, a, b)
+                store.link(edge_type, src, dst, facts)   # 事实**跟着走**
+                moved = True
+            return moved
+        # link
+        if declared is not None:
+            if declared.exclusive and store.of_src(edge_type, src):
+                logger.warning(
+                    "`%s` 是 exclusive 的:%s 已经有一条了,这次 link 不算数",
+                    edge_type, src)
+                return False
+            if declared.exclusive_to and store.of_dst(edge_type, dst):
+                logger.warning(
+                    "`%s` 是 exclusive_to 的:%s 那一端已经有一条了", edge_type, dst)
+                return False
+        facts = {
+            f"{declared.plugin}.{key}": fact.text_default if fact.shape == "text"
+            else fact.default
+            for key, fact in (declared.facts if declared is not None else {}).items()
+        }
+        facts.update(dict(spec.get("facts") or {}))
+        store.link(edge_type, src, dst, facts)
+        if declared is not None and declared.symmetric:
+            # `symmetric` = 两个方向共一份事实。**建两条,不是建一条然后到处记得
+            # 反着也查一遍** —— 后者要每个读的地方都记得,而漏掉一处不报错。
+            store.link(edge_type, dst, src, dict(facts))
+        return True
+
+    @staticmethod
+    def _resolve_node(
+        raw: Any, namespace: dict[str, Any], event: dict[str, Any] | None,
+        owner: str | None,
+    ) -> str:
+        """效果里那个 `"from"` / `"to"` 指的是哪个节点。**认不出就是空串,不猜。**"""
+        name = str(raw or "")
+        if name == "self":
+            return str(owner or "")
+        if name == "event.who":
+            return str((event or {}).get("who") or "")
+        return name
 
     def _trigger_bearer(self, trigger: Any, event: dict[str, Any]) -> str | None:
         """这条事件落在哪个 owner 身上。答不出就是 `None` —— **不猜**。"""

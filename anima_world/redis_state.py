@@ -1827,15 +1827,127 @@ class RedisNeedsStore:
         self._rows.put(agent_id, row)
 
 
+def edge_key(world_id: str, edge_type: str) -> str:
+    return f"{KEY_PREFIX}:{world_id}:edge:{edge_type}"
+
+
+class RedisEdgeStore:
+    """**边**:有类型、有方向、身上挂事实(3.8.0 第 2 期)。
+
+    ## 形状:**一个类型一个 hash**,field 是 `起点\x00终点`,value 是这条边的事实
+
+    为什么不是设计稿建议的 `edge:{type}:{from}` 一个 key 加一份反向索引:
+    **`for_each: {"edge": …}` 是每 tick 的事**,而"这个类型的边有哪些"在那种形状下
+    只能靠 `SCAN` —— 而 `SCAN` 是 O(整个 keyspace),一个 Redis 上跑十个世界的时候
+    别人的键也得扫(`RedisStockStore` 的说明里逐字点过这一条)。
+    一个类型一个 hash 之后,那件事是**一次 `HGETALL`**;而"某个节点的边"是在那
+    一份里过滤 —— 一次往返,不是一次扫描。
+
+    索引集合 `edge_types` 和 `stock_owners` 同一个理由:**"这个世界有哪些边类型"
+    不能靠扫键**。
+
+    ## 它**不是易失键**
+
+    边是世界的内容(和 `:kinds` / `:plugins` 同一类):跟着 `.cyberworld` 走、
+    重启不该忘。所以 `storage.volatile_keys` **一个字没动**,platform 那条 deepEqual
+    照旧是绿的 —— ⚠️ 而这句话照旧要**真跑一遍**再下结论(这个仓库两个方向都栽过)。
+    """
+
+    __slots__ = ("_redis", "_world")
+
+    #: field 里那个分隔符。节点 id 是 `agent:夏` / `tree:oak` 这种,里面不会有它。
+    SEP = "\x00"
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._redis = redis
+        self._world = world_id
+
+    def _types_key(self) -> str:
+        return f"{KEY_PREFIX}:{self._world}:edge_types"
+
+    def types(self) -> list[str]:
+        names = self._redis.smembers(self._types_key()) or set()
+        return sorted(n.decode() if isinstance(n, bytes) else n for n in names)
+
+    def link(self, edge_type: str, src: str, dst: str, facts: Any = None) -> None:
+        """建一条边(**幂等**:同一对 src/dst 重连就是改它身上的事实)。"""
+        pipe = self._redis.pipeline()
+        pipe.hset(edge_key(self._world, edge_type),
+                  f"{src}{self.SEP}{dst}", _dumps(dict(facts or {})))
+        pipe.sadd(self._types_key(), edge_type)
+        pipe.execute()
+
+    def unlink(self, edge_type: str, src: str, dst: str) -> int:
+        return int(self._redis.hdel(
+            edge_key(self._world, edge_type), f"{src}{self.SEP}{dst}") or 0)
+
+    def get(self, edge_type: str, src: str, dst: str) -> dict[str, Any] | None:
+        raw = self._redis.hget(edge_key(self._world, edge_type),
+                               f"{src}{self.SEP}{dst}")
+        return None if raw is None else (_loads(raw) or {})
+
+    def all(self, edge_type: str) -> list[tuple[str, str, dict[str, Any]]]:
+        """这个类型的全部边,**一次 `HGETALL`**,按 (src, dst) 排序。
+
+        次序确定是承重的:规律按它逐条求值,而不确定的次序意味着同一个世界在两台
+        机器上算出不同的结果(`RedisMemoryStore` 那条排序纪律同款)。
+        """
+        raw = self._redis.hgetall(edge_key(self._world, edge_type)) or {}
+        out: list[tuple[str, str, dict[str, Any]]] = []
+        for field, value in raw.items():
+            field = field.decode() if isinstance(field, bytes) else field
+            if self.SEP not in field:
+                continue
+            src, dst = field.split(self.SEP, 1)
+            out.append((src, dst, _loads(value) or {}))
+        return sorted(out, key=lambda row: (row[0], row[1]))
+
+    def of_src(self, edge_type: str, src: str) -> list[tuple[str, str, dict[str, Any]]]:
+        return [row for row in self.all(edge_type) if row[0] == src]
+
+    def of_dst(self, edge_type: str, dst: str) -> list[tuple[str, str, dict[str, Any]]]:
+        return [row for row in self.all(edge_type) if row[1] == dst]
+
+    def touching(self, node: str, types: Any = None) -> list[tuple[str, str, str]]:
+        """**任何一端**是这个节点的边,`(类型, src, dst)`。抹除与销毁都走它。
+
+        ⚠️ **按整个节点比,不按子串** —— `aubrey` 是 `aubrey-player` 的子串,而
+        两个人的名字长得像是常态(`forget_player` 那条同款教训)。
+        """
+        out: list[tuple[str, str, str]] = []
+        for edge_type in (self.types() if types is None else list(types)):
+            for src, dst, _facts in self.all(edge_type):
+                if src == node or dst == node:
+                    out.append((edge_type, src, dst))
+        return out
+
+    def drop_type(self, edge_type: str) -> int:
+        """整个类型抹掉(插件卸载时)。返回抹掉几条。"""
+        count = len(self.all(edge_type))
+        pipe = self._redis.pipeline()
+        pipe.delete(edge_key(self._world, edge_type))
+        pipe.srem(self._types_key(), edge_type)
+        pipe.execute()
+        return count
+
+
 class RedisPluginStore:
     """**这个世界此刻装着哪些插件** —— 一个 hash,一行一个插件。
 
-    ⚠️ **行里存的是「装的是哪一版、有哪几个事实名」,不是声明本身。** 声明的权威是
-    世界文件里那条 `plugin` 记录;库里再存一份就是第二真相源,而两份声明对不上的
-    那天没有一处会报错(她照着库里那份跑,作者读的是文件那份)。
+    🔴 **行里存的就是声明原文**(`body` 那一格),外加几格摘出来的派生值。
+    这一条和 `RedisRulesStore` / `RedisOntologyStore` 逐字同一个形制:**定义存原文,
+    编译在读取侧。** 理由是**世界住在键前缀里,不住在世界文件里** —— 一个从
+    `--world-file` 建起来的世界,下一次开机手上没有那份文件,而它的规律、种类、
+    插件都得照旧跑。**世界文件是来源,库是世界。**
 
-    那为什么还要这一行:**裁剪只有它答得出**。升级时要知道"上一版有、这一版没有的
-    是哪几个事实",而那件事文件里那份声明说不出来 —— 它只说得出这一版有什么。
+    ⚠️ **这段说明第一版写反了,而它反得正好在读者最会来查行形状的地方**:
+    原话是「行里存的不是声明本身,权威是世界文件里那条记录」—— 照它去掉 `body`,
+    重开机会**丢掉全部插件**,而世界照跑、日志干净。
+    (2026-08-26 第 1 期验收 B 挑出来的;同一句话在 `plugins.py` 里也有一份,一起改了。)
+
+    摘出来那几格(`version` / `facts` / `edges` / …)是**派生的**,存它们只为一件事:
+    **裁剪只有它答得出** —— 升级时要知道"上一版有而这一版没有的是哪几个事实",
+    而新声明说不出这句话,它只说得出这一版有什么。
 
     它**不是易失键**:插件是世界的内容(和 `:kinds` 同一类),跟着 `.cyberworld`
     走,重启不该让世界忘了自己装过什么。

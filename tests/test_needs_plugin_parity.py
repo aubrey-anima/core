@@ -13,12 +13,27 @@
 | `needs()` / `stocks()` | ✅ 逐位相同 | 纯算术,跑在 tick 线程上 |
 | `debug_prompt()` | ✅ 逐字节相同 | 同上 |
 | `state()` 的 `narrative_log` / `recent_events` / `runtime` | ❌ | 叙事跑在**线程池**上("时钟永不等网络"),它落在哪一 tick 由机器决定 |
-| 事件日志 | ❌ | 同上:同一份代码连跑两趟,条数与次序都能不一样 |
+| 事件日志里 **`narrative` 那一支** | ❌ | 同上 |
+| 事件日志里**其余全部**(按**多重集**比,不比次序) | ✅ 逐条相同 | 见下面那三段 |
 
-⚠️ **后两行不是"插件路做不到",是这个引擎做不到** —— 2026-08-26 拿**未改动的**
-引擎连跑两趟量的:关掉叙事之后条数一样了,**次序仍然不同**;开着叙事时连条数都差
-(110 vs 112)。**所以"事件日志逐字节相同"这条判据,对任何代码都不成立**,
-把它写进闸里只会得到一条永远红的检查,而一条永远红的检查等于没有这条检查。
+🔴 **这三行 2026-08-26 改过两次,而两次都是被证据推着走的 —— 值得逐字读一遍。**
+
+**第一版(我)说得太宽**:「事件日志逐字节相同对任何代码都不成立」,证据是连跑两趟
+条数不同(110 vs 112)、关掉叙事之后**次序**仍然不同。**一句说宽了的免责,和一盏
+假绿灯是同一件事** —— 它让本来验得了的那一大半跟着一起豁免掉了。
+
+**第二版(验收 A)把它收窄**:差的只是 `narrative` 那一支;滤掉它之后 old / new
+各两趟条数相同、`(type, payload)` **逐条**相同。A 是对的那一半 —— 那一大半确实验得了。
+
+**第三版(我,照 A 的方法多跑几趟)**:A 那句"逐条相同"**在次序上是运气**。
+同一份代码连跑两趟,`103` 条一条不差、类型计数一模一样,而**第 59 条上
+`state_change` 和 `travel` 换了位置** —— 关系判定和叙事一样跑在**线程池**上
+(`judge` 那条),它落在哪一 tick 由机器决定。三趟连着跑又全同,所以它是**时好时坏**,
+而一条时好时坏的闸比没有更贵:它红的时候没人知道该不该信。
+
+**所以这道闸比的是多重集(排过序),而那仍然是逐条精确相等,不是"差不多"** ——
+少一条、多一条、payload 差一个字节都会红。**被排除在外的只有"次序"这一件事,
+而它由线程池决定,不由这份代码决定。**
 
 于是这道闸比的是**那三样真的可复现的**,而且每一样都是**逐字节 / 逐位相等**,
 不是"近似":需求四个数、每个 owner 的量表、三份提示词的 sha256,
@@ -80,6 +95,13 @@ def _run(tmp_path):
                 a: hashlib.sha256(json.dumps(world.debug_prompt(a), ensure_ascii=False,
                                              sort_keys=True).encode()).hexdigest()
                 for a in agents},
+            # 🔴 **非叙事事件的多重集** —— 被验收 A 收回来的那一半(见模块 docstring)。
+            # **排序之后比**:次序不进这道闸,理由在 docstring 里。
+            "events": sorted(
+                [e.type, json.dumps(e.payload, ensure_ascii=False, sort_keys=True)]
+                for e in world.scheduler.event_log.replay()
+                if e.type != "narrative"
+            ),
             "state_sha": hashlib.sha256(json.dumps(
                 state, ensure_ascii=False, sort_keys=True,
                 default=str).encode()).hexdigest(),
@@ -124,10 +146,14 @@ def test_量表是旧的那份_外加搬过来的那三个量(tmp_path):
         agent = owner.split(":", 1)[1]
         for need in ("energy", "hunger", "social"):
             key = f"needs.{need}"
-            if key in got[owner]:
-                assert got[owner][key] == run["needs"][agent][need], (
-                    f"{owner}.{key} 和 needs() 报的不是同一个数"
-                )
+            # ⚠️ **硬断言,不是"有才比"**(2026-08-26 验收 A):写成
+            # `if key in got[owner]` 的话,哪天键名一改这三条就**静默跳过**,
+            # 而这条用例照绿 —— 一条只在"东西还在"时才检查的断言,正是它要防的
+            # 那种改动最先绕开的地方。
+            assert key in got[owner], f"{owner} 上没有 {key} —— 搬家没搬到他头上?"
+            assert got[owner][key] == run["needs"][agent][need], (
+                f"{owner}.{key} 和 needs() 报的不是同一个数"
+            )
 
 
 def test_提示词逐字节相同(tmp_path):
@@ -149,3 +175,52 @@ def test_基线自己是可复现的(tmp_path):
     不然上面四条红起来时,分不出是搬家搬坏了还是这道闸自己在抖。
     """
     assert _run(tmp_path) == _run(tmp_path)
+
+
+def test_非叙事事件逐条相同_按多重集(tmp_path):
+    """🔴 **被验收 A 收回来的那半道闸,而收回来的分寸自己也校准过一次。**
+
+    完整那三段在模块 docstring 里。一句话:**比的是多重集,不是次序** ——
+    少一条、多一条、payload 差一个字节都会红;而"第 59 条和第 60 条换了位置"
+    不红,因为那由线程池决定(关系判定和叙事都跑在上面),不由这份代码决定。
+    """
+    got = _run(tmp_path)["events"]
+    assert got == GOLDEN["events"], (
+        "非叙事事件变了。**先问是不是行为该变** —— 这一族由 tick 线程发出,"
+        "和量一样确定,它变了就是这个世界变了"
+    )
+
+
+def test_中途吃一次_末态仍然逐位同(tmp_path):
+    """🔴 **288 tick 的末态比不出"吃"这个动作**(2026-08-26 验收 A 指出的闸设计洞)。
+
+    A 的 P1 正是从这条缝里溜过去的:`_apply_item_restores` 只写黑板,而 3.8.0 起
+    黑板是派生值 —— 吃完那一刻对、下一 tick 被盖回去。而 parity 比的是**末态**,
+    demo 的 mock 路上"吃"要么没发生、要么被后面那两百多个 tick 淹没了。
+
+    这一条中途真吃一次再走一 tick:**那一口下去的效果必须留下来。**
+    """
+    db = tmp_path / "ate.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        world.config_set("needs.enabled", True)
+        world.config_set("economy.enabled", True)
+        world.config_set("planner.enabled", False)
+        world.config_set("autonomy.enabled", False)
+        world.scheduler.narrative = None
+        world.scheduler.economy_store.put_item(
+            "big_bowl", "大碗面", "consumable", 12.0, {"hunger": 0.5})
+        world.tick(10)
+        owner = world.scheduler.stock_owner_of("夏")
+        before = world.stocks(owner)["needs.hunger"]
+        world.scheduler._record_event({
+            "type": "item_consume", "who": "夏",
+            "payload": {"who": "夏", "item_id": "big_bowl", "source": "test"}})
+        eaten = world.stocks(owner)["needs.hunger"]
+        assert eaten > before, "吃了一碗回 0.5 的面,量表一格没动"
+        world.tick(1)
+        kept = world.stocks(owner)["needs.hunger"]
+        assert kept > before, (
+            f"吃完 {eaten},走一 tick 剩 {kept},而吃之前是 {before} —— "
+            "那一口被下一次折算盖回去了(黑板是派生值,真值在量表里)"
+        )

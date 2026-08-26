@@ -88,11 +88,38 @@ DEFERRED_SHAPES: dict[str, str] = {
 }
 
 #: 事实挂在谁身上。`entity:<kind>` 是一族(kind 由作者的 `kinds` 声明)。
-BEARER_FORMS = ("agent", "world", "location", "entity:<kind>")
+#:
+#: 🔴 **`actor` / `agent` / `player` 是三个词,而这一格是 2026-08-26 拍的**
+#: (第 1 期回报里问的那条产品向,老板自判):
+#:
+#:   `actor`  —— 角色**和**玩家。**这是今天的语义**(`stock_owner_of` 那条
+#:               「同一个命名空间」),出厂 `needs` 声明的就是它。
+#:   `agent`  —— 只角色。
+#:   `player` —— 只玩家。
+#:
+#: 为什么值得三个词而不是一个开关:**它是形状,不是产品判断。** 一个作者写「灵力」
+#: 时心里想的是谁,只有他知道;而引擎从前**没有地方让他说** —— 挂上去就两种人都有,
+#: 那不是一个决定,是一个默认值。⚠️ **`agent` 这个词的含义因此变窄了**,而它是
+#: 第 1 期刚公布的:老的声明写 `agent` 时要的是「今天的语义」= 现在的 `actor`。
+#: 所以**装载时把 `agent` 读成 `actor`**,并在 `contract` 里把这件事说出来 ——
+#: 收紧一个刚发出去的词而不留兼容,下场是第 1 期写的插件安静地少覆盖一半人。
+BEARER_FORMS = ("actor", "agent", "player", "world", "location", "entity:<kind>")
 
-#: 触发器与规律的效果原语。这一版两个;`spawn`/`destroy`/`link`/`unlink`/`transfer`
-#: 归第 2 期(它们要边和插件声明的 kind)。
-EFFECTS = ("set", "emit")
+#: 老词 → 今天的语义。**只有这一条,而且它是加法**(第 1 期的 `agent` = 两种人)。
+BEARER_ALIASES = {"agent": "actor"}
+
+#: 边上的事实收哪几种形状。**比节点多一个 `text`,而这不是偏心,是存储的形状**:
+#: 节点事实住在量表里(`[float, tick]`,存不下字符串),而边自己那一行本来就是
+#: 一份 JSON。⚠️ **`timer` 两边都不收**,而第 2 期的理由和第 1 期不同了:
+#: 边有了之后它**不缺地方住**,它缺的是 `p.k.age` / `p.k.active` 那套语法 ——
+#: 而两层点号这一版只在边的三个前缀下面开(`expressions.EDGE_PREFIXES`)。
+#: **更要紧的是它不缺能力**:一个存着 tick 的 `number` 加上内核的 `now`,
+#: `now - qi.中毒起始 < 100` 就是 `.active`,`now - qi.中毒起始` 就是 `.age`。
+#: **为一层语法糖开一道语法,不划算** —— 那道语法正是第 1 期特意关掉的那一道。
+EDGE_FACT_SHAPES = ("number", "state", "text")
+
+#: 效果原语。第 2 期把边那三个补上;`spawn` / `destroy` 要插件声明的 kind,还欠着。
+EFFECTS = ("set", "emit", "link", "unlink", "transfer")
 
 #: `text` 形状将来的默认上限。这一版用不上,写在这儿是因为它已经进了契约。
 DEFAULT_TEXT_MAX_CHARS = 400
@@ -125,6 +152,9 @@ class Fact:
     values: tuple[tuple[str, str], ...] = ()
     low: float | None = None
     high: float | None = None
+    #: `text` 那一支专用(只在边上收得下,见 `EDGE_FACT_SHAPES`)。
+    text_default: str = ""
+    max_chars: int = DEFAULT_TEXT_MAX_CHARS
 
     @property
     def qualified(self) -> str:
@@ -132,8 +162,18 @@ class Fact:
 
     @property
     def owner_kind(self) -> str:
-        """它落在可见性表的哪一行上 —— `entity:tree` → `tree`。"""
-        return self.bearer.split(":", 1)[1] if self.bearer.startswith("entity:") else self.bearer
+        """它落在可见性表的哪一行上 —— `entity:tree` → `tree`。
+
+        ⚠️ **`actor` / `agent` / `player` 三种 bearer 落的是同一行 `agent`**,
+        而那不是含糊:可见性表按**种类**声明,而玩家的量 owner 是
+        `agent:player:<id>` —— 种类就是 `agent`。三个词分的是"**种谁**",
+        不是"**谁看得见**"。
+        """
+        if self.bearer.startswith("entity:"):
+            return self.bearer.split(":", 1)[1]
+        if self.bearer in ("actor", "player"):
+            return "agent"
+        return self.bearer
 
     def clamp(self, value: float) -> float:
         """写入时夹一道。`state` 永远夹在 `[0, len(values)-1]` 上。"""
@@ -155,6 +195,17 @@ class Fact:
 
         return band_word(self.bands, float(value)) or ""
 
+    @property
+    def label_text(self) -> str:
+        return self.label or self.key
+
+    def render(self, value: Any) -> str:
+        """她读到的那一段。**分过档的读档词,数字不上屏;没分档的这一节不列。**"""
+        if self.shape == "text":
+            return f"{self.label_text} {value}" if value else ""
+        word = self.word(float(value))
+        return f"{self.label_text} {word}" if word else ""
+
     def note(self, value: float) -> str:
         """她读到的那句**描述**(档的第三项 / 值的 description);没有就是空串。"""
         if self.shape == "state":
@@ -170,6 +221,31 @@ class Fact:
 
 
 @dataclass(frozen=True)
+class EdgeType:  # noqa: D101 - 见下
+    """一种边:有方向、有约束、身上挂事实。
+
+    `exclusive` / `exclusive_to` 是**内核在 `link` 那一刻查的约束**,不是建议:
+    「一个人只能在一个门派」写成 `exclusive`,而放行它的样子是安静的 ——
+    两条 `member_of` 同时挂着,`plugin list` 看不出来,提示词里她同时是两个门派的人。
+    """
+
+    plugin: str
+    name: str
+    label: str = ""
+    src: str = "agent"
+    dst: str = "agent"
+    exclusive: bool = False        # 起点那一端唯一
+    exclusive_to: bool = False     # 终点那一端唯一
+    symmetric: bool = False        # 两个方向共一份事实
+    facts: dict[str, "Fact"] = field(default_factory=dict)
+
+    @property
+    def qualified(self) -> str:
+        """存储里那个类型名。**带命名空间** —— 两个插件各声明一个 `owns` 不会撞。"""
+        return f"{self.plugin}.{self.name}"
+
+
+@dataclass(frozen=True)
 class Trigger:
     """因一件事而变。**订的是事件,不是量** —— 量那一半是规律。"""
 
@@ -180,6 +256,8 @@ class Trigger:
     conditions: tuple[Expression, ...] = ()
     sets: tuple[tuple[str, Expression], ...] = ()
     emits: tuple[dict[str, Any], ...] = ()
+    #: `link` / `unlink` / `transfer` 那三条,原样交给 `Scheduler.apply_edge_effect`。
+    links: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,6 +268,7 @@ class Plugin:
     label: str = ""
     reads: frozenset[str] = frozenset()
     facts: dict[str, Fact] = field(default_factory=dict)
+    edges: dict[str, EdgeType] = field(default_factory=dict)
     rules: tuple[Rule, ...] = ()
     triggers: tuple[Trigger, ...] = ()
 
@@ -325,6 +404,19 @@ def _parse_one(
                 continue
             facts[fact.key] = fact
 
+    edges: dict[str, EdgeType] = {}
+    raw_edges = entry.get("edges") or {}
+    if not isinstance(raw_edges, dict):
+        errors.append(f"{label}:edges 必须是「边类型名 → 声明」的对象")
+    else:
+        for name, spec in raw_edges.items():
+            try:
+                edge = _parse_edge(plugin_id, f"{label}.edges.{name}", str(name), spec)
+            except PluginError as exc:
+                errors.extend(exc.errors)
+                continue
+            edges[edge.name] = edge
+
     # 自己的事实 + 声明过的依赖 = 这个插件的表达式允许读到的命名空间名字。
     allowed = {f"{plugin_id}.{key}" for key in facts} | reads
     allowed |= {f"me_{name}" for name in allowed}
@@ -357,7 +449,7 @@ def _parse_one(
             try:
                 trigger = _parse_trigger(
                     plugin_id, f"{label}.triggers[{position}]", spec, facts,
-                    allowed, subscribable,
+                    allowed, subscribable, edges,
                 )
             except PluginError as exc:
                 errors.extend(exc.errors)
@@ -381,11 +473,70 @@ def _parse_one(
         id=plugin_id, version=version,
         engine_min=str(entry.get("engine_min") or "").strip(),
         label=str(entry.get("label") or "").strip(),
-        reads=frozenset(reads), facts=facts, rules=rules, triggers=tuple(triggers),
+        reads=frozenset(reads), facts=facts, edges=edges,
+        rules=rules, triggers=tuple(triggers),
     )
 
 
-def _parse_fact(plugin_id: str, label: str, key: str, spec: Any) -> Fact:
+#: 边的两端认哪几种节点。⚠️ **和 `bearer` 不是一张表**:边连的是**节点**,
+#: 而 `actor` / `player` 那两个词说的是"给谁种事实" —— 一个是图上的位置,
+#: 一个是播种的范围。合成一张表会让 `{"from": "player"}` 读起来像是一种节点类型。
+EDGE_ENDS = ("agent", "player", "location", "world")
+
+
+def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:
+    errors: list[str] = []
+    if not name.strip() or any(m in name for m in _BAD_FACT_MARKS):
+        errors.append(f"{label}:边类型名不能为空,也不能带 {list(_BAD_FACT_MARKS)}")
+    if not isinstance(spec, dict):
+        raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
+
+    # ⚠️ **声明里这两个键仍然叫 `from` / `to`**(设计稿那两个词),而**表达式里**
+    # 的前缀是 `src` / `dst` —— 因为 `from` 是 Python 关键字,`ast` 连语法都过不去。
+    # 两套词只在这一处分岔,理由写在 `expressions.EDGE_PREFIXES` 上。
+    src = str(spec.get("from") or "agent").strip()
+    dst = str(spec.get("to") or "agent").strip()
+    for where, value in (("from", src), ("to", dst)):
+        if value in EDGE_ENDS or value.startswith(("entity:", "group:")):
+            continue
+        errors.append(
+            f"{label}.{where}:不认识的一端 `{value}`;认的是 {list(EDGE_ENDS)} "
+            "或者 `entity:<种类>` / `group:<种类>`"
+        )
+
+    facts: dict[str, Fact] = {}
+    raw_facts = spec.get("facts") or {}
+    if not isinstance(raw_facts, dict):
+        errors.append(f"{label}.facts 必须是「事实名 → 声明」的对象")
+    else:
+        for key, fact_spec in raw_facts.items():
+            body = dict(fact_spec) if isinstance(fact_spec, dict) else fact_spec
+            if isinstance(body, dict):
+                # 边上的事实**不写 bearer**(它挂在这条边上,不挂在谁身上)——
+                # 借节点那份解析器,所以这里替它填一个,免得作者被要求写一个
+                # 对边毫无意义的键。
+                body.setdefault("bearer", "world")
+            try:
+                fact = _parse_fact(plugin_id, f"{label}.facts.{key}", str(key), body,
+                                   shapes=EDGE_FACT_SHAPES)
+            except PluginError as exc:
+                errors.extend(exc.errors)
+                continue
+            facts[fact.key] = fact
+
+    if errors:
+        raise PluginError(errors)
+    return EdgeType(
+        plugin=plugin_id, name=name,
+        label=str(spec.get("label") or "").strip(), src=src, dst=dst,
+        exclusive=bool(spec.get("exclusive")),
+        exclusive_to=bool(spec.get("exclusive_to")),
+        symmetric=bool(spec.get("symmetric")), facts=facts,
+    )
+
+
+def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
+                *, shapes: tuple[str, ...] = FACT_SHAPES) -> Fact:
     errors: list[str] = []
     if not key.strip():
         raise PluginError([f"{label}:事实名不能为空"])
@@ -398,19 +549,28 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any) -> Fact:
         raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
 
     shape = str(spec.get("shape") or "number").strip()
-    if shape in DEFERRED_SHAPES:
+    if shape in DEFERRED_SHAPES and shape not in shapes:
         errors.append(
             f"{label}:`{shape}` 这一版还不收 —— {DEFERRED_SHAPES[shape]}。"
-            f"这一版收的是 {list(FACT_SHAPES)}"
-            "(按 `contract --json` 的 `plugins.fact_shapes` 探测,别照设计稿写)"
+            f"这里收的是 {list(shapes)}"
+            "(按 `contract --json` 的 `plugins.fact_shapes` / `edge_fact_shapes` "
+            "探测,别照设计稿写)"
         )
-    elif shape not in FACT_SHAPES:
-        errors.append(f"{label}:不认识的 shape `{shape}`;收的是 {list(FACT_SHAPES)}")
+    elif shape not in shapes:
+        errors.append(
+            f"{label}:不认识的 shape `{shape}`;这里收的是 {list(shapes)}"
+            + ("(⚠️ `text` 只在**边**上收得下 —— 节点的事实住在量表里,"
+               "那儿存的是 `[float, tick]`)" if shape == "text" else "")
+        )
 
     bearer = str(spec.get("bearer") or "").strip()
+    # 第 1 期写 `agent` 的插件要的是「今天的语义」(角色 + 玩家)—— 收紧一个刚发
+    # 出去的词而不留兼容,下场是那些插件安静地少覆盖一半人。
+    bearer = BEARER_ALIASES.get(bearer, bearer)
     if not bearer:
         errors.append(f"{label} 少了 bearer —— 这个事实挂在谁身上?{list(BEARER_FORMS)}")
-    elif bearer not in ("agent", "world", "location") and not bearer.startswith("entity:"):
+    elif (bearer not in ("actor", "player", "world", "location")
+          and not bearer.startswith("entity:")):
         errors.append(f"{label}:不认识的 bearer `{bearer}`;形状是 {list(BEARER_FORMS)}")
     elif bearer.startswith("entity:") and not bearer[len("entity:"):].strip():
         errors.append(f"{label}:`entity:` 后面要写种类 id")
@@ -425,6 +585,21 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any) -> Fact:
     low = high = None
     default = 0.0
 
+    if shape == "text":
+        # 边上那一行本来就是 JSON,字符串直接住得下。上限照契约那一格。
+        max_chars = spec.get("max_chars", DEFAULT_TEXT_MAX_CHARS)
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            errors.append(f"{label}.max_chars:{max_chars!r} 不是一个数")
+            max_chars = DEFAULT_TEXT_MAX_CHARS
+        if errors:
+            raise PluginError(errors)
+        return Fact(plugin=plugin_id, key=key, bearer=bearer, shape="text",
+                    default=0.0, visibility=visibility,
+                    label=str(spec.get("label") or "").strip(),
+                    text_default=str(spec.get("default") or ""),
+                    max_chars=max_chars)
     if shape == "state":
         raw_values = spec.get("values")
         if not isinstance(raw_values, list) or not raw_values:
@@ -531,8 +706,10 @@ def _as_float(label: str, what: str, raw: Any, errors: list[str], fallback: floa
 def _parse_trigger(
     plugin_id: str, label: str, spec: Any, facts: Mapping[str, Fact],
     allowed: set[str], subscribable: set[str],
+    edges: Mapping[str, "EdgeType"] | None = None,
 ) -> Trigger:
     errors: list[str] = []
+    edges = edges or {}
     if not isinstance(spec, dict):
         raise PluginError([f"{label} 必须是对象,收到 {type(spec).__name__}"])
     trigger_id = str(spec.get("id") or "").strip()
@@ -567,6 +744,7 @@ def _parse_trigger(
 
     sets: list[tuple[str, Expression]] = []
     emits: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
     raw_effects = spec.get("effects") or []
     if not isinstance(raw_effects, list) or not raw_effects:
         errors.append(f"{label}:effects 必须是非空列表 —— 一个什么都不做的触发器"
@@ -622,6 +800,27 @@ def _parse_trigger(
                     payload = {}
                 emits.append({"type": event_type, "payload": dict(payload),
                               "text": str(body.get("text") or "")})
+            elif kind in ("link", "unlink", "transfer"):
+                if not isinstance(body, dict):
+                    errors.append(f"{where}.{kind} 必须是对象")
+                    continue
+                edge_type = str(body.get("type") or "").strip()
+                if not edge_type:
+                    errors.append(f"{where}.{kind} 少了 type")
+                    continue
+                local = edge_type[len(plugin_id) + 1:] \
+                    if edge_type.startswith(f"{plugin_id}.") else edge_type
+                if local not in edges:
+                    errors.append(
+                        f"{where}.{kind}.type:这个插件没声明过 `{local}` 这种边;"
+                        f"声明过的是 {sorted(edges)} —— **只连得动自己声明的边**,"
+                        "别的插件的边由它自己管"
+                    )
+                    continue
+                links.append({"op": kind, "type": f"{plugin_id}.{local}",
+                              "from": body.get("from"), "to": body.get("to"),
+                              "by_dst": bool(body.get("by_dst")),
+                              "facts": dict(body.get("facts") or {})})
             else:
                 errors.append(f"{where}:不认识的效果 `{kind}`;这一版有 {list(EFFECTS)}")
 
@@ -636,7 +835,8 @@ def _parse_trigger(
     if errors:
         raise PluginError(errors)
     return Trigger(plugin=plugin_id, id=trigger_id, event=event, bearer=bearer,
-                   conditions=tuple(conditions), sets=tuple(sets), emits=tuple(emits))
+                   conditions=tuple(conditions), sets=tuple(sets), emits=tuple(emits),
+                   links=tuple(links))
 
 
 #: 表达式里**不必声明**就读得到的名字(内核的日历与流逝)。
@@ -782,10 +982,15 @@ def version_tuple(version: str) -> tuple[int, ...]:
 
 # ── 装 / 升 / 卸 ────────────────────────────────────────────────────────────
 #
-# 三件事共用一份"这个插件此刻装的是什么"的记录(`:plugins` 那个 hash),而**记录
-# 里存的是事实名清单,不是声明本身** —— 声明的权威是世界文件那一份,库里存一份
-# 拷贝就是第二真相源。记清单是为了**裁剪**:升级时要知道"上一版有而这一版没有的
-# 是哪几个",而那件事只有记录答得出。
+# 三件事共用一份"这个插件此刻装的是什么"的记录(`:plugins` 那个 hash)。
+# 🔴 **那一行里存的就是声明原文**(`body`),外加几格摘出来的派生值 ——
+# 和 `RedisRulesStore` 逐字同一个形制:定义存原文,编译在读取侧。
+# **世界住在键前缀里,不住在世界文件里**:一个从 `--world-file` 建起来的世界,
+# 下一次开机手上没有那份文件,而它的插件得照旧跑。
+# ⚠️ 这段注释第一版写的是"记录里存的不是声明本身" —— **那句是错的**,而且和同一个
+# commit 里 `_install_plugins` / REFERENCE / CHANGELOG 说的正相反(2026-08-26 验收 B:
+# 「错的那句正好在读者最会去查行形状的地方」)。
+# 摘出来那几格只为一件事:**裁剪只有它答得出**(上一版有而这一版没有的是哪几个)。
 
 
 @dataclass
@@ -860,7 +1065,7 @@ def install_plugins(
 
         # ② 默认值:**只填缺,不覆盖**(创世那条纪律)。
         for fact in plugin.facts.values():
-            if fact.bearer == "agent":
+            if fact.bearer in ("actor", "player"):
                 continue          # 走 `seed_actor_quantities` 那个窄口
             for owner in owners_of(fact.bearer):
                 have = stock_store.of(owner)
@@ -887,6 +1092,7 @@ def install_plugins(
         store.put(plugin.id, {
             "id": plugin.id, "version": plugin.version, "label": plugin.label,
             "facts": sorted(plugin.facts),
+            "edges": sorted(edge.qualified for edge in plugin.edges.values()),
             "bearers": sorted(plugin.bearers()),
             "rules": len(plugin.rules), "triggers": len(plugin.triggers),
             "reads": sorted(plugin.reads),
@@ -944,7 +1150,8 @@ def _prune_facts(
 
 def remove_plugin(
     plugin_id: str, *, store: Any, stock_store: Any, visibility_store: Any,
-    owners_of: Any, dry_run: bool = False,
+    owners_of: Any, dry_run: bool = False, edge_store: Any = None,
+    emit: Any = None,
 ) -> dict[str, Any]:
     """卸掉一个插件:它的事实、可见性行、记录。**它的规律与触发器随记录一起消失**
     (它们不落库 —— 权威是世界文件那份声明,库里只记"装的是哪一版")。
@@ -952,11 +1159,18 @@ def remove_plugin(
     ⚠️ **不删别的插件的东西**,一个字都不碰:命名空间就是这条边界的落点。
     ⚠️ **它抹不掉历史** —— 这个插件发过的事件留在日志里,和 `forget_player` 一条。
     日志是唯一的真相,而"这个世界曾经装过这个插件"是一件真的发生过的事。
+
+    🔴 **而"不改历史"不等于"不留痕迹":卸载**自己**要发一条 `plugin.removed`。**
+    第 1 期这条漏了,而漏的方式值得记一笔:REFERENCE 里用「历史一个字不动」把这句
+    承诺换掉了 —— 那两句话看着像同一件事,其实差着方向:**追加一条事件不是改历史,
+    它正是这个引擎记事情的唯一方式**。而别的插件要订它 —— **一个插件的卸载是另一个
+    插件的输入**(它读的那个事实从此不存在了,它得知道)。
+    `emit` 由调用方给(它认识事件日志,这一层不认识),不给就只是不发。
     """
     row = store.get(plugin_id)
     if row is None:
-        return {"plugin": plugin_id, "found": False, "facts": 0,
-                "keys": [], "dry_run": bool(dry_run)}
+        return {"plugin": plugin_id, "found": False, "facts": 0, "edges": 0,
+                "edge_types": [], "keys": [], "dry_run": bool(dry_run)}
     keys = sorted(row.get("facts") or ())
     if dry_run:
         qualified = [f"{plugin_id}.{key}" for key in keys]
@@ -968,12 +1182,31 @@ def remove_plugin(
         for owner in owners:
             have = stock_store.of(owner)
             count += sum(1 for name in qualified if name in have)
-        return {"plugin": plugin_id, "found": True, "facts": count,
-                "keys": keys, "dry_run": True}
+        edge_types = sorted(row.get("edges") or ())
+        cut = sum(len(edge_store.all(t)) for t in edge_types) if edge_store else 0
+        return {"plugin": plugin_id, "found": True, "facts": count, "edges": cut,
+                "edge_types": edge_types, "keys": keys, "dry_run": True}
     dropped = _prune_facts(plugin_id, keys, stock_store=stock_store,
                            visibility_store=visibility_store, owners_of=owners_of)
+    # **它声明的边也一起走。** 留着的话世界里挂着一族没有人再解释得了的连线:
+    # `plugin list` 里没有它,而 `state()` 里那几条边还在。
+    cut = 0
+    for edge_type in sorted(row.get("edges") or ()):
+        if edge_store is not None:
+            cut += int(edge_store.drop_type(edge_type) or 0)
     store.drop(plugin_id)
-    return {"plugin": plugin_id, "found": True, "facts": dropped,
+    if emit is not None:
+        # 载荷里只有**这次卸掉了什么**,没有声明本身:订它的插件要的是"哪些事实
+        # 从此不存在了",而不是一份它读不懂的别人的声明。
+        emit({
+            "type": "plugin.removed", "who": None,
+            "payload": {"plugin": plugin_id,
+                        "version": str(row.get("version") or ""),
+                        "facts": keys, "edge_types": sorted(row.get("edges") or ()),
+                        "dropped_facts": dropped, "dropped_edges": cut},
+        })
+    return {"plugin": plugin_id, "found": True, "facts": dropped, "edges": cut,
+            "edge_types": sorted(row.get("edges") or ()),
             "keys": keys, "dry_run": False}
 
 

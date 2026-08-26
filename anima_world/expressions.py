@@ -50,6 +50,17 @@ _FUNCTIONS: dict[str, Any] = {
 # (`Expression.evaluate(ns, dice=…)`),所以它不在 `_FUNCTIONS` 里。
 DICE_NAME = "rand"
 
+#: 边上那三个前缀 —— **两层点号只在它们下面开**(见 `_validate` 的 `Attribute` 那一支)。
+#: 它们是内核保留字(`plugins.RESERVED_IDS`),所以插件 id 永远拿不到它们,
+#: 于是"这是边的前缀"和"这是某个插件"分得开 —— 而分不开的样子是安静的。
+#:
+#: 🔴 **为什么不是 `from` / `to`(设计稿里写的那两个词)**:`from` 是 **Python 的
+#: 关键字**,而这一层的表达式是 `ast.parse` 解析的 —— `from.qi.灵力` 连语法都过不去
+#: (实测 `invalid syntax`)。**一个解析不出来的名字不是名字**,所以这里换成
+#: `src` / `dst`。⚠️ **边的声明里那两个键仍然叫 `from` / `to`**(那是 JSON,不是
+#: 表达式,不受这条限制);两套词只在这一处分岔,而分岔的理由写在这儿。
+EDGE_PREFIXES = frozenset({"src", "dst", "edge"})
+
 # `a ** b` 里 b 的上限。没有它,一个手滑的 `2 ** 999999999` 能把 tick 线程按住 ——
 # 而规律是跑在 tick 上的纯算术,它卡住就是整个世界卡住。
 _MAX_EXPONENT = 64
@@ -331,8 +342,15 @@ def rewrite_source(
         for node in ast.walk(expression._tree):
             # 命名空间那一层(`needs.energy`)整段换掉 —— 拿 `Name` 那一支去换的话
             # 只会换掉点号左边的 `needs`,而她读到的是「needs 的 energy 不够」。
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                said = name_text(f"{node.value.id}.{node.attr}")
+            if isinstance(node, ast.Attribute):
+                base = node.value
+                if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):
+                    whole = f"{base.value.id}.{base.attr}.{node.attr}"
+                elif isinstance(base, ast.Name):
+                    whole = f"{base.id}.{node.attr}"
+                else:
+                    continue
+                said = name_text(whole)
                 if said:
                     edits.append((*span(node), said))
                 continue
@@ -394,14 +412,49 @@ def _validate(node: ast.AST, source: str, names: set[str], *, dice: bool = False
         #   (运行期报「读了一个不存在的量」,而作者看不出错在哪一层)。
         if not isinstance(node.ctx, ast.Load):
             raise ExpressionError(f"{source!r} 里不能给名字赋值")
-        if not isinstance(node.value, ast.Name):
+        # 🆕 3.8.0 第 2 期:**两层只在边的三个前缀下面开**。
+        #
+        # 一条作用在边上的规律读得到三样东西:`edge.<事实>`(边自己的)、
+        # `from.<量>` / `to.<量>`(两端节点身上内核的量)—— 这三样都是**一层**。
+        # 而两端节点身上**插件的**事实本来就带命名空间(`qi.灵力`),于是它必然是
+        # `from.qi.灵力` —— **两层**。
+        #
+        # 所以开的口子是**有限的**:两层的根只准是 `from` / `to` / `edge` 这三个
+        # **内核保留字**(插件 id 拿不到它们,`plugins.RESERVED_IDS` 挡着)。
+        # `随便什么.b.c` 照旧当场拒 —— 第 1 期那句理由一个字没变:事实只有
+        # `<插件>.<键>` 这一种形状,两层一定是写错了,而放行会让它变成一个永远
+        # 读不到的名字。
+        base = node.value
+        if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):
+            if base.value.id not in EDGE_PREFIXES:
+                raise ExpressionError(
+                    f"{source!r}:两层点号只在边的这三个前缀下面开 —— "
+                    f"{sorted(EDGE_PREFIXES)}(`src.qi.灵力` 是"
+                    "「起点那一端身上、qi 这个插件的灵力」;⚠️ 不是 `from`,"
+                    "那是 Python 关键字,连语法都过不去)。别处写成 `a.b.c` 的话"
+                    "中间那一层指不到任何东西,而它会安静地变成一个永远读不到的名字"
+                )
+            if base.attr.startswith("_") or node.attr.startswith("_"):
+                raise ExpressionError(
+                    f"{source!r}:命名空间和事实名都不许以下划线开头"
+                )
+            names.add(f"{base.value.id}.{base.attr}.{node.attr}")
+            return
+        if not isinstance(base, ast.Name):
             raise ExpressionError(
                 f"{source!r}:点号只收一层 —— `<插件id>.<事实名>`(比如 "
-                "`needs.energy`、`me_needs.energy`)。写成 `a.b.c` 的话中间那一层"
+                "`needs.energy`、`me_needs.energy`);边上多一层前缀"
+                f"({sorted(EDGE_PREFIXES)})。别的写法里中间那一层"
                 "指不到任何东西,而它会安静地变成一个永远读不到的名字"
             )
-        if node.value.id == DICE_NAME:
-            raise ExpressionError(f"{source!r}:`rand` 是个函数,不是命名空间")
+        # **函数名当不了命名空间** —— `rand` 单独拦过一次,而 `min.x` / `clamp.x`
+        # 那一族当时漏了(2026-08-26 验收 A):同一类只挡了一个。
+        # 放行它们的下场不是报错,是一个永远读不到的名字。
+        if node.value.id in _FUNCTIONS or node.value.id == DICE_NAME:
+            raise ExpressionError(
+                f"{source!r}:`{node.value.id}` 是个函数,不是命名空间 —— "
+                f"函数名有 {sorted({*_FUNCTIONS, DICE_NAME})},它们都当不了插件 id"
+            )
         # 🔴 **下划线开头的一律拒,而这一条是安全边界不是洁癖。**
         # `self.__class__` 在语法树上和 `needs.energy` 是同一种节点 —— 放行它,
         # 这一层看上去就成了"属性访问",而 `tests/test_world_rules.py` 里那条
@@ -524,7 +577,11 @@ def _evaluate(
 
     if isinstance(node, ast.Attribute):
         # 命名空间那一层:整串当一个名字查,**不碰任何对象的属性**(见 `_validate`)。
-        key = f"{node.value.id}.{node.attr}"          # type: ignore[union-attr]
+        base = node.value
+        if isinstance(base, ast.Attribute):           # 边的两层:from.qi.灵力
+            key = f"{base.value.id}.{base.attr}.{node.attr}"   # type: ignore[union-attr]
+        else:
+            key = f"{base.id}.{node.attr}"            # type: ignore[union-attr]
         if key not in ns:
             raise ExpressionError(f"{source!r} 读了一个不存在的量:{key}")
         return ns[key]

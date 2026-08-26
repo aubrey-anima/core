@@ -114,7 +114,7 @@ $ anima-world chat --world-id w --agent 夏 -m "在吗" -m "今天忙吗" --json
 
 ---
 
-## 1. 现在 CLI 上有什么(**25 个顶层子命令 / 37 条叶子命令**,3.5.0 实测)
+## 1. 现在 CLI 上有什么(**26 个顶层子命令 / 37 条叶子命令**,3.5.0 实测)
 
 ```
 start  config  doctor  chat  prompt  map  ontology  roster  contact  relationship  player
@@ -3778,7 +3778,7 @@ $ anima-world plugin list --world-id w --json | jq '.plugins[] | {id, version, f
 | | 从前 | 3.8.0 |
 |---|---|---|
 | 值住哪儿 | 黑板 + `:needs` 检查点表 | **量表** `stock:agent:<id>` 的 `needs.energy` / `needs.hunger` / `needs.social` |
-| 谁推进它 | 引擎里一段 Python | 出厂插件的六条规律 |
+| 谁推进它 | 引擎里一段 Python | 出厂插件的七条规律 |
 | `needs.enabled` | 每 tick 现读 | 装不装这个插件;**照旧是热的**(引擎侧有钩子),改完不必重开世界 |
 | 曲线常数 / `URGENT` / `RELEASE` | | **一个字没改** |
 
@@ -3798,5 +3798,13 @@ $ anima-world plugin list --world-id w --json | jq '.plugins[] | {id, version, f
 `{"not_action": ["chat", "idle_social"]}` —— 纯加法,老的字符串写法一个字没变。
 它是被 needs 搬家逼出来的:`social` 有两个恢复动作,而"这两件都没在做"用单数的
 `not_action` 写不出来,硬写出来的两条规律会**抢同一个量**(后写的赢,谁也看不见谁)。
+
+### 一条你们可能会问的:为什么没有 `plugins.default`
+
+设计稿提过一个「默认装哪几个出厂插件」的名单(`plugins.default`),**这一轮有意
+没做**,理由不是来不及:**两个开关必须永远说同一句话**。一个世界里
+`needs.enabled=false` 而 `plugins.default` 里有 `needs`,该听谁的?没有第二个开关
+就没有这个问题 —— 而"两处判断迟早给出不同答案"是这个仓库反复栽的那一跤。
+出厂插件多起来时,那张表是 `FACTORY_PLUGINS`(id → 开关键),**一个插件一个开关**。
 
 **platform / player 照旧一件都不用改。**

@@ -755,7 +755,7 @@ _ERASE_ID_KEYS = frozenset({"as", "target", "from", "to"})
 #: 3.8.0 续完的抹除读回来的 `counts` 只有五格,所以取值一律 `.get(k) or 0`。
 _ERASE_COUNT_KEYS = (
     "events", "conversations", "messages", "memories_dropped", "memories_redacted",
-    "facts",
+    "facts", "edges",
 )
 #: 改写多少条落一次水位。**按批,不按条** —— 每条一次 Redis 往返是这个仓库
 #: 明说过的反面教材(`catch_up_projection` 那条)。和 `_iter_event_log` 的一页同宽。
@@ -769,6 +769,13 @@ _ERASURE_PROGRESS_TTL_SECONDS = 24 * 60 * 60
 _ERASE_PHASE_NOT_STARTED = "not_started"
 _ERASE_PHASE_PARTIAL = "partial"
 _ERASE_PHASE_DONE = "done"
+
+
+def _carried_count(carried: dict[str, Any], key: str) -> int | None:
+    """进度键里带过来的一格计数。缺席 = **0**(老引擎那一片一个都没删,它对总数的
+    贡献确实是 0);显式 `None` = 前面某一片没查成,**黏的**;数 = 原样。"""
+    value = carried.get(key, 0)
+    return None if value is None else int(value)
 
 
 def _carried_facts(carried: dict[str, Any]) -> int | None:
@@ -786,8 +793,7 @@ def _carried_facts(carried: dict[str, Any]) -> int | None:
       出过事。
     - **数** → 原样。
     """
-    value = carried.get("facts", 0)
-    return None if value is None else int(value)
+    return _carried_count(carried, "facts")
 
 
 def _mentions_pid(value: Any, pid: str) -> bool:
@@ -4035,7 +4041,18 @@ class World:
             {
                 "id": rule.id,
                 "every_ticks": rule.interval_ticks,
-                "for_each": {rule.selector_kind: rule.selector_value},
+                # `not_action` 收一列动作之后内部用 `\x00` 连(`Rule` 是冻的)——
+                # **这一格是给 tool / player 看的**,原样报出去会变成
+                # `"chat idle_social"` 这种既不是列表也不是名字的东西
+                # (2026-08-26 验收 A)。拆回列表。
+                "for_each": {
+                    rule.selector_kind: (
+                        rule.selector_value.split("\x00")
+                        if rule.selector_kind == "not_action"
+                        and "\x00" in rule.selector_value
+                        else rule.selector_value
+                    )
+                },
                 "set": {key: str(expression) for key, expression in rule.outputs.items()},
                 "when": [str(condition) for condition in rule.conditions],
                 "emit": [{"when": str(e.when), "type": e.type} for e in rule.emits],
@@ -6596,7 +6613,8 @@ class World:
                 "events": 0, "conversations": 0, "messages": 0,
                 # `facts` 是 `None` 而不是 0:这一趟**一个字都没写,也一个字都没查**,
                 # 而 0 在这一格上有一个明确的意思(见下面那段)。
-                "memories_dropped": 0, "memories_redacted": 0, "facts": None,
+                "memories_dropped": 0, "memories_redacted": 0,
+                "facts": None, "edges": None,
                 "names": 0, "names_skipped": 0,
                 "dry_run": bool(dry_run), "seq": None,
                 "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
@@ -6635,6 +6653,10 @@ class World:
             # ⚠️ **`None` 是黏的**:一趟里有一片没查成,整趟就说不出来 —— 拿一个
             # 查成了的片去盖掉它,回执上就再也看不出那一片出过事。
             "facts": _carried_facts(base),
+            # 🆕 3.8.0 第 2 期:**任何一端是他的边**(设计稿 §7 那条红字)。
+            # 三档和 `facts` 逐字同构 —— 缺席 = 这支引擎不认边;`null` = 我没查成;
+            # `0` = 我查过了,他身上没有边。
+            "edges": _carried_count(base, "edges"),
             "names": len(names), "names_skipped": len(skipped),
             "dry_run": bool(dry_run), "seq": None,
             "resume_seq": None, "phase": _ERASE_PHASE_NOT_STARTED,
@@ -6699,6 +6721,11 @@ class World:
         # **引擎自己的契约说 0 = 「我查过了他身上没有量」**,那就是一句谎。
         # 挪出来是安全的:它**幂等**(hash 已经没了就答 0),而它便宜、有界 ——
         # 一次 `HGETALL` 加一次 `DEL`,和那个 O(全量事件) 的循环不是一个量级。
+        cut = self._erase_player_edges(pid, dry_run=dry_run)
+        receipt["edges"] = (
+            None if receipt["edges"] is None or cut is None
+            else int(receipt["edges"]) + int(cut)
+        )
         answered = self._erase_player_facts(pid, dry_run=dry_run)
         receipt["facts"] = (
             None if receipt["facts"] is None or answered is None
@@ -6923,6 +6950,42 @@ class World:
                 logger.warning("撤 %r 在可见性表上那一行失败", owner, exc_info=True)
                 count = None
         return count
+
+    def _erase_player_edges(self, pid: str, *, dry_run: bool) -> int | None:
+        """**任何一端是他的边,一条不留**(3.8.0 第 2 期;设计稿 §7 那条红字)。
+
+        插件把"两个人之间"表达成边(师徒、婚约、欠情、心动),而那些边**两端都写着
+        谁** —— 抹除够不着它们的话,一个"已经抹掉"的人会以边的形式留在世界里:
+        `plugin list` 看不出来,而她的提示词里还写着「你和他:亲传弟子」。
+        这和量表那一格是同一笔账,只是它更露脸。
+
+        ⚠️ **按整个节点比,不按子串**(`RedisEdgeStore.touching` 那条):
+        `aubrey` 是 `aubrey-player` 的子串,而两个人的名字长得像是常态。
+        ⚠️ **`null` / `0` 的分法和 `facts` 逐字同构**,理由也同一条。
+        ⚠️ **数不出来不等于不删**:读失败照删,只是回执上说不出删了几条。
+        """
+        scheduler = self.scheduler
+        store = getattr(scheduler, "edge_store", None)
+        if store is None:
+            return None
+        node = scheduler.stock_owner_of(f"{scheduler.PLAYER_PREFIX}{pid}")
+        try:
+            rows = store.touching(node)
+        except Exception:  # noqa: BLE001 - 数不出来不该掀翻整趟抹除
+            logger.warning("扫 %r 的边失败 —— 回执这一格报 null(没查成)",
+                           node, exc_info=True)
+            return None
+        if dry_run:
+            return len(rows)
+        cut = 0
+        for edge_type, src, dst in rows:
+            try:
+                cut += int(store.unlink(edge_type, src, dst) or 0)
+            except Exception:  # noqa: BLE001 - 删不掉更要说出来
+                logger.warning("断 %s 上 %s→%s 那条边失败",
+                               edge_type, src, dst, exc_info=True)
+                return None
+        return cut
 
     def _erase_recent_window(self, pid: str, replacements: dict[str, str]) -> None:
         """本进程的内存事件窗口跟着改 —— 只读门不该还端着抹掉之前的原文。"""
@@ -7846,10 +7909,69 @@ class World:
         try:
             return perceive(agent_id=agent_id, here=here, stock_store=store,
                             visibility=visibility, ontology=self.scheduler.ontology,
-                            activities=self._activities_now())
+                            activities=self._activities_now(),
+                            edges=self._edges_for(agent_id))
         except Exception:  # noqa: BLE001 - 读不到感知不该让聊天告吹
             logger.warning("读 perception 失败", exc_info=True)
             return None
+
+    def _edges_for(self, agent_id: str) -> list[dict[str, Any]]:
+        """她身上那几条边,渲染成提示词那一节要的形状(3.8.0 第 2 期)。
+
+        **可见性走同一把尺**:`connected` = 这条边的两端都看得见(设计稿 §5.1 那句
+        「有这条边连着的节点都看得见」);`self` = 只有起点那一端;`public` = 谁都看得见;
+        `hidden` = 一个字都不出去(它是默认值,和量那一层逐字同构)。
+
+        ⚠️ **数字照旧不上屏**:分过档的读成档词,没分档的这一节干脆不列 ——
+        「你对遥:0.73」是一个引擎的账,不是一个人眼里的世界。
+        """
+        from anima_world.perception import CONNECTED, PUBLIC, SELF
+
+        scheduler = self.scheduler
+        store = getattr(scheduler, "edge_store", None)
+        if store is None or not scheduler.edge_types:
+            return []
+        me = scheduler.stock_owner_of(agent_id)
+        out: list[dict[str, Any]] = []
+        for edge_type, declared in sorted(scheduler.edge_types.items()):
+            for src, dst, facts in store.all(edge_type):
+                if me not in (src, dst):
+                    continue
+                mine = src == me
+                readouts: list[str] = []
+                notes: list[str] = []
+                for key, fact in sorted(declared.facts.items()):
+                    level = fact.visibility
+                    if level == PUBLIC or level == CONNECTED or (level == SELF and mine):
+                        pass
+                    else:
+                        continue
+                    raw = facts.get(fact.qualified)
+                    if raw is None:
+                        continue
+                    said = fact.render(raw)
+                    if said:
+                        readouts.append(said)
+                    note = fact.note(raw) if fact.shape != "text" else ""
+                    if note:
+                        notes.append(note)
+                other = dst if mine else src
+                out.append({
+                    "type": edge_type, "label": declared.label or declared.name,
+                    "other": other, "other_name": self._node_name(other),
+                    "outgoing": mine, "readouts": readouts, "notes": notes,
+                })
+        return out
+
+    def _node_name(self, node: str) -> str:
+        """一个节点的人话名字。答不出就原样回 id —— **不编**。"""
+        if node.startswith("agent:"):
+            who = node.split(":", 1)[1]
+            if who.startswith("player:"):
+                info = self.players.get(who.split(":", 1)[1]) or {}
+                return str(info.get("display_name") or "").strip() or node
+            return self.scheduler.agent_display_name(who) or node
+        return node
 
     def _activities_now(self) -> dict[str, str]:
         """此刻每个人在做的那件事,渲染成一句人话 —— `{"agent:齐": "在陪一次夜播"}`。

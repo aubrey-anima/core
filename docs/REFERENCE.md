@@ -5066,13 +5066,13 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 
 **曲线的三个常数一个字没改**(`needs.DECAY_PER_TICK` / `RESTORE_PER_TICK` 还在原处,
 它们现在是**声明的数据**);搬的是**谁来跑它** —— 从 `Scheduler._settle_agent_needs`
-里那段 Python,变成 `needs.factory_plugin()` 声明的**六条规律**,跑在世界自己那条
+里那段 Python,变成 `needs.factory_plugin()` 声明的**七条规律**,跑在世界自己那条
 规律引擎上(同一份双缓冲、同一条节流水位、同一句"两条规律抢同一个量"的警告)。
 
 | | 从前 | 3.8.0 |
 |---|---|---|
 | 值住哪儿 | 黑板 `need.*` + `:needs` 那张检查点表 | **量表** `stock:agent:<id>` 的 `needs.energy` / `needs.hunger` / `needs.social` |
-| 谁推进它 | `needs.settle()`,每 tick 每人一次 | 出厂插件的六条规律,3.6 那一步 |
+| 谁推进它 | `needs.settle()`,每 tick 每人一次 | 出厂插件的七条规律,3.6 那一步 |
 | 黑板那几格 | **真值** | **派生的** —— 每 tick 从量表折一次 |
 | `mood` | `settle()` 里算 | `needs.mood_of()`,照旧**永不存储** |
 | `need._restoring` / `URGENT` / `RELEASE` | 行为树的迟滞 | **一个字没动**(那是行为树的事,不是量的事) |
@@ -5081,7 +5081,7 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 从今天起**下一 tick 就被盖回去** —— 而盖回去的样子是"我明明改了,世界不认",
 没有一处报错。要按住一条需求,写**量表**(`world.set_stocks(owner, {"needs.hunger": …})`)。
 
-#### 为什么是六条规律,而不是一条
+#### 为什么是七条规律,而不是一条
 
 `settle()` 一次做两件事:**总是衰减**,而且**如果她正在做那件恢复动作**就再加一份。
 规律层没有"读她此刻在做什么"这种表达式,只有选择器 —— 所以每个量拆成**互不相交**

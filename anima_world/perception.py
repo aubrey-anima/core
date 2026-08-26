@@ -74,7 +74,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 SELF, HERE, PUBLIC, HIDDEN = "self", "here", "public", "hidden"
-VISIBILITIES = (SELF, HERE, PUBLIC, HIDDEN)
+#: 🆕 3.8.0 第 2 期:**有这条边连着的人看得见。**
+#:
+#: 阶梯是 `hidden < self < connected < here < public`,而 `connected` 补的是一档
+#: **既不是"只有我"、也不是"同一个地方"**的东西:门规对弟子可见、秘密对知情人可见、
+#: 一段关系的数值对这段关系的两头可见 —— 设计稿 §5.1 的原话是"全是这一档"。
+#:
+#: ⚠️ **这一版它只用在边自己的事实上**(边的两端都看得见)。挂在**节点**上的
+#: `connected(<边类型>)`(门规写在门派节点上、弟子隔着 `member_of` 读到)要等
+#: 插件声明的 kind —— 那还欠着,写在回报里。
+CONNECTED = "connected"
+VISIBILITIES = (SELF, CONNECTED, HERE, PUBLIC, HIDDEN)
 ANY_KIND = "*"
 
 # 提示词里那一段。三行分别是"你自己/你这儿/人人都知道",空的那档不出现。
@@ -131,12 +141,17 @@ class Perception:
     # 把它印在对的那一行上:同一个世界里"某某在做什么"只能有一种说法,而这一层要是
     # 自己再拼一遍,她说话时看到的和她做决定时看到的就是两个世界。
     activities: dict[str, str] = field(default_factory=dict)
+    #: 🆕 3.8.0 第 2 期:**她和别人之间那几条边。** 每条一行
+    #: `{"type","label","other","other_name","readouts":[…],"notes":[…]}`。
+    #: 由调用方查好了递进来(和 `activities` 逐字同一条:这一层是渲染器,
+    #: 不认识边存在哪儿)—— 各查一遍的话,她说话时看到的和她做决定时看到的会不一样。
+    edges: list[dict[str, Any]] = field(default_factory=list)
     # 这里还有多少样东西没带进来。**必须说出来** —— 截断了却不吭声,等于让她在一个
     # "她以为只有三棵树"的世界里做决定,而她永远不会知道自己被骗了。
     overflow: int = 0
 
     def is_empty(self) -> bool:
-        return not (self.own or self.here or self.public)
+        return not (self.own or self.here or self.public or self.edges)
 
     def to_dict(self) -> dict[str, Any]:
         """给宿主的那份。**数字原样,档词只是多出来的一段。**
@@ -181,7 +196,10 @@ class Perception:
                 "public_units": dict(self.public_units),
                 # 只加不改的又一格:宿主那一屏上"这儿的人此刻在做什么"此前问不出来,
                 # 只能自己去猜 —— 而猜出来的和她读到的不是同一句话。
-                "activities": dict(self.activities)}
+                "activities": dict(self.activities),
+                # 只加不改的又一格(3.8.0 第 2 期)。宿主要画"她和谁是什么关系",
+                # 从前只能自己去猜一份出来 —— 而猜出来的和她读到的不是同一句话。
+                "edges": [dict(row) for row in self.edges]}
 
     def describe_own(self) -> str:
         """`功力 120点、体力 有点累` —— 她自己那一行的正文。"""
@@ -234,6 +252,17 @@ class Perception:
             lines.append(f"- 这里还有 {self.overflow} 样别的东西,你没细看")
         if self.public:
             lines.append(f"- 人人都知道:{self.describe_public()}")
+        # 边单占一节,排在"人人都知道"之后、描述之前:它说的是**她和谁之间**,
+        # 而上面那三行说的是**东西**。混进去的话"你对遥:心跳有点乱"会读得像
+        # 屋里摆着一样叫「遥」的东西。
+        for row in self.edges:
+            body = "、".join(row.get("readouts") or ())
+            head = f"{row.get('label') or row.get('type')}"
+            other = row.get("other_name") or row.get("other") or ""
+            line = f"- 你和{other}:{head}" if head else f"- 你和{other}"
+            lines.append(f"{line} {body}".rstrip() if body else line)
+            for note in (row.get("notes") or ()):
+                lines.append(f"  —— {note}")
         # **描述单占一节,紧跟在感知之后**,而且只列**她自己身上**有描述的那几样。
         # 挤进上面那一行的话,一行里会同时有"多少"和"那是什么滋味",而她读到的
         # 是一段越来越长、越来越难分主次的话。别人身上那几句跟在档词后面(见
@@ -527,6 +556,7 @@ def perceive(
     ontology: Any = None,
     default_budget: int = 5,
     activities: dict[str, str] | None = None,
+    edges: list[dict[str, Any]] | None = None,
 ) -> Perception:
     """这个角色此刻感知到什么。纯读,无 LLM。
 
@@ -551,6 +581,10 @@ def perceive(
     """
     rules = visibility.rules_map()
     result = Perception()
+    # 边那一节由调用方查好递进来(它认识边存在哪儿,这一层不认识)。
+    # ⚠️ **在 `if not rules` 之前填** —— 一个只声明了边、一个量都没声明的世界,
+    # 那一节照样该进提示词;放在早退后面的话它整节消失,而世界照跑、日志干净。
+    result.edges = [dict(row) for row in (edges or ())]
     if not rules:
         return result
     # 鸭子类型再宽一格:老的可见性 store 没有 `bands_map` / `labels_map`,那样的

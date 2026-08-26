@@ -880,14 +880,24 @@ def authored_layer_errors(
     """
     if not authored:
         return []
-    return (
-        _world_seed_errors(authored, complete=complete)
-        + visibility_band_errors(authored)
-        + world_card_errors(authored)
-        + world_location_media_errors(authored)
-        + world_beat_errors(authored)
-        + world_plugin_errors(authored)
-    )
+    out: list[str] = list(_world_seed_errors(authored, complete=complete))
+    for check in AUTHORED_LAYER_CHECKS:
+        out += check(authored)
+    return out
+
+
+#: 作者层的检查器**一张表**(`_world_seed_errors` 另算 —— 它多一个 `complete=`)。
+#:
+#: 🔴 **这张表存在的理由只有一条纪律**:*新增一种开机失败,就必须同一轮把它补进
+#: 离线那两扇门。* 3.7.0 收节拍时第一版就漏了(收了段没补门,于是 `world check`
+#: 对一份**开不了机**的文件照答 `loadable: true`),而同一版的上一个 commit 刚为
+#: 同一种假绿修过三格。
+#:
+#: 从前这里是一串写死的 `+`,于是"忘了加一个"只表现为少了一行 —— **没有一处会红**。
+#: 收成一张表之后,加检查器变成往这张表里加一行,而
+#: `tests/test_validate_matches_boot.py` 那条通用用例盯着它:三扇门都必须走
+#: `authored_layer_errors`,而这张表就是它的全部内容。
+AUTHORED_LAYER_CHECKS: tuple[Any, ...] = ()
 
 
 def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
@@ -947,6 +957,18 @@ def world_beat_errors(authored: dict[str, Any] | None) -> list[str]:
     except BeatScriptError as exc:
         return list(exc.errors)
     return []
+
+
+def _register_authored_layer_checks() -> None:
+    """把那几个检查器填进 `AUTHORED_LAYER_CHECKS`。**加一个就往这儿加一行。**"""
+    global AUTHORED_LAYER_CHECKS
+    AUTHORED_LAYER_CHECKS = (
+        visibility_band_errors,
+        world_card_errors,
+        world_location_media_errors,
+        world_beat_errors,
+        world_plugin_errors,
+    )
 
 
 def _authored_media_warnings(authored: dict[str, Any] | None) -> list[str]:
@@ -1571,7 +1593,7 @@ def build_serve_scheduler(
         RedisEconomyStore, RedisEventLog, RedisKnowledgeGraph, RedisLocationStore,
         RedisMemoryStore, RedisNeedsStore, RedisCliqueStore, RedisPromptStore,
         RedisBeatsStore, RedisOntologyStore, RedisReflectionStore,
-        RedisPluginStore, RedisRulesStore, RedisStockStore,
+        RedisEdgeStore, RedisPluginStore, RedisRulesStore, RedisStockStore,
         RedisVisibilityStore,
         clock_key, current_action_key, decode_action, decode_plan, encode_action,
         encode_plan, events_key,
@@ -1861,8 +1883,11 @@ def build_serve_scheduler(
     # 量与规律。
     scheduler.stock_store = stock_store
     scheduler.visibility_store = visibility_store
+    from anima_world.plugins import PluginError
+
     plugin_store = RedisPluginStore(redis, world_id)
     scheduler.plugin_store = plugin_store
+    scheduler.edge_store = RedisEdgeStore(redis, world_id)
     with shared_lock:
         # **播种是创世那一刻的事,不是"这张表恰好还空着"的事。**
         #
@@ -1914,10 +1939,17 @@ def build_serve_scheduler(
         # 插件(3.8.0)。**排在本体之后**:插件的事实挂在 bearer 身上,而"这个世界
         # 有哪些实例"是本体答的;而且它要拿 `visibility_store` 写自己那几行镜像,
         # 那张表刚被 `_apply_ontology` 对齐过。
-        _install_plugins(
-            scheduler, plugin_store, stock_store, visibility_store, location_store,
-            world_seed if seed_author_layer else None,
-        )
+        # `PluginError` 和 `OntologyError` / `WorldSeedError` 同一类:**作者写错了
+        # 东西**,而作者看到的该是那几行中文,不是一段 Python 堆栈。
+        # (2026-08-26 验收 C:一次被拒的降级,屏幕先甩 `Traceback …` 才轮到中文。)
+        # 这里不吞它 —— 换成 `WorldSeedError`,那是开机路上已经有人接的那一种。
+        try:
+            _install_plugins(
+                scheduler, plugin_store, stock_store, visibility_store, location_store,
+                world_seed if seed_author_layer else None,
+            )
+        except PluginError as exc:
+            raise WorldSeedError(list(exc.errors)) from None
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -2939,6 +2971,7 @@ def _install_plugins(
     # 而"接着上一次的名单往上加"会让关掉一个开关之后它的规律还在跑。
     scheduler.plugins = []
     scheduler._triggers_by_event = {}
+    scheduler.edge_types = {}
     scheduler.world_rules = [
         rule for rule in scheduler.world_rules
         if rule.id not in scheduler.plugin_rule_ids
@@ -2952,19 +2985,8 @@ def _install_plugins(
 
     def owners_of(bearer: str) -> list[str]:
         """这个 bearer 此刻有哪些 owner。**这一层认识世界,插件那一层不认识。**"""
-        if bearer == "world":
-            return ["world"]
-        if bearer == "agent":
-            return list(stock_store.owners("agent"))
-        if bearer == "location":
-            return [f"location:{row['id']}" for row in (location_store.all() or ())
-                    if row.get("id")]
-        kind = bearer.split(":", 1)[1]
-        ontology = scheduler.ontology
-        if ontology is None:
-            return []
-        return [entity.id for entity in ontology.entities.values()
-                if entity.kind == kind]
+        return _plugin_owners(scheduler, bearer, location_store=location_store,
+                              stock_store=stock_store)
 
     report = install_plugins(
         plugins, store=plugin_store, stock_store=stock_store,
@@ -2972,6 +2994,10 @@ def _install_plugins(
         tick=scheduler.clock, bodies={str(b.get("id")): b for b in bodies},
     )
     scheduler.plugins = list(plugins)
+    # 边类型登记 —— `link` 那一刻查约束读的就是这张表。
+    scheduler.edge_types = {
+        edge.qualified: edge for plugin in plugins for edge in plugin.edges.values()
+    }
     # 规律接进那条已经在跑的路(`stocks.evaluate_due`)—— **不另起一个求值器**:
     # 双缓冲、节流水位、骰子、"两条规律抢同一个量"那句警告,插件一样得吃到。
     for plugin in plugins:
@@ -2987,6 +3013,17 @@ def _install_plugins(
     # 已经在册的人补上插件那几格(后来的人走 `seed_actor_quantities` 那个窄口)。
     for agent_id in list(scheduler.agents):
         scheduler.seed_actor_plugin_facts(agent_id)
+    if report.dropped_facts:
+        # **删数据的那个要吭声。** 兄弟那条 `dropped_quantities` 是 warning +
+        # 两扇离线门各一行,而它**不删任何东西**;这一条真的把值删掉了,却只走
+        # `logger.info` —— 吵的那个不删数据,删数据的那个不吭声
+        # (2026-08-26 验收 C)。
+        logger.warning(
+            "插件升级**裁剪**掉了几个事实 —— 它们的值与可见性行**已经删掉,"
+            "回不来了**(和本体层那条 `dropped_quantities` 不同:那一条只吭声不删)。"
+            "dropped_facts: %s",
+            json.dumps(report.dropped_facts, ensure_ascii=False, sort_keys=True),
+        )
     if report.installed or report.upgraded or report.dropped_facts:
         logger.info(
             "插件:装了 %s;升级 %s;同版本 %s;种了 %d 个默认值%s",
@@ -6370,8 +6407,12 @@ def contract_payload() -> dict[str, Any]:
     )
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
     from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.expressions import EDGE_PREFIXES
     from anima_world.plugins import (
+        BEARER_ALIASES,
         BEARER_FORMS,
+        EDGE_ENDS,
+        EDGE_FACT_SHAPES,
         DEFAULT_TEXT_MAX_CHARS,
         DEFERRED_SHAPES,
         EFFECTS,
@@ -6603,6 +6644,26 @@ def contract_payload() -> dict[str, Any]:
             # 消费方一律 `.get("erasure", {}).get("receipt_count_keys", [])`,
             # 读回执时一律 `receipt.get("facts", 0)`:老引擎是**缺席**不是 `null`。
             "receipt_count_keys": list(_ERASE_COUNT_KEYS),
+            # 🆕 **逐键一句人话**(形状照 `blocked` / `blocked_text` 那一对)。
+            # player 那一格明着挂着账:`Account.vue` 逐字写着「欠上游一件:那张表
+            # 旁边加一格逐键的 gloss……在它给之前站点一个字不译」——
+            # **全链上唯一一处下游明说在等的诉求**,而它等的就是这一格。
+            # ⚠️ 缺席 = 这支引擎没有这一格,别拿 `receipt_count_keys` 自己编一份:
+            # 编出来的措辞和引擎说的不是同一句话,而两句话都会印在合规记录上。
+            "receipt_count_gloss": {
+                "events": "事件里被改写过的条数(名字换成「(已注销)」、涉他事件的"
+                          "原文抹空)——**不是删掉的条数**,这条链从不删行",
+                "conversations": "整场删掉的会话数",
+                "messages": "跟着会话一起删掉的消息条数",
+                "memories_dropped": "由他而起的记忆**删掉**的行数",
+                "memories_redacted": "旁及他的记忆**只换名字**的行数(别人的记忆"
+                                     "不能因为他走了就少一角)",
+                "facts": "他身上那张量表删掉的量的个数。**三档**:整格缺席 = 这支"
+                         "引擎够不着量表 · `null` = 我没查成 · `0` = 我查过了,"
+                         "他身上没有量",
+                "edges": "任何一端是他的边断掉的条数(插件把「两个人之间」表达成边)。"
+                         "**三档**和 `facts` 逐字同构",
+            },
             # 进度键的形状。**镜像端要跟的是这一格加 `storage.volatile_keys`**:
             # 打包必须跳过它 —— 它装着正要被抹掉的那些名字。
             "progress_key": "anima:{world_id}:erasure:{player_id}",
@@ -6680,6 +6741,21 @@ def contract_payload() -> dict[str, Any]:
             # 装得下什么,契约说的是**这一版引擎收不收** —— 差着 `timer` 与 `text`
             # 两种,它们写了**开不了机**并点名(理由各不相同,见 `plugins.py`)。
             "fact_shapes": list(FACT_SHAPES),
+            # 🆕 第 2 期:**边上多收一个 `text`,而这不是偏心,是存储的形状** ——
+            # 节点事实住在量表里(`[float, tick]`),边自己那一行本来就是一份 JSON。
+            "edge_fact_shapes": list(EDGE_FACT_SHAPES),
+            "edge_ends": list(EDGE_ENDS),
+            "edge_storage_key": "anima:{world_id}:edge:{type}",
+            # 表达式里边的三个前缀。🔴 **不是设计稿写的 `from`/`to`** ——
+            # `from` 是 Python 关键字,而表达式是 `ast.parse` 解析的:
+            # `from.x` 连语法都过不去。**声明里那两个键仍然叫 `from`/`to`**
+            # (那是 JSON,不受这条限制),两套词只在这一处分岔。
+            "edge_expression_prefixes": sorted(EDGE_PREFIXES),
+            # 🆕 `bearer` 三个词(2026-08-26 老板自判):`actor` = 角色+玩家
+            # (**今天的语义**)· `agent` = 只角色 · `player` = 只玩家。
+            # ⚠️ **`agent` 是第 1 期刚公布的词,那时它是"两种人"** —— 装载时
+            # 读成 `actor`,消费方按 `bearer_aliases` 判,别自己记一条特例。
+            "bearer_aliases": dict(BEARER_ALIASES),
             "deferred_fact_shapes": {k: v for k, v in sorted(DEFERRED_SHAPES.items())},
             "bearer_forms": list(BEARER_FORMS),
             "effects": list(EFFECTS),
@@ -6803,11 +6879,35 @@ def run_plugin(args: argparse.Namespace) -> int:
                     print(f"    {onboarding.dim('读别人的:' + '、'.join(row['reads']))}")
             return 0
 
+        # 🔴 **出厂插件卸不动 —— 卸它的正确动作是关那个开关。**
+        #
+        # 2026-08-26 验收 C 实测:`plugin remove needs --yes` 答「卸了:事实 3 种、
+        # 9 处值」,redis 里也真没了 —— **而下一次开机它装回来,三个值全变回 1.0**。
+        # 一次会掉数据的空操作:回执说成功、屏幕不提一个字,而她的精力被悄悄补满。
+        # REFERENCE §10.9 自己刚写过这句话(「删掉的话『关一下再开』会把她的精力
+        # 悄悄补满」)—— 现在正是那一句。
+        #
+        # 为什么是**拒**而不是"真卸且下次不装回":后者要记一个"作者卸过"的标记,
+        # 而那个标记和 `needs.enabled` 就是同一件事的第二份答案 —— 两处判断迟早
+        # 给出不同答案,这个仓库反复栽的那一跤。**开关只有一个。**
+        if args.plugin in FACTORY_PLUGINS:
+            switch = FACTORY_PLUGINS[args.plugin]
+            print(f"[plugin] `{args.plugin}` 是出厂插件,卸不动 —— 它下一次开机"
+                  f"会照 `{switch}` 装回来,而这一趟删掉的值一个都回不来"
+                  f"(她的精力会被悄悄补满)。\n"
+                  f"[plugin] 要关掉它:anima-world config set {switch} false "
+                  f"--world-id {world_id}\n"
+                  f"[plugin] 关掉不删数据 —— 再打开从原处接着走。",
+                  file=sys.stderr)
+            world.close()
+            return 2
         receipt = remove_plugin(
             args.plugin, store=store, stock_store=scheduler.stock_store,
             visibility_store=scheduler.visibility_store,
             owners_of=lambda bearer: _plugin_owners(scheduler, bearer),
+            edge_store=getattr(scheduler, "edge_store", None),
             dry_run=not args.yes,
+            emit=scheduler._record_and_deliver,
         )
     finally:
         world.close()
@@ -6820,7 +6920,8 @@ def run_plugin(args: argparse.Namespace) -> int:
         return 2
     verb = "卸了" if args.yes else "要卸"
     print(f"[plugin] {receipt['plugin']} —— {verb}:"
-          f"事实 {len(receipt['keys'])} 种、{receipt['facts']} 处值。")
+          f"事实 {len(receipt['keys'])} 种、{receipt['facts']} 处值、"
+          f"边 {len(receipt.get('edge_types') or ())} 种 {receipt.get('edges', 0)} 条。")
     if not args.yes:
         print("[plugin] (没带 --yes:世界一个字节都没动)")
     else:
@@ -6829,14 +6930,30 @@ def run_plugin(args: argparse.Namespace) -> int:
     return 0
 
 
-def _plugin_owners(scheduler: Any, bearer: str) -> list[str]:
-    """这个 bearer 此刻有哪些 owner。**和装载那一处同一份判断**。"""
+#: 玩家那一族 owner 的前缀 —— `agent:player:<id>`。它是 `stock_owner_of` 与
+#: `Scheduler.PLAYER_PREFIX` 拼出来的,写在一处是为了三个调用点不各拼一遍。
+_PLAYER_OWNER_PREFIX = "agent:player:"
+
+
+def _plugin_owners(scheduler: Any, bearer: str, *, location_store: Any = None,
+                   stock_store: Any = None) -> list[str]:
+    """这个 bearer 此刻有哪些 owner。**装载、卸载、抹除三处共用这一份判断。**
+
+    ⚠️ **`actor` / `player` 落在同一族 owner 上,靠前缀分**:角色是 `agent:夏`,
+    玩家是 `agent:player:p1` —— 两种人**同一个命名空间**(`stock_owner_of` 那条
+    「`me_*` 读的是一个人身上的量,而这件事对两种人是同一件」)。分它们的从来不是
+    两张表,是那个前缀。
+    """
+    stocks = stock_store if stock_store is not None else scheduler.stock_store
     if bearer == "world":
         return ["world"]
-    if bearer == "agent":
-        return list(scheduler.stock_store.owners("agent"))
+    if bearer in ("actor", "agent"):
+        return list(stocks.owners("agent"))
+    if bearer == "player":
+        return [o for o in stocks.owners("agent")
+                if o.startswith(_PLAYER_OWNER_PREFIX)]
     if bearer == "location":
-        store = scheduler.location_store
+        store = location_store if location_store is not None else scheduler.location_store
         return [f"location:{row['id']}" for row in ((store.all() if store else []) or ())
                 if row.get("id")]
     kind = bearer.split(":", 1)[1] if ":" in bearer else bearer
@@ -7817,6 +7934,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_world_package(args)
     return _print_welcome()
 
+
+# 这几个检查器都定义完了,把表填上。**放在模块尾**是因为它引用的是函数对象。
+_register_authored_layer_checks()
 
 if __name__ == "__main__":
     sys.exit(main())

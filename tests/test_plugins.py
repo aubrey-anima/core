@@ -235,9 +235,14 @@ def test_不降级(tmp_path):
         pass
     path = write_seed_file(tmp_path / "d2.cyberworld",
                            {**BARE, "plugins": [{**QI, "version": "1.0.0"}]})
-    with pytest.raises(PluginError) as raised:
+    # ⚠️ 开机路上它被包成 `WorldSeedError` —— **和 `OntologyError` 同一类**:
+    # 作者写错了东西,而作者该看到的是那几行中文,不是一段 Python 堆栈
+    # (2026-08-26 验收 C:一次被拒的降级,屏幕先甩 `Traceback …` 才轮到中文)。
+    from anima_world.world_seed import WorldSeedError
+
+    with pytest.raises(WorldSeedError) as raised:
         open_world_at(str(tmp_path / "d.db"), world_file=path, force_mock_llm=True)
-    assert any("不降级" in e for e in raised.value.errors)
+    assert "不降级" in str(raised.value)
 
 
 def test_version_tuple_读不懂的段按0算():
@@ -335,7 +340,7 @@ def test_没写描述的量_一个字都不多(tmp_path):
     assert "——" not in block, "没写描述的量多出了一节"
 
 
-def test_无插件的世界_提示词逐字节不变(tmp_path):
+def test_无作者插件的世界_提示词里一点插件痕迹都没有(tmp_path):
     """🔴 **这一条是这一期最硬的那一条。** 一个不写 `plugin` 的世界,这一层整个
     缺席 —— 和 perception / ontology / beats 逐字同构(声明本身就是开关)。
 
@@ -362,8 +367,12 @@ def test_无插件的世界_提示词逐字节不变(tmp_path):
     # 出厂 needs 搬家之后,她的提示词里**一个 `needs.` 都不许有** —— 那三个量
     # 是 `hidden`,而"没声明 = 感知不到"是这一层的默认值。
     assert "needs." not in rendered, "需求搬家把它自己搬进提示词里去了"
-    # 🔴 **逐字节那一半由 `tests/test_needs_plugin_parity.py` 钉**:那份基线是
-    # 插件系统落地**之前**旧路真跑出来的,而 `test_提示词逐字节相同` 拿它比 sha256。
+    # 🔴 **逐字节那一半不在这条用例里,而这个名字从前假装它在**
+    # (2026-08-26 验收 A:「名不副实 —— 只断言几个字符串不在,没比 sha256」)。
+    # 真正钉逐字节的是 `tests/test_needs_plugin_parity.py::test_提示词逐字节相同`:
+    # 它拿的基线是插件系统落地**之前**旧路真跑出来的,比的是 sha256。
+    # **一条名字承诺了逐字节、而身体只查了几个子串的测试,比没有这条测试更坏** ——
+    # 它让人以为那件事被盯着。所以这条改了名,只说它真的在查的那件事。
 
 
 # ── 契约 ────────────────────────────────────────────────────────────────────
@@ -417,3 +426,246 @@ def test_带plugin记录的包_离线两扇门也查(tmp_path):
         run_cli("validate", "world", str(path), "--edit", "--json").stdout)
     assert validate["valid"] is False
     assert check["errors"] == validate["errors"], "两扇门对同一份文件给了不同答案"
+
+
+# ── 边(3.8.0 第 2 期)────────────────────────────────────────────────────────
+#
+# 边是"两个人之间"的家:师徒、婚约、欠情、心动、门派成员、物品归属。设计稿 §2.2
+# 那句"**pair 不再是特殊概念:它就是 agent→agent 的边**"落在这一节。
+
+
+SECT = {
+    "id": "sect", "version": "1.0.0", "label": "师徒",
+    "edges": {"apprentice_of": {
+        "label": "师承", "from": "agent", "to": "agent", "exclusive": True,
+        "facts": {
+            "rank": {"shape": "state", "default": "新入门", "visibility": "connected",
+                     "label": "身份",
+                     "values": [{"name": "新入门"},
+                                {"name": "亲传",
+                                 "description": "师父把压箱底的东西教给你了。"}]},
+            "门规": {"shape": "text", "default": "不得欺师灭祖",
+                     "visibility": "connected", "label": "门规"},
+            "私心": {"shape": "number", "default": 0.0, "visibility": "hidden"},
+        }}},
+    "triggers": [{
+        "id": "拜师", "on": {"event": "conversation"},
+        "when": ["event.message_count >= 99"],
+        "effects": [{"link": {"type": "sect.apprentice_of",
+                              "from": "self", "to": "agent:师父"}}],
+    }],
+}
+
+
+def test_边建得起来_而且约束在link那一刻查(tmp_path):
+    with _world_with(tmp_path, SECT, name="edge") as world:
+        store = world.scheduler.edge_store
+        ns = {}
+        ok = world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "sect.apprentice_of",
+             "from": "agent:阿岚", "to": "agent:师父"}, ns)
+        assert ok and len(store.all("sect.apprentice_of")) == 1
+        # 边上的事实**按声明种下默认值**(`state` 落序号,`text` 落那句话)。
+        _src, _dst, facts = store.all("sect.apprentice_of")[0]
+        assert facts["sect.rank"] == 0.0 and facts["sect.门规"] == "不得欺师灭祖"
+
+        # `exclusive`:起点那一端唯一 —— 第二个师父连不上,而且**说出来**。
+        again = world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "sect.apprentice_of",
+             "from": "agent:阿岚", "to": "agent:另一个师父"}, ns)
+        assert again is False, "exclusive 没拦住 —— 她同时拜了两个师父"
+        assert len(store.all("sect.apprentice_of")) == 1
+
+
+def test_断边与转移(tmp_path):
+    with _world_with(tmp_path, SECT, name="edge2") as world:
+        sch = world.scheduler
+        sch.apply_edge_effect({"op": "link", "type": "sect.apprentice_of",
+                               "from": "agent:阿岚", "to": "agent:师父"}, {})
+        # transfer:把起点那一端换人,**事实跟着走**(设计稿 §4.1 的 `transfer`)。
+        sch.apply_edge_effect({"op": "transfer", "type": "sect.apprentice_of",
+                               "from": "agent:小竹", "to": "agent:师父",
+                               "by_dst": True}, {})
+        rows = sch.edge_store.all("sect.apprentice_of")
+        assert [(r[0], r[1]) for r in rows] == [("agent:小竹", "agent:师父")]
+        assert rows[0][2]["sect.门规"] == "不得欺师灭祖", "事实没跟着走"
+        # unlink 只给一端 = 这一端上这个类型的边全断掉。
+        assert sch.apply_edge_effect({"op": "unlink", "type": "sect.apprentice_of",
+                                      "from": "agent:小竹"}, {})
+        assert sch.edge_store.all("sect.apprentice_of") == []
+
+
+def test_connected那一档_让边的两端都读得到(tmp_path):
+    """**`connected` 补的是既不是「只有我」也不是「同一个地方」的那一档**
+    (设计稿 §5.1)。门规对弟子可见、秘密对知情人可见,全是这一档。"""
+    from anima_world.perception import perceive
+
+    with _world_with(tmp_path, SECT, name="edge3") as world:
+        world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "sect.apprentice_of",
+             "from": "agent:阿岚", "to": "agent:师父",
+             "facts": {"sect.rank": 1.0, "sect.私心": 0.9}}, {})
+        block = perceive(agent_id="阿岚", here="cafe",
+                         stock_store=world.scheduler.stock_store,
+                         visibility=world.scheduler.visibility_store,
+                         ontology=world.scheduler.ontology,
+                         edges=world._edges_for("阿岚")).render()
+    assert "你和" in block and "师承" in block, block
+    assert "身份 亲传" in block, "边上的 state 没念成值名"
+    assert "师父把压箱底的东西教给你了。" in block, "values 的描述没进提示词"
+    assert "门规 不得欺师灭祖" in block, "边上的 text 没进提示词"
+    # `hidden` 的那一格一个字都不许出去 —— 它是默认值,和量那一层逐字同构。
+    assert "私心" not in block and "0.9" not in block
+
+
+def test_一端是玩家的边_抹除时一条不留(tmp_path):
+    """设计稿 §7 那条红字。插件把"两个人之间"表达成边,而边**两端都写着谁** ——
+    抹除够不着它们的话,一个"已经抹掉"的人会以边的形式留在世界里。"""
+    with _world_with(tmp_path, SECT, name="edge4") as world:
+        world.player_move("ghost-edge", "cafe", display_name="阿檀")
+        node = world.scheduler.stock_owner_of("player:ghost-edge")
+        world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "sect.apprentice_of",
+             "from": node, "to": "agent:阿岚"}, {})
+        # 另一个人的边,一个字都不许动。
+        world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "sect.apprentice_of",
+             "from": "agent:小竹", "to": "agent:阿岚"}, {})
+        assert len(world.scheduler.edge_store.all("sect.apprentice_of")) == 2
+
+        receipt = world.erase_player("ghost-edge")
+
+        rows = world.scheduler.edge_store.all("sect.apprentice_of")
+        assert [(r[0], r[1]) for r in rows] == [("agent:小竹", "agent:阿岚")], (
+            "抹除要么漏了他那条,要么误伤了别人那条"
+        )
+        assert receipt["edges"] == 1, f"回执那一格不对:{receipt['edges']}"
+
+
+def test_边这一格也是三档(tmp_path):
+    """缺席 = 这支引擎不认边;`null` = 我没查成;`0` = 查过了他身上没有边。
+    和 `facts` 逐字同构 —— 两格用同一条纪律,读的人才不用记两套。"""
+    with _world_with(tmp_path, SECT, name="edge5") as world:
+        receipt = world.erase_player("nobody-here")
+        assert receipt["edges"] == 0, "没有边要报 0(我查过了),不是 null"
+
+
+def test_插件只连得动自己声明的边():
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{**SECT, "triggers": [{
+            "id": "偷连", "on": {"event": "conversation"},
+            "effects": [{"link": {"type": "economy.owns",
+                                  "from": "self", "to": "x"}}]}]}])
+    assert any("没声明过" in e for e in raised.value.errors)
+
+
+def test_text只在边上收得下():
+    """节点的事实住在量表里(`[float, tick]`),存不下字符串;边自己那一行本来就是
+    一份 JSON。**这不是偏心,是存储的形状** —— 而报错要说出这句话。"""
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{"id": "tt", "version": "1.0.0",
+                        "facts": {"x": {"bearer": "actor", "shape": "text"}}}])
+    joined = "\n".join(raised.value.errors)
+    assert "text" in joined and "量表" in joined, joined
+    # 而边上它过得去。
+    ok = parse_plugins([{"id": "tt", "version": "1.0.0",
+                         "edges": {"e": {"facts": {"x": {"shape": "text"}}}}}])
+    assert ok[0].edges["e"].facts["x"].shape == "text"
+
+
+def test_bearer三个词_而agent读成actor():
+    """老板 2026-08-26 自判的那一条。⚠️ **`agent` 这个词是第 1 期刚公布的**,
+    那时它的意思是"角色和玩家" —— 收紧一个刚发出去的词而不留兼容,下场是第 1 期
+    写的插件安静地少覆盖一半人。"""
+    from anima_world.needs import PLUGIN_ID
+
+    p = parse_plugins([{"id": "tt", "version": "1.0.0", "facts": {
+        "a": {"bearer": "agent"}, "b": {"bearer": "actor"},
+        "c": {"bearer": "player"}}}])[0]
+    assert p.facts["a"].bearer == "actor", "老写法没被读成今天的语义"
+    assert p.facts["c"].bearer == "player"
+    # 三种落的是同一行可见性(可见性按**种类**声明,玩家的量 owner 是 agent:player:…)
+    assert {f.owner_kind for f in p.facts.values()} == {"agent"}
+    # 出厂 needs 声明的就是 `actor`(不改行为)。
+    from anima_world.needs import factory_plugin
+
+    needs = parse_plugins([factory_plugin()])[0]
+    assert {f.bearer for f in needs.facts.values()} == {"actor"}
+    assert needs.id == PLUGIN_ID
+
+
+def test_只有玩家的事实不种给角色(tmp_path):
+    only_player = {"id": "pp", "version": "1.0.0",
+                   "facts": {"疲惫": {"bearer": "player", "default": 5.0}}}
+    with _world_with(tmp_path, only_player, name="pl") as world:
+        assert world.stocks("agent:阿岚") == {}, "`player` 的事实种到角色身上去了"
+        world.player_move("p1", "cafe", display_name="阿檀")
+        assert world.stocks("agent:player:p1") == {"pp.疲惫": 5.0}
+
+
+def test_白名单里每一种事件都真的到得了触发器(tmp_path):
+    """🔴 **白名单说"订得到",那就必须真的订得到 —— 逐种验,不是抽验。**
+
+    2026-08-26 验收 C 实测出的第 1 期真 bug:入队挂在 `_record_and_deliver` 上,
+    而**十种里有五种根本不走那条路**(`entity_interaction` / `entity_spawn` /
+    `entity_destroy` / `item_consume` / `payment` 直接调 `_record_event`,
+    `state_change` 一半一半)。于是订 `entity_interaction` 的触发器在 288 tick 里
+    事件真发了 4 次、触发 **0** 次、值一格没动、**一处不报错**,而 `plugin list`
+    照旧印着「触发器 1」—— **那正是 FOR-STUDIO §3.37 与 REFERENCE §10.1 唯一的例子。**
+
+    修法是把入队挂到**落库**那一处(`_record_event`,事件真正变成"发生过"的地方)。
+    而这条测试是那个修法的闸:**每往白名单里加一种事件,这里就必须跟着响一次**,
+    否则第 2 期加的新事件又是死的 —— 而死的样子和这次一模一样,安静。
+    """
+    from anima_world.events import SUBSCRIBABLE_EVENTS
+
+    counter = {
+        "id": "probe", "version": "1.0.0",
+        "facts": {"n": {"bearer": "world", "default": 0.0}},
+        "triggers": [
+            {"id": f"t_{index}", "on": {"event": name},
+             "for_each": {"node": "world"},
+             "effects": [{"set": {"probe.n": "probe.n + 1"}}]}
+            for index, name in enumerate(sorted(SUBSCRIBABLE_EVENTS))
+        ],
+    }
+    with _world_with(tmp_path, counter, name="probe") as world:
+        sch = world.scheduler
+        for name in sorted(SUBSCRIBABLE_EVENTS):
+            before = float(world.stocks("world").get("probe.n", 0.0))
+            # **走 `_record_event`,不走 `_record_and_deliver`** —— 那五种死掉的
+            # 事件走的正是它,所以这条测试必须从最窄的那扇门进。
+            sch._record_event({"type": name, "who": "阿岚", "loc": "cafe",
+                               "payload": {"probe": 1}})
+            world.tick(1)
+            after = float(world.stocks("world").get("probe.n", 0.0))
+            assert after == before + 1, (
+                f"`{name}` 在白名单上,而订它的触发器一次都没响 —— "
+                "白名单是一句公开契约,而这一格是它最容易安静地变成假话的地方"
+            )
+
+
+def test_出厂插件卸不动_而且指向那个开关(tmp_path):
+    """🔴 **一次会掉数据的空操作**(2026-08-26 验收 C 实测):
+    `plugin remove needs --yes` 答"卸了",redis 里真没了,**而下一次开机它装回来、
+    三个值全变回 1.0** —— 回执说成功、屏幕不提一个字,而她的精力被悄悄补满。
+    REFERENCE §10.9 自己刚写过这句话。
+
+    为什么是**拒**而不是"真卸且下次不装回":后者要记一个"作者卸过"的标记,
+    而那个标记和 `needs.enabled` 就是同一件事的第二份答案。**开关只有一个。**
+    """
+    db = tmp_path / "factory.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        world.config_set("needs.enabled", True)
+        world.tick(5)
+        before = dict(world.stocks("agent:夏"))
+        assert any(k.startswith("needs.") for k in before), "夹具前提没成立"
+
+    done = run_cli("plugin", "remove", "needs", "--world-id", "w", "--yes")
+    assert done.returncode == 2, "出厂插件被卸掉了"
+    assert "出厂插件" in done.stderr and "needs.enabled" in done.stderr, done.stderr
+    assert "不删数据" in done.stderr, "没告诉他关掉不会掉数据"
+
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        assert world.stocks("agent:夏") == before, "被拒的那一趟动了世界"

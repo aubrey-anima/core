@@ -87,6 +87,23 @@ def test_what_you_eat_is_what_you_get(tmp_path):
 
         after = brain.agent.blackboard.read("need.hunger")
         assert after >= 0.55, f"吃了一碗回 0.5 的面,饱腹只到 {after}"
+        # 🔴 **再走一 tick。** 这一句是 2026-08-26 验收 A 补的,而它补的正是这条
+        # 用例从前照绿的那个洞:3.8.0 起需求的真值住在量表里,黑板是每 tick 折一次
+        # 的派生值 —— 只写黑板的话,吃完那一刻断言是对的,**下一 tick 就被盖回去**
+        # (A 实测 0.6 → 0.2454)。**一条在事件落库之后一个 tick 都不走就断言的
+        # 用例,验的是「写下去了」,不是「留下来了」。**
+        world.tick(1)
+        kept = brain.agent.blackboard.read("need.hunger")
+        assert kept >= 0.55, (
+            f"吃完那一刻 {after},走一 tick 之后只剩 {kept} —— 那一碗面被"
+            "下一次折算盖回去了(黑板是派生值,真值在量表里)"
+        )
+        from anima_world.needs import PLUGIN_ID
+
+        owner = world.scheduler.stock_owner_of("夏")
+        assert world.stocks(owner)[f"{PLUGIN_ID}.hunger"] == pytest.approx(kept), (
+            "黑板和量表给出了两个答案 —— 那正是 needs.py 自己点名的第二真相源"
+        )
 
 
 def test_an_item_with_no_restores_changes_nothing(tmp_path):
