@@ -132,6 +132,35 @@ CLI 那一行也印了这一格,**零也印** —— 「他身上没有量」和
 第一句就是三条假警报 —— **实测过,`{"world": ["季节","雨势","雨天数"]}`** ——
 而一句会误报的警告等于没有这条警告。REFERENCE §2.9.6.8。
 
+### `contract --json` 多一段 `config`:引擎声明过哪些配置键
+
+顶层从十一段变十二段。逐键 `{default, value_type, category, is_secret, description}`,
+66 个 —— 字段名照 `config list` / `ConfigStore.meta()` 的原话,**不另起一套**
+(同一样东西两个名字,就得有人维护一张翻译表)。
+
+🔴 **这一段是「这一版引擎声明过什么」(静态),不是「某个世界现在是什么」。**
+后者是 `config list` 的合并视图(环境变量 → 机器配置 → 世界 → 引擎默认值,带 `source`);
+这里是那条链**最后一层**的原件,而且 `contract` 整条命令**连 Redis 都不连**。
+混成一段就是 1.4.0 拆「创世播默认值」时治的那个病:播下去的是**创世那天的快照**,
+引擎把 `chat.recall_k` 从 3 改成 99,已有的世界一个都吃不到,而 `config list`
+看上去一模一样。这句边界写进了 docstring、REFERENCE §4.8 与 FOR-STUDIO。
+
+⚠️ **密文键只报元数据,一格值都不报**:`is_secret` 为真的键 `default` **永远是 `null`**
+—— 不是"这个世界没设",是**这一段根本不报值**。世界里一个 secret 都没有,
+所以这里也不该有一个能放它的位置。
+
+**它替创作台答上了一个一直答不出的问题**:`scheduler.max_agents` 此前只能"先建一个
+世界再 `config get`"才问得到(`tool/docs/引擎接口诉求-人数上限.md` §7),而现在
+**世界之前就问得到**。2026-08-26 拿 tool 那份 `cap_from_contract` **真跑过**:
+它读 `config.<键>.default`,答 100,出处印成「这一版 core 的 contract --json
+(config.scheduler.max_agents)」—— 那条路上写着"它一报出来就自动优先",这句话是真的。
+
+**platform 的 `test/contract.test.js` 那条 deepEqual 不会红,而且是跑过的**:
+它镜的只有 `storage` 一段(`STORAGE_CONTRACT`),顶层加段与 `erasure` 加格都碰不到它。
+`ANIMA_PYTHON=<core venv> ANIMA_REQUIRE_ENGINE=1 node --test test/contract.test.js`
+→ **16 pass / 0 fail**(2026-08-26,对着本轮工作树跑的)。⚠️ 照旧**真跑一遍再下结论** ——
+这个仓库有过一条"报了会红其实是绿的"回执,也有过一条"报了不红其实会红的"。
+
 ## [3.7.0] —— 同一件事,一把尺一句话 (2026-08-21 定版;2026-08-26 发版前又走了两轮)
 
 排雷单(`docs/任务单/2026-08-21-排雷.md`)。**升次版号是因为行为变了**,不是因为

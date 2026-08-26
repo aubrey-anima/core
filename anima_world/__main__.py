@@ -6125,6 +6125,7 @@ def contract_payload() -> dict[str, Any]:
         VALID_OPS,
         _VALID_PREDICATES,
     )
+    from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
     from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
     from anima_world.world_package import PACKAGE_FORMAT_VERSION
     from anima_world.character_card import (
@@ -6194,6 +6195,36 @@ def contract_payload() -> dict[str, Any]:
             }
             for spec in chat_tools.tools_for("*")
         ],
+        # 引擎**声明过**哪些配置键(3.8.0)。
+        #
+        # 🔴 **这一段是「这一版引擎声明过什么」,不是「某个世界现在是什么」。**
+        # 后者是 `config list` 的**合并视图**(环境变量 → 机器配置 → 世界 →
+        # `_DEFAULTS`,每行带 `source`),而这里报的是那条链**最后一层**的原件。
+        # 混成一段就是 1.4.0 拆「创世播默认值」时治的那个病本身:播下去的那份是
+        # **创世那天的快照**,引擎把 `chat.recall_k` 从 3 改成 99,已有的世界一个
+        # 都吃不到,而 `config list` 看上去一模一样。**这一段永远不碰任何世界** ——
+        # 它连 Redis 都不连(`contract` 整条命令都不连),所以它答的是引擎,
+        # 不是任何一个世界。
+        #
+        # ⚠️ **密文键只报元数据,一格值都不报。** `is_secret` 为真的键 `default`
+        # **永远是 `null`** —— 不是"这个世界没设",是**这一段根本不报值**。
+        # 世界里一个 secret 都没有(`config set llm.api_key` 自动路由进机器配置),
+        # 所以这里也不该有一个能放它的位置。
+        #
+        # 字段名**照 `config list` / `ConfigStore.meta()` 的原话**
+        # (`value_type` / `category` / `is_secret` / `description`),不另起一套 ——
+        # 同一样东西两个名字,就得有人维护一张翻译表,而翻译表迟早只有一半跟着代码走。
+        "config": {
+            key: {
+                "default": None if is_secret else default,
+                "value_type": value_type,
+                "category": category,
+                "is_secret": is_secret,
+                "description": description,
+            }
+            for key, (default, value_type, category, is_secret, description)
+            in _CONFIG_DEFAULTS.items()
+        },
         "package": {"format_version": PACKAGE_FORMAT_VERSION},
         "report": {"format_version": REPORT_FORMAT_VERSION, "buckets": list(BUCKETS)},
         "seed": {
@@ -6450,6 +6481,15 @@ def run_contract(args: argparse.Namespace) -> int:
           f"读出口 anima-world {imp['read_command']}")
     print(f"  节拍 op        {', '.join(payload['beats']['ops'])}")
     print(f"  节拍谓词       {', '.join(payload['beats']['predicates'])}")
+    # 配置键那一段:人这儿只印**数**与分类,逐键那份走 `--json`。
+    # 66 行刷屏对人没有用,而"这一版引擎认哪几类配置"是一眼就该看见的。
+    groups: dict[str, int] = {}
+    for row in payload["config"].values():
+        groups[row["category"]] = groups.get(row["category"], 0) + 1
+    print(f"  配置键         {len(payload['config'])} 个 —— "
+          + "、".join(f"{g}×{n}" for g, n in sorted(groups.items())))
+    print(f"  {onboarding.dim('               这是「引擎声明过什么」(静态),'
+                              '不是「某个世界现在是什么」—— 后者问 config list')}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
     return 0
 

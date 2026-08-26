@@ -99,3 +99,66 @@ def test_contract_is_readable_by_a_human_too():
     assert result.returncode == 0, result.stderr
     assert anima_world.__version__ in result.stdout
     assert "redis" in result.stdout.lower()
+
+
+# ── 配置键那一段(3.8.0)────────────────────────────────────────────────────
+#
+# 🔴 **这一段是「这一版引擎声明过什么」,不是「某个世界现在是什么」。**
+# 后者是 `config list` 的合并视图(环境变量 → 机器配置 → 世界 → `_DEFAULTS`)。
+# 混成一段就是 1.4.0 拆「创世播默认值」时治的那个病:播下去的是**创世那天的快照**,
+# 引擎把 `chat.recall_k` 从 3 改成 99,已有的世界一个都吃不到,而 `config list`
+# 看上去一模一样。
+
+
+def test_配置段和_DEFAULTS_逐键对得上():
+    """**逐键对账,不是数个数。** 只断条数的话,加一个键同时漏掉另一个仍然是绿的。"""
+    from anima_world.config_store import _DEFAULTS
+
+    payload = json.loads(_contract("--json").stdout)
+    section = payload["config"]
+    assert set(section) == set(_DEFAULTS), (
+        f"契约里多出来的:{sorted(set(section) - set(_DEFAULTS))};"
+        f"漏掉的:{sorted(set(_DEFAULTS) - set(section))}"
+    )
+    for key, (default, value_type, category, is_secret, description) in _DEFAULTS.items():
+        row = section[key]
+        assert row["value_type"] == value_type, key
+        assert row["category"] == category, key
+        assert row["is_secret"] == is_secret, key
+        assert row["description"] == description, key
+        # 密文键**一格值都不报**;别的键报引擎声明的那个默认值。
+        assert row["default"] == (None if is_secret else default), key
+
+
+def test_密文键只报元数据_不报值():
+    """`llm.api_key` 的 `default` **永远是 `null`** —— 不是"这个世界没设",
+    是**这一段根本不报值**。世界里一个 secret 都没有,所以这里也不该有一个能放它
+    的位置。"""
+    section = json.loads(_contract("--json").stdout)["config"]
+    secrets = [k for k, v in section.items() if v["is_secret"]]
+    assert secrets, "一个密文键都没有?那 `is_secret` 这一格就没有判据了"
+    for key in secrets:
+        assert section[key]["default"] is None, key
+        # 元数据照给 —— 缺席和 null 是两件事,消费方要分得出"这支引擎有这个键"。
+        assert section[key]["value_type"] and section[key]["category"]
+
+
+def test_配置段不碰任何世界():
+    """`contract` 整条命令都不连 Redis,所以这一段答的是引擎,不是任何一个世界。
+
+    判据敲得动:不给 `--redis`、不给 `--world-id`,它照样答得出 66 个键。
+    """
+    result = _contract("--json")
+    assert result.returncode == 0, result.stderr
+    assert len(json.loads(result.stdout)["config"]) >= 60
+
+
+def test_人看的那一份只印数与分类_不刷全表():
+    """**那个数现算,别写死。** 写死一个会随每次加键而烂的数字,烂了也没有红字。"""
+    from anima_world.config_store import _DEFAULTS
+
+    out = _contract().stdout
+    assert "配置键" in out and f"{len(_DEFAULTS)} 个" in out
+    assert "引擎声明过什么" in out, "没把那条边界印给人看"
+    # 逐键那份走 --json:人这儿不该出现某个具体键的描述文本。
+    assert "Closed-session summaries recalled into the prompt" not in out

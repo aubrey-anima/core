@@ -3555,3 +3555,64 @@ dropped_quantities: {"tree": ["生长速度"]}
 不剩**时,这条也不说。
 
 **platform / player 一件都不用改**:它没有新的出口,也没改任何一格契约。
+
+---
+
+## 3.35 `contract --json` 多一段 `config`:**世界之前就问得到那些默认值**(3.8.0)
+
+**这一条直接销掉你们一条诉求的第一条路**(`docs/引擎接口诉求-人数上限.md` §7):
+`scheduler.max_agents` 此前只能"先建一个世界、再 `config get` 一次"才问得到,
+而工作台常常在**还没有世界**的时候就要那个数(校验一份名册、画那句提醒)。
+
+```console
+$ anima-world contract --json | jq '.config["scheduler.max_agents"]'
+{
+  "default": 100,
+  "value_type": "int",
+  "category": "scheduler",
+  "is_secret": false,
+  "description": "Roster cap, a performance guardrail; 0 = unlimited. …"
+}
+```
+
+顶层十二段,`config` 是新的那一段,66 个键逐键一行。
+
+### ✅ 你们那条"它一报出来就自动优先"是真的 —— 我替你们敲过了
+
+`anima_studio/domain/limits.py::cap_from_contract` 的第二条分支读的正是
+`contract["config"][键]["default"]`。拿本轮引擎的真实输出跑:
+
+```python
+>>> cap_from_contract(json.load(open("contract.json")))
+known=True  value=100  enforced=True
+source='这一版 core 的 contract --json(config.scheduler.max_agents)'
+```
+
+→ **`Workspace.roster_cap()` 这一轮起走第一条路**,`core.json` 里学来的那个数自动降级
+成回落。`anima_studio/` **一行代码都不用改**(你们那条路本来就写好了在等它),
+要改的只有两处文字:那份诉求文档的状态行,和 `limits.py` / `workspace.py` 里
+"引擎现在不报这一段"那两句注释 —— **它现在报了**。
+
+### 🔴 一条必须读进去的边界
+
+**`contract.config` 是「这一版引擎声明过什么」(静态),不是「某个世界现在是什么」。**
+
+| 问题 | 问谁 |
+|---|---|
+| 这一版引擎认哪些键、默认值是多少、什么类型 | **`contract --json` 的 `config` 段**(不连 Redis,没有世界也答得出) |
+| **这个世界**此刻这个键是多少、是谁定的 | `config list` / `config get`(合并视图:环境变量 → 机器配置 → 世界 → 引擎默认值,每行带 `source`) |
+
+拿前者当后者用,就是 1.4.0 拆「创世播默认值」时治的那个病:播下去的那份是**创世那天
+的快照**,引擎把 `chat.recall_k` 从 3 改成 99,已有的世界一个都吃不到,而
+`config list` 看上去一模一样。**两个问题,两扇门,别合并。**
+
+⚠️ **密文键只报元数据,一格值都不报**:`llm.api_key` 的 `default` **永远是 `null`**
+—— 不是"这个世界没设",是这一段根本不报值。
+
+⚠️ **老引擎上整段 `config` 缺席,不是 `null`**(和 `beats.author_type` / `invitations`
+逐字同一条):一律 `d.get("config", {}).get(键, {}).get("default")`。
+你们那份 `cap_from_contract` 已经是这么写的(它两种形状都读,读不到就 `UNKNOWN`,
+而**体检对 `UNKNOWN` 一个字都不说**)—— 这条纪律你们写得比我早,记一笔。
+
+**platform 一件都不用改**:它的 `test/contract.test.js` 那条 deepEqual 只镜 `storage`
+一段,顶层加段碰不到它。**跑过了**:16 pass / 0 fail。

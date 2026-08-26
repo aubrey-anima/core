@@ -4199,6 +4199,61 @@ readline。
 直说。v1/v2 那套 `[engine_min, engine_max_exclusive)` 双端区间连同 `template` 模式
 一起退役了。
 
+### 4.8 anima-world contract —— 引擎自报它的对外契约
+
+```bash
+anima-world contract           # 人看的一屏
+anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
+```
+
+**不连 Redis、不建世界**(跑不了世界也要答得出,和 `world inspect` 同一类)。
+顶层十二段:`engine_version` · `storage` · `chat_tools` · **`config`** · `package` ·
+`report` · `seed` · `character_card` · `erasure` · `invitations` · `beats` ·
+`operation`。
+
+⚠️ **消费方按段/格在不在做能力探测,别比版本号**(全员纪律)。
+**新加的格在老引擎上是「缺席」,不是 `null`** —— 一律
+`d.get("<段>", {}).get("<格>")`;`d["<段>"][...]` 在老引擎上是 `KeyError` 退 1,
+而**一个崩掉的探测器不是「探测出没有」**:它长得像"这台机器坏了"。
+
+#### `config` 段(3.8.0):**引擎声明过哪些配置键**
+
+```jsonc
+"config": {
+  "chat.recall_k": {"default": 3, "value_type": "int", "category": "chat",
+                    "is_secret": false, "description": "Closed-session summaries …"},
+  "llm.api_key":   {"default": null, "value_type": "str", "category": "llm",
+                    "is_secret": true,  "description": "LLM API key (OpenAI-compatible)"}
+}
+```
+
+🔴 **这一段是「这一版引擎声明过什么」(静态),不是「某个世界现在是什么」。**
+后者是 `config list` / `World.config_list()` 的**合并视图**(环境变量 → 机器配置 →
+世界 → 引擎默认值,每行带 `source`);这里报的是那条链**最后一层**的原件,
+而且**它连一个世界都不碰**。
+
+把两者混成一段,就是 1.4.0 拆「创世播默认值」时治的那个病本身:播下去的那份是
+**创世那天的快照**,引擎把 `chat.recall_k` 从 3 改成 99,已有的世界一个都吃不到,
+而 `config list` 看上去一模一样(§6)。
+
+⚠️ **密文键只报元数据,一格值都不报**:`is_secret` 为真的键 `default` **永远是
+`null`** —— 不是"这个世界没设",是**这一段根本不报值**。世界里一个 secret 都没有
+(`config set llm.api_key` 自动路由进机器配置),所以这里也不该有一个能放它的位置。
+
+字段名照 `config list` / `ConfigStore.meta()` 的原话(`value_type` / `category` /
+`is_secret` / `description`),**不另起一套** —— 同一样东西两个名字,就得有人维护一张
+翻译表,而翻译表迟早只有一半跟着代码走。
+
+**它替谁答一个一直答不出的问题**:创作台此前只能"建一个世界再 `config get` 一次"
+才知道 `scheduler.max_agents` 是多少(`tool/docs/引擎接口诉求-人数上限.md` §7),
+而这条路要有世界才走得通。现在**世界之前就问得到**:
+`contract --json | jq '.config["scheduler.max_agents"].default'`。
+(2026-08-26 拿 tool 的 `cap_from_contract` 真跑过:它读 `config.<键>.default`,
+答 `100`,出处印成「这一版 core 的 contract --json(config.scheduler.max_agents)」。)
+
+判据 `tests/test_contract_command.py`:和 `_DEFAULTS` **逐键**对账 —— 只断条数的话,
+加一个键同时漏掉另一个仍然是绿的。
+
 ---
 
 ## 5. 环境变量
