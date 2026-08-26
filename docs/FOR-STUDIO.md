@@ -3420,3 +3420,20 @@ pip 不会为许可变更说一个字。会报错的是另一半(跨两个主版
 `NOTICE` 是**唯一随包发出去**的那一份。现在两条闸盯着它
 (`tests/test_packaging.py`,纯文本比对、不建包、不联网)。
 **这条留在这儿是当标本用的:一次"跑遍了所有地方"的更正,漏掉的恰好是唯一对外的那一份。**
+
+### 顺带一条给**照着橱窗写前端**的人(platform / player 尤其)
+
+内置橱窗世界那 7 张图,2026-08-26 起指的是 **`https://example.com/anima-demo-placeholder/…`**。
+在这之前它们指着 `cdn.animametaverse.com/…` —— **那台主机从来没存在过**,7 张图一直是 404,
+而**引擎不取字节所以一处都不报错**。换成 RFC 2606 保留的域名,是为了让"这是占位符"这件事
+不需要任何人去猜。
+
+**对你们的具体影响**:橱窗一直是"带图的参照世界"(能对着它写前端,看引擎真给出来的形状)——
+**形状一格没变**(`state().locations[].map_image/scene_image`、`map_data().places[]`、
+`roster()[].portrait` 照旧带得出来),变的只有那串字符串指向哪儿。**别把这些 URL 当成
+可以 GET 的东西写进任何冒烟检查** —— 它们过去就取不到,只是从今天起明说了。
+
+真图那条路仍然是 player 的 `/media/sha256/<64hex>.<ext>`(内容寻址,**先有字节才算得出
+那个 sha256**);橱窗要换真图得先把图传上去,再把 `animametaverse.com` 加进
+`tests/test_flagship_seed.py` 的 `_SHOWCASE_ALLOWED_HOSTS`。
+

@@ -628,3 +628,67 @@ def _bundled_rows() -> list[dict]:
         row for row in (json.loads(line) for line in text.splitlines() if line.strip())
         if row.get("kind") == "author"
     ]
+
+
+# ── 橱窗里的外链:主机名白名单 ────────────────────────────────────────────────
+# `demo.cyberworld` 是本包**唯一的 package data**,而包是**分发物** —— 写进去的
+# 每一串 URL 都是一句发出去就收不回来的话。**这一条只许指着一台明摆着不存在的主机。**
+_SHOWCASE_ALLOWED_HOSTS = frozenset({
+    # RFC 2606 给文档保留的域名:它**在构造上**不可能是谁家的真服务器,
+    # 于是"这是占位符"不需要任何人去猜。
+    "example.com",
+})
+
+
+def test_橱窗里的外链只许指着一台明摆着不存在的主机():
+    """开箱那份世界里的每一串 `http(s)://`,主机名必须在上面那张白名单里。
+
+    **这条闸是被一次真事逼出来的**(2026-08-26,发 3.7.0 之前拦下)。橱窗里那 8 张图
+    从加进来那天起就指着 `cdn.animametaverse.com/oldport/…` —— 而那台主机**从来没
+    存在过**(实测 `curl` 连着两次 `000`;同时 `animametaverse.com` 自己答 200,
+    所以不是网断了)。当时加它是为了走通配图那条路(还真当场逮出 `anima-world map`
+    对配了图的世界整个 TypeError),**但 URL 本身是编的**。
+
+    它为什么能挂到发版前才被发现:**引擎不取字节**(裁决划得很清楚 —— 图的家归网站,
+    引擎只校验"是不是绝对 URI + 有没有超上限",一个字节都不存)。于是那 8 张图
+    在每个新用户的第一屏上**静静地全 404,而世界照跑、日志干净、退出码 0**。
+    这正是这个仓库最怕的那种坏法,而它就住在唯一那份 package data 里。
+
+    ⚠️ **别把这条闸改成"去 GET 一下看通不通"**:那就是一条联网判据,而这个仓库
+    已经有两条判据栽在联网/挂钟上,红出来的话都在指控被测的东西(见 `CLAUDE.md`
+    §常用命令那一段)。所以这里**只查主机名**,离线、确定、不会替引擎认罪。
+
+    想往橱窗里放**真的**图,三条路,别绕过这条闸去做:
+
+    1. **指真图床** —— `animametaverse.com/media/sha256/<64hex>.<ext>`(权威在 player,
+       内容寻址)。**先有字节才算得出那个 sha256**,所以这条路的前置条件是"图真的传上去了";
+       传完把 `animametaverse.com` 加进上面那张白名单。
+    2. **写 `data:` URI** —— 包自足,`character_card.py` 的 docstring 逐字留了这条路
+       (地点每格 ≤ 262144 B,`portrait` ≤ 1048576 B)。⚠️ 代价是
+       `demo.cyberworld` **以纯文本进仓库**这条不变量:一个 review 不了的二进制块
+       不该是新用户看到的第一眼。
+    3. **就让它留在占位域上** —— 今天选的这条。诚实,而且上面那两条闸
+       (`anima-world map` 的渲染回归、橱窗"图是可选的"那条形状)一格都不少地照跑。
+    """
+    import re
+    from urllib.parse import urlsplit
+
+    text = resources.files("anima_world").joinpath("demo.cyberworld").read_text(encoding="utf-8")
+    urls = re.findall(r"https?://[^\s\"'\\]+", text)
+    assert urls, (
+        "橱窗里一串外链都没有 —— 要么图整个被摘掉了(那样 `test_the_cli_prints_a_map` "
+        "里那条渲染回归就没东西可验了),要么这条闸的正则不再认得它们。两种都要看一眼。"
+    )
+
+    offenders = sorted({
+        host for u in urls
+        if (host := (urlsplit(u).hostname or "")) not in _SHOWCASE_ALLOWED_HOSTS
+    })
+    assert not offenders, (
+        f"橱窗世界里有外链指着不在白名单上的主机:{offenders}。\n"
+        f"`demo.cyberworld` 是唯一的 package data,发出去就是公开的、烧死的 —— "
+        f"而**引擎不取字节,所以一张取不到的图不会有任何一处报错**,它只是在每个新用户的"
+        f"第一屏上安静地 404。\n"
+        f"要放真图请按本测试 docstring 里那三条路走;把一台主机加进 "
+        f"`_SHOWCASE_ALLOWED_HOSTS` 之前,请先确认那些字节**真的**在那台机器上。"
+    )

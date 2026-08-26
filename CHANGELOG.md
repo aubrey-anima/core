@@ -594,6 +594,43 @@ here == where:` 把「世界压根不知道她在哪」印成了「她这会儿�
   (SPDX 串写着 AGPL 而 `LICENSE` 里躺着别的许可,今天没有任何一处会报错)。
   ⚠️ **两道闸都只读文本、不建包**,所以它们不会像 sdist 那条一样被网络拖成假红。
 
+#### Fixed —— 🔴 橱窗那 8 张图指着一台**从来没存在过**的主机(发版前拦下)
+
+- **`demo.cyberworld` 里那 7 个 URL 全部指着 `cdn.animametaverse.com/oldport/…`,
+  而那台主机从来没服务过一个字节**(实测 `curl` 连着两次 `000`;同一时刻
+  `animametaverse.com` 自己答 200、它的 `/media/` 根答 404 —— **所以不是网断了,
+  是那台机器不存在**。⚠️ 顺带一条:这台开发机的 DNS 会给**任何**名字一个 `198.18.x`
+  的假 IP,`example.com` 也解析得到 —— **DNS 在这儿不是判据,`curl` 才是**)。
+  当初写它是为了走通配图那条路(`e2ba877`,还真当场逮出 `anima-world map` 对
+  配了图的世界整个 TypeError),**但 URL 本身是编的**。
+- **为什么能挂到发版前**:裁决划得很清楚 —— 图的家归网站,**引擎不取字节**,
+  只校验"是不是绝对 URI + 有没有超上限"。于是那 8 张图在每个 `pip install` 的新用户
+  第一屏上**静静地全 404,而世界照跑、日志干净、退出码 0**。
+  **而 `demo.cyberworld` 是本包唯一的 package data —— 发出去就是公开的、烧死的。**
+- **改成 RFC 2606 给文档保留的 `example.com`**,路径里写着 `anima-demo-placeholder`。
+  三条路里选它的理由是**另外两条各有一笔看不见的代价**:**摘掉图**会让
+  `test_mapview.py::test_the_cli_prints_a_map` 里那句"橱窗真的带图"的前置断言失去对象
+  ——那条正是上面那个 TypeError 的回归钉,摘图 = **悄悄少一道闸**;**写 `data:` URI**
+  能让包自足(`character_card.py` 留了这条路),但它砸的是"`demo.cyberworld` 以纯文本
+  进仓库、可 diff 可 review"那条不变量,而一个 1×1 的假像素和一张 404 一样假,只是更安静。
+  **指真图床要先有字节**(`/media/` 是内容寻址,没有字节算不出 sha256)—— 那是另一件活。
+- **上了一道闸**:`test_flagship_seed.py::test_橱窗里的外链只许指着一台明摆着不存在的主机`
+  —— 扫整份橱窗文件里的每一串 `http(s)://`,主机名必须在一张**明示的**白名单里
+  (今天只有 `example.com` 一个),报错点名是哪台主机。**它盯的是主机名不是可达性**:
+  改成"去 GET 一下"就是一条联网判据,而这个仓库今年已经有两条判据栽在联网/挂钟上,
+  红出来的话都在指控被测的东西。**验过它有牙**:把 `cdn.animametaverse.com` 塞回
+  `git archive HEAD` 的临时树 → 当场 `1 failed`,原文
+  `橱窗世界里有外链指着不在白名单上的主机:['cdn.animametaverse.com']`;换回来 `1 passed`。
+- **`demo.cyberworld` 一动就把分发物那几条判据重敲了一遍**(它是分发物,改错了收不回来):
+  `world inspect` 封皮 `engine_min` 仍是 **3.7.0**(两格图是 3.4.0 起的作者层键,本来就在,
+  这一改没抬也没降)· `validate world` **没有发现问题** · `world check --json`
+  `loadable: true / errors: []`,而 `external_media` 现在**照实报**
+  `{"host": "example.com", "count": 7, "fields": ["map_image","portrait","scene_image"]}`
+  —— 那一段本来就是为"让外链这笔代价看得见"做的,它现在指着一个诚实的答案 ·
+  文件仍是**裸 JSONL 纯文本**(头两个字节 `{"`)、43 条记录逐行合法 JSON ·
+  真开机 → `map` 渲染 rc=0 → `state()` / `map_data()` / `roster()` 三个读出口都带得出新 URL ·
+  导出再看包里 `cdn` **零命中**。
+
 ## [3.6.0] —— 她点你的名时,你得自己答 (2026-08-20)
 
 ### 第九轮:把闸补宽到它本该有的射程,以及一条只会点头的判据
