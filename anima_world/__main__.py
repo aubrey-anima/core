@@ -2530,10 +2530,24 @@ def _precheck_ontology(
 
     # 本体同理:合并那条路上,库里已经声明过的种类此刻读得到,而文件里的新实例
     # 完全可以挂在它们身上。只验文件那一份会把这种写法判成"引用了不存在的种类"。
+    #
+    # 🔴 **两处的合并方向必须一样,而它们曾经是反的**(2026-08-26 验收 C 复现):
+    # 这里当初写的是默认的"库里的赢",而真正落库的 `_seed_ontology` 用的是
+    # `incoming_wins=True`(**文件里的赢** —— 种类是法不是状态)。于是一份
+    # **撤掉了某个量**的编辑包在这里拿旧声明验、当然过;`_seed_ontology` 随后把新
+    # 声明写进 `:kinds`;再由 `_load_ontology` 撞上一条还引用着那个量的规律,
+    # `OntologyError`。**而 `:kinds` 已经被改掉了** —— 这个世界从此每一次开机都是
+    # 同一条报错,不带 `--world-file` 也救不回来。
+    #
+    # **这正是这个函数当初要治的病的镜像**:不是"验漏了一条",是**验的和写的不是
+    # 同一份东西**。所以修法不是在外面包一层回滚(这些表在 Redis 上没有共同的
+    # 事务),是把这一处的方向掰过来 —— 判断只有一份,输入也只有一份。
+    # ⚠️ `entities` 那一半照旧是"库里的赢",因为**落库那一侧也是**(实例只增)。
     kind_rows = world_seed.get("kinds") or []
     entity_rows = world_seed.get("entities") or []
     if ontology_store is not None and len(ontology_store):
-        kind_rows = _union_by_id(ontology_store.kind_definitions(), kind_rows)
+        kind_rows = _union_by_id(ontology_store.kind_definitions(), kind_rows,
+                                 incoming_wins=True)
         entity_rows = _union_by_id(ontology_store.entity_definitions(), entity_rows)
     kinds = parse_kinds(kind_rows)
     entities = parse_entities(entity_rows, kinds)

@@ -501,3 +501,54 @@ def test_作用在agent上的规律那一支_resolve够不着而这里说得出(
         build_serve_scheduler("w", client, world_file=patch, force_mock_llm=True).stop()
     lines = [r.getMessage() for r in caplog.records if "dropped_quantities" in r.getMessage()]
     assert lines and "干劲" in lines[0], lines
+
+
+def test_验不过的那一次开机_一张表都没动过(tmp_path):
+    """🔴 **"验不过就一个字都不写"曾经在这条路上不成立,而代价是世界报废。**
+
+    2026-08-26 验收 C 在一次性真 Redis 上复现:一份**撤掉了某个量**、而世界里
+    还有一条规律引用着它的编辑包 —— 开机 `OntologyError`,**而 `:kinds` 已经被
+    改掉了**。之后每一次开机都是同一条报错,不带 `--world-file` 也救不回来。
+
+    病根不是"验漏了一条",是**验的和写的不是同一份东西**:预检合并库里那份用的是
+    默认的「库里的赢」,而真正落库的 `_seed_ontology` 用的是「文件里的赢」
+    (种类是法不是状态)。一个参数的方向差,而这正是这个预检当初要治的病的镜像。
+
+    这条钉三件:报错 · `:kinds` 一个字没变 · 之后照旧开得起来。
+    """
+    import fakeredis
+    from anima_world.ontology import OntologyError
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    seed = pathlib.Path(write_seed_file(tmp_path / "grow.cyberworld", {
+        "agents": [{"id": "a", "name": "阿岚", "location": "cafe", "personality": "安静"}],
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+        "kinds": [{"id": "tree", "quantities": {
+            "树高": {"default": 1.0, "visibility": "here"},
+            "生长速度": {"default": 0.05, "visibility": "here"},
+            "最大树高": {"default": 12.0, "visibility": "here"}}}],
+        "entities": [{"id": "tree:oak", "name": "老橡树", "location": "cafe"}],
+        "rules": [{"id": "长高", "every": {"ticks": 1}, "for_each": {"kind": "tree"},
+                   "set": {"树高": "min(树高 + 生长速度 * dt, 最大树高)"}}],
+    }))
+    build_serve_scheduler("w", client, world_file=seed, force_mock_llm=True).stop()
+    before = client.hget("anima:w:kinds", "tree")
+    assert "生长速度" in before, "夹具前提没成立"
+
+    drop = tmp_path / "drop.cyberworld"
+    drop.write_text(
+        '{"kind": "manifest", "version": 3, "world_id": "w"}\n'
+        + json.dumps({"kind": "author", "type": "kind", "body": {"id": "tree",
+            "quantities": {"树高": {"default": 1.0, "visibility": "here"},
+                           "最大树高": {"default": 12.0, "visibility": "here"}}}},
+            ensure_ascii=False) + "\n",
+        encoding="utf-8")
+
+    with pytest.raises(OntologyError):
+        build_serve_scheduler("w", client, world_file=drop, force_mock_llm=True).stop()
+
+    assert client.hget("anima:w:kinds", "tree") == before, (
+        "验不过的那一次开机改了 `:kinds` —— 这个世界从此每次开机都是同一条报错"
+    )
+    # 而且它照旧开得起来 —— 这一条才是"没报废"的判据。
+    build_serve_scheduler("w", client, force_mock_llm=True).stop()
