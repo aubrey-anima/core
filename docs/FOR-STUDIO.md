@@ -3616,3 +3616,49 @@ source='这一版 core 的 contract --json(config.scheduler.max_agents)'
 
 **platform 一件都不用改**:它的 `test/contract.test.js` 那条 deepEqual 只镜 `storage`
 一段,顶层加段碰不到它。**跑过了**:16 pass / 0 fail。
+
+---
+
+## 3.36 事件白名单:插件订得到哪几种事件(`contract.plugins.subscribable_events`,3.8.0)
+
+**这一条对创作台今天只有一个用处:知道第 1 期的触发器能订什么。** 引擎这一期没有
+`type:"plugin"` 记录,所以你们**一件都不用改**;先把这张表读进去,是因为它决定了
+第 1 期作者能写出什么样的机制。
+
+```console
+$ anima-world contract --json | jq -r '.plugins.subscribable_events | keys[]'
+agent_join  conversation  entity_destroy  entity_interaction  entity_spawn
+item_consume  item_transfer  payment  state_change  travel
+```
+
+**十条,策展的,不是全集。** 引擎里在发的 type 有四十来个,一半是内部管道
+(`subsystem_health` / `memory_seed` / `plan` / `legacy_seq_gap`)—— 它们的载荷为引擎
+自己的用途服务,明天就可能因为一次内部重构而变。
+🔴 **进了这张表就是一句公开契约,拿不掉**:加一条是加法(便宜),删一条是破坏消费方
+(和改线格式同级)。所以第一版宁少勿多;需要哪一条,写进诉求文档(§6 那条通道),
+由一次显式的加法放进来。
+
+每条报两样,而它们答的是两个不同的问题:
+
+| 格 | 答什么 |
+|---|---|
+| `numbers` | **数字格** —— 载荷里哪几格是数,规律/触发器拿它做算术。**空列表不是漏了**,是"这类事情本身不带数"(一个人走进这个世界,没有一个数可读) |
+| `parties` | **当事人格** —— 哪几格装着"这件事落在谁头上"。它决定触发器的 `for_each` 对不对得上人;对不上人的事件,插件只能拿它当一次全局脉冲 |
+
+⚠️ 事件顶层还有 `who`(做这件事的那个人,玩家写成 `player:<id>`)与 `loc`,
+**每条都有**,所以不在表里逐条重复。
+
+### 两条最容易订错的
+
+- ⚠️ **关系四轴不在表上**(老板 2026-08-26 拍的 D40 ③):插件**读得到、emit 得出,
+  写不进** —— 四轴是 `sentiment_delta` 的**投影**,直写就等于把关系从"可重放"变成
+  "直接写"。作者要"聊完这场她对他好感涨了",写法是订
+  `state_change{kind: "sentiment_delta"}`,不是往四轴上写一个数。
+- ⚠️ **顶层的 `location_join` 不在表上**:它是**创世时播下的一个地点**(配置,不是
+  发生的事)。"有人走进了一个地方"是 `state_change{kind: "location_join"}`。
+
+**按出口探测,别比版本号**:`d.get("plugins", {}).get("subscribable_events", {})` ——
+老引擎上**整段 `plugins` 缺席**(不是 `null`),`d["plugins"][…]` 在它身上是 `KeyError`
+退 1,而**一个崩掉的探测器不是「探测出没有」**:它长得像"这台机器坏了"。
+
+**platform / player 一件都不用改。**

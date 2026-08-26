@@ -99,11 +99,77 @@
 只有 INSERT,没有 UPDATE/DELETE。当前状态(角色、关系、地点、叙事日志)是把事件流 fold
 出来的**投影**,开世界时从 seq=0 全量重放重建 —— 日志是唯一真相,没有第二处物化状态。
 
-事件类型(投影器处理的全集):`agent_join` / `agent_move` / `agent_action` / `agent_idle` /
-`agent_leave` / `agent_return` / `location_join` / `narrative` / `user_message` /
-`capability_registered` / `state_change`(按 `payload.kind` 二级分发:`sentiment`、
-`sentiment_delta`、`r_type`、`agent_state`、`persona_update`、`location_join` 等)。
-未知类型静默忽略 —— 废弃旧事件天然向后兼容。
+事件类型有**三张**清单,而它们回答的是三个不同的问题 —— 2026-08-26 之前这里
+只有一张手抄的,而它和下面那张 payload 表**对不上**(11 条 vs 16 条),两张都没有闸:
+
+| 问题 | 权威在哪 | 怎么问 |
+|---|---|---|
+| **投影器折得动哪几种** | `anima_world/projection.py` 的 `_apply_*` 处理器 | `git grep -n 'def _apply_' -- anima_world/projection.py` —— ⚠️ **别用 `-c`**:它把分发器 `_apply_event` 自己也数进去(答 18,而处理器是 17)。**一个差一的数比没有数更坏**,它看上去像个读数 |
+| **世界里真的在发哪几种** | 代码里那些 `{"type": "…"}` 字面量 | 数它们要用 `ast` 不能用 grep(见下面那条 ⚠️) |
+| **插件订得到哪几种** | `anima_world/events.py` 的 **`SUBSCRIBABLE_EVENTS`**,经 `contract --json` 的 `plugins.subscribable_events` 报出 | §2.1.1 |
+
+⚠️ **别在这里再抄一份清单。** 上一份就是这么烂的:它写着"投影器处理的全集"共十一条,
+而真实的处理器有十七个,`payment` / `item_transfer` / `agent_invites` /
+`invitation_settled` / `player_departed` / `item_consume` 一条都没列 —— 而**没有任何
+一处会报错**,读它的人只会以为那几种事件"投影不认"。
+
+⚠️ **数它们要用 `ast`,不能用 `git grep`**:grep 分不清一行代码和一句注释。
+`entity_spawn` 在 `world_file.py` 与 `world_package.py` 的文档里各出现过一次
+(讲的是 `zcat | grep` 那个例子),grep 数出来是三处,而**真发它的只有一处**;
+反过来,一个只活在注释里的 type 会被 grep 判成"真有人在发"。
+判据 `tests/test_subscribable_events.py`。
+
+`state_change` 是二级分发的那一种(按 `payload.kind`:`sentiment`、`sentiment_delta`、
+`r_type`、`agent_state`、`persona_update`、`location_join` 等)。
+未知类型投影器静默忽略 —— 废弃旧事件天然向后兼容。
+
+#### 2.1.1 插件订得到哪几种事件(`SUBSCRIBABLE_EVENTS`,3.8.0)
+
+**这是一张策展表,不是全集。** 引擎里在发的 type 有四十来个,其中一半是**内部管道**:
+`subsystem_health`(子系统档位切换)、`memory_seed`(记忆层自己的种子)、`plan`
+(规划器的回执)、`legacy_seq_gap`(1.x 迁移留下的补丁)—— 它们的载荷形状为引擎自己的
+用途服务,明天就可能因为一次内部重构而变。
+
+🔴 **进了这张表就是一句公开契约,拿不掉。** 所以宁少勿多:第一版十条,
+**加一条是加法(便宜),删一条是破坏消费方(和改线格式同级)**。一个不在表上的事件
+**照旧在发**,只是插件订不到它 —— 需要它的那天,由一次显式的加法把它放进来。
+
+出口:`contract --json` 的 `plugins.subscribable_events`,**每条报两样**:
+
+- `numbers` —— **数字格**:载荷里哪几格是数,插件的规律 / 触发器拿它做算术。
+  这一格是空列表**不是漏了**,是"这类事情本身不带数"(一个人走进这个世界,
+  没有一个数可读)。
+- `parties` —— **当事人格**:哪几格装着"这件事落在谁头上"。它决定触发器的 `for_each`
+  能不能对得上人 —— 对不上人的事件,插件只能拿它当一次全局脉冲。
+
+⚠️ 事件顶层还有 `who`(做这件事的那个人,玩家写成 `player:<id>`)与 `loc`,**每条都有**,
+所以不在表里逐条重复。
+
+| type | 是什么 | 数字格 | 当事人格 |
+|---|---|---|---|
+| `conversation` | 一场对话结束了(整场只发这一条) | `message_count` / `started_at` / `closed_at`(⚠️ **墙钟秒,不是 tick**) | `agent_id` / `participants` |
+| `state_change` | 世界的状态变了 —— **按 `payload.kind` 二级分发** | `delta` / `axes` | `as` / `target` |
+| `entity_interaction` | 有人对一样东西用了一个动词,而且做成了 | `changed` / `me_changed` / `me_delta` / `consumed` | `target` |
+| `entity_spawn` | 世界里长出了一样新东西 | `values` | `entity` / `from` |
+| `entity_destroy` | 一样东西没了 | — | `entity` |
+| `item_transfer` | 一样东西换了主人 | `qty` | `from` / `to` |
+| `item_consume` | 一样东西被用掉了 | `qty`(能力那条路才带,吃饭那条缺席 = 1) | `who` |
+| `payment` | 一笔钱 | `amount` | `from` / `to` |
+| `travel` | 有人出发去别的地方 | `minutes` / `arrive_at`(**到达的 tick,不是时长**) | `player_id` |
+| `agent_join` | 一个角色进了这个世界 | — | —(是谁在顶层 `who` 上) |
+
+⚠️ **关系四轴不在这张表上,而这是老板 2026-08-26 拍的(D40 ③)**:插件**读得到、
+emit 得出,写不进**内置四轴 —— 它们是 `sentiment_delta` 事件的**投影**,不是一张可以
+直接写的表,直写就等于把关系从"可重放"变成"直接写"。所以四轴的变化只以
+`state_change{kind: "sentiment_delta"}` 这**一种事件形式**进来。
+
+⚠️ **`location_join` 这个名字底下有两件事,别订错**:顶层那条 `location_join` 是
+**创世时播下的一个地点**(配置,不是发生的事),所以它**不在**这张表上;
+"有人走进了一个地方"是 `state_change{kind: "location_join"}`。
+
+**按出口探测,别比版本号**:`d.get("plugins", {}).get("subscribable_events", {})` ——
+老引擎上**整段 `plugins` 缺席**(不是 `null`),而 `d["plugins"][…]` 在它身上是
+`KeyError` 退 1,**一个崩掉的探测器不是「探测出没有」**。
 
 **"谁在哪"的持续来源是 `state_change` + `kind=location_join`**(角色走进一个地点时发,
 `payload.location` 是目的地);顶层的 `agent_join` 只说得出出生地。投影把它折成

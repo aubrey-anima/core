@@ -6126,6 +6126,7 @@ def contract_payload() -> dict[str, Any]:
         _VALID_PREDICATES,
     )
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
+    from anima_world.events import SUBSCRIBABLE_EVENTS
     from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
     from anima_world.world_package import PACKAGE_FORMAT_VERSION
     from anima_world.character_card import (
@@ -6397,6 +6398,24 @@ def contract_payload() -> dict[str, Any]:
                 "`invitations_page()` 的 `pending`"
             ),
         },
+        # 插件段(3.8.0,第 0 期)。**这一期只有一格** —— 第 1 期才有
+        # `type:"plugin"` 记录、命名空间、事实四形状那一摞。
+        # 报在这里的理由和 `erasure` / `beats` 逐字相同:**消费方按段/格在不在探测,
+        # 不比版本号**;老引擎上**整段缺席**(不是 `null`),一律
+        # `d.get("plugins", {}).get("subscribable_events", {})`。
+        "plugins": {
+            # 插件的触发器订得到哪几种事件。**策展表,不是全集** ——
+            # 引擎里在发的 type 有四十来个,一半是内部管道(`subsystem_health` /
+            # `memory_seed` / `plan` / `legacy_seq_gap`),它们的载荷为引擎自己的
+            # 用途服务,明天就可能因为一次内部重构而变。
+            # 🔴 **进了这张表就是一句公开契约,拿不掉**,所以宁少勿多。
+            # 每条带 `numbers`(数字格)与 `parties`(当事人格)—— 前者给算术,
+            # 后者决定触发器的 `for_each` 对不对得上人。
+            # 详见 `anima_world/events.py` 的 `SUBSCRIBABLE_EVENTS`。
+            "subscribable_events": {
+                name: dict(spec) for name, spec in SUBSCRIBABLE_EVENTS.items()
+            },
+        },
         "beats": {
             "schema_version": None,
             # 🆕 3.7.0(看板 D1):节拍进得了 `.cyberworld` 了,而且**首启自己带上**。
@@ -6490,6 +6509,10 @@ def run_contract(args: argparse.Namespace) -> int:
           + "、".join(f"{g}×{n}" for g, n in sorted(groups.items())))
     print(f"  {onboarding.dim('               这是「引擎声明过什么」(静态),'
                               '不是「某个世界现在是什么」—— 后者问 config list')}")
+    subscribable = payload["plugins"]["subscribable_events"]
+    print(f"  可订事件       {', '.join(sorted(subscribable))}")
+    print(f"  {onboarding.dim('               策展表不是全集 —— 内部事件不在上面;'
+                              '进了就拿不掉,所以宁少勿多')}")
     print(f"\n  {onboarding.dim('持有镜像的仓库用 --json 对齐;种子与节拍没有版本号,随主版本走。')}")
     return 0
 
