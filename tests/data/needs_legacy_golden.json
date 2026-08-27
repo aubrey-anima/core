@@ -1,4 +1,23 @@
 {
+ "_采自": {
+  "上一份 golden": {
+   "sha256": "72802224d9430cfa5f11196907a3e29a623bd6293199d610a4de60edaf5a0db2",
+   "在哪儿": "fa1507b:tests/data/needs_legacy_golden.json(**没被抹掉,在 git 里**)"
+  },
+  "为什么两池都关": "它们的产物落在第几 tick 由这台机器忙不忙决定。上一份 golden 只关了叙事,于是这道闸时好时坏 —— 交叉重跑量过:base 9 趟红 5、head 9 趟红 9,而红的一条是 `test_基线自己是可复现的`(它比的是同一份代码对它自己)。**一条时好时坏的闸比没有更贵:它红的时候没人知道该不该信。**范式照 `test_economy_plugin_parity.py`:**先决定比什么,再采基线。**",
+  "关掉之后这道闸验不了什么": "「搬家有没有改到关系」—— needs 不碰四轴,所以这一格今天是空的;哪天它碰了,得另开一道闸,而不是把这两个池打开(打开就回到时好时坏)。",
+  "凭什么说它出自旧路": "实测:`anima_world.__file__` 落在那棵 worktree 上,而 `hasattr(anima_world.needs, 'factory_plugin')` 是 **False** —— **判据是正的**(那个函数不在),不是「grep 到 0 行」。⚠️ `PYTHONPATH` 单独放是不够的:本仓 editable 装的是一个 `__editable__` 的 meta_path finder,它比 `sys.path` 先说话。要先把它从 `sys.meta_path` 摘掉。",
+  "和上一份逐格对照(实测)": {
+   "events": "103 → 99;少的 4 条**点得出名字**:2 条 memory_seed + 2 条 state_change,全是关系判定那一次的产物(夏/柔在咖啡店那段对话)",
+   "needs": "**逐字节相同**",
+   "prompt_sha": "**逐字节相同**",
+   "state_sha": "变了(它盖住上面那几样)",
+   "stocks": "只差三个 `needs.*` 键 —— 那就是搬家本身(这道闸本来就逐键白名单了它们)"
+  },
+  "怎么跑": "内置橱窗 · 288 tick · needs 开 · 规划与自主关 · **叙事与关系判定两个线程池都关**(scheduler.narrative = None / scheduler.relationship_judge = None)",
+  "改它之前先问一句": "**是行为该变,还是我把它改坏了。**",
+  "树": "a6b3da3(= fa1507b^,第 1 期地基已在、needs 还没搬的那一棵)"
+ },
  "events": [
   [
    "agent_action",
@@ -174,10 +193,6 @@
   ],
   [
    "memory_seed",
-   "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.518, \"kind\": \"chat\", \"summary\": \"沈亦柔和苏晚夏在咖啡店说了会儿话\"}"
-  ],
-  [
-   "memory_seed",
    "{\"agent_id\": \"夏\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"这家咖啡店是我盘下来的,第一天只卖出去三杯,雨下了一整天。\"}"
   ],
   [
@@ -191,10 +206,6 @@
   [
    "memory_seed",
    "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"苏晚夏总说我脸色差,给我多加一份糖。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.518, \"kind\": \"chat\", \"summary\": \"沈亦柔和苏晚夏在咖啡店说了会儿话\"}"
   ],
   [
    "memory_seed",
@@ -242,10 +253,6 @@
   ],
   [
    "state_change",
-   "{\"as\": \"夏\", \"as_name\": \"苏晚夏\", \"axes\": {\"affection\": 0.0144, \"respect\": 0.0, \"trust\": 0.0063}, \"delta\": 0.018, \"kind\": \"sentiment_delta\", \"target\": \"柔\", \"target_name\": \"沈亦柔\"}"
-  ],
-  [
-   "state_change",
    "{\"as\": \"夏\", \"kind\": \"r_type\", \"r_type\": \"住得近的朋友\", \"r_type_back\": \"总记得我口味的人\", \"target\": \"柔\"}"
   ],
   [
@@ -259,10 +266,6 @@
   [
    "state_change",
    "{\"as\": \"夏\", \"kind\": \"sentiment\", \"sentiment\": 0.55, \"target\": \"柔\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"柔\", \"as_name\": \"沈亦柔\", \"axes\": {\"affection\": 0.0144, \"respect\": 0.0, \"trust\": 0.0063}, \"delta\": 0.018, \"kind\": \"sentiment_delta\", \"target\": \"夏\", \"target_name\": \"苏晚夏\"}"
   ],
   [
    "state_change",
@@ -438,12 +441,9 @@
   "柔": "bd343ff6dcfff872c7fec067acd795707ad80ca459dfbbfd32d12f0bfed3fe85",
   "遥": "9bbb6893c3334e0126de7ea2fb7de47bc31403ad9c9fb0e3b93c62c7464c650d"
  },
- "state_sha": "d7b08ac857cdd852c9f8537bfbd4fa5bdd8e476c599e6abbe3085037342ab860",
+ "state_sha": "5542c122735bbff14f1f32934b9b84da8f0e52c759cf03b97ea646eccb7308d3",
  "stocks": {
   "agent:夏": {
-   "needs.energy": 0.7083333333333344,
-   "needs.hunger": 0.3666666666666617,
-   "needs.social": 0.33333333333334236,
    "主动": 1.4,
    "体力": 100.0,
    "手艺": 1.0,
@@ -451,9 +451,6 @@
    "随和": 1.4
   },
   "agent:柔": {
-   "needs.energy": 0.8125000000000007,
-   "needs.hunger": 0.3666666666666617,
-   "needs.social": 0.41666666666667607,
    "主动": 1.0,
    "体力": 100.0,
    "手艺": 1.0,
@@ -461,9 +458,6 @@
    "随和": 1.0
   },
   "agent:遥": {
-   "needs.energy": 0.7708333333333341,
-   "needs.hunger": 0.3666666666666617,
-   "needs.social": 0.33333333333334236,
    "主动": 0.4,
    "体力": 100.0,
    "手艺": 1.0,
