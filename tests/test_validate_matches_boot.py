@@ -241,6 +241,9 @@ def test_跑过的世界导出来_两条路都收(tmp_path, fresh_redis, open_wo
     """只有状态记录的文件:开机一直欢迎它,校验器从前说 `'agents' must be a list`。
 
     **作者层为空 = 没有种子,不是一个空种子。**
+
+    ⚠️ 2026-08-27(收件箱 D30)之后这条还钉一件**新的**:这一趟的绿灯不再是
+    "什么都没查的绿灯" —— 状态层里开机会编译的那几张表已经查过了。
     """
     world = open_world("src")
     world.tick(2)
@@ -253,9 +256,165 @@ def test_跑过的世界导出来_两条路都收(tmp_path, fresh_redis, open_wo
 
     _, payload = _validate_json(str(out))
     assert any("没有作者层" in w for w in payload["warnings"]), (
-        "收下它可以,但要说出'这里没有可查的东西' —— 一个什么都没查的绿灯"
+        "收下它可以,但要说出这份包是哪一种 —— 一个什么都没查的绿灯"
         "和一个查过的绿灯长得一样,那是最坏的一种"
     )
+    # **而"没查"这件事从今天起必须是机器读得到的一格,不是一句 warning。**
+    # 读它的是脚本,脚本读不到那句解释 —— D30 那个洞的全部形状就在这一句里。
+    check = json.loads(run_cli("world", "check", str(out), "--json").stdout)
+    assert check["checked_layers"] == ["redis"], check
+    assert check["unchecked_layers"], (
+        "一个跑过的世界导出来带着事件与转录,而这扇门查不动它们 —— "
+        "查不动就要说出来,而且要说给机器听"
+    )
+    assert "kinds" not in check["unchecked_state_tables"], (
+        "种类表是开机会编译的,它必须落在'查过'那一边 —— 落在这一格里就是 D30 复发"
+    )
+
+
+# ── 四之二、状态层那一族(收件箱 D30,2026-08-27)────────────────────────────
+#
+# 这一节和上面那些逐条枚举的用例是**同一件事的另一半**:上面查的是作者层,
+# 而一个跑过的世界导出来**一条作者记录都没有**。这扇门从前对那种包什么都没看过,
+# 却照答 `loadable: true`。
+
+
+def _future_field_export(tmp_path, open_world, name="future"):
+    """造一份"新引擎写下、老引擎读不懂"的导出包 —— D30 那个实测案例的形状。
+
+    真实案例是 3.7.0 的 `importance` 随状态层进包、3.5.0 的解析器不认识它。
+    这里没有第二支引擎可用,所以反过来造:往状态层的 `:kinds` 里塞一个**这一版
+    引擎就不认识**的字段。两者对这扇门是同一个形状 —— 状态层里躺着一个编译不过
+    的声明,而作者层是空的。
+    """
+    import gzip
+
+    world = open_world("src")
+    world.tick(2)
+    clean = tmp_path / f"{name}-clean.cyberworld"
+    world.export_snapshot(clean, world_id="src", name="导出的")
+    world.close()
+
+    rows = []
+    with gzip.open(clean, "rt", encoding="utf-8") as fh:
+        for line in fh:
+            record = json.loads(line)
+            if record.get("kind") == "checksum":
+                continue           # 改了内容,校验和当然要重算 —— 这里索性不写
+            if record.get("kind") == "redis" and record.get("key") == "kinds":
+                for field in record["value"]:
+                    row = json.loads(record["value"][field])
+                    row["definition"]["未来字段"] = 0.6
+                    record["value"][field] = json.dumps(row, ensure_ascii=False)
+            rows.append(record)
+    out = tmp_path / f"{name}.cyberworld"
+    with gzip.open(out, "wt", encoding="utf-8") as fh:
+        for record in rows:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return clean, out
+
+
+def test_状态层里读不懂的声明_三扇门说同一句话(tmp_path, fresh_redis, open_world):
+    """🔴 **D30 本身**:`world check` 对一份**开不了机**的导出包答过绿灯。
+
+    实测原文(FOR-STUDIO §3.30,2026-08-21,两支真 venv):3.7.0 导出的世界拿
+    3.5.0 `world check` **说绿**、`import` **退 0**、**真开机退 1**
+    (`OntologyError: 不认识的字段 ['importance']`)。三扇门,三句话,而下游
+    (运维台判包、创作台出包前那道闸)读的正是最乐观的那一句。
+
+    病灶不是"说窄了",是**没看**:这扇门当时只读作者层,而这种包一条作者记录都没有。
+    所以修法也不是把话说宽 —— 是**真去查**状态层里开机会编译的那几张表,
+    用的还是开机第一秒那个函数(`_precheck_ontology`)。
+
+    这条钉的就是那三扇门的答案**相等**,而不是各说各的。
+    """
+    _, bad = _future_field_export(tmp_path, open_world)
+
+    # 门一:离线那两扇(它们本来就被 `_both` 钉成相等)
+    ok_check, check_errors = _check_says(str(bad))
+    ok_validate, validate_errors = _validate_says(str(bad))
+    # 门三:真开一次机
+    ok_boot, boot_errors = _boot_says(str(bad), fresh_redis, "restored")
+
+    assert not ok_boot, (
+        "这份夹具本身失效了:它该是一份**开不了机**的包,而它开起来了 —— "
+        "夹具不红的话,下面三条断言全是假绿")
+    assert not ok_check, (
+        f"🔴 D30 复发:一份开不了机的包,`world check` 答了绿灯。开机说:{boot_errors}")
+    assert not ok_validate, f"🔴 `validate world` 也漏了同一份包:{validate_errors}"
+    assert check_errors == validate_errors, (
+        f"两扇离线门给了不同的话 —— check:{check_errors};validate:{validate_errors}")
+    assert any("未来字段" in e for e in check_errors), check_errors
+    # **同一句话,逐字相同** —— 因为它本来就是同一个函数吐出来的。
+    # 两边各写一份判断的话,这一句是第一个会松掉的。
+    assert set(check_errors) <= set(boot_errors), (
+        f"离线门说的话不在开机说的话里面 —— 那就是第二份判断了。"
+        f"离线:{check_errors};开机:{boot_errors}")
+
+
+def test_状态层查过了这件事_是机器读得到的一格(tmp_path, fresh_redis, open_world):
+    """D30 三条候选修法里,只加一格 `checked_layers` 那条**单独做是不够的** ——
+    它只把那句 warning 翻译成机器读得懂的,那份包照样答绿。所以这一轮先真去查,
+    再用这几格说清"查到哪儿为止"。
+
+    这条钉的是**那几格自己**:纯增量、四格、消费方那条判据只有一行。
+    """
+    clean, bad = _future_field_export(tmp_path, open_world, name="cov")
+
+    good = json.loads(run_cli("world", "check", str(clean), "--json").stdout)
+    assert good["loadable"] is True
+    assert good["present_layers"], good
+    assert set(good["checked_layers"]) <= set(good["present_layers"]), good
+    assert good["unchecked_layers"] == [
+        layer for layer in good["present_layers"] if layer not in good["checked_layers"]
+    ], "`unchecked` 必须真的是那个减法 —— 让消费方自己减就是让它们各持一份对层名的猜测"
+
+    # 内置橱窗那份是纯作者层,它该是**满覆盖**的那一种:绿灯 + 没有没查过的层。
+    from anima_world.__main__ import WORLD_FILE_PATH
+
+    demo = json.loads(run_cli("world", "check", str(WORLD_FILE_PATH), "--json").stdout)
+    assert demo["loadable"] is True and demo["unchecked_layers"] == [], demo
+    assert demo["checked_layers"] == ["author"], demo
+
+    # 而那份坏的:`loadable` 是 false,可覆盖那几格**照样要填** —— 一个答"不行"
+    # 的回执如果不说自己看了哪儿,人只会重问一遍。
+    broken = json.loads(run_cli("world", "check", str(bad), "--json").stdout)
+    assert broken["loadable"] is False and broken["checked_layers"] == ["redis"], broken
+
+
+def test_三扇门里的第二扇_import_对一份纯作者层的包不许报成成功(tmp_path, fresh_redis):
+    """**收件箱 D32,和 D30 同族**:`world import` 那扇门。
+
+    `world check` 与开机是两扇门,`world import` 是第三扇 —— 而它对一份**只有
+    作者层**的包落 0 键、退 0、日志干净:世界仍是空的,首启装的是**内置橱窗**。
+    **丢的不是节拍,是整个世界。**
+
+    ⚠️ 这条和 `test_import一份纯作者层的包_是当场拒绝_不是一句没人读的日志`
+    是有意的两条:那一条钉 `world import` 自己的出口,这一条钉的是**它和另外
+    两扇门站在一起时的一致性** —— 同一份包,check 说"能装"(它作为作者层是合法的)、
+    开机说"能开"(`--world-file` 那条路),而 import 必须说"这条路装不了它"。
+    三句话方向不同却互不矛盾,**正是这一族要的形状**:每扇门只答自己那个问题,
+    而且都不许把"我没做那件事"说成"成了"。
+    """
+    from _worldfile import redis_for
+
+    path = _write(tmp_path / "authored.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, _tree_kind(), _OAK])
+
+    # 门一:作为一份作者层,它是合法的 —— 这扇门不该因为 D32 而变红。
+    ok_check, check_errors = _check_says(path)
+    assert ok_check, f"D32 的修法误伤了 `world check`:{check_errors}"
+    # 门三:`--world-file` 那条路真的开得起来。
+    ok_boot, boot_errors = _boot_says(path, fresh_redis, "w")
+    assert ok_boot, f"D32 的修法误伤了开机那条路:{boot_errors}"
+
+    # 门二:而 `world import` 这条路装不了它,所以它必须说"不行",不是退 0。
+    client = redis_for(tmp_path / "d32.db")
+    done = run_cli("world", "import", path, "--world-id", "d32")
+    assert done.returncode != 0, (
+        "三扇门里最乐观的那一句又出现了:一次完全无效的导入报成了成功。"
+        f"stdout={done.stdout}")
+    assert list(client.scan_iter("anima:d32:*")) == [], "拒绝不许留下半个世界"
 
 
 def test_一次编辑_两条路都收(tmp_path, fresh_redis, open_world):
@@ -749,3 +908,38 @@ def test_三扇门都走同一份判断_而检查器是一张看得见的表():
             f"`{door}` 没走 `authored_layer_errors` —— 它会和另外两扇门分叉,"
             "而分叉那天两边都不报错"
         )
+
+
+def test_状态层那张表里的键_必须真的是这个世界里的键(tmp_path, open_world):
+    """🔴 **这一条防的是一种 0 行的假绿**(收件箱 D30 的连带闸,2026-08-27)。
+
+    `STATE_ONTOLOGY_TABLES` 是按 **Redis 键名**匹配的。哪天有人把 `:kinds` 改名、
+    或者把种类挪进别的键,这张表就**一条都匹配不上** —— 于是状态层那道新闸
+    悄悄回到"什么都没查",而 `errors` 是空的、`loadable` 是 `true`、
+    **一条测试都不会红**。这正是这个仓库记过的那种坏法:命令答 0 行,
+    而 0 行既可能是"没问题",也可能是"这条命令根本没说话"。
+
+    所以这里拿**一个真的跑过的世界**去对:表里登记的每一个键,都必须真的出现在
+    它导出来的状态层里。改了键名 → 这条当场红,而不是那扇门安静地失明。
+    """
+    from anima_world.world_file import STATE_ONTOLOGY_TABLES, StateScan, read_world_file
+
+    world = open_world("keys")
+    world.tick(2)
+    out = tmp_path / "keys.cyberworld"
+    world.export_snapshot(out, world_id="keys", name="对键名的")
+    world.close()
+
+    scan = StateScan()
+    _, records = read_world_file(str(out))
+    for record in records:
+        scan.feed(record)
+
+    missing = sorted(set(STATE_ONTOLOGY_TABLES) - scan.tables)
+    assert not missing, (
+        f"`STATE_ONTOLOGY_TABLES` 里这几个键在一个真世界里根本不存在:{missing} —— "
+        f"这个世界导出来的表是 {sorted(scan.tables)}。"
+        "键名对不上时那道闸不会报错,它只是什么都不查"
+    )
+    # 而"查过的"这一格也必须真的有料:五张表全空的话,上面那条也照样过。
+    assert scan.rows, "登记过的那几张表一行都没读到 —— 那道闸此刻是死的"

@@ -392,36 +392,38 @@ def test_四格永远都在_少一格是消费方的KeyError(tmp_path):
     assert set(build_run_report([], ticks=1, beats=[])["beats"]) == keys
 
 
-def test_import一份纯作者层的包_一个键都不落_而空世界首启装的是橱窗(tmp_path, caplog):
-    """**「首启自己带上」这句承诺,在 `world import` 那条路上不成立** —— 而它不成立
-    的样子比"节拍不响"重得多。
+def test_import一份纯作者层的包_是当场拒绝_不是一句没人读的日志(tmp_path):
+    """**这一格 2026-08-27 从"警告"升成了"拒绝"(收件箱 D32)。**
 
-    `world import` 只落键、不编译作者层(它自己的 docstring 写着,是有意的)。
-    一份**只有作者层**的包因此一个键都不落 —— 于是那个 world_id 仍然是**空的**,
-    而空世界首启装的是**内置橱窗**:屏幕上住着夏、遥、柔,不是作者写的那些人,
-    退出码 0、日志干净。
+    上一版这条用例钉的是 `returncode == 0` + 一句 `logger.warning`,而它自己的
+    docstring 就写着那是个二选一:「要么 `import` 那条路整个补上作者层编译
+    (= 契约变更,得先拍板),要么把承诺写窄。这一轮选了后者。」拍板到了,
+    而选的是**第三条**:不编译(那会造出第二条创世路径),但**也不报成成功**。
 
-    ⚠️ **这一格不是节拍特有的**(agents / locations 一起没进去),所以修法不是给
-    节拍打补丁 —— 要么 `import` 那条路整个补上作者层编译(改的是 `world import`
-    的语义 = 契约变更,得先拍板),要么**把承诺写窄**。这一轮选了后者,
-    而这条用例把"窄到哪儿"钉住:**变宽了就红。**
+    理由是 D32 那句话本身:`world import 我的世界.cyberworld` 退 0、stdout 打出
+    一份 `{"operation": "import", …}`,容器起来,屏幕上住着夏、遥、柔 ——
+    **丢的不是一段节拍,是整个世界**,而机器读到的是"成功"。
+    一句写在日志上的真话,和一盏假绿灯是同一件事:读它的是脚本。
+
+    ⚠️ 这条钉的是**三件**,少一件这个洞就开着:退出码非零、那句话还在、
+    以及**一个键都没落**(拒绝不许留下半个世界)。
     """
-    import logging
-
     from _worldfile import redis_for
 
     client = redis_for(tmp_path / "i.db")
     path = write_seed_file(tmp_path / "w.cyberworld", _seed(beats=[_BEAT]))
-    with caplog.at_level(logging.WARNING):
-        done = run_cli("world", "import", path, "--world-id", "i1")
-    assert done.returncode == 0, done.stderr
+    done = run_cli("world", "import", path, "--world-id", "i1")
+    assert done.returncode != 0, (
+        "一份只有作者层的包走 import 是一次**完全无效**的操作,"
+        f"报成成功就是 D32 那个洞本身:{done.stdout}")
     assert list(client.scan_iter("anima:i1:*")) == [], (
-        "纯作者层的包不该落键 —— 落了就是另一种病")
-    # 而这一句才是这条用例存在的理由:那个警告必须说出**真正的后果**。
-    # 它从前一律说"状态记录已经落键,这个世界从此不是空的了" —— 对这一种文件
-    # 那句话是假的,而假在最要紧的一格上:世界恰恰**还是空的**,所以首启会去装橱窗。
-    said = "\n".join(r.getMessage() for r in caplog.records)
-    assert "内置橱窗" in said and "一个键都没落" in said, said
+        "拒绝不许留下半个世界 —— 纯作者层的包本来就不落键,落了就是另一种病")
+    # 那句话必须说出**真正的后果**,而且要在 stderr 上(退出码告诉脚本"不行",
+    # 这句话告诉人"下一步敲什么")。它从前一律说"状态记录已经落键,这个世界
+    # 从此不是空的了" —— 对这一种文件那句话是假的,而假在最要紧的一格上。
+    assert "内置橱窗" in done.stderr and "一个键都没落" in done.stderr, done.stderr
+    assert "--world-file" in done.stderr, (
+        "拦下来还得指出那条走得通的路,不然人只会去 `|| true` 掉它")
 
 
 def test_import一份跑过的带剧情世界_节拍跟着状态层过来(tmp_path, open_world):

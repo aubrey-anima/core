@@ -6484,6 +6484,92 @@ def _authored_ontology_errors(
     return []
 
 
+def _state_layer_ontology_errors(state_seed: dict[str, Any]) -> list[str]:
+    """**状态层**里那几张开机会编译的表,离线也编译一遍(3.8.0,收件箱 D30)。
+
+    这扇门存在的全部理由是"这一版引擎收不收这份包",而在它加进来的头两年里,它
+    看的只有**作者层**。一个跑过的世界导出来一条作者记录都没有 —— 于是这扇门在
+    **没看过**的情况下答了"能装",而印出来那句话是「装得进去」。
+
+    实测(FOR-STUDIO §3.30,2026-08-21):3.7.0 导出的世界拿 3.5.0 `world check`
+    说绿、`import` 退 0、**真开机退 1**(`OntologyError`,一个 3.5.0 不认识的字段
+    随状态层进了包)。**它和 `--edit` 那一格是同一个形状**:不是"没说",是"说窄了"
+    —— 而读它的是脚本,脚本读不到那句解释。
+
+    **判断只有一份**:翻成 section 字典之后走的就是 `_authored_ontology_errors`,
+    也就是开机第一秒的 `_precheck_ontology`。这一条是这里唯一要守的纪律,理由和
+    `_authored_ontology_errors` 的 docstring 逐字相同 —— 两份判断迟早给出不同答案。
+
+    ⚠️ **两条刻意的边界,都是为了不制造假红**(比开机严比比它松更难查:一份跑得
+    好好的世界出不了包,而报错指着一个不存在的问题):
+
+    - **规律不管有没有 `kinds` 都编译一遍。** 「声明本身就是开关」说的是本体那一层
+      (`_load_ontology` 在 `not len(ontology_store)` 时整个跳过),而规律不是:
+      `RedisRulesStore` 定义存原文、编译在读取侧,一个 `kinds` 都没写的世界,
+      开机照样要把 `:world_rules` 解析出来。所以这两半在这里是分开的两问。
+    - **`stocks` 这一格有意不查。** 状态层的量住 `stock:*` 一族,形状和作者层的
+      `stocks` 段不是一回事;硬翻过去就是在写第二份判断。它落进"没查过"那一格
+      (`state_layer_tables` 数得到),这比猜一句诚实。
+    """
+    from anima_world.rules import RuleError, parse_rules
+
+    errors: list[str] = []
+    rules = [dict(r) for r in (state_seed.get("rules") or []) if isinstance(r, dict)]
+    if rules:
+        try:
+            parse_rules(rules)
+        except RuleError as exc:
+            errors += list(getattr(exc, "errors", None) or [str(exc)])
+        except Exception as exc:  # noqa: BLE001 - 坏声明的形状很多,一律当成一条错报
+            errors.append(str(exc))
+    if state_seed.get("kinds"):
+        # `edit=False`:一个跑过的世界导出来是**完整**的一份(它就是那个世界的
+        # 全部),跨引用该查就查 —— 这和 `--edit` 那条豁免不是一回事。
+        errors += _authored_ontology_errors(state_seed)
+    # 同一句话不说两遍:规律那一摞在 `_precheck_ontology` 里会被再解析一次。
+    deduped: list[str] = []
+    for line in errors:
+        if line not in deduped:
+            deduped.append(line)
+    return deduped
+
+
+def _coverage_fields(state: Any, *, authored: bool) -> dict[str, Any]:
+    """`loadable` 那句话的**主语**,四格,全是纯增量(3.8.0,收件箱 D30)。
+
+    D30 摆在桌上的三条修法各有舰队级后果:`loadable` 答 `false` 会拦下舰队上
+    **每一份正常导出包**(比开机严 = 假红);答 `null` + 退 1 让每份包都拿到一个
+    非零退出码(而**一条永远红的检查等于没有这条检查**,人只会把它 `|| true` 掉,
+    `doctor` 那一格是同一条教训);只加一格 `checked_layers` 是对的,但它**只把
+    那句 warning 翻译成机器读得懂的**,那份 3.7.0 导出包在 3.5.0 上照样答绿。
+
+    所以这一轮做的是**第四条**:先真去查(`_state_layer_ontology_errors`),
+    再用这几格说清"查到哪儿为止"。查过之后仍然有查不动的(事件、记忆、转录、
+    黑板),那些必须机器读得到 —— 否则下一个 `importance` 又是一次静默。
+
+    ⚠️ **`present` 用的是记录层的真名**(`author` / `redis` / `event` / `mysql`),
+    不另造词:消费方已经认识它们(`.cyberworld` 每一行的 `kind` 就是它)。
+    """
+    from anima_world.world_file import STATE_ONTOLOGY_TABLES
+
+    present = sorted(state.layers)
+    checked: list[str] = []
+    if authored:
+        checked.append("author")
+    if "redis" in state.layers and (state.tables & set(STATE_ONTOLOGY_TABLES)):
+        # `redis` 这一层算查过的判据是**开机会编译的那几张表我编译了** ——
+        # 事件与记忆是数据,读不懂它们不会让世界开不了机(它们安静地不生效,
+        # 那是另一种坏法,而这扇门答的是"开不开得了机")。
+        checked.append("redis")
+    unchecked = [layer for layer in present if layer not in checked]
+    return {
+        "present_layers": present,
+        "checked_layers": sorted(checked),
+        "unchecked_layers": unchecked,
+        "unchecked_state_tables": state.unchecked_tables(),
+    }
+
+
 def _cannot_even_look(path: str) -> str | None:
     """**这个文件被看过没有** —— 分的是"我没答上来"和"这个引擎收不了它"。
 
@@ -6502,7 +6588,7 @@ def _cannot_even_look(path: str) -> str | None:
 
 
 def _load_authored_layer(
-    path: str, *, scan: Any = None
+    path: str, *, scan: Any = None, state: Any = None
 ) -> tuple[dict[str, Any], str | None]:
     """读一个世界文件的**作者层**,聚合成 section 字典。读不了就把话说清楚。
 
@@ -6513,14 +6599,23 @@ def _load_authored_layer(
 
     给了 `scan`(一个 `media.MediaScan`)就在**同一趟**上顺手把图数了。为了数图再
     读第二遍等于把上面那条纪律作废,而在同一条流上分叉是免费的。
+
+    🆕 给了 `state`(一个 `world_file.StateScan`)就在**同一趟**上顺手把状态层那几张
+    会被编译的表也接下来(3.8.0,收件箱 D30)。理由同上,而且这一格比图更承重:
+    一个跑过的世界导出来**只有**状态记录,不接它就等于这扇门对那种包什么都没看过。
+    `StateScan` 是有界的 —— 只留层名、表名与登记过的那五张表的行。
     """
     from anima_world.media import tee_media
-    from anima_world.world_file import WorldFileError, author_records_to_seed, read_world_file
+    from anima_world.world_file import (
+        WorldFileError, author_records_to_seed, read_world_file, tee_state,
+    )
 
     try:
         _, records = read_world_file(path)
         if scan is not None:
             records = tee_media(records, scan)
+        if state is not None:
+            records = tee_state(records, state)
         return author_records_to_seed(records), None
     except WorldFileError as exc:
         return {}, str(exc)
@@ -6542,18 +6637,29 @@ def run_validate(args: argparse.Namespace) -> int:
         # 与 `_precheck_ontology`)。另写一份判断的话,迟早出现"validate 说没问题,
         # 开机还是失败" —— 而 2026-08-19 舰队上撞到的是它的反面:开机说没问题
         # (一份纯状态层的导出包),validate 却答"'agents' must be a list"。
+        from anima_world.world_file import StateScan, state_records_to_seed
+
         edit = bool(getattr(args, "edit", False))
-        authored, read_error = _load_authored_layer(args.path)
+        state = StateScan()
+        authored, read_error = _load_authored_layer(args.path, state=state)
         if read_error is not None:
             return _report_validation("world", args.path, [read_error], [], args.json)
         errors = authored_layer_errors(authored, complete=not edit)
+        # 🆕 状态层那几张会被编译的表(收件箱 D30)。**两扇门必须加同一条** ——
+        # `tests/test_validate_matches_boot.py` 把它们的 errors 钉成相等,而这两扇
+        # 门是同一个判断的两个出口,不是两份判断。
+        errors = list(errors) + _state_layer_ontology_errors(
+            state_records_to_seed(state.rows)
+        )
         warnings: list[str] = []
         if not authored:
             # **作者层为空 = 没有种子,不是一个空种子。** 开机那条路一直这么判;
             # 这里从前不是,于是任何一份导出的世界在校验器嘴里都是非法的。
             warnings.append(
                 "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
-                "装载时直接落键、不走作者层那几道闸,所以这里没有可查的东西"
+                "装载时直接落键、不走作者层那几道闸。**状态层里开机会编译的那几张表"
+                "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了**;"
+                f"没查过的:{state.unchecked_tables() or '(无)'}"
             )
         else:
             warnings += (
@@ -8070,6 +8176,7 @@ def run_world_check(args: argparse.Namespace) -> int:
     这一版引擎真的收不收它** —— 两个问题,`inspect` 那一格没有被动过。
     """
     from anima_world.media import MediaScan
+    from anima_world.world_file import StateScan, state_records_to_seed
     from anima_world.world_package import _engine_version
     from anima_world.world_seed import world_seed_warnings
 
@@ -8093,10 +8200,33 @@ def run_world_check(args: argparse.Namespace) -> int:
         # `agent_join` 的载荷里。只数作者层的话,那种包会得到一句"外链 0 条"。
         "external_media": [],
         "inline_media_bytes": {"count": 0, "total": 0, "largest": 0},
+        # 🆕 3.8.0(收件箱 D30):**`loadable` 这句话的主语。**
+        #
+        # 这一格治的不是 `loadable` 的值,是它的**主语从来没写出来**:这扇门答的
+        # 是「我查过的那些没问题」,而它印出来的是「装得进去」。中间那段差,读它的
+        # 脚本读不到 —— 它只读一个布尔。
+        #
+        # 三格都是**纯增量**,一格都不夺:
+        # · `present_layers` 这份包里有哪些层(`author` / `redis` / `event` / `mysql`)
+        # · `checked_layers` 这一趟真编译过哪些层
+        # · `unchecked_layers` 两者之差 —— **非空 = `loadable` 没覆盖全**
+        #
+        # 消费方那条判据只有一行,抄进 FOR-STUDIO §3.45 了:
+        #     真绿 = (rc == 0 and loadable is True and not unchecked_layers)
+        # 减法由引擎做,不由消费方做:各自算减法就是各持一份对层名的猜测,
+        # 和 `world drop` 归引擎是同一条理由。
+        "present_layers": [],
+        "checked_layers": [],
+        "unchecked_layers": [],
+        # 状态层里**没被编译过**的那些表(短键名)。上面那三格答"哪一层",
+        # 这一格答"那一层里的哪几张表" —— 下一个 `importance` 会出现在其中一张上。
+        "unchecked_state_tables": [],
     }
     unopenable = _cannot_even_look(args.package)
+    state = StateScan()
     authored, read_error = (
-        ({}, None) if unopenable else _load_authored_layer(args.package, scan=scan)
+        ({}, None) if unopenable
+        else _load_authored_layer(args.package, scan=scan, state=state)
     )
     if unopenable is None and read_error is None:
         # **只有整份读完了才报这两段。** 半途抛错的那趟扫描手里是一份残缺的账
@@ -8125,10 +8255,16 @@ def run_world_check(args: argparse.Namespace) -> int:
         errors = list(authored_layer_errors(authored, complete=not payload["edit"]))
         warnings: list[str] = []
         payload["authored"] = bool(authored)
+        # 🆕 状态层那几张会被编译的表(收件箱 D30)。**放在作者层之外单算**:
+        # 一个跑过的世界导出来两者只有一半在,而混装包两半都在。
+        errors += _state_layer_ontology_errors(state_records_to_seed(state.rows))
+        payload.update(_coverage_fields(state, authored=bool(authored)))
         if not authored:
             warnings.append(
                 "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
-                "装载时直接落键、不走作者层那几道闸,所以这里没有可查的东西"
+                "装载时直接落键、不走作者层那几道闸。**状态层里开机会编译的那几张表"
+                "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了**;"
+                f"没查过的见 unchecked_state_tables:{state.unchecked_tables() or '(无)'}"
             )
         else:
             warnings += (
@@ -8265,14 +8401,20 @@ def run_world_package(args: argparse.Namespace) -> int:
                 return 0
         else:
             redis, world_id, mysql = _world_args(args)
+            # 🆕 `receipt` 那一格(收件箱 D32):混装两层的包走这条路会**丢掉作者层
+            # 那一半**,而那件事此前只写在 `logger.warning` 上 —— 机器读的是这份
+            # JSON 和退出码,读不到日志。纯增量,一格不夺。
+            receipt: dict[str, Any] = {}
             manifest = import_world_file(
                 args.package, redis=redis, world_id=world_id, mysql=mysql,
+                receipt=receipt,
             )
             result = {
                 "operation": "import",
                 "world_id": world_id,
                 "from": manifest.world_id,
                 "engine_min": manifest.engine_min,
+                **receipt,
             }
     except (OSError, WorldFileError, PackageValidationError) as exc:
         # 说清是**哪一道**闸拦下的(校验和 / 格式版本 / 目标非空 / 记录坏了)。

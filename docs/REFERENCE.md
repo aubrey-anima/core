@@ -4213,6 +4213,31 @@ anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真
 成功时 stdout 输出一行 JSON(`export` / `import`)或一份清单(`inspect`,`--json` 给
 一行 JSON);失败退出码 2。
 
+🔴 **3.8.0 起 `world import` 多一种拒绝(收件箱 D32,这是一次行为变更):
+一份只有作者层的包走这条路,退出码 2,不再是 0。**
+
+`world import` **只落键、不编译作者层**(有意的,见下)。一份只有 `author` 记录的
+包因此**一个键都不落** —— 那个 `world_id` 仍然是**空的**,而空世界首启装的是
+**内置橱窗**:屏幕上住着夏、遥、柔,不是作者写的那些人。此前这一整条链的退出码
+全是 0、日志干净。**丢的不是一段节拍,是整个世界。**
+
+那句诊断从 3.7.0 起就写对了,可它写在 `logger.warning` 上 —— 而**机器读的是退出码
+和那份 JSON**。一句写在日志上的真话,和一盏假绿灯是同一件事。
+
+**为什么不是"让 import 编译作者层"**:那会造出**第二条创世路径**(编译要一整套
+store、一次预检、一次投影重放,也就是半个 `build_serve_scheduler`),而"别另写一份
+判断"是这个仓库最贵的一条纪律。`--world-file` 那条路已经是创世,它不需要孪生兄弟。
+所以这一格的形状是:**这次操作完全无效,就别报成成功。**
+
+```bash
+anima-world world import 我的世界.cyberworld --world-id w   # ← 只有作者层 → 退 2
+anima-world run --world-id w --world-file 我的世界.cyberworld  # ← 这才是那条路
+```
+
+**下游代价实测为零**:运维台 v3 装载走的是 `--world-file`
+(`deploy/world-image/entrypoint.sh`),创作台一次都不调 `world import`。
+会被它拦下的调用方,今天拿到的本来就是一个空世界。
+
 #### 各命令的 JSON 字段集
 
 第三方工具按这几组字段编码,所以它们是**线格式**,与 `.cyberworld` 本身同一条纪律。
@@ -4222,7 +4247,12 @@ anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真
 | `export` | `operation` / `world_id` / `revision_id` / `mode` |
 | `import` | `operation` / `world_id` / `instance_id` / `path`(`instance_id == world_id`,`path` 是 `redis:{world_id}` —— 没有磁盘目录了,这两个字段留着是给镜像端不破) |
 | `inspect --json` | manifest 全字段(`world_id` / `name` / `summary` / `genre` / `setting` / `theme` / `export_mode` / `revision_id` / `created_at` / `files` / `source_engine_version` / `package_format_version` / `engine_min` / `engine_max_exclusive`)+ `current_engine_version` / `runnable` / `operation` |
-| `check --json` | `operation`(`"world check"`)/ `path` / `engine_version` / `edit` / `loadable` / `authored` / `errors` / `warnings` / `external_media` / `inline_media_bytes` |
+| `check --json` | `operation`(`"world check"`)/ `path` / `engine_version` / `edit` / `loadable` / `authored` / `errors` / `warnings` / `external_media` / `inline_media_bytes` / 🆕 `present_layers` / `checked_layers` / `unchecked_layers` / `unchecked_state_tables`(3.8.0,见下面「`loadable` 那句话的主语」) |
+
+🆕 **3.8.0:`import` 那一行多一格 `authored_sections_skipped`** —— 这份包里**有、
+而这条路不编译**的作者层段名。混装两层的包走 `world import` 会丢掉作者层那一半
+(它只落键),而那件事此前只写在 `logger.warning` 上 —— **机器读的是这份 JSON 和
+退出码,读不到日志**。纯作者层的包从 3.8.0 起不再走到这一格:它**当场被拒**(见下)。
 
 `external_media` 是**按 host 列的外链**(`[{host, scheme, count, fields}]`),
 `inline_media_bytes` 是内嵌 `data:` 的账(`{count, total, largest}`,同一条 URI
@@ -4231,6 +4261,50 @@ anima-world world check  my.cyberworld [--edit] [--json]  # 这一版引擎**真
 不是"这些链接还活着吗"(那是运维的活,而且答案每分钟都在变)。图床由宿主自己建、
 世界里只存绝对外链是定下来的形状,那么这条选择的**代价**就该在拿到包的那一刻看得见。
 ⚠️ 文件读不完时这两段**留空**(半份账是个安静的错答案,和 `loadable: null` 同一个姿势)。
+
+#### 🆕 `loadable` 那句话的主语(3.8.0,收件箱 D30)
+
+**`loadable` 答的一直是「我查过的那些没问题」,而它印出来的是「装得进去」。**
+中间那段差,读它的脚本读不到 —— 它只读一个布尔。
+
+实测(FOR-STUDIO §3.30,2026-08-21,两支真 venv):3.7.0 跑过的世界导出来,拿
+3.5.0 `world check` **说绿**、`import` **退 0**、**真开机退 1**
+(`OntologyError: 不认识的字段 ['importance']`)。病灶不是"说窄了",是**没看** ——
+那种包一条 `author` 记录都没有,而这扇门当时只读作者层。
+
+3.8.0 做了两件,顺序不能颠倒:
+
+1. **先真去查。** 状态层里**开机会编译**的那几张表(`kinds` / `entities` /
+   `world_rules` / `locations` / `item_defs`,登记在
+   `anima_world/world_file.py:STATE_ONTOLOGY_TABLES`)离线也编译一遍 —— 用的还是
+   开机第一秒那个函数(`_precheck_ontology`)。**不另写一份判断**:两份判断迟早
+   给出不同答案,而那种不一致会表现成"检查器说没问题,开机还是失败"。
+   事件 / 记忆 / 转录 / 黑板**有意不查**:它们是数据,读不懂它们不会让世界开不了机,
+   而把它们也编译一遍就是**比开机严** = 假红。
+2. **再说清查到哪儿为止。** 四格,全是纯增量,一格不夺:
+
+| 字段 | 是什么 |
+|---|---|
+| `present_layers` | 这份包里出现过哪些记录层:`author` / `redis` / `event` / `mysql`(就是每行的 `kind`,不另造词) |
+| `checked_layers` | 这一趟**真编译过**哪些层。`redis` 算查过的判据是"开机会编译的那几张表我编译了" |
+| `unchecked_layers` | 两者之差。**非空 = `loadable` 没覆盖全** |
+| `unchecked_state_tables` | 状态层里没被编译过的表(短键名)。上面三格答"哪一层",这一格答"那一层里的哪几张表" |
+
+**消费方那条判据只有一行**,减法由引擎做(各自算减法就是各持一份对层名的猜测,
+和 `world drop` 归引擎是同一条理由):
+
+```js
+const 真绿 = rc === 0 && payload.loadable === true && payload.unchecked_layers.length === 0;
+```
+
+⚠️ **`unchecked_layers` 非空不等于该拦。** 一个跑过的世界正常导出来就带着事件与
+转录,它照旧是 `loadable: true` 且**开得起来** —— 拦下每一份正常导出包正是 D30
+否决掉的那条修法。这一格要的是"记一笔我没看全",不是一盏红灯。
+
+⚠️ **加一张新的「开机会编译的」状态表,就要在 `STATE_ONTOLOGY_TABLES` 里登记一行**,
+否则那一层又变成看不见的。改 Redis 键名同理 ——
+`tests/test_validate_matches_boot.py::test_状态层那张表里的键_必须真的是这个世界里的键`
+拿一个真跑过的世界对着这张表,对不上当场红(键名对不上时那道闸不报错,它只是什么都不查)。
 
 #### `check` 的退出码问的是另一个问题
 

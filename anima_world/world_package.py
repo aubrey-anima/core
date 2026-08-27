@@ -693,6 +693,7 @@ def install_world_records(
 
 def import_world_file(
     path: str | Path, *, redis: Any, world_id: str, mysql: Any = None,
+    receipt: dict[str, Any] | None = None,
 ) -> Any:
     """把一个世界文件装进一个**空的** `world_id`。返回它的 manifest。
 
@@ -702,6 +703,12 @@ def import_world_file(
     这和 `World.open(world_file=)` 是同一条装载路径,区别只在这里多一道
     "目标必须空"的闸:`World.open` 允许往一个已有的世界补作者层(那是编辑),
     而 `import` 说的是"把这个世界搬过来"。
+
+    🆕 给了 `receipt`(一个 dict)就往里填一格 `authored_sections_skipped`:
+    这份包里**有、而这条路不编译**的作者层段名(3.8.0,收件箱 D32)。
+    混装两层的包走这条路时会丢掉作者层那一半,今天那句话只说给人听
+    (`logger.warning`),而**机器读的是退出码和那份 JSON** —— D30 与 D32 是
+    同一个病灶的两格,治法也是同一条:让"我没做那件事"机器读得到。
     """
     from anima_world.world_file import read_world_file
 
@@ -741,20 +748,42 @@ def import_world_file(
             iter(redis.scan_iter(match=f"{_glob_escape(prefix)}*", count=1)), None
         )
         if landed is None:
-            logger.warning(
-                "%s **只有作者层**(%s),而导入不编译它 —— 于是这一趟一个键都没落,"
-                "`%s` 仍然是一个空世界。⚠️ 空世界首启时装的是**内置橱窗**,不是你这份 "
-                "—— 世界会照常跑起来、住着橱窗里那几个人,而且一处不报错。"
-                "要装这份世界,别用 import,首启直接把文件指回来:`--world-file %s`。",
-                path, "、".join(sorted(authored)), world_id, path,
+            # 🆕 3.8.0(收件箱 D32):**这里从今天起是拒绝,不是一句日志。**
+            #
+            # 上面那句警告一个字都没写错,而它写在 `logger.warning` 上 ——
+            # 退出码是 0、stdout 照样打那份 `{"operation": "import", …}` 的 JSON。
+            # 于是**机器读到的是"成功"**:`world import 我的世界.cyberworld` 退 0,
+            # 容器起来,屏幕上住着夏、遥、柔。**丢的不是一段节拍,是整个世界。**
+            #
+            # 为什么不是"那就让 import 编译作者层":那会造出**第二条创世路径**。
+            # 编译要一整套 store、一次预检、一次投影重放 —— 也就是半个
+            # `build_serve_scheduler`。而"别另写一份判断"是这个仓库最贵的一条纪律:
+            # 两份判断迟早给出不同答案,而那种不一致会表现成"import 装得进,
+            # 开机还是失败"。`--world-file` 那条路已经是创世,它不需要一个孪生兄弟。
+            #
+            # 所以这一格的形状是:**这次操作完全无效,就别报成成功。**
+            # ⚠️ 这是一次**行为变更**(rc 0 → rc 2),不是纯增量,契约表与
+            # FOR-STUDIO §3.46 都记了。它的下游代价实测为零:运维台 v3 装载走的是
+            # `--world-file`(`deploy/world-image/entrypoint.sh`),创作台一次都不调
+            # `world import`。会被它拦下的调用方,今天拿到的本来就是一个空世界。
+            raise PackageValidationError(
+                f"{path} **只有作者层**({'、'.join(sorted(authored))}),"
+                f"而导入不编译它 —— 这一趟一个键都没落,`{world_id}` 仍然是一个空世界。"
+                f"⚠️ 空世界首启时装的是**内置橱窗**,不是你这份 —— 世界会照常跑起来、"
+                f"住着橱窗里那几个人,而且一处不报错。所以这里拒绝,而不是报成成功。"
+                f"要装这份世界,别用 import,首启直接把文件指回来:`--world-file {path}`"
             )
         else:
+            if receipt is not None:
+                receipt["authored_sections_skipped"] = sorted(authored)
             logger.warning(
                 "%s 里有作者层(%s),而**导入不编译它** —— 状态记录已经落键,这个世界从此"
                 "不是空的了。要让作者层生效,首启时把同一份文件指回来:"
                 "`--world-file %s`(那是一次编辑,只填缺不覆盖)。",
                 path, "、".join(sorted(authored)), path,
             )
+    if receipt is not None:
+        receipt.setdefault("authored_sections_skipped", [])
     return manifest
 
 

@@ -485,3 +485,135 @@ def seed_to_author_records(seed: dict[str, Any]) -> list[dict[str, Any]]:
 
 def has_author_records(records: Iterable[dict[str, Any]]) -> bool:
     return any(record.get("kind") == "author" for record in records)
+
+
+# ── 状态层 ↔ 同一条编译管线 ─────────────────────────────────────────────────
+#
+# 🆕 3.8.0(收件箱 D30):**状态层里有几张表,开机是会去编译的。**
+#
+# 从前这条线上只有作者层:离线那两扇门(`validate world` / `world check`)读
+# `author` 记录,状态记录一律当成"不用看的字节"放过去。而那个假设在**一个跑过的
+# 世界导出来的包**上整个不成立 —— 那种包**一条作者记录都没有**,它的种类、实例、
+# 规律、地点、物品全都在 Redis 行里,而开机第一秒照样要把它们编译一遍
+# (`RedisOntologyStore.load` / `RedisRulesStore` 都是"定义存原文,编译在读取侧")。
+#
+# 实测(2026-08-21,FOR-STUDIO §3.30):3.7.0 导出的世界拿 3.5.0 `world check`
+# 说绿、`import` 退 0,**真开机退 1** —— `OntologyError`,病根是一个 3.5.0 不认识
+# 的字段随 `:kinds` / `:world_rules` 走状态层进了包。那扇门不是"没说",是**没看**。
+#
+# 下面这张表就是"没看"的那一半。它只登记**开机会拿去编译**的表,不登记事件、
+# 记忆、转录、黑板 —— 那些是数据,读不懂它们不会让世界开不了机,而把它们也编译
+# 一遍就是**比开机严**,那是假红,比假绿更难查(一份跑得好好的世界出不了包,
+# 而报错指着一个不存在的问题)。
+#
+# ⚠️ 加一张新的"开机会编译的"状态表,就要在这里登记一行,否则那一层又变成
+# 看不见的。`_state_layer_unchecked` 是它的对偶:**没登记的表要报出去**,
+# 而不是安静地不查(这条正是 D30 这个洞本身的形状)。
+STATE_ONTOLOGY_TABLES: dict[str, tuple[str, str | None]] = {
+    # Redis 键(去掉 `anima:{world_id}:` 前缀)→ (编译管线里的段名, 要不要剥壳)
+    #
+    # 剥壳那一格是 `{"definition": {...}, "updated_at": "…"}` 这种行:定义存原文,
+    # 外面包一层写入时间。剥的是 `definition`,因为编译器吃的是里面那份。
+    "kinds": ("kinds", "definition"),
+    "entities": ("entities", "definition"),
+    "world_rules": ("rules", "definition"),
+    # 这两张是**平的**(整行就是那份定义),而且它们在这里的用处是**被引用** ——
+    # 规律指着哪个地点、能力里的 `have_X` 指着哪件物品,`resolve` 要拿它们去查。
+    # 少了它们不会漏报,只会**误报**成"引用不到",所以它们必须在表里。
+    "locations": ("locations", None),
+    "item_defs": ("items", None),
+}
+
+
+@dataclass
+class StateScan:
+    """一份包的状态层**摸下来的那点东西**:哪些层、哪些表、五张要编译的表的行。
+
+    刻意是一个**有界**的东西:一个跑过的世界导出来是十几万条记录,而这里留下的
+    只有「层名一个集合 + 表名一个集合 + 五张表的行」。把记录整个攒下来才是把
+    `world check` 那条流式纪律作废的写法 —— 而这条命令正是要被拿去问真实舰队
+    世界的(灯塔湾那份包)。
+    """
+
+    layers: set[str] = field(default_factory=set)
+    """这份包里出现过哪些记录层:`author` / `redis` / `event` / `mysql`。"""
+
+    tables: set[str] = field(default_factory=set)
+    """状态层里有哪些 Redis 表(短键名,`stock:agent:夏` 一族只留族名 `stock`)。"""
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    """`STATE_ONTOLOGY_TABLES` 登记过的那几张表的原始记录。"""
+
+    def feed(self, record: dict[str, Any]) -> None:
+        kind = str(record.get("kind") or "").strip()
+        if not kind or kind in ("manifest", "checksum"):
+            return
+        self.layers.add(kind)
+        if kind != "redis":
+            return
+        key = str(record.get("key") or "").strip()
+        if not key:
+            return
+        # 逐个报 `stock:agent:夏` 等于让"这个世界有几个人"决定这一格有多长,
+        # 而消费方要判的是"哪一类东西没查过"。
+        self.tables.add(key.split(":", 1)[0])
+        if key in STATE_ONTOLOGY_TABLES:
+            self.rows.append(record)
+
+    def unchecked_tables(self) -> list[str]:
+        """状态层里**没被编译过**的表。下一个 `importance` 会出现在其中一张上。"""
+        return sorted(self.tables - set(STATE_ONTOLOGY_TABLES))
+
+
+def state_records_to_seed(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """把**状态层**里那几张会被编译的表,翻译成和作者层同一个 section 字典。
+
+    翻成同一个形状是这件事的全部要点:**判断只有一份。** 翻译完之后喂给的正是
+    `_precheck_ontology` —— 开机第一秒调的那个函数。另写一份"状态层校验器"的话,
+    两份判断迟早给出不同答案,而那种不一致会表现成"检查器说没问题,开机还是失败",
+    也就是这个洞的第二种写法。
+
+    非 `redis` 记录、表里没登记的键、类型不是 hash 的键**一律放过** —— 这里不是
+    格式校验(那是 `read_world_file` 的活),这里只挑"开机要编译的那几张"。
+    坏掉的行(JSON 解不开、剥壳后不是对象)同样放过:它进不了编译管线,而
+    真开机时它会被 `RedisRows` 那一侧照实报出来,这里替它猜一句反而多一份判断。
+    """
+    seed: dict[str, Any] = {}
+    for record in records:
+        if record.get("kind") != "redis" or record.get("type") != "hash":
+            continue
+        mapped = STATE_ONTOLOGY_TABLES.get(str(record.get("key") or ""))
+        if mapped is None:
+            continue
+        section, unwrap = mapped
+        value = record.get("value")
+        if not isinstance(value, dict):
+            continue
+        rows: list[dict[str, Any]] = []
+        for field in sorted(value):
+            raw = value[field]
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+            if unwrap is not None and isinstance(raw, dict):
+                raw = raw.get(unwrap)
+            if isinstance(raw, dict):
+                rows.append(raw)
+        if rows:
+            seed.setdefault(section, []).extend(rows)
+    return seed
+
+
+def tee_state(records: Iterable[dict[str, Any]], scan: StateScan
+              ) -> Iterator[dict[str, Any]]:
+    """把记录流原样放过去,顺手喂给状态层扫描器。**单趟遍历。**
+
+    和 `media.tee_media` 逐字同一条理由:`world check` 已经是流式读一遍(灯塔湾
+    那份包十几万条状态记录),为了看状态层再读第二遍等于把那条纪律作废。
+    """
+    for record in records:
+        if isinstance(record, dict):
+            scan.feed(record)
+        yield record
