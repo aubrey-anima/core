@@ -645,6 +645,24 @@ def _parse_one(
             errors.extend(f"{label}.{e}" for e in exc.errors)
     for rule in rules:
         where = f"{label}.rules ({rule.id})"
+        # 🔴 **规律发的事件也得是自己的命名空间**(2026-08-27 收紧)。
+        #
+        # 触发器那一层早就查了、会拒(`_parse_trigger` 的 `emit` 那一支),
+        # 而规律这一层从前不查 —— **同一个插件里两种写法两种下场**,
+        # 而作者读不出为什么。发别人的名字下去,订它的插件会以为那件事真的发生过。
+        #
+        # ⚠️ **这是一次收紧,理由是量出来的**:第 1 期到今天四个仓库里一条
+        # `plugin` 记录都没有,`3.8.0` 没打 tag、PyPI 停在 `3.7.0`、线上镜像是
+        # `anima-world:3.7.0`,出厂那三个里唯一发事件的写的就是全名。
+        # **消费方为零,所以现在收最便宜** —— 再晚就真的会破坏谁了。
+        for emit in rule.emits:
+            if not str(emit.type).startswith(f"{plugin_id}."):
+                errors.append(
+                    f"{where}.emit:插件只发得出自己命名空间的事件 —— "
+                    f"要写成 `{plugin_id}.<名字>`,收到 `{emit.type}`。"
+                    "发别人的名字下去,订它的插件会以为那件事真的发生过"
+                    "(触发器那一层一直是这么查的,规律这一层从今天起一样)"
+                )
         if rule.selector_kind != "edge":
             errors.extend(_undeclared_reads(where, rule.reads(), plugin_id, allowed))
             continue
@@ -894,6 +912,18 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
             if spec_out is not None:
                 links.append(spec_out)
 
+    # 🔴 **不认识的键当场拒,别静默丢**(2026-08-27,创作台接第 2 期时测出来的)。
+    #
+    # 从前这一行只挑认识的那几个,多写的**照收然后丢掉** —— 作者写下的那一格
+    # 根本不在,而退出码 0、日志干净。**和「target 写错字静默长出空种类」同族**,
+    # 也和 `sources` 那一层早就有的逐键检查对不上(同一份文件里两种脾气)。
+    unknown = sorted(set(spec) - set(VERB_KEYS))
+    if unknown:
+        errors.append(
+            f"{label}:不认识的键 {unknown} —— 写下去它会被**静默丢掉**,"
+            f"而你看到的只是「我写的那一格没生效」。这一版收的是 {list(VERB_KEYS)}"
+            "(问 `contract --json` 的 `plugins.verb_keys`,别照文档记一份清单)"
+        )
     body = {key: spec[key] for key in _VERB_PASSTHROUGH if key in spec}
     label_text = str(spec.get("label") or "").strip()
     if label_text:
@@ -1085,16 +1115,21 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
             "(按 `contract --json` 的 `plugins.projected_shapes` 探测)"
         )
         mode = "stored"
-    elif mode == "projected" and not namespaced:
+    elif mode == "projected" and (
+            not namespaced
+            or str(spec.get("bearer") or "").strip().startswith(("entity:", "group:"))):
         # 挂在插件自己种类上的事实住在那个实例的量表里,而实例**会被 `destroy`
         # 抹掉** —— 一串折向一个不存在的 owner 的 delta,重放出来的是一个没有主人
         # 的数。要让"东西身上的量"可重放,先得回答"它没了之后那串账归谁",
         # 而那是另一期的事。
         errors.append(
-            f"{label}:挂在插件自己种类上的事实这一版做不了 `projected` —— "
+            f"{label}:挂在**一样东西**上的事实做不了 `projected` —— "
             "那样东西会被 `destroy` 抹掉,而一串折向一个不存在的主人的 delta,"
             "重放出来是一个没有主人的数。挂在 `actor` / `world` / `location` "
-            "上的可以"
+            "上的可以(问 `contract --json` 的 `plugins.projected_bearers`)。"
+            "⚠️ 写在 `kinds` 里和写在顶层 `facts` 里(`bearer: \"entity:…\"`)"
+            "**是同一件事**,两种写法一样拒 —— 从前只拦住了前一种,"
+            "而后一种照收:契约说不收、引擎照收,是这一族最贵的不一致"
         )
         mode = "stored"
 

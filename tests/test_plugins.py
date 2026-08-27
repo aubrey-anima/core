@@ -1691,3 +1691,74 @@ def test_出厂钱包声明的进位就是账本的进位(tmp_path):
         "出厂钱包的进位不是两位了 —— 钱有最小单位,而账本折的就是两位;"
         "两处不一样就是两个钱包,它们只在小数第三位往后分家"
     )
+
+
+# ── 契约说的和引擎做的对不上,三处收口(2026-08-27,创作台接第 2 期时测出来的)──
+#
+# 三条都是同一个形状:**契约里写着不收,而 `parse_plugins` 照收**。
+# 下场比"不支持"更坏 —— 作者写下的那一格**根本不在**,而退出码 0、日志干净。
+# 创作台因此两头都没法判:照契约判是假红,照行为判是帮着引擎丢东西。
+# **把两句话变成一句:引擎照契约拒。**
+
+
+def test_挂在插件种类上的事实_做不了projected_顶层写法也拒():
+    """🔴 **这一格 2b 就写明做不了,而闸只拦住了写在 `kinds` 里那一种。**
+
+    顶层 `facts` 里写 `bearer: "entity:<种类>"` + `projected` **照收** ——
+    而理由一个字没变:那样东西会被 `destroy` 抹掉,一串折向不存在的主人的 delta,
+    重放出来是**一个没有主人的数**。契约那一格(`projected_bearers`)里从来没有
+    `entity:` / `group:`,所以这是"契约说的和引擎做的对不上",不是一条新规矩。
+    """
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{"id": "forge", "version": "1.0.0",
+                        "kinds": {"entity:sword": {"facts": {}}},
+                        "facts": {"锋利": {
+                            "bearer": "entity:forge.sword", "shape": "number",
+                            "mode": "projected",
+                            "sources": [{"event": "payment", "credit": "to"}]}}}],
+                      subscribable=("payment",))
+    joined = "\n".join(raised.value.errors)
+    assert "projected" in joined and "destroy" in joined, joined
+
+
+def test_动词上多写一个键_当场拒而不是静默丢():
+    """🔴 **和「target 写错字静默长出空种类」同族**(§2a 那条)。
+
+    `verb_keys` 报十五个键,而多写的键从前**照收然后丢掉** —— 作者写的那一格
+    根本不在,退出码 0、日志干净。**一个被静默丢掉的声明,比一条报错难查得多。**
+    对照组就在同一份文件里:`sources` 那一层早就逐键查了不认识的键。
+    """
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{"id": "forge", "version": "1.0.0",
+                        "kinds": {"entity:sword": {"facts": {}}},
+                        "verbs": {"磨": {"target": "entity:sword", "label": "磨",
+                                         "cooldown": {"ticks": 5}}}}])
+    joined = "\n".join(raised.value.errors)
+    assert "cooldown" in joined and "verb_keys" in joined, joined
+
+
+def test_插件规律发的事件_也得是自己的命名空间():
+    """**触发器那一层早就查了、会拒;规律这一层从前不查** —— 同一个插件里
+    两种写法两种下场,而作者读不出为什么。
+
+    ⚠️ **这是一次收紧,而它成立的理由是量出来的**:第 1 期到现在,
+    四个仓库里**一条 `plugin` 记录都没有**(`grep -rl '"type": "plugin"'` 答空),
+    `3.8.0` 没打 tag、PyPI 停在 `3.7.0`、线上跑的镜像是 `anima-world:3.7.0`,
+    出厂那三个插件里唯一发事件的写的就是全名。**消费方为零,所以现在收最便宜。**
+    """
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{"id": "qi", "version": "1.0.0",
+                        "facts": {"灵力": {"bearer": "agent", "shape": "number"}},
+                        "rules": [{"id": "回气", "for_each": {"kind": "agent"},
+                                   "set": {"qi.灵力": "qi.灵力 + 1"},
+                                   "emit": [{"type": "耗尽", "when": "qi.灵力 > 5"}]}]}])
+    joined = "\n".join(raised.value.errors)
+    assert "耗尽" in joined and "qi." in joined, joined
+    # 写全名的照收 —— 出厂那个 `invitation.expired` 走的就是这条。
+    ok = parse_plugins([{"id": "qi", "version": "1.0.0",
+                         "facts": {"灵力": {"bearer": "agent", "shape": "number"}},
+                         "rules": [{"id": "回气", "for_each": {"kind": "agent"},
+                                    "set": {"qi.灵力": "qi.灵力 + 1"},
+                                    "emit": [{"type": "qi.耗尽",
+                                              "when": "qi.灵力 > 5"}]}]}])
+    assert ok[0].rules[0].emits[0].type == "qi.耗尽"
