@@ -105,7 +105,15 @@ WORLD_OWNER = "world"
 #
 # 补集本身没有引入任何新东西:它和 `action` 读的是同一份 `_current_action`,
 # 只是取反。而"取反"这件事在数据里不可表达,恰恰会逼作者去改引擎。
-_SELECTOR_KINDS = ("kind", "owner", "action", "not_action")
+#: 🆕 3.8.0 第 2 期:`{"edge": "<插件>.<边类型>"}` —— 作用在**一条边**上。
+#: 表达式里读得到 `src.*` / `dst.*` / `edge.*`(见 `expressions.EDGE_PREFIXES`),
+#: 而 `set` 写的是**边自己的事实**。
+_SELECTOR_KINDS = ("kind", "owner", "action", "not_action", "edge")
+
+#: 上面那张表的公开名字 —— `contract --json` 的 `plugins.rule_selectors` 报的就是它。
+#: **消费方问这一格,别照文档抄一份清单**(那份清单会烂,而烂了的样子是创作台
+#: 对着一条合法的规律报一条假红)。
+RULE_SELECTORS = _SELECTOR_KINDS
 
 
 class RuleError(ValueError):

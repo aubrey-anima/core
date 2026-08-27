@@ -3257,7 +3257,8 @@ anima-world contract --json | jq '.erasure.resume_command'
 | `phases` | `["not_started", "partial", "done"]` | `phase` 的闭集 |
 | `progress_key` | `anima:{world_id}:erasure:{player_id}` | 进度键(也在 `storage.volatile_keys` 里) |
 | `progress_ttl_seconds` | `86400` | 进度键活多久 |
-| `receipt_count_keys` | `["events", "conversations", "messages", "memories_dropped", "memories_redacted", "facts"]` | 回执上**跨片累加**的那几格。**`facts` 缺席 = 这支引擎的抹除够不着玩家量表**(3.7.0 及更早),而它够不着的时候不报错,只是把一行体力留在世界里。读回执用 `.get("facts")` —— ⚠️ **别 `.get("facts", 0)`**:`0` 在这一格上是一句肯定句(「我查过了他身上没有量」),而缺席与 `null` 都不是 |
+| `receipt_count_keys` | `["events", "conversations", "messages", "memories_dropped", "memories_redacted", "facts", "edges"]` | 回执上**跨片累加**的那几格。**`facts` 缺席 = 这支引擎的抹除够不着玩家量表**(3.7.0 及更早),而它够不着的时候不报错,只是把一行体力留在世界里。读回执用 `.get("facts")` —— ⚠️ **别 `.get("facts", 0)`**:`0` 在这一格上是一句肯定句(「我查过了他身上没有量」),而缺席与 `null` 都不是。🆕 **3.8.0 第 1 期多的第七格 `edges`**(任何一端是他的边断掉几条,见 §10.10)**三档和 `facts` 逐字同构** |
+| `receipt_count_gloss` | 七键逐键一句话 | **别拿 `receipt_count_keys` 自己编一份。** `events` 数的是**被改写过的条数**,不是删掉的条数(这条链从不删行)—— 而一份写着「事件 1723」的合规回执,读的人默认会读成"删了 1723 条"。**整格缺席 = 这支引擎没有这一格**(3.8.0 第 1 期之前);一律 `.get("erasure", {}).get("receipt_count_gloss", {})` |
 | `gloss` | 一段人话 | **会随版本长,别拿它做判断** |
 
 ⚠️ **那三格命令里的 `--yes` 一个都不能少,照它原样敲。** 这条命令**默认是预演**
@@ -5121,3 +5122,117 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 开着叙事时条数就差(110 vs 112);关掉叙事条数一样了,**次序仍然不同**。
 **所以"事件日志逐字节相同"这条判据对任何代码都不成立** —— 把它写进闸里只会得到
 一条永远红的检查,而一条永远红的检查等于没有这条检查。
+
+### 10.10 边、插件自己的种类、动词(3.8.0 第 2 期 2a)
+
+§10.1–10.9 那一半只让作者加得了一个**量**。这一节是**图**:东西之间的关系、
+插件自己声明的一族东西、以及**她/他按一下就发生的事**。
+
+#### 边:`plugin.edges`
+
+```jsonc
+"edges": {
+  "member_of": {"label":"门籍", "from":"agent", "to":"group:sect", "exclusive":true,
+    "facts": {"rank": {"shape":"state", "default":"外门", "visibility":"connected",
+                       "values":[{"name":"外门"},
+                                 {"name":"内门","description":"门规是你的规矩。"}]},
+              "门规": {"shape":"text", "default":"不得欺师灭祖", "visibility":"connected"},
+              "资历": {"shape":"number", "default":0, "visibility":"connected"}}}}
+```
+
+| | |
+|---|---|
+| 两端 | `agent` / `player` / `location` / `world` / `entity:<种类>` / `group:<种类>`(`contract.plugins.edge_ends`) |
+| 约束 | `exclusive`(起点唯一)· `exclusive_to`(终点唯一)· `symmetric`(两个方向共一份事实)—— **在 `link` 那一刻查**,不是声明里劝一句 |
+| 事实形状 | `number` / `state` / **`text`**(`contract.plugins.edge_fact_shapes`)。多的那一种不是偏心,是存储的形状:节点事实住量表(`[float, tick]`),边自己那一行本来就是一份 JSON |
+| 存储 | `anima:{world_id}:edge:{类型}`,field 是 `起点\x00终点`。**一个类型一个 hash** —— `for_each:{edge:…}` 是每 tick 的事,而 `edge:{type}:{from}` 那种形状下"这个类型有哪些边"只能靠 `SCAN`,`SCAN` 是 O(整个 keyspace) |
+| 易失吗 | 🟢 **不是。** 边是世界的内容,和 `:kinds` 同一类 → `storage.volatile_keys` 一个字没动 |
+| 可见性 | 阶梯多一档 `connected`:有这条边连着的两端读得到(门规对弟子、秘密对知情人) |
+
+⚠️ **声明里两个键叫 `from`/`to`,表达式里的前缀是 `src`/`dst`** —— `from` 是
+Python 关键字,而表达式是 `ast.parse` 解析的:`from.x` 连语法都过不去(实测
+`invalid syntax`)。**一个解析不出来的名字不是名字。** 两套词只在这一处分岔。
+
+#### 插件声明的种类:`plugin.kinds`
+
+```jsonc
+"kinds": {"group:sect": {"gloss":"一个门派", "budget":3,
+            "facts": {"库银": {"shape":"number", "default":100, "visibility":"here"}}},
+          "entity:sword": {"gloss":"一把剑", "facts": {…}}}
+```
+
+🔴 **它编译成一个普普通通的本体种类**(`ontology.kinds`,id 是 `<插件>.<名>`),
+不是引擎里另开的一族。**这一处判断是这一期最省事、也最该这么做的一个**:种类那一层
+已经有出生自检(`check_entity`)、「生成必须要代价」、`prompt.budget`、可见性、
+拒绝语、`resolve` 的跨引用闸 —— 插件另建一套的话,那几件要么重写一遍、要么
+**悄悄不生效**,而"悄悄不生效"正是这个仓库最怕的形状。
+
+⚠️ **挂在插件自己种类上的事实,存储键不带 `<插件>.` 前缀**(`Fact.namespaced`):
+那个种类的 id 本身就是命名空间。挂在**共用**载体上的(`actor`/`world`/`location`)
+照旧带 —— 那儿两个插件各声明一个「重量」是会撞的。
+⚠️ `group` 与 `entity` 这一版**只差一个记号**(`members`)。设计稿 §13 ⑥ 自己说不准
+这一刀该不该切,而只属于 group 的行为(解散时成员怎么办)这一期一件都没做 ——
+**现在分家是在猜**;记号存着,等第一件真的只属于 group 的行为出现时再分。
+
+#### 动词:`plugin.verbs`,按 tool-calling 的 JSON schema 声明
+
+```jsonc
+"verbs": {"入门": {"target":"group:sect", "label":"拜入门下",
+                   "description":"递上名帖,拜入这个门派",
+                   "costs": {"体力":"me_体力 - 5"},
+                   "effects": [{"link": {"type":"member_of","from":"self","to":"target"}}]}}
+```
+
+- 设计 §12.3:**NPC 挑动词和玩家点按钮读的是同一份定义**(`Verb.schema()` 就是
+  tool-calling 那份 `{name, description, parameters}`)。它们从前是两份,一份在
+  提示词里、一份在界面上,分岔了不报错。
+- **它编译成 target 那个种类上的一个 affordance**,`requires` / `costs` /
+  `consumes` / `duration` / `occupies` / `spawn` / `destroys_target` /
+  `participants` / `importance` **语义一个字都没重新定义**(`contract.plugins.verb_keys`)。
+- **`effects` 这一版只收 `link` / `unlink` / `transfer`**
+  (`contract.plugins.verb_effects`)。改量写在动词自己的 `set` 里 —— 同一件事
+  两个写法迟早在语义上分岔。`from`/`to` 认 `self` / `target` / `spawned` /
+  一个光写的节点 id;**认不出就是空串,不猜**。
+  ⚠️ 边效果落在**生之后、灭之前**:`spawn` 完才拿得到 `spawned` 的 id,而灭那一步
+  会把这个东西身上的边一并断掉。
+- 🔴 **必须有 `target`**(`contract.plugins.verb_requires_target`)。「开宗立派」那种
+  不对着任何东西做的动词今天没有一条调用路(能力调用一律是
+  `act(她, "interact", {target, verb})`)—— **装上去让谁也点不动,比开不了机坏。**
+- 🔴 **`target` 还不能是 `agent`**(`contract.plugins.verb_target_forms`)。
+  「拜某人为师」「把东西给某人」这一族这一期**写不出来**,而这不是漏了:
+  内置种类只准声明量(`ontology.DECLARABLE_BUILTINS`),而角色也不在
+  `ontology.entities` 里。开这一格 = 开内核的一道闸,连带离线那两扇门
+  (`validate world` / `world check`)要同轮跟上 —— 单独一轮的事。
+
+#### 规律作用在边上:`for_each: {"edge": "<边类型>"}`
+
+表达式里三个前缀:`edge.<插件>.<事实>` · `src.<量>` · `dst.<量>`。
+**`set` 只写得到边自己的事实**(声明里有的那几个,写别的**开不了机**)——
+写两端节点身上的量是扇入,和 `bad_output_name` 挡的那件事逐字同一种。
+
+🔴 **边上的规律和量上的规律分两趟跑,而这不是"顺手分个类"**:两条路共用
+`_rule_last_run` 那张水位表,`evaluate_due` 会替每一条到点的规律盖戳(包括它自己
+一条都算不动的边规律),于是紧跟其后的 `_evaluate_edge_rules` 每一轮都读到
+"这一 tick 已经跑过了"而整个跳过 —— **边上的规律一辈子不跑,而 `rule_stats()`
+每一轮都在涨**(那个数是 `evaluate_due` 数的)。判据
+`tests/test_plugins.py::test_边上的规律_读得到边自己也读得到两端`。
+
+#### 一样东西没了,挂在它身上的边一条不留
+
+`Scheduler._unmake` 从三张表变成**四**张。留着的下场和另外三样一样安静:那条规律
+每一轮在一条指向坟墓的边上求值 → 跳过 → `rule_stats()` 报 skipped;`connected`
+那一档会把一个不存在的门派的门规继续念给她听。判据
+`tests/test_plugins.py::test_一样东西没了_挂在它身上的边一条不留`。
+
+#### `contract --json` 的 `plugins` 段这一期多的格
+
+| 格 | 值 | 干什么用 |
+|---|---|---|
+| `kind_prefixes` | `["entity:","group:"]` | **缺席 = 这支引擎不认插件的种类与动词** |
+| `kind_id_syntax` | `<plugin>.<local>` | 编译出来那个本体种类 id 长什么样 |
+| `verb_declaration` / `verb_keys` | `"tool-calling"` / 作者写得到的键 | 校验器照它判,别硬编码 |
+| `verb_effects` | `["link","unlink","transfer"]` | 动词的 `effects` 这一版收哪几条 |
+| `verb_requires_target` | `true` | 没有 target 的动词**开不了机** |
+| `verb_target_forms` | `["entity:","group:","<作者写的种类 id>"]` | ⚠️ **`agent` 不在里面** |
+| `rule_selectors` | `[…,"edge"]` | `for_each` 认哪几种 |
+| `edge_ends` / `edge_fact_shapes` / `edge_storage_key` / `edge_expression_prefixes` | | 边那一族(第 2 期 2a 地基那一轮已在) |

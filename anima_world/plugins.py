@@ -155,10 +155,20 @@ class Fact:
     #: `text` 那一支专用(只在边上收得下,见 `EDGE_FACT_SHAPES`)。
     text_default: str = ""
     max_chars: int = DEFAULT_TEXT_MAX_CHARS
+    #: 存储键要不要带 `<plugin>.` 前缀。
+    #:
+    #: 🔴 **挂在插件自己声明的种类上的事实,不带。** 那个种类的 id 本身就是
+    #: `<plugin>.<名>`(`forge.sword`)—— **种类就是命名空间**,再前缀一次既多余,
+    #: 又会撞上本体那一层两道既有的闸(量名不许带 `.`、affordance 的 `set` 写不到
+    #: 带点号的名字上)。而那两道闸挡的是**真的**跨实体写,不该为插件放开。
+    #: 挂在**共用**载体上的(`actor` / `world` / `location`)照旧带 —— 那儿两个插件
+    #: 各声明一个「重量」是会撞的。
+    namespaced: bool = True
 
     @property
     def qualified(self) -> str:
-        return f"{self.plugin}.{self.key}"
+        """存储里那个键。见 `namespaced` —— 插件自己种类上的事实是**裸名字**。"""
+        return f"{self.plugin}.{self.key}" if self.namespaced else self.key
 
     @property
     def owner_kind(self) -> str:
@@ -206,6 +216,24 @@ class Fact:
         word = self.word(float(value))
         return f"{self.label_text} {word}" if word else ""
 
+    def quantity_spec(self) -> dict[str, Any]:
+        """这条事实喂给本体那一层时长什么样(`kinds[].quantities` 的一格)。
+
+        **它就是今天的 `Quantity` 声明**,一个新字段都不加 —— `visibility` /
+        `label` / `unit` / `bands` 那几格本体层本来就认。`state` 的 `values`
+        翻成 `bands`(档位就是序号、档词就是值名),于是**一套渲染,不是两套**。
+        """
+        spec: dict[str, Any] = {"default": self.default, "visibility": self.visibility}
+        if self.label:
+            spec["label"] = self.label
+        if self.unit:
+            spec["unit"] = self.unit
+        if self.shape == "state":
+            spec["bands"] = [[float(i), name] for i, (name, _n) in enumerate(self.values)]
+        elif self.bands:
+            spec["bands"] = [[float(t), w] for t, w in self.bands]
+        return spec
+
     def note(self, value: float) -> str:
         """她读到的那句**描述**(档的第三项 / 值的 description);没有就是空串。"""
         if self.shape == "state":
@@ -218,6 +246,87 @@ class Fact:
             if float(value) >= threshold:
                 chosen = position
         return self.band_notes[chosen] if chosen < len(self.band_notes) else ""
+
+
+@dataclass(frozen=True)
+class PluginKind:
+    """插件声明的一种**节点**:`entity:<k>`(东西)或 `group:<k>`(有成员的)。
+
+    🔴 **它编译成一个普普通通的本体种类**(`ontology.kinds`,id 是
+    `<plugin>.<local>`),而不是引擎里另开的一族。这一条是这一期最省事、也最该
+    这么做的一处判断:种类那一层已经有**出生自检**(`check_entity`)、
+    **"生成必须要代价"**、`prompt.budget`、可见性、拒绝语 —— 插件另建一套的话,
+    那几件要么重写一遍、要么悄悄不生效,而"悄悄不生效"正是这个仓库最怕的形状。
+
+    ⚠️ **`group` 与 `entity` 这一版只差一个记号。** 设计稿自己在 §13 ⑥ 里说不准
+    这一刀该不该切(「组织有的行为(解散时成员怎么办)是 entity 没有的」)——
+    那些行为这一期一件都没做,所以**现在就把它们做成两种东西是在猜**。
+    记号存着(`members`),契约里报出来,等第一件真的只属于 group 的行为出现时
+    再分家 —— 那时才知道分在哪儿。
+    """
+
+    plugin: str
+    local: str
+    group: bool = False
+    gloss: str = ""
+    budget: int | None = None
+    facts: dict[str, "Fact"] = field(default_factory=dict)
+
+    @property
+    def kind_id(self) -> str:
+        """本体里那个种类 id。**带命名空间** —— 两个插件各声明一个 `item` 不会撞。
+
+        ⚠️ 种类 id 不许带**冒号**(那是实例 id 的分隔符),但点号是可以的,
+        所以 `economy.item:coffee` 这种实例 id 拆得开:`owner_kind` 按第一个冒号切。
+        """
+        return f"{self.plugin}.{self.local}"
+
+
+@dataclass(frozen=True)
+class Verb:
+    """插件给世界加的一件"能做的事"。
+
+    **按 tool-calling 的 JSON schema 声明**(`name` / `description` / `parameters`,
+    设计 §12.3):这样**NPC 挑动词和玩家点按钮读的是同一份定义** —— 而它们从前是
+    两份,一份在提示词里、一份在界面上,分岔了不报错。
+
+    🔴 **它编译成目标那个种类上的一个 affordance。** 于是 `requires` / `costs` /
+    `consumes` / `duration` / `occupies` / `spawn` / `destroys_target` 那一整摞
+    **一件都不用重写** —— 连"声明了 `spawn` 却没写代价就开不了机"那条纪律都跟着来。
+    """
+
+    plugin: str
+    name: str
+    target: str = ""
+    label: str = ""
+    description: str = ""
+    body: dict[str, Any] = field(default_factory=dict)
+    #: `link` / `unlink` / `transfer` 那三条,原样交给 `Scheduler.apply_edge_effect`。
+    #:
+    #: 🔴 **动词必须连得起边来,不能只有触发器那一条路。** 设计稿 §4.2 那四个例子
+    #: (开宗立派 / 逐出 / 提拔 / 给东西)**没有一个**是"等某件事发生" —— 它们全是
+    #: 「他按一下」。只给触发器的话,作者写「入门」时唯一的写法是自己 emit 一条
+    #: 事件再订它,而那条路上"按下去到底成没成"隔了一整个 tick 才知道。
+    links: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def qualified(self) -> str:
+        return f"{self.plugin}.{self.name}"
+
+    def schema(self) -> dict[str, Any]:
+        """给模型看的那份工具声明(tool-calling 的形状)。"""
+        return {
+            "name": self.qualified,
+            "description": self.description or self.label or self.qualified,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string",
+                               "description": f"对哪一个 `{self.target}` 做"},
+                },
+                "required": ["target"],
+            },
+        }
 
 
 @dataclass(frozen=True)
@@ -269,6 +378,8 @@ class Plugin:
     reads: frozenset[str] = frozenset()
     facts: dict[str, Fact] = field(default_factory=dict)
     edges: dict[str, EdgeType] = field(default_factory=dict)
+    kinds: dict[str, PluginKind] = field(default_factory=dict)
+    verbs: dict[str, Verb] = field(default_factory=dict)
     rules: tuple[Rule, ...] = ()
     triggers: tuple[Trigger, ...] = ()
 
@@ -404,6 +515,19 @@ def _parse_one(
                 continue
             facts[fact.key] = fact
 
+    kinds: dict[str, PluginKind] = {}
+    raw_kinds = entry.get("kinds") or {}
+    if not isinstance(raw_kinds, dict):
+        errors.append(f"{label}:kinds 必须是「`entity:<名>` / `group:<名>` → 声明」的对象")
+    else:
+        for name, spec in raw_kinds.items():
+            try:
+                kind = _parse_kind(plugin_id, f"{label}.kinds.{name}", str(name), spec)
+            except PluginError as exc:
+                errors.extend(exc.errors)
+                continue
+            kinds[kind.local] = kind
+
     edges: dict[str, EdgeType] = {}
     raw_edges = entry.get("edges") or {}
     if not isinstance(raw_edges, dict):
@@ -416,6 +540,24 @@ def _parse_one(
                 errors.extend(exc.errors)
                 continue
             edges[edge.name] = edge
+
+    # ⚠️ **动词排在边后面,而这个顺序是承重的**:动词的 `effects` 里那三条
+    # (`link`/`unlink`/`transfer`)要当场查"这个插件声明过这种边吗" ——
+    # 反过来的话那道闸只能查一张空表,于是它对每一条都说"没声明过",
+    # 或者(更坏)被写成"表是空的就放行"。
+    verbs: dict[str, Verb] = {}
+    raw_verbs = entry.get("verbs") or {}
+    if not isinstance(raw_verbs, dict):
+        errors.append(f"{label}:verbs 必须是「动词名 → 声明」的对象")
+    else:
+        for name, spec in raw_verbs.items():
+            try:
+                verb = _parse_verb(plugin_id, f"{label}.verbs.{name}", str(name),
+                                   spec, kinds, edges)
+            except PluginError as exc:
+                errors.extend(exc.errors)
+                continue
+            verbs[verb.name] = verb
 
     # 自己的事实 + 声明过的依赖 = 这个插件的表达式允许读到的命名空间名字。
     allowed = {f"{plugin_id}.{key}" for key in facts} | reads
@@ -436,8 +578,43 @@ def _parse_one(
         except RuleError as exc:
             errors.extend(f"{label}.{e}" for e in exc.errors)
     for rule in rules:
-        errors.extend(_undeclared_reads(f"{label}.rules ({rule.id})", rule.reads(),
-                                        plugin_id, allowed))
+        where = f"{label}.rules ({rule.id})"
+        if rule.selector_kind != "edge":
+            errors.extend(_undeclared_reads(where, rule.reads(), plugin_id, allowed))
+            continue
+        # 🆕 第 2 期:`for_each: {"edge": …}`。**两道闸和节点那一层不是同一道**,
+        # 因为读写的对象换了:读得到的是 `edge.*` / `src.*` / `dst.*`,
+        # 写得到的**只有边自己的事实**。
+        local = rule.selector_value
+        if local.startswith(f"{plugin_id}."):
+            local = local[len(plugin_id) + 1:]
+        declared = edges.get(local)
+        if declared is None:
+            errors.append(
+                f"{where}.for_each.edge:这个插件没声明过 `{local}` 这种边;"
+                f"声明过的是 {sorted(edges)} —— **只跑得动自己声明的边**。"
+                "放行的话这条规律每一轮都在一张空表上求值,而 `rule_stats()` "
+                "报的是 skipped:专门用来回答\"这层跑通了吗\"的仪表说的是"
+                "\"没什么可算的\""
+            )
+            continue
+        rules = tuple(replace(r, selector_value=f"{plugin_id}.{local}")
+                      if r is rule else r for r in rules)
+        for name in rule.outputs:
+            fact_name = name[len(plugin_id) + 1:] if name.startswith(f"{plugin_id}.") \
+                else name
+            if fact_name not in declared.facts:
+                errors.append(
+                    f"{where}.set.{name}:`{local}` 这种边上没声明过 `{fact_name}`;"
+                    f"这条边身上有的是 {sorted(declared.facts)}。"
+                    "**边上的规律只写得到边自己的事实** —— 写两端节点身上的量是"
+                    "扇入,和 `bad_output_name` 挡的那件事逐字同一种:一条作用在"
+                    "一百条边上的规律,每条读到的都是同一份旧值"
+                )
+        errors.extend(_undeclared_reads(
+            where, rule.reads(), plugin_id,
+            allowed | {f"edge.{plugin_id}.{key}" for key in declared.facts},
+            on_edge=True))
 
     triggers: list[Trigger] = []
     raw_triggers = entry.get("triggers") or []
@@ -474,8 +651,200 @@ def _parse_one(
         engine_min=str(entry.get("engine_min") or "").strip(),
         label=str(entry.get("label") or "").strip(),
         reads=frozenset(reads), facts=facts, edges=edges,
-        rules=rules, triggers=tuple(triggers),
+        kinds=kinds, verbs=verbs, rules=rules, triggers=tuple(triggers),
     )
+
+
+#: 插件声明的节点两种前缀。`group` 多一个 `members` 记号(见 `PluginKind`)。
+KIND_PREFIXES = ("entity:", "group:")
+
+#: 动词的 `effects` 这一版收哪几条。**`set` 不在这儿** —— 动词改量走它自己的
+#: `set`(本体那一层已经有了,`me_*` / `have_*` 都认),再开一个入口就是同一件事
+#: 两个写法,而两个写法迟早在语义上分岔。
+EDGE_VERB_EFFECTS = ("link", "unlink", "transfer")
+
+
+
+def _parse_kind(plugin_id: str, label: str, name: str, spec: Any) -> PluginKind:
+    errors: list[str] = []
+    if not isinstance(spec, dict):
+        raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
+    prefix = next((p for p in KIND_PREFIXES if name.startswith(p)), "")
+    if not prefix:
+        errors.append(
+            f"{label}:名字要写成 `entity:<名>` 或 `group:<名>`,收到 {name!r} —— "
+            "**前缀是承重的**:它说的是这一族东西有没有成员"
+        )
+    local = name[len(prefix):] if prefix else name
+    if not local.strip() or any(m in local for m in (*_BAD_FACT_MARKS, ":")):
+        errors.append(f"{label}:`{prefix}` 后面那个名字不能为空,也不能带冒号/点号/空格")
+
+    facts: dict[str, Fact] = {}
+    raw_facts = spec.get("facts") or {}
+    if not isinstance(raw_facts, dict):
+        errors.append(f"{label}.facts 必须是「事实名 → 声明」的对象")
+    else:
+        for key, fact_spec in raw_facts.items():
+            body = dict(fact_spec) if isinstance(fact_spec, dict) else fact_spec
+            if isinstance(body, dict):
+                # 挂在这个种类上 —— 作者不必再写一遍 bearer。
+                body.setdefault("bearer", f"entity:{plugin_id}.{local}")
+            try:
+                fact = _parse_fact(plugin_id, f"{label}.facts.{key}", str(key), body,
+                                   namespaced=False)
+            except PluginError as exc:
+                errors.extend(exc.errors)
+                continue
+            facts[fact.key] = fact
+
+    budget = spec.get("budget", (spec.get("prompt") or {}).get("budget")
+                      if isinstance(spec.get("prompt"), dict) else None)
+    if budget is not None:
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            errors.append(f"{label}.budget:{budget!r} 不是一个数")
+            budget = None
+    if errors:
+        raise PluginError(errors)
+    return PluginKind(
+        plugin=plugin_id, local=local, group=name.startswith("group:"),
+        gloss=str(spec.get("gloss") or "").strip(), budget=budget, facts=facts,
+    )
+
+
+#: 动词声明里,**原样交给本体那一层**的那几个键。它们的语义一个字都不重新定义 ——
+#: `AFFORDANCE_KEYS` 是权威,这里只是把作者写的那份转交过去。
+_VERB_PASSTHROUGH = (
+    "when", "set", "requires", "costs", "consumes", "duration", "occupies",
+    "spawn", "destroys_target", "participants", "importance",
+)
+
+#: 动词声明里作者写得到的键。**消费方问这一格,别照文档维护一份清单** ——
+#: 那份清单会烂,而烂了的样子是创作台对着一份合法声明报一条假红。
+VERB_KEYS = ("target", "label", "description", "effects", *_VERB_PASSTHROUGH)
+
+
+def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
+                kinds: Mapping[str, PluginKind],
+                edges: Mapping[str, "EdgeType"] | None = None) -> Verb:
+    edges = edges or {}
+    errors: list[str] = []
+    if not isinstance(spec, dict):
+        raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
+    if not name.strip() or any(m in name for m in (*_BAD_FACT_MARKS, ":")):
+        errors.append(f"{label}:动词名不能为空,也不能带冒号/点号/空格")
+
+    target = str(spec.get("target") or "").strip()
+    if not target:
+        errors.append(
+            f"{label} 少了 target —— **这一版只收有目标的动词**。"
+            "「开宗立派」那种不对着任何东西做的动词还没有一条调用路"
+            "(今天的能力调用一律是 `act(她, interact, {target, verb})`),"
+            "写了它这个世界就该开不了机,而不是装上去之后谁也点不动它"
+        )
+    else:
+        prefix = next((p for p in KIND_PREFIXES if target.startswith(p)), "")
+        local = target[len(prefix):] if prefix else target
+        if prefix and local not in kinds:
+            errors.append(
+                f"{label}.target:这个插件没声明过 `{target}`;"
+                f"声明过的是 {sorted(KIND_PREFIXES[0] + k for k in kinds)}"
+            )
+
+    links: list[dict[str, Any]] = []
+    raw_effects = spec.get("effects") or []
+    if not isinstance(raw_effects, list):
+        errors.append(f"{label}.effects 必须是列表")
+    else:
+        for position, effect in enumerate(raw_effects):
+            where = f"{label}.effects[{position}]"
+            if not isinstance(effect, dict) or len(effect) != 1:
+                errors.append(
+                    f"{where}:要写成 `{{\"link\": …}}` / `{{\"unlink\": …}}` / "
+                    f"`{{\"transfer\": …}}`,一条一个原语"
+                )
+                continue
+            (kind, body_spec), = effect.items()
+            if kind not in ("link", "unlink", "transfer"):
+                # `set` / `emit` 那两条**不走这儿**:动词改量走 `set`(本体那一层
+                # 已经有了,而且它认 `me_*` / `have_*`),`emit` 走 `entity_interaction`
+                # 那条既有的路。在这儿再开一个入口 = 同一件事两个写法,而两个写法
+                # 迟早在语义上分岔。
+                errors.append(
+                    f"{where}:动词的 `effects` 这一版只收 "
+                    f"{list(EDGE_VERB_EFFECTS)} —— 改量写在动词自己的 `set` 里"
+                    "(那是本体那一层,`me_*` / `have_*` 都认)"
+                )
+                continue
+            spec_out = _parse_link_effect(plugin_id, where, kind, body_spec,
+                                          edges, errors)
+            if spec_out is not None:
+                links.append(spec_out)
+
+    body = {key: spec[key] for key in _VERB_PASSTHROUGH if key in spec}
+    label_text = str(spec.get("label") or "").strip()
+    if label_text:
+        body["label"] = label_text
+    if errors:
+        raise PluginError(errors)
+    return Verb(plugin=plugin_id, name=name, target=target, label=label_text,
+                description=str(spec.get("description") or "").strip(), body=body,
+                links=tuple(links))
+
+
+def verb_kind_id(plugin_id: str, target: str) -> str:
+    """这个动词挂在哪个**本体种类**上。
+
+    ⚠️ **只有一份判断。** 编译 `kinds` 行那一处和登记边效果那一处必须答同一个
+    答案 —— 各算一遍的话,动词会挂在 A 上而它的边效果登记在 B 上,于是
+    **点得动、什么也不发生**,而两边的日志都干净。
+    """
+    prefix = next((p for p in KIND_PREFIXES if target.startswith(p)), "")
+    return f"{plugin_id}.{target[len(prefix):]}" if prefix else target
+
+
+def compile_kind_rows(plugins: Iterable[Plugin]) -> list[dict[str, Any]]:
+    """插件声明的种类与动词 → **普普通通的本体 `kinds` 行**。
+
+    这一步是这一期最省事的那处判断:把它们喂进作者层那条已经在跑的路
+    (`_precheck_ontology` → `_seed_ontology` → `_load_ontology` → `_apply_ontology`),
+    于是**出生自检、"生成必须要代价"、`prompt.budget`、可见性、拒绝语、
+    `resolve` 的跨引用闸**一件都不用重写 —— 而重写它们的下场是"要么重写一遍、
+    要么悄悄不生效"。
+
+    ⚠️ **量名带命名空间,动词名不带。** 量住在一张**跨种类共用**的表里
+    (`stock:{owner}`),所以两个插件各声明一个「重量」必须分得开;而动词住在
+    **它自己那个种类**的声明里,`economy.item` 上的 `买` 和 `sect.token` 上的 `买`
+    本来就不会碰面 —— 给它加前缀只会让她提示词里读到 `economy.买`,那是噪音,
+    而她要照着它行动。
+    """
+    by_kind: dict[str, dict[str, Any]] = {}
+    for plugin in plugins:
+        for kind in plugin.kinds.values():
+            row: dict[str, Any] = {"id": kind.kind_id, "quantities": {}, "affordances": {}}
+            if kind.gloss:
+                row["gloss"] = kind.gloss
+            if kind.budget is not None:
+                row["prompt"] = {"budget": kind.budget}
+            for fact in kind.facts.values():
+                row["quantities"][fact.qualified] = fact.quantity_spec()
+            by_kind[kind.kind_id] = row
+    for plugin in plugins:
+        for verb in plugin.verbs.values():
+            kind_id = verb_kind_id(plugin.id, verb.target)
+            row = by_kind.get(kind_id)
+            if row is None:
+                # 挂在**别人的 / 内核的**种类上(`agent`、作者写的 `tree`)——
+                # 那一行不归这里造,交给调用方并进去。
+                row = by_kind.setdefault(kind_id, {"id": kind_id, "quantities": {},
+                                                   "affordances": {}, "_merge": True})
+            row["affordances"][verb.name] = dict(verb.body)
+    return [
+        {k: v for k, v in row.items() if k != "_merge" and (v or k == "id")}
+        for row in by_kind.values()
+    ]
+
 
 
 #: 边的两端认哪几种节点。⚠️ **和 `bearer` 不是一张表**:边连的是**节点**,
@@ -536,7 +905,8 @@ def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:
 
 
 def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
-                *, shapes: tuple[str, ...] = FACT_SHAPES) -> Fact:
+                *, shapes: tuple[str, ...] = FACT_SHAPES,
+                namespaced: bool = True) -> Fact:
     errors: list[str] = []
     if not key.strip():
         raise PluginError([f"{label}:事实名不能为空"])
@@ -599,7 +969,7 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
                     default=0.0, visibility=visibility,
                     label=str(spec.get("label") or "").strip(),
                     text_default=str(spec.get("default") or ""),
-                    max_chars=max_chars)
+                    max_chars=max_chars, namespaced=namespaced)
     if shape == "state":
         raw_values = spec.get("values")
         if not isinstance(raw_values, list) or not raw_values:
@@ -657,6 +1027,7 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
         visibility=visibility, label=str(spec.get("label") or "").strip(),
         unit=str(spec.get("unit") or "").strip(), bands=bands,
         band_notes=tuple(notes), values=tuple(values), low=low, high=high,
+        namespaced=namespaced,
     )
 
 
@@ -801,26 +1172,10 @@ def _parse_trigger(
                 emits.append({"type": event_type, "payload": dict(payload),
                               "text": str(body.get("text") or "")})
             elif kind in ("link", "unlink", "transfer"):
-                if not isinstance(body, dict):
-                    errors.append(f"{where}.{kind} 必须是对象")
-                    continue
-                edge_type = str(body.get("type") or "").strip()
-                if not edge_type:
-                    errors.append(f"{where}.{kind} 少了 type")
-                    continue
-                local = edge_type[len(plugin_id) + 1:] \
-                    if edge_type.startswith(f"{plugin_id}.") else edge_type
-                if local not in edges:
-                    errors.append(
-                        f"{where}.{kind}.type:这个插件没声明过 `{local}` 这种边;"
-                        f"声明过的是 {sorted(edges)} —— **只连得动自己声明的边**,"
-                        "别的插件的边由它自己管"
-                    )
-                    continue
-                links.append({"op": kind, "type": f"{plugin_id}.{local}",
-                              "from": body.get("from"), "to": body.get("to"),
-                              "by_dst": bool(body.get("by_dst")),
-                              "facts": dict(body.get("facts") or {})})
+                spec_out = _parse_link_effect(plugin_id, where, kind, body,
+                                              edges, errors)
+                if spec_out is not None:
+                    links.append(spec_out)
             else:
                 errors.append(f"{where}:不认识的效果 `{kind}`;这一版有 {list(EFFECTS)}")
 
@@ -839,17 +1194,64 @@ def _parse_trigger(
                    links=tuple(links))
 
 
+#: 边那三条效果里,`from` / `to` 认得出的几个词。**认不出就是一个光名字**
+#: (当成节点 id 用),`Scheduler._resolve_node` 那一句"认不出就是空串,不猜"是同一条。
+EDGE_EFFECT_NODES = ("self", "target", "spawned", "event.who")
+
+
+def _parse_link_effect(
+    plugin_id: str, where: str, kind: str, body: Any,
+    edges: Mapping[str, "EdgeType"], errors: list[str],
+) -> dict[str, Any] | None:
+    """`link` / `unlink` / `transfer` 那三条的声明。**触发器和动词共用这一份。**
+
+    共用是承重的:两份判断迟早分岔,而分岔的样子是"同一条 `link` 写在触发器里
+    过得了闸、写在动词里过不了",作者读不出为什么。
+    """
+    if not isinstance(body, dict):
+        errors.append(f"{where}.{kind} 必须是对象")
+        return None
+    edge_type = str(body.get("type") or "").strip()
+    if not edge_type:
+        errors.append(f"{where}.{kind} 少了 type")
+        return None
+    local = edge_type[len(plugin_id) + 1:] \
+        if edge_type.startswith(f"{plugin_id}.") else edge_type
+    if local not in edges:
+        errors.append(
+            f"{where}.{kind}.type:这个插件没声明过 `{local}` 这种边;"
+            f"声明过的是 {sorted(edges)} —— **只连得动自己声明的边**,"
+            "别的插件的边由它自己管"
+        )
+        return None
+    return {"op": kind, "type": f"{plugin_id}.{local}",
+            "from": body.get("from"), "to": body.get("to"),
+            "by_dst": bool(body.get("by_dst")),
+            "facts": dict(body.get("facts") or {})}
+
+
 #: 表达式里**不必声明**就读得到的名字(内核的日历与流逝)。
 _BUILTIN_READS = frozenset({"dt", "now", "day", "hour", "minute", "minute_of_day"})
 
 
 def _undeclared_reads(
     label: str, names: Iterable[str], plugin_id: str, allowed: set[str],
-    *, event_ok: bool = False,
+    *, event_ok: bool = False, on_edge: bool = False,
 ) -> list[str]:
-    """读了没声明的东西 —— **开机失败并点名**(插件系统那条读边界的落点)。"""
+    """读了没声明的东西 —— **开机失败并点名**(插件系统那条读边界的落点)。
+
+    `on_edge=True` 是 `for_each: {"edge": …}` 那一支:表达式里多三个前缀
+    (`edge.` / `src.` / `dst.`)。**前缀剥掉之后判据一个字没变** —— 剥不掉的
+    才是真的越界。另写一份判断的下场是两边迟早给出不同答案,而那种不一致
+    表现成"边上的规律放行了一个节点上放不行的名字"。
+    """
     out: list[str] = []
     for name in sorted(names):
+        if on_edge:
+            for prefix in ("edge.", "src.", "dst."):
+                if name.startswith(prefix) and name not in allowed:
+                    name = name[len(prefix):]
+                    break
         bare = name[3:] if name.startswith("me_") else name
         if name in _BUILTIN_READS or bare in _BUILTIN_READS:
             continue

@@ -1698,6 +1698,21 @@ def build_serve_scheduler(
     # 写之前**:本体声明本来就验得动,它依赖的规律/地点/物品三样,库里那份读得到、
     # 文件里那份就在手上。验不过就一个字都不写 —— 和能力调用被拒时"一个字都不写"
     # 是同一条。
+    # 🔴 **插件声明的种类与动词,在这里并进作者层的 `kinds`。**
+    #
+    # 它们从此就是**普普通通的本体种类** —— 于是下面那条已经在跑的路
+    # (预检 → 播种 → 装载 → `_apply_ontology`)一个字都不用改,而**出生自检、
+    # 「生成必须要代价」、`prompt.budget`、可见性、拒绝语、`resolve` 的跨引用闸**
+    # 一件都不用重写。给插件另起一套的下场是那几件要么重写一遍、要么悄悄不生效,
+    # 而"悄悄不生效"正是这个仓库最怕的形状。
+    #
+    # **必须排在预检之前**:预检验的就是这份 `kinds`,而插件的种类要和作者写的
+    # 那些一起过同一道闸 —— 晚一步的话,一个引用不到的 `spawn.kind` 会绕过预检,
+    # 到 `_load_ontology` 那儿才炸,而那时表已经写过几张了。
+    if seed_author_layer:
+        world_seed = _merge_plugin_kinds(
+            config_store, RedisPluginStore(redis, world_id), world_seed)
+
     if seed_author_layer and world_seed and world_seed.get("kinds"):
         _precheck_ontology(world_seed, rules_store, location_store, economy_store,
                            ontology_store if merge_author else None)
@@ -2890,7 +2905,64 @@ def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list
     ]
 
 
-def _factory_plugins(scheduler: Any) -> list[dict[str, Any]]:
+def _plugin_bodies(config_store: Any, plugin_store: Any,
+                   world_seed: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """这个世界这一趟要装的插件声明,**已经按"谁赢"合并好**。
+
+    三个来源,后面的赢前面的:**出厂**(`_factory_plugins`,由配置开关决定)→
+    **库里那几行**(上一次装的,声明原文存在 `body` 里)→ **作者层这一份**
+    (`--world-file` 或创世)。
+    ⚠️ **出厂那几个 id 上 `_factory_plugins` 是唯一权威** —— 库里那一行是上一次装的
+    痕迹,不是"该不该装"的答案(不滤掉的话 `needs.enabled` 关掉之后它会自己活回来)。
+    """
+    from anima_world.plugins import merge_bodies, stored_bodies
+
+    incoming = [
+        dict(row) for row in ((world_seed or {}).get("plugins") or [])
+        if isinstance(row, dict)
+    ]
+    stored = [row for row in stored_bodies(plugin_store)
+              if str(row.get("id") or "") not in FACTORY_PLUGINS]
+    return merge_bodies(merge_bodies(_factory_plugins(config_store), stored), incoming)
+
+
+def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
+                        world_seed: dict[str, Any] | None,
+                        ticks_per_day: int = 288) -> dict[str, Any] | None:
+    """把插件声明的种类/动词并进 `world_seed["kinds"]`。**声明坏了当场抛。**
+
+    ⚠️ **同 id 的种类:插件那份赢。** 和 `kinds` 那条"文件里那份赢"逐字同一个理由 ——
+    种类是**法不是状态**,身上没有会随时间漂的东西。而动词是**合并**不是替换:
+    一个插件给内核的 `agent` 加一个动词,不该把作者写在 `agent` 上的那些顶掉。
+    """
+    from anima_world.plugins import compile_kind_rows, order_plugins, parse_plugins
+
+    bodies = _plugin_bodies(config_store, plugin_store, world_seed)
+    if not bodies:
+        return world_seed
+    plugins = order_plugins(parse_plugins(bodies, ticks_per_day=ticks_per_day))
+    rows = compile_kind_rows(plugins)
+    if not rows:
+        return world_seed
+    seed = dict(world_seed or {})
+    by_id = {str(row.get("id")): dict(row)
+             for row in (seed.get("kinds") or []) if isinstance(row, dict)}
+    for row in rows:
+        kind_id = str(row["id"])
+        have = by_id.get(kind_id)
+        if have is None:
+            by_id[kind_id] = row
+            continue
+        # 动词**合并**:插件给一个已有种类加动词,不顶掉作者写在它上面的那些。
+        merged = dict(have)
+        merged.setdefault("quantities", {}).update(row.get("quantities") or {})
+        merged.setdefault("affordances", {}).update(row.get("affordances") or {})
+        by_id[kind_id] = merged
+    seed["kinds"] = list(by_id.values())
+    return seed
+
+
+def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
     """出厂内置插件 —— **这一版只有一个:`needs`**(设计稿 §9 的第一个搬家对象)。
 
     ⚠️ **开关仍然是 `needs.enabled`,而且只有它。** 设计稿提过一个
@@ -2906,7 +2978,7 @@ def _factory_plugins(scheduler: Any) -> list[dict[str, Any]]:
     改到这张表里的键就重装一遍。⚠️ **它是一张表,不是一个 `if needs`** ——
     出厂插件多起来时,那道钩子一个字都不用改。
     """
-    store = getattr(scheduler, "config_store", None)
+    store = config_store
     if store is None or not store.get("needs.enabled", default=False):
         return []
     from anima_world.needs import factory_plugin
@@ -2950,28 +3022,19 @@ def _install_plugins(
     """
     from anima_world.events import SUBSCRIBABLE_EVENTS
     from anima_world.plugins import (
-        install_plugins, merge_bodies, order_plugins, parse_plugins, stored_bodies,
+        install_plugins, order_plugins, parse_plugins, verb_kind_id,
     )
 
-    incoming = [
-        dict(row) for row in ((world_seed or {}).get("plugins") or [])
-        if isinstance(row, dict)
-    ]
-    # **出厂插件排在最前面,而世界文件里的同 id 声明赢**(`merge_bodies` 的方向)——
-    # 于是作者要改出厂的 needs,写一份同 id 更高 version 的声明就行,不必先卸掉它。
-    # 🔴 **出厂插件那几个 id 上,`_factory_plugins` 是唯一权威** —— 库里那一行是
-    # 上一次装的**痕迹**(留着是为了裁剪和 `plugin list`),不是"该不该装"的答案。
-    # 不滤掉的话,`needs.enabled` 关掉之后它会从库里自己活回来,而关掉的人看到的是
-    # "我明明关了"。
-    stored = [row for row in stored_bodies(plugin_store)
-              if str(row.get("id") or "") not in FACTORY_PLUGINS]
-    bodies = merge_bodies(stored, incoming)
-    bodies = merge_bodies(_factory_plugins(scheduler), bodies)
+    # **三个来源怎么合并、谁赢,只有一份判断**(`_plugin_bodies`)—— 开机那一处
+    # (并 `kinds`)和这一处(真装)喂的必须是同一份名单,不然种类按一份来、
+    # 事实按另一份来,而那种不一致不报错。
+    bodies = _plugin_bodies(scheduler.config_store, plugin_store, world_seed)
     # 每次重装都从头建 —— 这个函数在开机和 `config set` 两条路上都会被调,
     # 而"接着上一次的名单往上加"会让关掉一个开关之后它的规律还在跑。
     scheduler.plugins = []
     scheduler._triggers_by_event = {}
     scheduler.edge_types = {}
+    scheduler.verb_edge_effects = {}
     scheduler.world_rules = [
         rule for rule in scheduler.world_rules
         if rule.id not in scheduler.plugin_rule_ids
@@ -2997,6 +3060,16 @@ def _install_plugins(
     # 边类型登记 —— `link` 那一刻查约束读的就是这张表。
     scheduler.edge_types = {
         edge.qualified: edge for plugin in plugins for edge in plugin.edges.values()
+    }
+    # 动词的边效果**按 (种类, 动词) 登记**,而不是塞进 affordance 里。
+    #
+    # 理由是 affordance 是**本体那一层**的东西,而边不是:往它身上挂一格
+    # `links` 就等于让本体层认识插件的边类型,而它此后每一处遍历 affordance
+    # 的代码(校验器、`ontology --json`、离线两扇门)都要各自决定"这一格算不算
+    # 声明的一部分" —— 漏一处不报错。挂在调度器上,本体层一个字节都不知道有这回事。
+    scheduler.verb_edge_effects = {
+        (verb_kind_id(plugin.id, verb.target), verb.name): verb.links
+        for plugin in plugins for verb in plugin.verbs.values() if verb.links
     }
     # 规律接进那条已经在跑的路(`stocks.evaluate_due`)—— **不另起一个求值器**:
     # 双缓冲、节流水位、骰子、"两条规律抢同一个量"那句警告,插件一样得吃到。
@@ -6408,16 +6481,20 @@ def contract_payload() -> dict[str, Any]:
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
     from anima_world.events import SUBSCRIBABLE_EVENTS
     from anima_world.expressions import EDGE_PREFIXES
+    from anima_world.rules import RULE_SELECTORS
     from anima_world.plugins import (
         BEARER_ALIASES,
         BEARER_FORMS,
         EDGE_ENDS,
         EDGE_FACT_SHAPES,
+        EDGE_VERB_EFFECTS,
         DEFAULT_TEXT_MAX_CHARS,
         DEFERRED_SHAPES,
         EFFECTS,
         FACT_SHAPES,
+        KIND_PREFIXES,
         PLUGIN_ID_PATTERN,
+        VERB_KEYS,
         RESERVED_IDS,
     )
     from anima_world.sim_report import BUCKETS, REPORT_FORMAT_VERSION
@@ -6751,6 +6828,32 @@ def contract_payload() -> dict[str, Any]:
             # `from.x` 连语法都过不去。**声明里那两个键仍然叫 `from`/`to`**
             # (那是 JSON,不受这条限制),两套词只在这一处分岔。
             "edge_expression_prefixes": sorted(EDGE_PREFIXES),
+            # 🆕 第 2 期 2a:插件声明的**节点**。`group` 只比 `entity` 多一个
+            # `members` 记号(设计稿 §13 ⑥ 自己也说不准这一刀该不该切,而只属于
+            # group 的行为这一期一件都没做 —— 现在分家是在猜)。
+            # 🔴 **它们编译成普普通通的本体种类**(id 是 `<插件>.<名>`),于是
+            # 出生自检、「生成必须要代价」、`prompt.budget`、可见性、拒绝语
+            # 一件都不用重写。
+            "kind_prefixes": list(KIND_PREFIXES),
+            "kind_id_syntax": "<plugin>.<local>",
+            # 🆕 动词。**按 tool-calling 的 JSON schema 声明**(设计 §12.3):
+            # NPC 挑动词和玩家点按钮读的是同一份定义。
+            "verb_declaration": "tool-calling",
+            "verb_keys": list(VERB_KEYS),
+            # 动词的 `effects` 这一版只收边那三条 —— 改量写在动词自己的 `set` 里
+            # (那是本体那一层,`me_*` / `have_*` 都认)。
+            "verb_effects": list(EDGE_VERB_EFFECTS),
+            # 🔴 **这一版的动词必须有 `target`。** 「开宗立派」那种不对着任何东西
+            # 做的动词今天没有一条调用路(能力调用一律是
+            # `act(她, interact, {target, verb})`),写了它**开不了机** ——
+            # 装上去让谁也点不动,比开不了机坏。
+            "verb_requires_target": True,
+            # ⚠️ **target 只认插件自己声明的种类,以及作者写在 `kinds` 里的种类。**
+            # `agent` 还不行(内置种类只准声明量,`ontology.DECLARABLE_BUILTINS`)——
+            # 「拜某人为师」「把东西给某人」那一族因此这一期还写不出来。
+            "verb_target_forms": list(KIND_PREFIXES) + ["<作者写的种类 id>"],
+            # `for_each` 认哪几种选择器。第 2 期多了 `edge`。
+            "rule_selectors": list(RULE_SELECTORS),
             # 🆕 `bearer` 三个词(2026-08-26 老板自判):`actor` = 角色+玩家
             # (**今天的语义**)· `agent` = 只角色 · `player` = 只玩家。
             # ⚠️ **`agent` 是第 1 期刚公布的词,那时它是"两种人"** —— 装载时

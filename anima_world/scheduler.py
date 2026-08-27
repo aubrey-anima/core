@@ -331,6 +331,9 @@ class Scheduler:
         self.edge_store: Any | None = None
         #: 边类型名(带命名空间)→ 它的声明。`link` 那一刻查约束靠它。
         self.edge_types: dict[str, Any] = {}
+        #: `(种类 id, 动词) → 这个动词的边效果`(`link`/`unlink`/`transfer`)。
+        #: 挂在这儿而不是挂在 affordance 上,理由见 `__main__._install_plugins`。
+        self.verb_edge_effects: dict[tuple[str, str], tuple[dict[str, Any], ...]] = {}
         self.plugins: list[Any] = []
         # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
         # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
@@ -1642,6 +1645,13 @@ class Scheduler:
             #     —— 它是纯算术 + SQL,没有 LLM,和 needs/economy 同一类。
             #     (autonomy 正相反:那条要打网络,必须丢到别的线程去。)
             self._evaluate_world_rules()
+
+            # 3.61 边上的规律(`for_each: {"edge": …}`)。**和量的规律分开跑**:
+            #      它们写的是两种存储(量表 / 边的那份 JSON),而 `evaluate_due`
+            #      的双缓冲与一次性写回是按量表那张表写的。共用一个函数的话,
+            #      要么边跟着量走一遍无谓的快照,要么量跟着边逐条往返 —— 两种都比
+            #      分开写贵。**双缓冲那条纪律照抄**:这一轮读的是这一轮开始前的值。
+            self._evaluate_edge_rules()
 
             # 3.62 插件的触发器:因一件事而变。**紧跟规律** —— 它和规律同一类
             #      (纯算术,写的都是量);排在规律之后是因为规律读的是这一轮开始前
@@ -3875,9 +3885,38 @@ class Scheduler:
         born: dict[str, Any] = {}
         if affordance.spawn is not None:
             born = self._spawn_entity(agent_id, target, verb, affordance.spawn, here)
+        # 边效果排在**生之后、灭之前**:`sect.found` 那种「生出一个门派、再把自己
+        # 连上去」要拿到新生的 id;而灭那一步会把挂在这个东西身上的边一并断掉,
+        # 排在它后面的 `link` 会在一条刚被抹掉的边上重建一条指向坟墓的边。
+        self._apply_verb_edges(agent_id, target, verb, here, born)
         if affordance.destroys_target:
             self._destroy_entity(agent_id, target, verb, here)
         return born
+
+    def _apply_verb_edges(
+        self, agent_id: str, target: str, verb: str, here: str,
+        born: dict[str, Any] | None = None,
+    ) -> None:
+        """插件动词声明的 `link` / `unlink` / `transfer`。
+
+        **和触发器那条路共用 `apply_edge_effect`** —— 各写一份的话,同一条 `link`
+        写在触发器里查约束、写在动词里不查,而"没查"的样子是安静的:两条
+        `member_of` 同时挂着,提示词里她同时是两个门派的人。
+        """
+        if not self.verb_edge_effects:
+            return
+        kind_id = target.split(":", 1)[0] if ":" in target else target
+        specs = self.verb_edge_effects.get((kind_id, verb))
+        if not specs:
+            return
+        namespace = {
+            "target": target,
+            "spawned": str((born or {}).get("id") or ""),
+        }
+        actor = self.stock_owner_of(agent_id)
+        for spec in specs:
+            self.apply_edge_effect(spec, namespace, {"who": actor, "loc": here},
+                                   owner=actor)
 
     def _spawn_entity(
         self, agent_id: str, target: str, verb: str, spawn: Any, here: str,
@@ -4005,7 +4044,19 @@ class Scheduler:
         })
 
     def _unmake(self, entity_id: str) -> None:
-        """把一个实体从三张表上一起抹掉。撤回一次失败的出生走的也是这一条。"""
+        """把一个实体从**四**张表上一起抹掉。撤回一次失败的出生走的也是这一条。
+
+        🆕 3.8.0 第 2 期加的是第四张:**挂在它身上的边**。留着的下场和上面那三样
+        一样安静 —— `for_each: {"edge": …}` 每一轮都在一条指向坟墓的边上求值,
+        两端有一端读不到量,于是这条规律**跳过**,而 `rule_stats()` 报的是
+        skipped:专门用来回答"这层跑通了吗"的仪表说的是"没什么可算的"。
+        提示词那一侧更直白:`connected` 那一档会把一个不存在的门派的门规
+        继续念给她听。
+        """
+        store = getattr(self, "edge_store", None)
+        if store is not None:
+            for edge_type, src, dst in store.touching(entity_id):
+                store.unlink(edge_type, src, dst)
         if self.ontology_store is not None:
             self.ontology_store.drop_entity(entity_id)
             self._entities_rev = self.ontology_store.revision()
@@ -4818,6 +4869,57 @@ class Scheduler:
                 self._maybe_hail_player(agent)
             return True
 
+    def _evaluate_edge_rules(self) -> None:
+        """作用在边上的规律。**双缓冲、一次写回,和量那一层逐字同一条纪律。**
+
+        namespace 三个前缀:`edge.<事实>`(这条边自己的)· `src.<量>` / `dst.<量>`
+        (两端节点身上的量,插件的事实写成 `src.<插件>.<事实>`)。
+        ⚠️ **`set` 只写得到边自己的事实** —— 写两端节点身上的量,和 `bad_output_name`
+        挡的那件事逐字同一种:双缓冲下扇入没有意义(一条作用在一百条边上的规律,
+        每条读到的都是同一份旧值,于是"每条 +1"的结果是 +1 而不是 +100)。
+        """
+        store = self.edge_store
+        if store is None or not self.world_rules:
+            return
+        due = [r for r in self.world_rules if r.selector_kind == "edge"]
+        if not due:
+            return
+        from anima_world.stocks import clock_names
+
+        clock = clock_names(self.clock, self._minutes_per_tick())
+        pending: list[tuple[str, str, str, dict[str, Any]]] = []
+        for rule in due:
+            since = self._rule_last_run.get(rule.id)
+            if since is not None and self.clock - since < rule.interval_ticks:
+                continue
+            self._rule_last_run[rule.id] = self.clock
+            edge_type = rule.selector_value
+            for src, dst, facts in store.all(edge_type):
+                namespace: dict[str, Any] = {
+                    **{f"edge.{k}": v for k, v in facts.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool)},
+                    **{f"src.{k}": v for k, v in self.stock_store.of(src).items()},
+                    **{f"dst.{k}": v for k, v in self.stock_store.of(dst).items()},
+                    **clock, "dt": 0, "now": self.clock,
+                }
+                try:
+                    if not all(c.evaluate(namespace) for c in rule.conditions):
+                        continue
+                    updates = {key: float(expr.evaluate(namespace))
+                               for key, expr in rule.outputs.items()}
+                except ExpressionError as exc:
+                    logger.warning("边规律 %s 在 %s→%s 上算不出来:%s",
+                                   rule.id, src, dst, exc)
+                    continue
+                if updates:
+                    pending.append((edge_type, src, dst, updates))
+        for edge_type, src, dst, updates in pending:
+            facts = store.get(edge_type, src, dst)
+            if facts is None:
+                continue          # 这一轮里被别人断掉了 —— 不复活它
+            facts.update(updates)
+            store.link(edge_type, src, dst, facts)
+
     def _drain_plugin_triggers(self) -> None:
         """把上一 tick 攒下的那批事件交给订它们的触发器,**drain 一遍就停**。
 
@@ -4954,12 +5056,20 @@ class Scheduler:
         raw: Any, namespace: dict[str, Any], event: dict[str, Any] | None,
         owner: str | None,
     ) -> str:
-        """效果里那个 `"from"` / `"to"` 指的是哪个节点。**认不出就是空串,不猜。**"""
+        """效果里那个 `"from"` / `"to"` 指的是哪个节点。**认不出就是空串,不猜。**
+
+        ⚠️ **`target` / `spawned` 只在动词那条路上有值**(`_apply_verb_edges` 往
+        namespace 里放),触发器那条路上它们**不存在** —— 而"不存在"在这里读成
+        空串,于是 `apply_edge_effect` 当场返回 False。这是有意的:一个指着
+        `target` 的触发器不该悄悄连到别的什么东西上。
+        """
         name = str(raw or "")
         if name == "self":
             return str(owner or "")
         if name == "event.who":
             return str((event or {}).get("who") or "")
+        if name in ("target", "spawned"):
+            return str(namespace.get(name) or "")
         return name
 
     def _trigger_bearer(self, trigger: Any, event: dict[str, Any]) -> str | None:
@@ -4992,11 +5102,20 @@ class Scheduler:
             return
         from anima_world.stocks import evaluate_due
 
+        # 🔴 **边上的规律不进这一趟,而这不是"顺手分个类"** —— 两条路共用
+        # `_rule_last_run` 那张水位表:`evaluate_due` 会替每一条到点的规律盖上戳
+        # (包括它自己一条都算不动的边规律),于是紧跟其后的 `_evaluate_edge_rules`
+        # 每一轮都读到"这一 tick 已经跑过了"而整个跳过。**下场是边上的规律一辈子
+        # 不跑,而 `rule_stats()` 每一轮都在涨** —— 那个数是 `evaluate_due` 数的。
+        due = [r for r in self.world_rules if r.selector_kind != "edge"]
+        if not due:
+            return
+
         self._hydrate_rule_marks()
         try:
             report = evaluate_due(
                 self.stock_store,
-                self.world_rules,
+                due,
                 self.clock,
                 last_run=self._rule_last_run,
                 action_owners=self._agents_doing,

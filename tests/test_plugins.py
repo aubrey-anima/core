@@ -669,3 +669,271 @@ def test_出厂插件卸不动_而且指向那个开关(tmp_path):
 
     with open_world_at(str(db), force_mock_llm=True) as world:
         assert world.stocks("agent:夏") == before, "被拒的那一趟动了世界"
+
+
+# ── 插件声明的种类与动词(2a 下半)────────────────────────────────────────────
+#
+# 🔴 **它们编译成普普通通的本体种类与 affordance。** 这一处判断是这一期最省事、
+# 也最该这么做的一个:种类那一层已经有出生自检、「生成必须要代价」、`prompt.budget`、
+# 可见性、拒绝语、`resolve` 的跨引用闸 —— 插件另建一套的话,那几件要么重写一遍、
+# 要么悄悄不生效,而"悄悄不生效"正是这个仓库最怕的形状。
+
+
+FORGE = {
+    "id": "forge", "version": "1.0.0", "label": "铸剑",
+    "kinds": {
+        "entity:sword": {"gloss": "一把剑", "budget": 3, "facts": {
+            "锋利": {"shape": "number", "default": 1.0, "visibility": "here",
+                     "label": "锋利", "bands": [[0, "钝"], [5, "锋利"]]}}},
+        "entity:shard": {"gloss": "一块碎铁", "facts": {}},
+    },
+    "verbs": {
+        "磨": {"target": "entity:sword", "label": "磨一磨",
+               "description": "把剑磨快一点",
+               "when": ["锋利 < 10"], "set": {"锋利": "锋利 + 1"},
+               "requires": ["me_体力 >= 5"], "costs": {"体力": "me_体力 - 5"}},
+        "砸碎": {"target": "entity:sword", "label": "砸碎它",
+                 "costs": {"体力": "me_体力 - 3"},
+                 "destroys_target": True},
+        "打一把": {"target": "entity:shard", "label": "打一把剑",
+                   "costs": {"体力": "me_体力 - 20"},
+                   "spawn": {"kind": "forge.sword", "name": "新打的剑"},
+                   "destroys_target": False},
+    },
+}
+_ACTOR = {"id": "agent", "quantities": {
+    "体力": {"default": 100.0, "visibility": "self", "label": "体力"}}}
+
+
+def _forge_world(tmp_path, name="forge", plugin=None, entities=None):
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", {
+        **BARE,
+        "kinds": [dict(_ACTOR)],
+        "entities": entities if entities is not None else [
+            {"id": "forge.sword:青锋", "name": "青锋剑", "location": "cafe"}],
+        "plugins": [dict(plugin or FORGE)],
+    })
+    return open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                         force_mock_llm=True)
+
+
+def test_插件的种类就是本体的种类(tmp_path):
+    with _forge_world(tmp_path) as world:
+        kinds = {k["id"] for k in world.kinds()}
+        assert "forge.sword" in kinds, "插件的种类没进本体"
+        # 事实变成**量**,而且**不带命名空间前缀** —— 种类 id 本身就是命名空间。
+        assert world.stocks("forge.sword:青锋") == {"锋利": 1.0}
+        row = next(k for k in world.kinds() if k["id"] == "forge.sword")
+        assert row["gloss"] == "一把剑" and row["budget"] == 3
+        # 动词挂在**它的 target 那个种类**上 —— `打一把` 的 target 是碎铁,
+        # 所以它在 `forge.shard` 上,不在剑上。
+        assert {a["verb"] for a in row["affordances"]} == {"磨", "砸碎"}
+        shard = next(k for k in world.kinds() if k["id"] == "forge.shard")
+        assert {a["verb"] for a in shard["affordances"]} == {"打一把"}
+
+
+def test_动词走的是真的那条能力路(tmp_path):
+    """`act(她, interact, {target, verb})` —— 和作者写在 `kinds` 里的动词**同一条路**,
+    所以 `requires` / `costs` 那一整摞一件都不用重写。"""
+    with _forge_world(tmp_path, name="v") as world:
+        out = world.act("阿岚", "interact",
+                        {"target": "forge.sword:青锋", "verb": "磨"}, surface="body")
+        assert out["ok"] is True, out
+        assert world.stocks("forge.sword:青锋") == {"锋利": 2.0}
+        assert world.stocks("agent:阿岚")["体力"] == 95.0, "代价没付"
+
+
+def test_生成必须要代价那条纪律_对插件一样成立(tmp_path):
+    """**声明了 `spawn` 却没写代价,开不了机。** 这一条是 2.0 就定下的,而插件
+    编译成本体种类之后**免费继承**了它 —— 那正是不另起一套的全部理由。"""
+    from anima_world.world_seed import WorldSeedError
+
+    bad = {**FORGE, "verbs": {"白捡一把": {
+        "target": "entity:shard", "label": "白捡",
+        "spawn": {"kind": "forge.sword", "name": "白来的剑"}}}}
+    with pytest.raises((WorldSeedError, Exception)) as raised:
+        _forge_world(tmp_path, name="free", plugin=bad,
+                     entities=[{"id": "forge.shard:铁块", "name": "铁块",
+                                "location": "cafe"}])
+    assert "代价" in str(raised.value), raised.value
+
+
+def test_spawn与destroy走的是现成的机器(tmp_path):
+    """生出来的东西过**出生自检**、id 由引擎发且只增不减、抹掉时四样一起走 ——
+    这些一行都没重写。"""
+    with _forge_world(tmp_path, name="sd",
+                      entities=[{"id": "forge.shard:铁块", "name": "铁块",
+                                 "location": "cafe"},
+                                {"id": "forge.sword:青锋", "name": "青锋剑",
+                                 "location": "cafe"}]) as world:
+        born = world.act("阿岚", "interact",
+                         {"target": "forge.shard:铁块", "verb": "打一把"},
+                         surface="body")
+        assert born["ok"] is True, born
+        made = [e for e in world.entities() if e["kind"] == "forge.sword"]
+        assert len(made) == 2, f"没生出来:{made}"
+        # 新生的那一把**量落地了**(出生自检查的就是这个)。
+        fresh = next(e for e in made if e["id"] != "forge.sword:青锋")
+        assert world.stocks(fresh["id"]) == {"锋利": 1.0}
+        kinds = [e.type for e in world.scheduler.event_log.replay()]
+        assert "entity_spawn" in kinds
+
+        world.act("阿岚", "interact",
+                  {"target": "forge.sword:青锋", "verb": "砸碎"}, surface="body")
+        assert not [e for e in world.entities() if e["id"] == "forge.sword:青锋"]
+        assert world.stocks("forge.sword:青锋") == {}, "抹掉时量没跟着走"
+
+
+def test_没有目标的动词_当场开不了机而不是装上去点不动(tmp_path):
+    """「开宗立派」那种不对着任何东西做的动词,今天**没有一条调用路**
+    (能力调用一律是 `act(她, interact, {target, verb})`)。
+    **装上去让谁也点不动,比开不了机坏** —— 后者作者当场知道。"""
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{**FORGE, "verbs": {"开宗立派": {"label": "开宗立派"}}}])
+    assert any("少了 target" in e and "调用路" in e for e in raised.value.errors)
+
+
+def test_动词按tool_calling的schema报出来():
+    """设计 §12.3:**NPC 挑动词和玩家点按钮读的是同一份定义** —— 它们从前是两份。"""
+    verb = parse_plugins([FORGE])[0].verbs["磨"]
+    schema = verb.schema()
+    assert schema["name"] == "forge.磨"
+    assert schema["description"] == "把剑磨快一点"
+    assert schema["parameters"]["required"] == ["target"]
+
+
+# ── 2a 收口:动词连得起边、东西没了边跟着走、边上的规律 ──────────────────────
+#
+# 这四条各钉一件"少了它照跑、而错法是安静的"事:
+#
+# - 动词只改得动量的话,`plugin.edges` 就只有触发器一条进得去的路 —— 而作者写
+#   「入门」时想的是**他按一下**,不是"等某件事发生"。
+# - 一样东西没了,挂在它身上的边留着:`for_each:{edge:…}` 每 tick 在一条指向
+#   坟墓的边上求值,两端有一端读不到量 → 规律安静地跳过,`rule_stats` 说 skipped。
+# - 边上的规律没有闸的话,`_evaluate_edge_rules` 整个函数可以被删掉而全绿。
+
+MENPAI = {
+    "id": "menpai", "version": "1.0.0", "label": "门派",
+    "kinds": {"group:sect": {"gloss": "一个门派", "facts": {
+        "库银": {"shape": "number", "default": 100.0, "visibility": "here",
+                 "label": "库银", "bands": [[0, "空空如也"], [50, "尚可周转"]]}}}},
+    "edges": {"member_of": {
+        "label": "门籍", "from": "agent", "to": "group:sect", "exclusive": True,
+        "facts": {
+            "rank": {"shape": "state", "default": "外门", "visibility": "connected",
+                     "label": "身份",
+                     "values": [{"name": "外门"},
+                                {"name": "内门", "description": "门规是你的规矩。"}]},
+            "门规": {"shape": "text", "default": "不得欺师灭祖",
+                     "visibility": "connected", "label": "门规"},
+            "资历": {"shape": "number", "default": 0.0, "visibility": "connected",
+                     "label": "资历", "bands": [[0, "新来的"], [3, "老人"]]},
+        }}},
+    "verbs": {
+        "入门": {"target": "group:sect", "label": "拜入门下",
+                 "description": "递上名帖,拜入这个门派",
+                 "costs": {"体力": "me_体力 - 5"},
+                 "effects": [{"link": {"type": "member_of",
+                                       "from": "self", "to": "target"}}]},
+        "退出": {"target": "group:sect", "label": "退出师门",
+                 "costs": {"体力": "me_体力 - 1"},
+                 "effects": [{"unlink": {"type": "member_of",
+                                         "from": "self", "to": "target"}}]},
+        "拆了它": {"target": "group:sect", "label": "拆了这个门派",
+                   "costs": {"体力": "me_体力 - 9"}, "destroys_target": True},
+    },
+    "rules": [{"id": "熬资历", "every": {"ticks": 1}, "for_each": {"edge": "member_of"},
+               "when": ["edge.menpai.rank >= 0"],
+               "set": {"menpai.资历": "edge.menpai.资历 + 1"}}],
+}
+_TIRED = {"id": "agent", "quantities": {
+    "体力": {"default": 100.0, "visibility": "self", "label": "体力"}}}
+
+
+def _menpai_world(tmp_path, name="menpai", plugin=None):
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", {
+        **BARE,
+        "kinds": [dict(_TIRED)],
+        "entities": [{"id": "menpai.sect:青云门", "name": "青云门", "location": "cafe"}],
+        "plugins": [dict(plugin or MENPAI)],
+    })
+    return open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                         force_mock_llm=True)
+
+
+def test_动词连得起边来_而不是只有触发器那一条路(tmp_path):
+    """**「入门」是他按一下,不是等某件事发生。**
+
+    动词只改得动量的话,`plugin.edges` 就只剩触发器一条进得去的路 —— 而设计稿
+    §4.2 那四个例子(开宗立派 / 逐出 / 提拔 / 给东西)**没有一个**是"等某件事"。
+    """
+    with _menpai_world(tmp_path) as world:
+        out = world.act("阿岚", "interact",
+                        {"target": "menpai.sect:青云门", "verb": "入门"},
+                        surface="body")
+        assert out["ok"] is True, out
+        rows = world.scheduler.edge_store.all("menpai.member_of")
+        assert [(r[0], r[1]) for r in rows] == [("agent:阿岚", "menpai.sect:青云门")]
+        # 边上的事实按声明种下默认值 —— 和触发器那条路**同一个** `apply_edge_effect`。
+        assert rows[0][2]["menpai.门规"] == "不得欺师灭祖"
+        assert world.stocks("agent:阿岚")["体力"] == 95.0, "动词的代价没付"
+
+        # 连上了,`connected` 那一档就把门规念给他听(设计 §5.1)。
+        from anima_world.perception import perceive
+
+        block = perceive(agent_id="阿岚", here="cafe",
+                         stock_store=world.scheduler.stock_store,
+                         visibility=world.scheduler.visibility_store,
+                         ontology=world.scheduler.ontology,
+                         edges=world._edges_for("阿岚")).render()
+        assert "门规 不得欺师灭祖" in block, block
+
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "退出"}, surface="body")
+        assert world.scheduler.edge_store.all("menpai.member_of") == []
+
+
+def test_一样东西没了_挂在它身上的边一条不留(tmp_path):
+    """**`destroy` 连带 `unlink`**(任务单 2a 那句)。
+
+    留着的下场是安静的:`for_each:{edge:…}` 每 tick 在一条指向坟墓的边上求值,
+    两端有一端读不到量,于是这条规律**安静地跳过**,而 `rule_stats()` 报的是
+    skipped —— 专门用来回答"这层跑通了吗"的仪表说的是"没什么可算的"。
+    """
+    with _menpai_world(tmp_path, name="gone") as world:
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "入门"}, surface="body")
+        assert len(world.scheduler.edge_store.all("menpai.member_of")) == 1
+        out = world.act("阿岚", "interact",
+                        {"target": "menpai.sect:青云门", "verb": "拆了它"},
+                        surface="body")
+        assert out["ok"] is True and out["detail"].get("destroyed"), out
+        assert world.scheduler.edge_store.all("menpai.member_of") == [], \
+            "东西没了,边还挂着 —— 一条指向坟墓的边"
+
+
+def test_边上的规律_读得到边自己也读得到两端(tmp_path):
+    """`for_each: {"edge": …}`:表达式里 `edge.*` / `src.*` / `dst.*` 三个前缀,
+    `set` 写的是**边自己的事实**(写两端是扇入,和 `bad_output_name` 挡的那件事
+    逐字同一种)。"""
+    with _menpai_world(tmp_path, name="rule") as world:
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "入门"}, surface="body")
+        world.tick(3)
+        facts = world.scheduler.edge_store.get(
+            "menpai.member_of", "agent:阿岚", "menpai.sect:青云门")
+        assert facts is not None and facts["menpai.资历"] >= 3.0, facts
+
+
+def test_契约报得出种类与动词怎么写():
+    """**消费方问契约,别照设计稿抄** —— 设计稿说的是这套架构装得下什么。"""
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    plugins = json.loads(out.stdout)["plugins"]
+    assert plugins["kind_prefixes"] == ["entity:", "group:"]
+    # 动词按 tool-calling 的 schema 声明(设计 §12.3)。
+    assert plugins["verb_declaration"] == "tool-calling"
+    assert "target" in plugins["verb_keys"]
+    assert set(plugins["verb_effects"]) == {"link", "unlink", "transfer"}
+    # `for_each` 认哪几种选择器 —— 第 2 期多了 `edge`。
+    assert "edge" in plugins["rule_selectors"]

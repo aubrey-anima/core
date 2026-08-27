@@ -3499,6 +3499,26 @@ $ redis-cli --scan --pattern 'anima:*:stock:agent:player:*' | wc -l
 - **按出口探测,别比版本号**:`contract --json` 的
   `erasure.receipt_count_keys`(3.8.0 新增)里有没有 `"facts"`。
   一律 `.get("erasure", {}).get("receipt_count_keys", [])`。
+
+#### 🆕 回执还有第七格 `edges`,以及一张逐键的 `receipt_count_gloss`(3.8.0 第 1 期)
+
+⚠️ **这一笔迟到了一轮**(2026-08-26 player 视角 B 逮出来的):`receipt_count_gloss`
+是第 1 期 `13d5078` 加的,而回执板上一个字都没有 —— 而回执板正是下游唯一会去查的
+那一份。**库里有而对方看不见,等于没有**,这一条这次咬的是我们自己。
+
+`erasure.receipt_count_keys` 今天是**七**格,第七格是 `edges`:任何一端是他的边
+断掉的条数(插件把「两个人之间」表达成边,见 §3.39)。**三档和 `facts` 逐字同构** ——
+整格缺席 = 这支引擎够不着 · `null` = 我没查成 · `0` = 我查过了没有。
+下游照旧 `.get("edges")`,**别 `.get("edges", 0)`**。
+
+而 `receipt_count_gloss` 是**逐键一句话**(七键各一句,形状照 `blocked` /
+`blocked_text` 那一对:键名表旁边配一份人话)。它存在的理由很窄:
+`events` 那一格数的是**被改写过的条数**,不是删掉的条数 —— 这条链**从不删行**,
+而一份写着「事件 1723」的合规回执,读的人默认会读成"删了 1723 条"。
+🔴 **整格缺席 = 这支引擎没有这一格**(3.8.0 第 1 期之前),
+**别拿 `receipt_count_keys` 自己编一份**:自己编的那份会把上面那句话编丢,
+而编丢的正是唯一一句需要解释的。一律
+`d.get("erasure", {}).get("receipt_count_gloss", {})`。
 - CLI 那一行也印了(**零也印**):`… 记忆删 0 行改 0 行、他身上的量 5 个(显示名 …)`。
 - ⚠️ **审计事件 `player_erased` 的载荷一个字没加。** 回执是同步返回值,加格便宜;
   事件是已经发出去的形状,改它贵。要机器读这一格就读回执,别去翻日志。
@@ -3511,8 +3531,8 @@ $ redis-cli --scan --pattern 'anima:*:stock:agent:player:*' | wc -l
 | 仓 | 要做的 |
 |---|---|
 | **tool** | **一件都不用改**(抹除不在创作那条路上)。记在这儿只是因为回执板只有一块 |
-| **platform** | 壳**按类型过滤,计数格顺着放行**(`world_server.py` 的 `_erase_counts` 逐字写着「过滤按**类型**做……**绝不能**原样转发」)。`facts` 是 int,今天照旧到得了玩家手里;⚠️ **但下一格若是字符串会被静默丢掉** —— 别照"逐字转发整个 dict"那句写,它是假的(2026-08-26 验收 B 挑出来的,那句是我写的)。⚠️ 这一格**靠重建镜像才到得了线上** —— 在跑的镜像里那一版引擎抹不掉量表,而它抹不掉的时候不报错 |
-| **player** | `/me/erasure` 那一屏要不要显示这一格,**归站点自判**(它是一个数,不是一个名字)。落库与否同理 |
+| **platform** | 壳**按类型过滤,计数格顺着放行**(`world_server.py` 的 `_erase_counts` 逐字写着「过滤按**类型**做……**绝不能**原样转发」)。`facts` / `edges` 都是 int,今天照旧到得了玩家手里;⚠️ **但下一格若是字符串会被静默丢掉** —— 别照"逐字转发整个 dict"那句写,它是假的(2026-08-26 验收 B 挑出来的,那句是我写的)。<br>🆕 **而 `receipt_count_gloss` 正是那种会被静默丢掉的东西**(它是一个 dict of str):把它当 `dry_run` 的**顶层兄弟键**带下来,**别塞进 `erasure` 那个计数 dict 里** —— 塞进去会被那道类型闸原样吃掉,而两边日志都干净。⚠️ 这一族**靠重建镜像才到得了线上** —— 在跑的镜像里那一版引擎抹不掉量表,而它抹不掉的时候不报错 |
+| **player** | ✅ **已接完,这一行原先写的「归站点自判」是老话**(2026-08-26 `e26a788`):站点判了 —— **照旧不译**,有 gloss 就整排用引擎原话,读法钉在它自己的 `_GLOSS_KEY` 上。记在这儿是因为回执板只有一块,而一张"谁欠什么"的表,**销账和记账一样是义务** |
 
 **判据敲得动**:`anima-world player erase --player <id> --yes --json | jq .facts`;
 仓内判据 `tests/test_erase_player.py::test_他身上那张量表跟着抹掉_而回执有facts一格`
@@ -3808,3 +3828,130 @@ $ anima-world plugin list --world-id w --json | jq '.plugins[] | {id, version, f
 出厂插件多起来时,那张表是 `FACTORY_PLUGINS`(id → 开关键),**一个插件一个开关**。
 
 **platform / player 照旧一件都不用改。**
+
+## 3.39 插件第二半:**边、插件自己的种类、动词**(3.8.0 第 2 期 2a)
+
+§3.37 交的是「作者能给世界加一个**量**」;这一节交的是**图**:东西之间的关系
+(边)、插件自己声明的一族东西(种类)、以及**他按一下就发生的事**(动词)。
+
+🔴 **照旧先记一句**:设计稿(`docs/设计-插件系统.md`)说的是这套架构装得下什么,
+`contract --json` 的 `plugins` 段说的是**这一版引擎收不收**。差着好几期,
+**照设计稿给作者画界面 = 替他许愿。**
+
+### ① 边:有类型、有方向、身上挂事实
+
+```jsonc
+"edges": {
+  "member_of": {"label":"门籍", "from":"agent", "to":"group:sect", "exclusive":true,
+    "facts": {
+      "rank": {"shape":"state", "default":"外门", "visibility":"connected", "label":"身份",
+               "values":[{"name":"外门"},{"name":"内门","description":"门规是你的规矩。"}]},
+      "门规": {"shape":"text", "default":"不得欺师灭祖", "visibility":"connected"},
+      "资历": {"shape":"number", "default":0, "visibility":"connected"}}}}
+```
+
+- **两端** `from` / `to` 认 `agent` / `player` / `location` / `world`,以及
+  `entity:<种类>` / `group:<种类>`。⚠️ **声明里这两个键叫 `from`/`to`,而表达式里
+  的前缀是 `src`/`dst`** —— `from` 是 Python 关键字,`ast` 连语法都过不去。
+  两套词只在这一处分岔,问 `contract.plugins.edge_expression_prefixes`。
+- **约束在 `link` 那一刻查**:`exclusive`(起点唯一)/ `exclusive_to`(终点唯一)/
+  `symmetric`(两个方向共一份事实)。**不是声明里劝一句** —— 放行的样子是安静的:
+  两条 `member_of` 同时挂着,提示词里她同时是两个门派的人。
+- **边上多收一个 `text`**(`contract.plugins.edge_fact_shapes`),而这不是偏心,
+  是存储的形状:节点事实住在量表里(`[float, tick]`,存不下字符串),边自己
+  那一行本来就是一份 JSON。
+- **可见性多一档 `connected`**:有这条边连着的两端读得到。门规对弟子可见、
+  秘密对知情人可见 —— 全是这一档。
+- **存储** `anima:{world_id}:edge:{类型}`。🟢 **它不是易失键**(边是世界的内容,
+  和 `:kinds` 同一类)—— 打包按前缀扫,新 hash 自己跟着走,**platform 那条
+  `storage.volatile_keys` 的 deepEqual 一个字都不会红。**
+
+### ② 插件声明的种类:`entity:<名>` / `group:<名>`
+
+```jsonc
+"kinds": {"group:sect": {"gloss":"一个门派", "budget":3,
+  "facts": {"库银": {"shape":"number", "default":100, "visibility":"here",
+                     "bands":[[0,"空空如也"],[50,"尚可周转"]]}}}}
+```
+
+🔴 **它编译成一个普普通通的本体种类**,id 是 `<插件id>.<名>`(`menpai.sect`),
+实例 id 照旧是 `menpai.sect:青云门`。于是**出生自检、「生成必须要代价」、
+`prompt.budget`、可见性、拒绝语、`resolve` 的跨引用闸一件都不用重写** ——
+你们的校验器也**照本体那一层判就行**,不必为插件的种类另写一份。
+
+⚠️ **挂在插件自己种类上的事实,存储键不带 `<插件>.` 前缀** —— 那个种类的 id
+本身就是命名空间(`menpai.sect`)。挂在**共用**载体上的(`actor`/`world`/`location`)
+照旧带前缀,那儿两个插件各声明一个「重量」是会撞的。
+⚠️ `group` 与 `entity` 这一版**只差一个记号**(`members`);只属于 group 的行为
+(解散时成员怎么办)一件都没做 —— 现在替作者分家是在猜。
+
+### ③ 动词:**按 tool-calling 的 JSON schema 声明**
+
+```jsonc
+"verbs": {
+  "入门": {"target":"group:sect", "label":"拜入门下", "description":"递上名帖,拜入这个门派",
+           "costs": {"体力":"me_体力 - 5"},
+           "effects": [{"link": {"type":"member_of", "from":"self", "to":"target"}}]},
+  "打一把": {"target":"entity:shard", "label":"打一把剑",
+             "costs": {"体力":"me_体力 - 20"},
+             "spawn": {"kind":"menpai.sword", "name":"新打的剑"}}}
+```
+
+- **NPC 挑动词和玩家点按钮读的是同一份定义**(设计 §12.3)—— 它们从前是两份,
+  一份在提示词里、一份在界面上,分岔了不报错。
+- **它编译成 target 那个种类上的一个 affordance**,所以 `requires` / `costs` /
+  `consumes` / `duration` / `occupies` / `spawn` / `destroys_target` /
+  `participants` / `importance` **语义一个字都没重新定义**,连「声明了 `spawn`
+  却没写代价就开不了机」那条纪律都跟着来。作者写得到哪些键问
+  `contract.plugins.verb_keys`,**别照这份文档维护一份清单**。
+- **`effects` 这一版只收边那三条**(`link` / `unlink` / `transfer`,
+  问 `contract.plugins.verb_effects`)。改量写在动词自己的 `set` 里 ——
+  同一件事两个写法,迟早在语义上分岔。
+  `from`/`to` 认得出 `self`(施动者)/ `target`(她正在做的那样东西)/
+  `spawned`(这一下新生的那个)/ 一个光写的节点 id。
+- 🔴 **这一版的动词必须有 `target`**(`contract.plugins.verb_requires_target`)。
+  「开宗立派」那种不对着任何东西做的动词今天**没有一条调用路**(能力调用一律是
+  `act(她, "interact", {target, verb})`),写了它**开不了机** ——
+  **装上去让谁也点不动,比开不了机坏**:后者作者当场知道。
+- 🔴 **`target` 还不能是 `agent`**(`contract.plugins.verb_target_forms`)。
+  「拜某人为师」「把东西给某人」「提拔某人」那一族**这一期写不出来**,而这不是
+  漏了:内置种类只准声明量(`ontology.DECLARABLE_BUILTINS`,理由是"她不是一样
+  可以被 tend 的东西"),而角色也不在 `ontology.entities` 里。**要开这一格,
+  开的是内核的一道闸,得单独一轮**(连带离线那两扇门 `validate world` /
+  `world check` 要同轮跟上)。**别先把那种界面画出来。**
+
+### ④ 规律作用在边上:`for_each: {"edge": "<边类型>"}`
+
+```jsonc
+"rules": [{"id":"熬资历", "every":{"ticks":1}, "for_each":{"edge":"member_of"},
+           "when":["edge.menpai.rank >= 0"],
+           "set":{"menpai.资历":"edge.menpai.资历 + 1"}}]
+```
+
+表达式里三个前缀:`edge.<插件>.<事实>`(这条边自己的)· `src.<量>` / `dst.<量>`
+(两端节点身上的)。**`set` 只写得到边自己的事实** —— 写两端是扇入,和量那一层
+`bad_output_name` 挡的那件事逐字同一种(一条作用在一百条边上的规律,每条读到的
+都是同一份旧值,于是「每条 +1」的结果是 +1 而不是 +100)。
+选择器全集问 `contract.plugins.rule_selectors`。
+
+### ⑤ 一样东西没了,挂在它身上的边一条不留
+
+`destroy` 从今天起连带 `unlink`。留着的下场是安静的:那条规律每一轮在一条指向
+坟墓的边上求值,两端有一端读不到量于是**跳过**,而 `rule_stats()` 报的是 skipped
+——专门用来回答"这层跑通了吗"的仪表说的是"没什么可算的";提示词那一侧更直白:
+`connected` 会把一个不存在的门派的门规继续念给她听。
+
+### 你们要接的三件
+
+1. **方言那条探测**:`d.get("plugins", {}).get("kind_prefixes")` **缺席 = 这支 core
+   不认插件的种类与动词**(3.8.0 第 1 期那一支也算缺席)。照旧 `.get` 到底,
+   `d["plugins"][…]` 在老引擎上是 `KeyError` 退 1,而**一个崩掉的探测器不是
+   「探测出没有」**。
+2. **校验器照契约判,别硬编码**:`kind_prefixes` / `verb_keys` / `verb_effects` /
+   `verb_requires_target` / `verb_target_forms` / `rule_selectors` /
+   `edge_fact_shapes` / `edge_ends` 全在 `contract --json` 的 `plugins` 段里。
+3. **`engine_min` 照旧写 `3.8.0`**(带 `plugin` 记录的包一律如此,第 1 期那一条
+   一个字没变)。
+
+**platform / player 照旧一件都不用改**(新键 `anima:{w}:edge:{type}` 是持久世界内容,
+不进 `volatile_keys`)。

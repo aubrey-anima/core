@@ -246,6 +246,56 @@ payload 差一个字节都会红,被排除的只有"次序",而次序由线程�
   下场是第 1 期写的插件安静地少覆盖一半人。
 - **抹除**:任何一端是他的边一条不留,回执多一格 `edges`(**三档和 `facts` 逐字同构**)。
 
+### 第 2 期 2a:**插件自己的种类、动词、边上的规律** —— 图这一半合拢了
+
+任务单 `docs/任务单/2026-08-26-插件系统-第2期.md` §2a。上一节交的是"边存得下",
+这一节交的是**边被谁建起来** —— 而少了它,`plugin.edges` 只有触发器一条进得去的路,
+可设计稿 §4.2 那四个例子(开宗立派 / 逐出 / 提拔 / 给东西)**没有一个**是"等某件事
+发生",它们全是「他按一下」。
+
+- **`plugin.kinds`**:`entity:<名>` / `group:<名>`。🔴 **它编译成一个普普通通的本体
+  种类**(id 是 `<插件>.<名>`),不是引擎里另开的一族 —— 于是**出生自检、
+  「生成必须要代价」、`prompt.budget`、可见性、拒绝语、`resolve` 的跨引用闸
+  一件都不用重写**。另建一套的下场是那几件"要么重写一遍、要么悄悄不生效"。
+  ⚠️ 挂在插件自己种类上的事实**不带 `<插件>.` 前缀**(种类 id 本身就是命名空间);
+  挂在共用载体上的照旧带。⚠️ `group` 与 `entity` 这一版**只差一个记号**:
+  只属于 group 的行为一件都没做,现在分家是在猜。
+- **`plugin.verbs`**,按 **tool-calling 的 JSON schema** 声明(设计 §12.3)——
+  NPC 挑动词和玩家点按钮读的是同一份定义,它们从前是两份。它编译成 target 那个
+  种类上的一个 affordance,`requires`/`costs`/`consumes`/`duration`/`occupies`/
+  `spawn`/`destroys_target` 语义一个字没重新定义。
+  - **`effects` 收 `link`/`unlink`/`transfer`**,和触发器**共用同一个
+    `_parse_link_effect` 与 `apply_edge_effect`** —— 各写一份的话,同一条 `link`
+    写在触发器里查约束、写在动词里不查,而"没查"的样子是安静的。
+  - 🔴 **没有 `target` 的动词开不了机**。「开宗立派」今天没有一条调用路
+    (能力调用一律是 `act(她, interact, {target, verb})`)——
+    **装上去让谁也点不动,比开不了机坏**:后者作者当场知道。
+  - 🔴 **`target` 还不能是 `agent`,而这一格是这一期欠得最明白的一件**:
+    「拜某人为师」「把东西给某人」「提拔某人」写不出来。不是漏了 ——
+    内置种类只准声明量(`ontology.DECLARABLE_BUILTINS`),角色也不在
+    `ontology.entities` 里。开这一格 = 开内核的一道闸,连带
+    `validate world` / `world check` 要同轮跟上。**契约里明说了**
+    (`plugins.verb_target_forms`),免得创作台先把那种界面画出来。
+    ⚠️ **2d 的 `give`(玩家→NPC)正卡在这一格上。**
+- **`for_each: {"edge": …}`**:规律作用在一条边上,表达式里 `edge.*` / `src.*` /
+  `dst.*` 三个前缀,`set` **只写得到边自己的事实**(写两端是扇入,和量那一层
+  `bad_output_name` 挡的那件事逐字同一种)。选择器指着没声明过的边类型 **开不了机**。
+  - 🔴 **它和量上的规律分两趟跑,而这不是"顺手分个类"**:两条路共用
+    `_rule_last_run` 那张水位表,`evaluate_due` 会替每一条到点的规律盖戳
+    (包括它自己一条都算不动的边规律),于是紧跟其后的 `_evaluate_edge_rules`
+    每一轮都读到"这一 tick 已经跑过了"而整个跳过 —— **边上的规律一辈子不跑,
+    而 `rule_stats()` 每一轮都在涨**(那个数是 `evaluate_due` 数的)。
+    写这一条时它真的这么错过一次,是那道闸红出来的。
+- **`destroy` 连带 `unlink`**:`Scheduler._unmake` 从三张表变成**四**张。留着的下场
+  和另外三样一样安静 —— 规律在一条指向坟墓的边上求值 → 跳过 → `rule_stats()` 报
+  skipped;`connected` 那一档会把一个不存在的门派的门规继续念给她听。
+- **`contract --json` 的 `plugins` 段多七格**(纯增量,老引擎整格缺席):
+  `kind_prefixes` / `kind_id_syntax` / `verb_declaration` / `verb_keys` /
+  `verb_effects` / `verb_requires_target` / `verb_target_forms` / `rule_selectors`。
+- **存储契约一个字没动**:边那个 hash 是**持久**世界内容(和 `:kinds` 同一类),
+  不进 `volatile_keys` → platform 那条 deepEqual 照旧绿。
+- 回执 `docs/FOR-STUDIO.md` §3.39,`docs/REFERENCE.md` §10.10。
+
 ### 第 1 期(下半):**needs 搬成第一个出厂插件**
 
 设计稿 §9 的检验标准只有一条:**形状对不对,不看例子,看能不能把出厂的东西用同一
