@@ -3517,6 +3517,8 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.config_list(category=None, mask=True)` | 全部配置(secret 默认打码为 `前3***后4`);每行带 `source`:`默认值` / `世界文件` / `环境变量` / `机器配置 <路径>` |
 | `world.config_get(key, default=None)` / `world.config_set(key, value)` | 读/写;写按声明类型强转、立即生效;未知键 KeyError,secret 空值 / 非法 tick_rate 抛 ValueError |
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
+| 🆕 `world.world_setting()` | 这个世界的**世界观**此刻是什么:`{text, source, length}`。`source` 用 `prompt_list()` 那一套词(`默认值` / `世界文件`),不另造一套 |
+| 🆕 `world.set_world_setting(text=None, *, clear=False, dry_run=False)` | 改**一个已经跑着的世界**的世界观(3.8.0,收件箱 D4)。覆盖;`clear=True` 回落到引擎内置那份(**不是变成空的**);`None` / 空白 **拒绝**(`ValueError`);逐字相同 `changed: false`;`dry_run=True` 一个字节都不写。回执 `{before, after, source, changed, cleared, dry_run, length}`。CLI 出口是 `anima-world world setting`(§4.7.1) |
 
 ### 持久化与底层
 
@@ -4367,6 +4369,57 @@ readline。
 直说。v1/v2 那套 `[engine_min, engine_max_exclusive)` 双端区间连同 `template` 模式
 一起退役了。
 
+### 4.7.1 anima-world world setting —— 改一个**跑着的世界**的世界观(3.8.0,收件箱 D4)
+
+```bash
+anima-world world setting --world-id w                       # 只读:它现在是什么
+anima-world world setting --world-id w --set "旧港区,常年下雨。"
+anima-world world setting --world-id w --set-file setting.txt   # `-` = 标准输入
+anima-world world setting --world-id w --clear                # 回落到引擎内置那份
+anima-world world setting --world-id w --set "…" --dry-run --json
+```
+
+**这一格欠得比角色卡和地点图都久。** 世界观是作者层的一个段(`world_setting`),
+而它**只在创世那一刻**落进 `:prompts` 的 `world.setting`(`_seed_world_setting` 被
+`if not persisted` 把着门)。也就是说一个**已经建好、有人在玩**的世界改不了自己的
+世界观 —— 连拿一份改过的 `.cyberworld` 走 `--world-file` 都不行,那条路对这一段
+不生效,**而且不报错**。
+
+于是创作台唯一的办法是 `world drop` **把整个世界抹掉重建**:玩家的记忆、关系、
+事件日志、跑了几十个世界日的历史,全为了改一段话陪葬。**这条路是引擎逼出来的。**
+
+| 你给的 | 意思 |
+|---|---|
+| **什么都不给** | **只读** —— 印出它现在是什么、多少字、来源是哪一边 |
+| `--set TEXT` / `--set-file PATH` | 换成这段(**覆盖**) |
+| `--clear` | 抹掉这个世界自己那一行,**回落到引擎内置那份**(不是变成空的) |
+| 一段空白 / 一张表 | **拒绝**,退出码 2 |
+
+⚠️ **"什么都不给"是只读的那一边**,和 `world drop` 不带 `--yes` 只数同一条:
+一条会改东西的命令,它的默认必须是安全的那一边。
+
+⚠️ **`--set-file` 不是可有可无的**:世界观动辄几百上千字,而 Linux 的
+`MAX_ARG_STRLEN` 把单个 argv 元素封在 128 KiB —— 和 `--portrait-file` 逐字同一个
+理由,撞上去时报错的是操作系统,不是引擎。
+
+🔴 **为什么拒绝一段空白**(代价不对称):`None` 在宿主那儿最常见的来源是
+`row.get("setting")` 没取到值,一段全空白最常见的来源是模板里一个没展开的变量。
+把它们读成"抹掉"就是一次**静默抹掉整个世界观** —— 而世界观是她提示词里的
+**第一块**(`PROMPT_BLOCK_ORDER` 的头一项),抹掉它这个世界里每个人下一句话都会变,
+而回执上写着"改了"。拒一次的代价只是调用方补一个字。
+真要回落,请明写 `--clear`。⚠️ **这条判断在 API 上,不在 CLI 上** —— argv 那扇门和
+`--set-file` 那扇门因此对同一个输入给同一个答案。
+
+✅ **热改是权威,重启不拿文件盖回去** —— 这条**没有被动过**
+(`tests/test_world_setting.py` 两条各钉一遍:老写口一条、新写口一条)。
+"只填缺不覆盖"说的是**文件**那一侧,不是这一侧。
+
+⚠️ **它不发事件**,和 `location set-image` 同一条理由:`:prompts` 是世界观唯一的
+权威,在这里再发一条事件等于让"这个世界的世界观是什么"多出一个日志之外的答案。
+
+⚠️ **不许在一个不存在的世界上当场创世**(`5ce6aed` 的教训)—— 抄错 `--world-id`
+退出码 2,而不是建出一个新世界让你看到一份"排版正常"的默认世界观。
+
 ### 4.8 anima-world contract —— 引擎自报它的对外契约
 
 ```bash
@@ -4667,7 +4720,7 @@ stance / tools / intent / autonomy / contact / 人设尾部重注 / 夜间固化
 | `locations[]` | **必填** `id` / `name` / `description`;可选 `kind` / `parent` / `x` / `y` / `w` / `h`(嵌套邻接树,region 带 x/y/w/h、point 带 x/y,相对父区域 0~1)、`stock`、`map_image` / `scene_image`(见 §2.14 —— ⚠️ 和 `card` 一样是"写坏了当场开不了机"的可选键:相对路径的图发出去就是一张断的图) |
 | `relations[]` | `a` / `b` / `sentiment` / `r_type` / `r_type_back`,双向播种 |
 | `memories[]` | 创世记忆 |
-| `world_setting` | 世界观,**一段文本**(一条 `author` 记录,`body` 就是那段话),首启写进 `world.setting` 提示词;之后 `prompt_set` 的热改是权威,重启不覆盖 |
+| `world_setting` | 世界观,**一段文本**(一条 `author` 记录,`body` 就是那段话),首启写进 `world.setting` 提示词;之后热改是权威,重启不覆盖。🆕 3.8.0 起改一个**跑着的**世界走 `anima-world world setting`(§4.7.1)/ `World.set_world_setting()` —— 此前 CLI 上没有写口,创作台只能 `world drop` 重建 |
 | `items[]` | 物品定义:`id` / `name` / `kind`(`consumable`/`durable`/`artwork`)/ `base_price` / `restores` |
 | `mock_narration` | Mock 叙事模板,键是动作种类(外加 `memory_suffix`),见 §7 |
 | `config` | **这个世界开箱点亮哪些开关**(1.3.0),见下 |

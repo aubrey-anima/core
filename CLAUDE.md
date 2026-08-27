@@ -274,6 +274,12 @@ anima-world world export --world-id w --output my.cyberworld \
     --package-id my-world --name "我的世界"
 anima-world world import my.cyberworld --world-id w2  # 目标必须是空世界
 anima-world world drop --world-id w --yes             # 整个抹掉一个世界(不带 --yes 只数)
+anima-world world setting --world-id w [--set TEXT | --set-file PATH | --clear]
+#   读/改一个**跑着的世界**的世界观(3.8.0,收件箱 D4)。**不给开关就是只读**。
+#   此前它只在创世那一刻落进 `:prompts`,于是一个有人在玩的世界改不了自己的世界观
+#   —— 连 `--world-file` 都不生效且不报错,创作台唯一的办法是 `world drop` 重建。
+#   ⚠️ `--clear` 是**回落到引擎内置那份**,不是清空;一段空白/一张表当场拒绝
+#   (世界观是她提示词的第一块,静默抹掉它每个人下一句话都变而没有一处报错)。
 anima-world world inspect my.cyberworld               # 只读第一行:要哪个引擎、多大
 anima-world validate world my.cyberworld              # 不建世界就查作者层
 # `.cyberworld` 是 JSONL:`zcat x.cyberworld | grep '"type": "entity_spawn"'` 真的能用。

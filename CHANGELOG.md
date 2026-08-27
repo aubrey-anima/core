@@ -82,6 +82,58 @@ PyPI**,而这一轮往 `contract --json` 里加了两段、往抹除回执里加
 **已发布世界的 `engine_min` 一格没抬**(这一版没加作者层字段,老包照旧开得起来);
 动的只有橱窗自己的封皮(`test_flagship_seed` 的等号闸)。
 
+### 世界观改得动一个**跑着的**世界了(2026-08-27,收件箱 D4)
+
+同一张任务单的第二件。**这一格欠得比角色卡和地点图都久**,而它的代价也最重。
+
+`world_setting` 是作者层的一个段,而它**只在创世那一刻**落进 `:prompts` 的
+`world.setting`(`_seed_world_setting` 被 `if not persisted` 把着门)。于是一个
+**已经建好、有人在玩**的世界改不了自己的世界观 —— 连拿一份改过的 `.cyberworld` 走
+`--world-file` 都不行,**那条路对这一段不生效,而且不报错**。
+
+所以创作台唯一的办法是 `world drop --yes` **把整个世界抹掉重建**
+(`anima_studio/infra/workspace.py::_drop_world`):玩家的记忆、关系、事件日志、
+跑了几十个世界日的历史,全为了改一段话陪葬。**这条路是引擎逼出来的。**
+
+**新出口**(读写同一条命令,**什么都不给就是只读** —— 和 `world drop` 不带 `--yes`
+只数同一条:一条会改东西的命令,它的默认必须是安全的那一边):
+
+```bash
+anima-world world setting --world-id w                      # 它现在是什么
+anima-world world setting --world-id w --set "旧港区,常年下雨。"
+anima-world world setting --world-id w --set-file setting.txt   # `-` = 标准输入
+anima-world world setting --world-id w --clear              # 回落到引擎内置那份
+```
+
+Python 侧 `World.world_setting()` / `World.set_world_setting()`;
+`contract --json` 的 `seed` 段多三格(`world_setting_read_command` /
+`_write_command` / `_write_gloss`),**消费方按出口在不在探测,不比版本号**。
+
+四条语义,和 `set_card` / `set_location_image` 逐格同源:**覆盖**(明示的编辑)·
+**`--clear` 是回落到引擎内置那份,不是清空**(判据是"引擎声明过什么",不是"表里
+有没有行")· **一段空白 / 一张表当场拒绝** · **逐字相同就一个字都不写**。
+
+🔴 **那条拒绝值得单说,理由是代价不对称。** `None` 最常见的来源是
+`row.get("setting")` 没取到值,一段全空白最常见的来源是模板里一个没展开的变量。
+读成"抹掉"就是一次**静默抹掉整个世界观** —— 而世界观是她提示词里的**第一块**
+(`PROMPT_BLOCK_ORDER` 的头一项),抹掉它这个世界里每个人下一句话都会变,
+而回执上写着"改了"。拒一次的代价只是调用方补一个字。
+
+✅ **热改是权威这一条没有被动过** —— `tests/test_world_setting.py` 现在两条各钉一遍
+(老写口一条、新写口一条):**换了门不等于换了语义。**
+
+🔴 **一条差点漏掉的洞,被一条用例钉住了**:`--clear` 的 `changed` 判据**不能只比
+文本**。一个世界完全可能把世界观热改成和引擎默认值**逐字相同**的一段话 ——
+那时 `after == before`,只比文本的话 `--clear` 会报 `changed: false` 然后一个字都
+不写,于是那一行**永远删不掉**,而屏幕上写着"没有变化",看上去完全正常。
+判据得是「这个世界自己还有没有那一行」。**试过牙**:把判据退回成只比文本,
+`test_clear_一个和默认值逐字相同的世界观_照样删得掉` 当场红。
+
+顺带:`world.setting` 这个槽位名从字面量升成常量
+(`prompt_store.WORLD_SETTING_PROMPT`)—— 新开的那扇门和播种那一处必须指着同一个槽位。
+`RedisPromptStore` 多一个 `drop()`:「世界里只存作者动过的」那条纪律的对偶 ——
+能写下一个意见,就得能收回它。
+
 ### 判包那一族:三扇门说的话对上了(2026-08-27,收件箱 D30 / D31 / D32)
 
 任务单 `docs/任务单/2026-08-27-core-判包一族与world_setting.md`。

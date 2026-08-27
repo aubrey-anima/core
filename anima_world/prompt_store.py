@@ -333,6 +333,13 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
 # a literal '{' (prompt-grounding code review #1).
 _RAW_TEMPLATES = {"world.setting"}
 
+# 世界观住的那个槽位名。作者层那一段(`.cyberworld` 的 `type: "world_setting"`)
+# 落进世界之后就叫这个,她提示词里的**第一块**读的也是它
+# (`chat_service.PROMPT_BLOCK_ORDER` 的头一项)。
+# 3.8.0 起它有了热改的门(`World.set_world_setting` / `anima-world world setting`),
+# 所以这个名字从字面量升成常量 —— 那扇门和这里必须指着同一个槽位。
+WORLD_SETTING_PROMPT = "world.setting"
+
 
 def _sample_for(name: str) -> dict[str, Any]:
     """The variables a template's call site passes, for render-checking.

@@ -361,8 +361,9 @@ anima-world config         # 读写配置;api key 自动进机器配置,不进�
 # 部署 / 脚本打的
 anima-world run            # 只把时钟跑在前台:不引导、不问、不改时钟
 anima-world simulate       # 无头快进(--report 落一份运行摘要;--ticks 0 = 只创世)
-anima-world world          # export / import / inspect / check / migrate / drop 一个世界
+anima-world world          # export / import / inspect / check / setting / migrate / drop
 #                            check = 这一版引擎装不装得进这份包(退出码 = 答没答上来)
+#                            setting = 读/改一个**跑着的世界**的世界观(不给开关就是只读)
 anima-world validate       # 不建世界就查一份 .cyberworld 或一份节拍脚本
 anima-world contract       # 引擎自报存储契约与包格式版本 —— 持镜像的仓库拿它对账
 anima-world report         # 只读地出一份运行摘要,不跑世界

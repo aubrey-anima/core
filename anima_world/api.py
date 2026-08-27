@@ -7726,6 +7726,145 @@ class World:
             raise KeyError(f"prompt {name} not found")
         store.set(name, template)
 
+    def world_setting(self) -> dict[str, Any]:
+        """这个世界的**世界观**此刻是什么,以及它是谁写的。
+
+        读那一侧,`{text, source, length}`。
+
+        ⚠️ **`source` 用的是 `prompt_list()` 那一套词**(`默认值` / `世界文件`),
+        不另造一套。同一个概念在两条相邻的命令上有两种说法,消费方迟早各信各的
+        —— 而这个仓库为"同一件事两个答案"付过的账已经够多了。
+        (那两个词自己有一点不准:热改写下的值也报 `世界文件`,而它来自一次
+        CLI 写口、不来自任何文件。改这两个词会破坏 `prompt list --json` 的消费方,
+        所以留着,并在这里说明。)
+
+        **两个来源在 `text` 上分不出来**,而它们是两件不同的事:一个作者写过的
+        世界观,和一个"谁都没说话所以用了引擎默认值"的世界观,读起来一模一样。
+        """
+        from anima_world.prompt_store import WORLD_SETTING_PROMPT
+
+        store = self.scheduler.prompt_store
+        if store is None:
+            return {"text": "", "source": "默认值", "length": 0}
+        rows = {str(row.get("name")): row for row in store.list()}
+        row = rows.get(WORLD_SETTING_PROMPT) or {}
+        text = str(row.get("template") or store.get(WORLD_SETTING_PROMPT, default=""))
+        return {
+            "text": text,
+            "source": str(row.get("source") or "默认值"),
+            "length": len(text),
+        }
+
+    def set_world_setting(
+        self,
+        text: str | None = None,
+        *,
+        clear: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """改**一个已经跑起来的世界**的世界观。`world_setting()` 的写那一侧。
+
+        存在的理由和 `set_card` / `set_location_image` 是同一个故事的第三格,而这
+        一次欠得最久:世界观是作者层的一个段(`world_setting`),而它**只在创世
+        那一刻**落进 `:prompts` 的 `world.setting`(`__main__._seed_world_setting`
+        被 `if not persisted` 把着门)。也就是说一个**已经建好、有人在玩**的世界
+        改不了自己的世界观 —— 拿一份改过世界观的文件走 `--world-file` 也不行,
+        那条路对这一段是不生效的(而且不报错)。
+
+        于是创作台唯一的办法是 `world drop` **把整个世界抹掉重建**:玩家的记忆、
+        关系、事件日志、跑了几十个世界日的历史,全为了改一段话陪葬。
+        这条路是引擎逼出来的,不是他们想那么干。
+
+        ⚠️ **热改是权威,重启不拿文件盖回去** —— 这一条**没有被动过**
+        (`tests/test_world_setting.py::test_热改留得住重启不拿文件盖回去`)。
+        它和这扇门是配套的:这里写下的那段话,下次开机不会被那份 `.cyberworld`
+        里的旧世界观倒带回去。**"只填缺不覆盖"说的是文件那一侧,不是这一侧。**
+
+        三条判断,都和 `set_location_image` 逐字同源:
+
+        **一、这是一次明示的编辑,所以它覆盖。** 一个人指名道姓地说"这个世界的
+        世界观换成这段",而不是手里捏着一份文件(缺省还是内置橱窗)去填空。
+
+        **二、三个答案,别合并。**
+
+        | 你给的 | 意思 |
+        |---|---|
+        | `text` 一段非空文本 | 换成这段 |
+        | `clear=True` | 抹掉这个世界自己那一行,**回落到引擎内置那份**(不是变成空的) |
+        | `None` / 全是空白 | **拒绝**(`ValueError`) |
+
+        第三行的理由和地点图那一格逐字相同,而这一格的代价更重:`None` 在宿主那儿
+        最常见的来源是 `row.get("setting")` 没取到值,把它读成"抹掉"就是**静默抹掉
+        整个世界观**,而回执上写着"改了"。世界观是她收到的提示词的**第一块**
+        (`chat_service.PROMPT_BLOCK_ORDER` 的头一项)—— 抹掉它,这个世界里每个人
+        下一句话都会变,而没有一处报错。**"别动"不需要第二种写法:不调这个方法就是。**
+
+        **三、逐字相同就一个字都不写**(`changed: false`)。一次什么也没改的"成功"
+        读起来和改成功了一模一样。
+
+        ⚠️ **它不发事件**,和 `set_location_image` 同一条理由:`:prompts` 是世界观
+        **唯一**的权威,在这里再发一条事件等于让"这个世界的世界观是什么"多出一个
+        日志之外的答案,而两个答案分叉那天没有一处会报错。
+
+        返回 `{before, after, source, changed, cleared, dry_run, length}`。
+        `dry_run=True` 一个字节都不写。
+        """
+        if clear and text is not None:
+            raise ValueError(
+                "--clear 和一段世界观不能一起给:一句是「抹掉这个世界自己那一行、"
+                "回落到引擎内置那份」,一句是「换成这段」——引擎挑哪句都是猜"
+            )
+        if not clear:
+            if text is None:
+                raise ValueError(
+                    "什么都没给 —— 一段世界观或者 --clear 至少给一个。"
+                    "一次什么也没改的「成功」读起来和改成功了一模一样"
+                )
+            if not isinstance(text, str):
+                raise ValueError(
+                    f"世界观是**一段文本**,不是一张表(收到 {type(text).__name__})"
+                    " —— 这一格从 .cyberworld 到 :prompts 再到她的提示词块,"
+                    "全程是同一个字符串"
+                )
+            if not text.strip():
+                raise ValueError(
+                    "拒绝把世界观写成一段空白:它是她提示词里的**第一块**,"
+                    "抹掉它这个世界里每个人下一句话都会变,而没有一处会报错。"
+                    "真要回落到引擎内置那份,请明说 --clear"
+                )
+        from anima_world.prompt_store import WORLD_SETTING_PROMPT, resolve
+
+        store = self.scheduler.prompt_store
+        if store is None:
+            raise RuntimeError("这个世界没有 prompt_store —— 世界观没有可写的家")
+
+        before = self.world_setting()
+        # 回落之后是**引擎内置那份**,不是空 —— 所以回执里的 `after` 报的是回落到
+        # 的那一份,而不是一句空话。判据是"引擎声明过什么",不是"表里有没有行"
+        # (和 `config` 那条逐字同源)。
+        after_text = resolve(WORLD_SETTING_PROMPT, None, "") if clear else str(text)
+        # ⚠️ **`clear` 那一格的 changed 不能只比文本。** 一个世界完全可能把世界观
+        # 热改成和引擎默认值**逐字相同**的一段话 —— 那时文本没变,可"这个世界自己
+        # 有没有一行"变了,而那正是 `--clear` 要做的事。只比文本的话它会报
+        # `changed: false` 然后一个字都不写,于是那一行永远删不掉。
+        changed = after_text != before["text"] or (clear and before["source"] != "默认值")
+        receipt = {
+            "before": before["text"],
+            "after": after_text,
+            "source": "默认值" if clear else "世界文件",
+            "length": len(after_text),
+            "changed": bool(changed),
+            "cleared": bool(clear),
+            "dry_run": bool(dry_run),
+        }
+        if dry_run or not changed:
+            return receipt
+        if clear:
+            store.drop(WORLD_SETTING_PROMPT)
+        else:
+            store.set(WORLD_SETTING_PROMPT, str(text))
+        return receipt
+
     # ── 内部 ────────────────────────────────────────────────────────────────
 
     def _record_and_fan(self, event: dict[str, Any]) -> None:

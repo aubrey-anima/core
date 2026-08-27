@@ -774,6 +774,17 @@ class RedisPromptStore:
             "description": description if description is not None else old.get("description"),
         })
 
+    def drop(self, name: str) -> int:
+        """抹掉这个世界自己那一行,**回落到引擎声明的那份**(不是变成空的)。
+
+        「世界里只存作者动过的」那条纪律的对偶:能写下一个意见,就得能收回它。
+        没有这扇门时,收回一个热改过的世界观只有一条路 —— `world drop` 把整个
+        世界抹掉重建,而那会让玩家的记忆、关系、事件日志一起陪葬。
+
+        返回真的删掉了几行(0 = 这个世界本来就没说过话,已经在用默认值了)。
+        """
+        return self._rows.drop(name)
+
     def list(self) -> list[dict[str, Any]]:
         from anima_world.prompt_store import merged_listing
 

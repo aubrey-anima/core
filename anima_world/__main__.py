@@ -766,6 +766,32 @@ def _build_parser() -> argparse.ArgumentParser:
     world_import.add_argument("package", help="要装的 .cyberworld 文件")
     _add_world_args(world_import)
 
+    world_setting = world_commands.add_parser(
+        "setting",
+        help="读 / 改一个「已经跑着的世界」的世界观(不给 --set/--clear 就是只读)",
+    )
+    _add_world_args(world_setting)
+    world_setting.add_argument(
+        "--set", default=None, dest="set_text", metavar="TEXT",
+        help="换成这段世界观(这是覆盖;热改是权威,重启不会被世界文件盖回去)",
+    )
+    world_setting.add_argument(
+        "--set-file", default=None, dest="set_file", metavar="PATH",
+        help="从文件里读那段世界观(`-` = 标准输入)—— 世界观动辄几百上千字,"
+             "而 argv 有操作系统的上限,那不是引擎的上限",
+    )
+    world_setting.add_argument(
+        "--clear", action="store_true",
+        help="抹掉这个世界自己那一行,**回落到引擎内置那份**(不是变成空的);"
+             "不许和 --set/--set-file 一起给",
+    )
+    world_setting.add_argument(
+        "--dry-run", action="store_true", help="只报要改成什么,不动库"
+    )
+    world_setting.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出"
+    )
+
     world_migrate = world_commands.add_parser(
         "migrate",
         help="把一个 1.x 的 world.db 迁成 2.0 的世界文件 —— 一次性的桥",
@@ -6053,6 +6079,113 @@ def run_location_set_image(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_world_setting(args: argparse.Namespace) -> int:
+    """`anima-world world setting` —— 读 / 改**一个已经跑着的世界**的世界观。
+
+    补的是收件箱 D4 那一格,而它欠得比角色卡和地点图都久:世界观是作者层的一个段
+    (`world_setting`),而它**只在创世那一刻**落进 `:prompts` 的 `world.setting`
+    (`_seed_world_setting` 被 `if not persisted` 把着门)。也就是说一个**已经建好、
+    有人在玩**的世界改不了自己的世界观 —— 连拿一份改过的 `.cyberworld` 走
+    `--world-file` 都不行,那条路对这一段不生效,而且不报错。
+
+    于是创作台唯一的办法是 `world drop` **把整个世界抹掉重建**(实测:
+    `anima_studio/infra/workspace.py::_drop_world`)—— 玩家的记忆、关系、事件日志、
+    跑了几十个世界日的历史,全为了改一段话陪葬。**这条路是引擎逼出来的。**
+
+    **不给 `--set/--set-file/--clear` 就是只读**,和 `world drop` 不带 `--yes` 只数
+    是同一条:一条会改东西的命令,它的"什么都不给"必须是安全的那一边。
+
+    判断都在 `World.set_world_setting` 的 docstring 里(**覆盖**、`--clear` 回落到
+    引擎内置那份而不是空、拒绝空白、幂等)。这里只管四件:参数互斥、把文件读进来、
+    退出码、印给人看。**退出码 2 = 「我听懂了,但我不干」。**
+
+    ⚠️ **`--set-file` 不是可有可无的**:世界观动辄几百上千字,而 Linux 的
+    `MAX_ARG_STRLEN` 把单个 argv 元素封在 128 KiB —— 和 `--portrait-file` 逐字
+    同一个理由,撞上去时报错的是操作系统,不是引擎。
+    """
+    from anima_world.api import World
+
+    inline, source = args.set_text, args.set_file
+    if inline is not None and source is not None:
+        print("[world setting] --set 和 --set-file 不能一起给:"
+              "两句话都在说世界观写成什么 —— 引擎挑哪句都是猜。", file=sys.stderr)
+        return 2
+    text: str | None = inline
+    if source is not None:
+        try:
+            text = sys.stdin.read() if source == "-" else Path(source).read_text("utf-8")
+        except OSError as exc:
+            print(f"[world setting] 读不了 {source}:{exc}", file=sys.stderr)
+            return 2
+        except UnicodeDecodeError:
+            print(f"[world setting] {source} 不是 UTF-8 文本 —— "
+                  "这里要的是那段世界观本身,一段话。", file=sys.stderr)
+            return 2
+
+    if args.clear and text is not None:
+        print("[world setting] --clear 和 --set/--set-file 不能一起给:"
+              "一句是「回落到引擎内置那份」,一句是「换成这段」——引擎挑哪句都是猜。",
+              file=sys.stderr)
+        return 2
+
+    redis, world_id, mysql = _world_args(args)
+    if not _require_existing_world(redis, world_id, "world setting"):
+        return 2
+    try:
+        world = World.open(world_id, redis=redis, mysql=mysql)
+    except (BeatScriptError, WorldSeedError) as exc:
+        print(f"[world setting] {exc}", file=sys.stderr)
+        return 2
+
+    read_only = text is None and not args.clear
+    try:
+        if read_only:
+            receipt = world.world_setting()
+        else:
+            _warn_if_live(redis, world_id)
+            receipt = world.set_world_setting(
+                text, clear=bool(args.clear), dry_run=bool(args.dry_run),
+            )
+    except ValueError as exc:
+        print(f"[world setting] {exc}", file=sys.stderr)
+        return 2
+    except RuntimeError as exc:
+        print(f"[world setting] {exc}", file=sys.stderr)
+        return 2
+    finally:
+        world.close()
+
+    if args.as_json:
+        print(json.dumps(
+            {"operation": "world setting", "world_id": world_id,
+             "read_only": read_only, **receipt},
+            ensure_ascii=False, indent=2))
+        return 0
+
+    if read_only:
+        print(f"[world setting] {world_id} 的世界观({receipt['length']} 字,"
+              f"来源:{receipt['source']}):")
+        print()
+        print(receipt["text"] or "(空)")
+        return 0
+    if not receipt["changed"]:
+        # **说出「没有变化」** —— 一声不吭和改成功了长得一模一样。
+        print(f"[world setting] {world_id} 的世界观没有变化,一个字都没写。")
+        return 0
+    verb = "要改" if receipt["dry_run"] else "改了"
+    what = "回落到引擎内置那份" if receipt["cleared"] else f"{receipt['length']} 字"
+    print(f"[world setting] {world_id} 的世界观{verb}({what}):")
+    print(f"    原来 {len(receipt['before'])} 字 → 现在 {receipt['length']} 字")
+    if receipt["dry_run"]:
+        print("[world setting] --dry-run:一个字节都没写。")
+    else:
+        # **热改是权威** —— 说出来,因为下一个问题必然是"重启会不会被文件盖回去"。
+        print("[world setting] 热改是权威:下次开机不会被世界文件里那段旧的盖回去。")
+        print(f"[world setting] 看一眼她收到了什么:"
+              f"anima-world prompt --world-id {world_id} --agent <谁>")
+    return 0
+
+
 def run_player(args: argparse.Namespace) -> int:
     """`player forget` / `player options` / `player erase` —— 玩家数据的三个出口。
 
@@ -6977,6 +7110,27 @@ def contract_payload() -> dict[str, Any]:
                 "(`-` = 标准输入)。作者层那条路不变,仍然是「只填缺、不覆盖」:"
                 "拿一份补了图的世界文件去装一个已有的世界,已在册的地点照旧跳过"
                 "(并逐个点名),补图请走这扇门"
+            ),
+            # 🆕 3.8.0(收件箱 D4):**世界观的读写出口。**
+            # 和上面那两格逐字同一个理由,而这一格欠得最久 —— `world_setting` 只在
+            # **创世那一刻**落进 `:prompts`,于是一个已经在玩的世界改不了自己的
+            # 世界观,连 `--world-file` 都不生效(而且不报错),创作台唯一的办法是
+            # `world drop` 把整个世界抹掉重建。
+            # ⚠️ **按这一格判,别比版本号**(同一个 3.3.0 下有过七份不同的引擎)。
+            "world_setting_read_command": "world setting",
+            "world_setting_write_command": "world setting --set",
+            "world_setting_write_gloss": (
+                "`anima-world world setting --world-id <w> "
+                "[--set TEXT | --set-file PATH | --clear] [--dry-run] [--json]` —— "
+                "改一个**已经跑着的**世界的世界观。**什么都不给 = 只读**"
+                "(和 `world drop` 不带 `--yes` 只数同一条)。形状和 "
+                "`location set-image` 逐格相同:明示的编辑所以**覆盖**、"
+                "逐字相同就一个字都不写、`--dry-run` 只报不写、世界不存在退 2 "
+                "且不许当场创世。⚠️ **`--clear` 是回落到引擎内置那份,不是变成空的**;"
+                "一段空白 / 一张表**当场拒绝**(退 2)—— 世界观是她提示词里的第一块,"
+                "静默抹掉它会让这个世界里每个人下一句话都变,而没有一处报错。"
+                "argv 装不下的长文本走 `--set-file`(`-` = 标准输入)。"
+                "**热改是权威**:下次开机不会被世界文件里那段旧的盖回去"
             ),
         },
         # 角色卡:作者写给**玩家**看的那一面。创作台照这一段决定填什么、怎么校验,
@@ -8312,6 +8466,11 @@ def run_world_package(args: argparse.Namespace) -> int:
 
     if args.world_command == "check":
         return run_world_check(args)
+    # `setting` 和 `check` 一样走在下面那个 try/except 之前:它一个字节的 `.cyberworld`
+    # 都不碰(读写的是一个**活着的**世界),而那个 except 把一切拒绝报成 2 并印
+    # `[world setting] …` 之外的前缀 —— 它的拒绝理由自己已经说得更清楚。
+    if args.world_command == "setting":
+        return run_world_setting(args)
 
     try:
         if args.world_command == "inspect":

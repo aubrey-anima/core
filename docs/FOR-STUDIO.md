@@ -775,11 +775,13 @@ anima-world ontology --world-id w --json     # 给你们:{"kinds": [...], "entit
    `:prompts` 里那一行是运行期权威,`prompt_set` 的热改留得住,重启不会拿文件盖回去。
    ⚠️ 也就是说,把一份带 `world_setting` 的文件装进一个**已有**的世界,这一段**不生效**
    (对象型的 `config` / `mock_narration` 同样如此)——"装进已有世界 = 一次编辑"目前
-   只对列表型的段成立。而 `world.setting` 的写口只有 Python 的
-   `World.prompt_set("world.setting", …)`,**CLI 上没有**(`anima-world prompt` 是只读的),
-   所以你们现在改不了一个**活着的**世界的世界观 —— 新建的世界没问题。
-   要这条路就开一条诉求(`anima-world prompt --set` 之类的写口归引擎开),
-   别在你们那侧绕过去。
+   只对列表型的段成立。
+   ✅ **2026-08-27 更正后半段(3.8.0,收件箱 D4):CLI 上现在有写口了。**
+   这一整段此前写着「`world.setting` 的写口只有 Python 的
+   `World.prompt_set(…)`,**CLI 上没有**……要这条路就开一条诉求」——
+   **那条诉求批了、做了**:`anima-world world setting --set`(读写同一条命令,
+   什么都不给 = 只读)。**你们不用再为改一段世界观 `world drop` 重建整个世界了。**
+   完整回执见 **§3.47**。
 3. **验一遍不需要 Redis**:`anima-world validate world x.cyberworld` 就能查出形状错。
 
 守着它的是 `tests/test_world_setting.py`(文件 → `:prompts` → 她真收到的提示词块,
@@ -4560,3 +4562,89 @@ $ echo $?
 ```
 
 **读到它非空,就知道这个世界还差一次 `--world-file` 的编辑。**
+
+---
+
+## 3.47 世界观改得动了 —— **不用再 `world drop` 重建整个世界**(3.8.0,收件箱 D4)
+
+### 这一格欠了你们多久
+
+§3.10 第 2 条那段话从写下那天起就挂着一句「要这条路就开一条诉求」。诉求批了,这是回执。
+
+病是这样的:`world_setting` 是作者层的一个段,而它**只在创世那一刻**落进 `:prompts`
+的 `world.setting`(`_seed_world_setting` 被 `if not persisted` 把着门)。于是一个
+**已经建好、有人在玩**的世界改不了自己的世界观 —— 连拿一份改过的 `.cyberworld` 走
+`--world-file` 都不行,**那条路对这一段不生效,而且不报错**。
+
+所以你们那侧唯一的办法是 `world drop --yes` **把整个世界抹掉重建**
+(`anima_studio/infra/workspace.py::_drop_world`)—— 玩家的记忆、关系、事件日志、
+跑了几十个世界日的历史,全为了改一段话陪葬。**这条路是引擎逼出来的,不是你们想那么干。**
+
+### 现在
+
+```bash
+anima-world world setting --world-id w                        # 只读:它现在是什么
+anima-world world setting --world-id w --set "旧港区,常年下雨。港务局说了算。"
+anima-world world setting --world-id w --set-file setting.txt   # `-` = 标准输入
+anima-world world setting --world-id w --clear                # 回落到引擎内置那份
+anima-world world setting --world-id w --set "…" --dry-run --json
+```
+
+**读写同一条命令,什么都不给就是只读** —— 和 `world drop` 不带 `--yes` 只数同一条:
+一条会改东西的命令,它的默认必须是安全的那一边。
+
+Python 侧对应 `World.world_setting()` / `World.set_world_setting(text, clear=, dry_run=)`,
+回执 `{before, after, source, changed, cleared, dry_run, length}`。
+
+### 按出口探测,别比版本号
+
+`contract --json` 的 `seed` 段多三格(和 `location_image_write_command` 那一组逐字
+同一个形状、同一个理由):
+
+```json
+"seed": {
+  "world_setting_read_command":  "world setting",
+  "world_setting_write_command": "world setting --set",
+  "world_setting_write_gloss":   "……"
+}
+```
+
+⚠️ **按这一格在不在判**,别比 `engine_version`:同一个 `3.3.0` 下有过七份不同的引擎。
+你们 `infra/dialect.py` 里已经有这个形状(`beats_in_world_file` 按
+`contract --json` 的 `beats.author_type` 判)—— 照它加一格就行。
+
+### 四条你们要知道的语义
+
+| | |
+|---|---|
+| **覆盖** | 这是一次明示的编辑,不是作者层那条"只填缺、不覆盖" |
+| **`--clear` 是回落,不是清空** | 抹掉这个世界自己那一行 → **用引擎内置那份**。判据是"引擎声明过什么",不是"表里有没有行"(和 `config` 那条逐字同源) |
+| 🔴 **一段空白 / 一张表当场拒绝(退 2)** | 见下 |
+| **幂等** | 逐字相同 → `changed: false`,一个字都不写。一次什么也没改的「成功」读起来和改成功了一模一样 |
+
+🔴 **那条拒绝值得单说,因为它会咬到你们的自动化。** `None` 在宿主那儿最常见的来源是
+`row.get("setting")` 没取到值,一段全空白最常见的来源是模板里一个没展开的变量。
+把它们读成"抹掉"就是一次**静默抹掉整个世界观** —— 而世界观是她提示词里的**第一块**
+(`PROMPT_BLOCK_ORDER` 的头一项),抹掉它这个世界里每个人下一句话都会变,
+而回执上写着"改了"。**代价不对称**,所以引擎选择拒绝;真要回落请明写 `--clear`。
+
+### ✅ 热改是权威,这一条**没有被动过**
+
+下次开机不会被世界文件里那段旧的盖回去(`tests/test_world_setting.py` 现在两条各钉
+一遍:老写口一条、新写口一条 —— **换了门不等于换了语义**)。
+"只填缺不覆盖"说的是**文件**那一侧,不是这一侧。
+
+### 你们那侧可以拆掉什么
+
+1. **改世界观不再需要重建。** `_save_world_setting()` 之后不必再走"生成世界"那条
+   drop-重建路 —— 直接一条 `world setting --set` 打到那个活着的世界上。
+   ⚠️ 但**别一次性拆掉重建那条路**:它还管着别的段(`config` / `mock_narration` /
+   列表型段的语义各不相同)。这一轮只有 `world_setting` 这一格有了热改门。
+2. **作业库和世界之间那条对不上账的缝**可以收一格了:此前"作业库里改了但世界没变"
+   是常态(要点一次生成世界才生效),现在这一格可以做成写完当场生效。
+
+### 一条给运维台的(顺带)
+
+这扇门**不发事件**,和 `location set-image` 同一条理由:`:prompts` 是世界观唯一的
+权威,再发一条事件就是让"这个世界的世界观是什么"多出一个日志之外的答案。
+所以别去事件流里找它 —— 读 `world setting --json` 或 `prompt list`。

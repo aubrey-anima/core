@@ -100,3 +100,238 @@ def test_一条空白的世界观是错的不是无声的():
     """空字符串和"没写"在文件里长得几乎一样,而它们的意思完全不同。"""
     with pytest.raises(WorldFileError):
         author_records_to_seed([{"kind": "author", "type": "world_setting", "body": ""}])
+
+
+# ── 热改的门(3.8.0,收件箱 D4)────────────────────────────────────────────────
+#
+# 上面那几条钉的是**创世那一刻**这段话进不进得来。这一节钉的是另一半:
+# 一个**已经建好、有人在玩**的世界,改不改得了自己的世界观。
+#
+# 在这扇门之前答案是**改不了** —— `_seed_world_setting` 被 `if not persisted` 把着,
+# 连拿一份改过的 `.cyberworld` 走 `--world-file` 都不生效(而且不报错)。于是创作台
+# 唯一的办法是 `world drop` 把整个世界抹掉重建,玩家的记忆、关系、事件日志一起陪葬。
+
+
+def test_一个跑着的世界改得了自己的世界观(open_world, fresh_redis, tmp_path):
+    """D4 本身。**判据是她收到的提示词变了**,不是"库里存下了" ——
+    她读不到的世界观和没有世界观是同一件事(这条和本文件第一条同一个理由)。"""
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    assert _SETTING in world.debug_prompt("夏")["system"]
+
+    receipt = world.set_world_setting("港务局倒了。现在三号码头夜里有灯。")
+    assert receipt["changed"] is True and receipt["cleared"] is False
+    assert receipt["before"] == _SETTING
+    assert "三号码头夜里有灯" in world.debug_prompt("夏")["system"], (
+        "改完她还读着旧的 —— 那这扇门只是写了一行谁也看不见的字")
+    assert _SETTING not in world.debug_prompt("夏")["system"]
+
+
+def test_改成一模一样的一段话_一个字都不写(open_world, fresh_redis, tmp_path):
+    """幂等,和 `set_card` / `set_location_image` 同一条:一次什么也没改的「成功」
+    读起来和改成功了一模一样,而这条命令最常见的用法是照着单子敲一遍。"""
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    assert world.set_world_setting(_SETTING)["changed"] is False
+
+
+def test_dry_run_一个字节都不写(open_world, fresh_redis, tmp_path):
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    receipt = world.set_world_setting("换一段", dry_run=True)
+    assert receipt["changed"] is True and receipt["dry_run"] is True
+    assert world.world_setting()["text"] == _SETTING, "--dry-run 动了库"
+
+
+@pytest.mark.parametrize("bad", [None, "", "   \n  ", 123, {"text": "x"}])
+def test_拒绝把世界观写成空白或一张表(open_world, fresh_redis, tmp_path, bad):
+    """🔴 **代价不对称,所以这几种一律拒绝。**
+
+    `None` 在宿主那儿最常见的来源是 `row.get("setting")` 没取到值,一段全空白最
+    常见的来源是模板里一个没展开的变量。把它们读成"抹掉"就是一次**静默抹掉整个
+    世界观** —— 而世界观是她提示词里的**第一块**,抹掉它这个世界里每个人下一句话
+    都会变,回执上却写着"改了"。拒一次的代价只是调用方补一个字。
+    """
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    with pytest.raises(ValueError):
+        world.set_world_setting(bad)
+    assert world.world_setting()["text"] == _SETTING, "拒绝的那一次不许写下任何东西"
+
+
+def test_clear_是回落到引擎内置那份_不是变成空的(open_world, fresh_redis, tmp_path):
+    """「世界里只存作者动过的」那条纪律的对偶:能写下一个意见,就得能收回它。
+    而收回之后是**引擎声明的那份**,不是一段空话 —— 判据是"引擎声明过什么",
+    不是"表里有没有行"。"""
+    from anima_world.prompt_store import resolve
+
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    receipt = world.set_world_setting(clear=True)
+    assert receipt["cleared"] is True and receipt["changed"] is True
+    fallback = resolve("world.setting", None, "")
+    assert fallback and receipt["after"] == fallback
+    assert world.world_setting()["text"] == fallback
+    assert world.world_setting()["source"] == "默认值"
+    assert fallback in world.debug_prompt("夏")["system"]
+
+
+def test_clear_一个和默认值逐字相同的世界观_照样删得掉(open_world, fresh_redis, tmp_path):
+    """🔴 **这一条防的是一个只比文本就会漏掉的洞。**
+
+    一个世界完全可能把世界观热改成和引擎默认值**逐字相同**的一段话。那时
+    `after == before`,只比文本的话 `--clear` 会报 `changed: false` 然后一个字都
+    不写 —— 于是那一行**永远删不掉**,而屏幕上写着"没有变化",看上去完全正常。
+    判据必须是「这个世界自己还有没有那一行」。
+    """
+    from anima_world.prompt_store import resolve
+
+    fallback = resolve("world.setting", None, "")
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    world.set_world_setting(fallback)
+    assert world.world_setting()["source"] == "世界文件"
+    assert world.set_world_setting(clear=True)["changed"] is True
+    assert world.world_setting()["source"] == "默认值", (
+        "文本一样就没删 —— 那一行会永远留在这个世界里")
+
+
+def test_clear_和一段话不能一起给(open_world, fresh_redis, tmp_path):
+    world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
+    with pytest.raises(ValueError):
+        world.set_world_setting("换一段", clear=True)
+
+
+def test_热改过之后重启照旧不被文件盖回去(open_world, fresh_redis, tmp_path):
+    """**这扇门没有动那条规矩** —— 它和上面 `test_热改留得住重启不拿文件盖回去`
+    是同一条,只是走的是新的写口。两条一起钉:换了门不等于换了语义。"""
+    path = _world_file(tmp_path)
+    world = open_world("w", redis=fresh_redis, world_file=path)
+    world.set_world_setting("港务局倒了,现在没人说了算。")
+    world.close()
+
+    again = open_world("w", redis=fresh_redis, world_file=path)
+    assert again.world_setting()["text"] == "港务局倒了,现在没人说了算。"
+
+
+# ── CLI 出口(真路径)────────────────────────────────────────────────────────
+
+
+def test_world_setting_命令真的注册了_而且默认只读(open_world, fresh_redis, tmp_path):
+    """⚠️ **先钉"存在且合法时退 0"** —— argparse 对一个**没注册**的子命令也返回 2,
+    只钉拒绝那几条的话,命令根本不存在时测试会一路假绿(`test_character_card.py`
+    那条纪律,逐字同一个坑)。
+
+    顺带钉「不给开关就是只读」:一条会改东西的命令,它的"什么都不给"必须是安全
+    的那一边(和 `world drop` 不带 `--yes` 只数同一条)。
+    """
+    from _worldfile import redis_for, run_cli
+
+    client = redis_for(tmp_path / "cli.db")
+    open_world("w", redis=client, world_file=_world_file(tmp_path)).close()
+    done = run_cli("world", "setting", "--world-id", "w", "--json")
+    assert done.returncode == 0, done.stderr
+    import json as _json
+
+    payload = _json.loads(done.stdout)
+    assert payload["operation"] == "world setting" and payload["read_only"] is True
+    assert payload["text"] == _SETTING
+
+
+def test_world_setting_命令改得动_而且_set_file_读得进来(open_world, fresh_redis, tmp_path):
+    """`--set-file` 不是可有可无的:世界观动辄上千字,而 Linux 的 `MAX_ARG_STRLEN`
+    把单个 argv 元素封在 128 KiB —— 撞上去时报错的是操作系统,不是引擎。"""
+    import json as _json
+
+    from _worldfile import redis_for, run_cli
+
+    client = redis_for(tmp_path / "cli.db")
+    open_world("w", redis=client, world_file=_world_file(tmp_path)).close()
+
+    long_text = "旧港区的雨下了四十年。" * 200
+    src = tmp_path / "setting.txt"
+    src.write_text(long_text, encoding="utf-8")
+    done = run_cli("world", "setting", "--world-id", "w",
+                   "--set-file", str(src), "--json")
+    assert done.returncode == 0, done.stderr
+    assert _json.loads(done.stdout)["changed"] is True
+
+    again = run_cli("world", "setting", "--world-id", "w", "--json")
+    assert _json.loads(again.stdout)["text"] == long_text
+
+
+def test_world_setting_命令的四种拒绝(open_world, fresh_redis, tmp_path):
+    """退出码 2 = 「我听懂了,但我不干」,而且拒绝时一个字都不写。"""
+    from _worldfile import redis_for, run_cli
+
+    client = redis_for(tmp_path / "cli.db")
+    open_world("w", redis=client, world_file=_world_file(tmp_path)).close()
+    base = ["world", "setting", "--world-id", "w"]
+    for extra, why in [
+        (["--set", "a", "--set-file", "-"], "--set 和 --set-file 一起给"),
+        (["--set", "a", "--clear"], "--clear 和 --set 一起给"),
+        (["--set", "   "], "一段空白"),
+        (["--set-file", str(tmp_path / "没有这个文件")], "读不了那个文件"),
+    ]:
+        done = run_cli(*base, *extra)
+        assert done.returncode == 2, f"{why} 该被拒绝:{done.stdout}"
+    # 拒了这么多次,世界观一个字都没动。
+    assert open_world("w", redis=client).world_setting()["text"] == _SETTING
+
+
+def test_world_setting_不许在一个不存在的世界上当场创世(tmp_path):
+    """和 `agent set-card` / `location set-image` 同一条:抄错名字不该建出一个新世界
+    (`5ce6aed` 的教训)——那时你看到的是一份"排版正常"的默认世界观。"""
+    from _worldfile import redis_for, run_cli
+
+    client = redis_for(tmp_path / "empty.db")
+    done = run_cli("world", "setting", "--world-id", "根本没有这个世界", "--json")
+    assert done.returncode == 2, done.stdout
+    assert list(client.scan_iter("anima:根本没有这个世界:*")) == []
+
+
+def test_文档里承诺的每一条命令_真敲一遍(open_world, tmp_path):
+    """**凡是文档里承诺了一句用户会照着敲的命令,就去敲一遍**(CLAUDE.md 那条)。
+
+    REFERENCE §4.7.1 与 FOR-STUDIO §3.47 各印了一块 bash,里面五条命令。
+    这条把那五条**逐条**敲过去 —— 一份 832 项全绿的测试套件曾经和一句
+    `grep` 什么都找不到并存过,而坏的正是**可用性**。
+    """
+    import json as _json
+
+    from _worldfile import redis_for, run_cli
+
+    client = redis_for(tmp_path / "doc.db")
+    open_world("w", redis=client, world_file=_world_file(tmp_path)).close()
+    src = tmp_path / "setting.txt"
+    src.write_text("港务局倒了。三号码头夜里有灯。", encoding="utf-8")
+
+    def _say(*args):
+        done = run_cli(*args)
+        assert done.returncode == 0, f"{' '.join(args)} → {done.stderr}"
+        assert done.stdout.strip(), f"{' '.join(args)} 什么都没印 —— 人敲完看不到结果"
+        return done.stdout
+
+    base = ["world", "setting", "--world-id", "w"]
+    assert _SETTING in _say(*base), "只读那一趟没把现在这段印出来"
+    _say(*base, "--set", "旧港区,常年下雨。港务局说了算。")
+    _say(*base, "--set-file", str(src))
+    assert open_world("w", redis=client).world_setting()["text"] == src.read_text("utf-8")
+
+    # ⚠️ **`--dry-run` 那一条要在 `--clear` 之前查**,否则这句断言是白写的:
+    # 清完之后世界观本来就不含那段话,不管 --dry-run 有没有写过。
+    _say(*base, "--set", "换一段", "--dry-run", "--json")
+    assert open_world("w", redis=client).world_setting()["text"] == src.read_text("utf-8"), (
+        "--dry-run 动了库")
+
+    _say(*base, "--clear")
+    assert open_world("w", redis=client).world_setting()["source"] == "默认值"
+
+
+def test_contract_报得出这扇门_消费方按出口探测不比版本号(open_world, tmp_path):
+    """`contract --json` 的 `seed` 段三格 —— 创作台照它决定"这支引擎带不带得动",
+    而**同一个 3.3.0 下有过七份不同的引擎**,版本号比不出来。"""
+    import json as _json
+
+    from _worldfile import redis_for, run_cli
+
+    redis_for(tmp_path / "c.db")
+    seed = _json.loads(run_cli("contract", "--json").stdout)["seed"]
+    assert seed["world_setting_read_command"] == "world setting"
+    assert seed["world_setting_write_command"] == "world setting --set"
+    assert "--clear" in seed["world_setting_write_gloss"], (
+        "gloss 要说清 --clear 是回落不是清空 —— 读它的人正是拿它决定怎么调")
