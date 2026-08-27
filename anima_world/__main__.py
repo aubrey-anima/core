@@ -6669,6 +6669,13 @@ def contract_payload() -> dict[str, Any]:
         EDGE_END_PREFIXES,
         EDGE_FACT_SHAPES,
         EDGE_VERB_EFFECTS,
+        EMIT_KEYS,
+        EMIT_REQUIRED_KEYS,
+        KIND_LOCAL_PATTERN,
+        RULE_EVERY_KEYS,
+        RULE_KEYS,
+        TRIGGER_KEYS,
+        TRIGGER_REQUIRED_KEYS,
         DEFAULT_TEXT_MAX_CHARS,
         DEFERRED_SHAPES,
         EFFECTS,
@@ -7009,6 +7016,20 @@ def contract_payload() -> dict[str, Any]:
             "world_file_section": "plugins",
             "storage_key": "anima:{world_id}:plugins",
             "id_pattern": PLUGIN_ID_PATTERN,
+            # 🆕 2026-08-27:**六格盲区**(创作台诉求第六条)。
+            # 🔴 **引擎本来就全都拒**,契约只是把它已经在做的事说出来 ——
+            # 纯增量,一格取值都没改。少了这几格,创作台判不了,
+            # 只能眼看作者出包之后被引擎打回。形状照 `id_pattern` 那条先例:
+            # **给每种名字一格正则**,别让下游自己写死判断。
+            "version_required": True,
+            "rule_keys": list(RULE_KEYS),
+            "rule_every_keys": list(RULE_EVERY_KEYS),
+            "emit_keys": list(EMIT_KEYS),
+            "emit_required_keys": list(EMIT_REQUIRED_KEYS),
+            "trigger_keys": list(TRIGGER_KEYS),
+            "trigger_required_keys": list(TRIGGER_REQUIRED_KEYS),
+            # 创作台在这一格上是全仓**唯一一处写死的空白判断**,所以它点名要了。
+            "kind_local_pattern": KIND_LOCAL_PATTERN,
             "reserved_ids": sorted(RESERVED_IDS),
             # 🔴 **这一版收的事实形状,不是设计稿那张表。** 设计稿说的是这套架构
             # 装得下什么,契约说的是**这一版引擎收不收** —— 差着 `timer` 与 `text`

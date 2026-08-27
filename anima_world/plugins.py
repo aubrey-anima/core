@@ -751,6 +751,25 @@ def _parse_one(
 #: 插件声明的节点两种前缀。`group` 多一个 `members` 记号(见 `PluginKind`)。
 KIND_PREFIXES = ("entity:", "group:")
 
+#: `entity:` / `group:` 后面那个局部名的形状。**非空、不带冒号/点号/空白。**
+#:
+#: 创作台在这一格上是全仓**唯一一处写死的空白判断**(它诉求里点名的)——
+#: 给一格正则,它就不必猜。形状照 `PLUGIN_ID_PATTERN` 那条先例。
+#: ⚠️ 中文当然可以(这个引擎中文优先),所以不是 `[a-z]` 那种白名单,
+#: 而是**把不行的那几样排掉**。
+KIND_LOCAL_PATTERN = r"^[^\s.:]+$"
+_KIND_LOCAL = re.compile(KIND_LOCAL_PATTERN)
+
+#: 规律那三格从 `rules` 转出来 —— **同一份常量,不抄第二遍**
+#: (抄一遍就是"契约说六个、引擎认七个"那种漂移的来路)。
+from anima_world.rules import (  # noqa: E402
+    EMIT_KEYS, EMIT_REQUIRED_KEYS, RULE_EVERY_KEYS, RULE_KEYS,
+)
+
+#: 一条触发器里写得到的键;`id` / `on` / `effects` 三个必填。
+TRIGGER_KEYS = ("id", "on", "for_each", "when", "effects")
+TRIGGER_REQUIRED_KEYS = ("id", "on", "effects")
+
 #: 🔴 **动词的 target 永远不收的那几个词**(裁决 ①,2026-08-26)。
 #:
 #: 它们不是"还没支持",是**这条路不从这儿走**:对着一个人做的动作要过同意那道门,
@@ -779,8 +798,12 @@ def _parse_kind(plugin_id: str, label: str, name: str, spec: Any) -> PluginKind:
             "**前缀是承重的**:它说的是这一族东西有没有成员"
         )
     local = name[len(prefix):] if prefix else name
-    if not local.strip() or any(m in local for m in (*_BAD_FACT_MARKS, ":")):
-        errors.append(f"{label}:`{prefix}` 后面那个名字不能为空,也不能带冒号/点号/空格")
+    if not _KIND_LOCAL.match(local):
+        errors.append(
+            f"{label}:`{prefix}` 后面那个名字不能为空,也不能带冒号/点号/空白 —— "
+            f"形状是 `{KIND_LOCAL_PATTERN}`"
+            "(问 `contract --json` 的 `plugins.kind_local_pattern`,别自己写死判断)"
+        )
 
     facts: dict[str, Fact] = {}
     raw_facts = spec.get("facts") or {}
@@ -1362,6 +1385,12 @@ def _parse_trigger(
     edges = edges or {}
     if not isinstance(spec, dict):
         raise PluginError([f"{label} 必须是对象,收到 {type(spec).__name__}"])
+    unknown = sorted(set(spec) - set(TRIGGER_KEYS))
+    if unknown:
+        errors.append(
+            f"{label}:不认识的键 {unknown} —— 写下去会被**静默丢掉**;"
+            f"收的是 {list(TRIGGER_KEYS)}(`plugins.trigger_keys`)"
+        )
     trigger_id = str(spec.get("id") or "").strip()
     if not trigger_id:
         errors.append(f"{label} 少了 id")

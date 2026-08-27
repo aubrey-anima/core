@@ -1762,3 +1762,62 @@ def test_插件规律发的事件_也得是自己的命名空间():
                                     "emit": [{"type": "qi.耗尽",
                                               "when": "qi.灵力 > 5"}]}]}])
     assert ok[0].rules[0].emits[0].type == "qi.耗尽"
+
+
+def test_插件规律里多写一个键_当场拒而不是静默丢():
+    """🔴 **最后一个静默住户**(2026-08-27,创作台换钉 `a3b5fca` 重量出来的)。
+
+    它报的是「边规律里写 `link`」,而实测**比那更宽**:`link` / `effects` /
+    `cooldown` —— **随便什么不认识的键,插件的规律都照收然后丢掉**。
+    和刚收掉的那三格同种,也和同一份文件里 `sources` / `verbs` 两层对不上脾气。
+
+    ⚠️ **只收紧插件那一支**(`namespace` 不是 None)。作者层的 `rules` 是一个
+    早就发出去的面 —— 线上那两个世界我够不着,而"没量过就别收"是这一单一路的口径。
+    """
+    from anima_world.rules import RuleError, parse_rules
+
+    body = {"id": "qi", "version": "1.0.0",
+            "facts": {"灵力": {"bearer": "agent", "shape": "number"}},
+            "edges": {"bond": {"from": "agent", "to": "agent",
+                               "facts": {"热": {"shape": "number"}}}}}
+    for extra in ({"link": {"type": "bond"}}, {"effects": [{"link": {}}]},
+                  {"cooldown": 5}):
+        with pytest.raises(PluginError) as raised:
+            parse_plugins([{**body, "rules": [
+                {"id": "r", "for_each": {"kind": "agent"},
+                 "set": {"qi.灵力": "qi.灵力 + 1"}, **extra}]}])
+        joined = "\n".join(raised.value.errors)
+        assert next(iter(extra)) in joined and "rule_keys" in joined, joined
+    # **作者层那一支一个字没动** —— 同样多写一个键,照旧收下(没量过就别收)。
+    assert parse_rules([{"id": "r", "for_each": {"kind": "agent"},
+                         "set": {"高": "高 + 1"}, "cooldown": 5}])
+
+
+def test_契约把六个盲区报出来_让创作台判得了():
+    """创作台诉求第六条:**引擎开机拒、而契约不报**的那几格 —— 它判不了,
+    只能眼看作者出包之后被引擎打回。
+
+    六格实测**引擎全都已经拒了**,所以这不是"让引擎更严",是**把已经在做的事
+    说出来**:纯增量,一格取值都不改。形状照 `id_pattern` 那条先例(给名字一格正则)。
+    """
+    from anima_world.plugins import (
+        EMIT_KEYS, KIND_LOCAL_PATTERN, RULE_EVERY_KEYS, RULE_KEYS, TRIGGER_KEYS,
+    )
+
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    p = json.loads(out.stdout)["plugins"]
+    assert p["version_required"] is True
+    assert p["rule_keys"] == list(RULE_KEYS)
+    assert p["rule_every_keys"] == list(RULE_EVERY_KEYS)
+    assert p["emit_keys"] == list(EMIT_KEYS)
+    assert p["emit_required_keys"] == ["type", "when"]
+    assert p["trigger_keys"] == list(TRIGGER_KEYS)
+    assert p["trigger_required_keys"] == ["id", "on", "effects"]
+    assert p["kind_local_pattern"] == KIND_LOCAL_PATTERN
+    # 报出来的正则得**真的**是引擎在用的那一条 —— 拿它跑一遍引擎拒过的那两个名字。
+    import re
+
+    assert re.match(p["kind_local_pattern"], "sword")
+    assert not re.match(p["kind_local_pattern"], "my sword")
+    assert not re.match(p["kind_local_pattern"], "")

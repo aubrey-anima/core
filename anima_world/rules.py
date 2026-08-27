@@ -110,6 +110,22 @@ WORLD_OWNER = "world"
 #: 而 `set` 写的是**边自己的事实**。
 _SELECTOR_KINDS = ("kind", "owner", "action", "not_action", "edge")
 
+#: 一条规律里作者写得到的键。**`contract --json` 的 `plugins.rule_keys` 报的就是它。**
+#:
+#: 🔴 **它同时是那道"不认识的键当场拒"的判据**(只作用在**插件**的规律上)——
+#: 从前随便写一个 `link` / `effects` / `cooldown` 都照收然后丢掉,而作者看到的
+#: 只是「我写的那一格没生效」。判据和契约共用一份,才不会有"契约说六个、
+#: 引擎认七个"那种漂移。
+RULE_KEYS = ("id", "every", "for_each", "set", "when", "emit")
+
+#: `every` 认哪两个单位。
+RULE_EVERY_KEYS = ("ticks", "days")
+
+#: 一条 `emit` 里写得到的键;`type` 与 `when` 两个是必填
+#: (少了 `type` 当场报,`when` 空表达式编译不过)。
+EMIT_KEYS = ("type", "when", "payload", "importance", "text", "on")
+EMIT_REQUIRED_KEYS = ("type", "when")
+
 #: 上面那张表的公开名字 —— `contract --json` 的 `plugins.rule_selectors` 报的就是它。
 #: **消费方问这一格,别照文档抄一份清单**(那份清单会烂,而烂了的样子是创作台
 #: 对着一条合法的规律报一条假红)。
@@ -291,6 +307,34 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any],
                ticks_per_day: int = TICKS_PER_DAY(),
                *, namespace: str | None = None) -> Rule:
     errors: list[str] = []
+
+    # 🔴 **不认识的键当场拒 —— 只在插件那一支上**(2026-08-27,创作台重量出来的)。
+    #
+    # 从前 `link` / `effects` / `cooldown` 随便写,**照收然后丢掉**:作者写下的
+    # 那一格根本不在,而退出码 0、日志干净。这是插件这一层最后一个静默住户,
+    # 和同一轮收掉的另外三格同种。
+    # ⚠️ **作者层的 `rules` 一个字不动**:那是一个早就发出去的面(线上两个世界我
+    # 够不着),而"没量过就别收"是这一单一路的口径 —— 收它要先量它。
+    if namespace is not None:
+        unknown = sorted(set(entry) - set(RULE_KEYS))
+        if unknown:
+            errors.append(
+                f"{label}:不认识的键 {unknown} —— 写下去它会被**静默丢掉**,"
+                f"而你看到的只是「我写的那一格没生效」。规律收的是 {list(RULE_KEYS)}"
+                "(问 `contract --json` 的 `plugins.rule_keys`)。"
+                "⚠️ 边那三条原语(`link`/`unlink`/`transfer`)是**动词与触发器**的"
+                "效果,不是规律的 —— 规律这一层只有 `set` 与 `emit`"
+                "(`plugins.edge_rule_effects`)"
+            )
+        for position, spec in enumerate(entry.get("emit") or []):
+            if not isinstance(spec, dict):
+                continue
+            odd = sorted(set(spec) - set(EMIT_KEYS))
+            if odd:
+                errors.append(
+                    f"{label}.emit[{position}]:不认识的键 {odd};"
+                    f"收的是 {list(EMIT_KEYS)}(`plugins.emit_keys`)"
+                )
 
     interval = _parse_interval(label, entry.get("every"), errors, ticks_per_day)
     selector = _parse_selector(label, entry.get("for_each"), errors)
