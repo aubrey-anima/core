@@ -1821,3 +1821,100 @@ def test_契约把六个盲区报出来_让创作台判得了():
     assert re.match(p["kind_local_pattern"], "sword")
     assert not re.match(p["kind_local_pattern"], "my sword")
     assert not re.match(p["kind_local_pattern"], "")
+
+
+# ── 收尾全扫:`plugin` 记录**每一个层级**都不许静默丢键(2026-08-27)────────
+#
+# 前几轮是一层一层收的(事实的 `sources` → 动词 → 规律 / `emit` / 触发器),
+# 而创作台每换一次钉就量出新的一层。**一层一层来本身就是那个 bug 的形状** ——
+# 所以这一轮把每一层一次过完,并把每层的键名单都进契约。
+
+
+_SWEEP = {
+    "顶层": {"id": "qi", "version": "1.0.0", "怪键": 1},
+    "事实": {"id": "qi", "version": "1.0.0",
+             "facts": {"灵": {"bearer": "agent", "shape": "number", "怪键": 1}}},
+    "边": {"id": "qi", "version": "1.0.0",
+           "edges": {"b": {"from": "agent", "to": "agent", "怪键": 1}}},
+    "边上的事实": {"id": "qi", "version": "1.0.0",
+                   "edges": {"b": {"from": "agent", "to": "agent",
+                                   "facts": {"热": {"shape": "number", "怪键": 1}}}}},
+    "种类": {"id": "qi", "version": "1.0.0",
+             "kinds": {"entity:sword": {"gloss": "剑", "怪键": 1}}},
+    "种类上的事实": {"id": "qi", "version": "1.0.0",
+                     "kinds": {"entity:sword": {
+                         "facts": {"锋": {"shape": "number", "怪键": 1}}}}},
+    "触发器的 emit": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵": {"bearer": "agent", "shape": "number"}},
+        "triggers": [{"id": "t", "on": {"event": "conversation"},
+                      "effects": [{"emit": {"type": "qi.x", "怪键": 1}}]}]},
+    "边效果体": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵": {"bearer": "agent", "shape": "number"}},
+        "edges": {"b": {"from": "agent", "to": "agent"}},
+        "triggers": [{"id": "t", "on": {"event": "conversation"},
+                      "effects": [{"link": {"type": "b", "from": "self",
+                                            "to": "agent:x", "怪键": 1}}]}]},
+}
+
+
+@pytest.mark.parametrize("level", sorted(_SWEEP))
+def test_每一层多写一个键都当场拒(level):
+    """🔴 **一层一层收本身就是这个 bug 的形状** —— 所以这一条把每层都扫一遍。
+
+    ⚠️ **加一层就往 `_SWEEP` 里加一格**:漏一层的下场是安静的
+    (作者写下的那一格根本不在,而退出码 0、日志干净)。
+    """
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([_SWEEP[level]], subscribable=("conversation",))
+    joined = "\n".join(raised.value.errors)
+    assert "怪键" in joined, f"{level} 这一层把不认识的键静默吞了:{joined}"
+
+
+def test_触发器的emit和规律的emit_是两份键名单():
+    """🔴 **别把这两层合成一格**(创作台量到的那条,它已用 `strict_keys` 分开):
+    规律的 `emit` 有 `when` / `on` / `importance`(门槛与边沿是规律那一层的概念),
+    触发器的 `emit` 只有 `type` / `payload` / `text`(它已经"因一件事而发"了)。
+    **合成一格,创作台那边就是假红。**
+    """
+    from anima_world.plugins import EMIT_KEYS, TRIGGER_EMIT_KEYS
+
+    assert set(TRIGGER_EMIT_KEYS) < set(EMIT_KEYS), "两份名单的关系变了"
+    assert "when" in EMIT_KEYS and "when" not in TRIGGER_EMIT_KEYS
+    # 触发器里写 `when` 会被当成不认识的键拒 —— 那正是两份名单分开的意思。
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([{"id": "qi", "version": "1.0.0",
+                        "facts": {"灵": {"bearer": "agent", "shape": "number"}},
+                        "triggers": [{"id": "t", "on": {"event": "conversation"},
+                                      "effects": [{"emit": {"type": "qi.x",
+                                                            "when": "1 > 0"}}]}]}],
+                      subscribable=("conversation",))
+    assert "when" in "\n".join(raised.value.errors)
+
+
+def test_契约把每一层的键名单都报出来_而且不许漂():
+    """**每层一格,和引擎读同一份常量** —— 抄第二遍就是「契约说六个、引擎认七个」
+    那种漂移的来路(`rule_keys` 那一轮的先例)。"""
+    from anima_world import plugins as P
+
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    c = json.loads(out.stdout)["plugins"]
+    for grid, const in (
+        ("plugin_keys", P.PLUGIN_KEYS), ("fact_keys", P.FACT_KEYS),
+        ("edge_keys", P.EDGE_KEYS), ("kind_keys", P.PLUGIN_KIND_KEYS),
+        ("trigger_emit_keys", P.TRIGGER_EMIT_KEYS),
+        ("edge_effect_keys", P.EDGE_EFFECT_KEYS),
+        ("rule_required_keys", P.RULE_REQUIRED_KEYS),
+    ):
+        assert c[grid] == list(const), f"{grid} 和引擎那份常量漂了"
+    # 🔴 **反向闸:每一层都得有一格。** 加一层却忘了报,创作台的盲区就多一个,
+    # 而它那条"盲区不许变多"的闸只能靠人去发现。
+    assert set(P.STRICT_LEVELS) == {
+        "plugin_keys", "fact_keys", "edge_keys", "kind_keys", "verb_keys",
+        "rule_keys", "emit_keys", "trigger_keys", "trigger_emit_keys",
+        "edge_effect_keys", "projected_source_keys",
+    }, sorted(P.STRICT_LEVELS)
+    for grid in P.STRICT_LEVELS:
+        assert c.get(grid), f"契约少报了一层:{grid}"

@@ -539,6 +539,7 @@ def _parse_one(
     subscribable: set[str],
 ) -> Plugin:
     errors: list[str] = []
+    errors += unknown_keys(label, entry, PLUGIN_KEYS, "plugin_keys")
     version = str(entry.get("version") or "").strip()
     if not version:
         errors.append(
@@ -770,6 +771,72 @@ from anima_world.rules import (  # noqa: E402
 TRIGGER_KEYS = ("id", "on", "for_each", "when", "effects")
 TRIGGER_REQUIRED_KEYS = ("id", "on", "effects")
 
+#: 🔴 **触发器效果里的 `emit`,键名单和规律那一层的 `emit` 不是同一份。**
+#:
+#: 规律的 `emit` 有 `when` / `on` / `importance` —— 门槛与边沿是**规律**那一层的
+#: 概念(它每 tick 都在算,得有个"跨过去那一下"的说法);触发器的 `emit`
+#: **已经"因一件事而发"了**,再要一个 `when` 是同一件事说两遍。
+#: ⚠️ **别把这两格合成一格** —— 合了,创作台那边对着一份合法声明就是假红。
+TRIGGER_EMIT_KEYS = ("type", "payload", "text")
+
+#: `link` / `unlink` / `transfer` 那三条效果的体。
+EDGE_EFFECT_KEYS = ("type", "from", "to", "by_dst", "facts")
+
+#: 一条规律必填的那几个键(`every` 不写 = 每 tick 都算)。
+RULE_REQUIRED_KEYS = ("id", "for_each", "set")
+
+#: `plugin` 记录**顶层**写得到的键。
+PLUGIN_KEYS = ("id", "version", "engine_min", "label", "reads",
+               "facts", "edges", "kinds", "verbs", "rules", "triggers")
+
+#: 一条事实(节点上的、边上的、种类上的,**同一份**)写得到的键。
+#: ⚠️ `bearer` 在边与种类上由引擎替作者填,写不写都行;`sources` / `mode`
+#: 只对 `projected` 有意义,而那一层自己会拒。
+FACT_KEYS = ("bearer", "shape", "mode", "sources", "default", "visibility",
+             "label", "unit", "range", "bands", "values", "max_chars")
+
+#: 一种边写得到的键。
+EDGE_KEYS = ("label", "from", "to", "exclusive", "exclusive_to", "symmetric", "facts")
+
+#: 插件声明的一种**节点**写得到的键。⚠️ 名字里带 `PLUGIN_`:
+#: `ontology.KIND_KEYS` 是**作者层**那张表,两者不是一回事。
+PLUGIN_KIND_KEYS = ("gloss", "budget", "prompt", "facts")
+
+#: 🔴 **`plugin` 记录里每一个"会查不认识的键"的层级,一层一格。**
+#:
+#: 它存在的理由是一条**反向闸**:创作台那侧有一条"盲区不许变多"的断言,
+#: 而这一格让它收得到底 —— **加一层却忘了报,盲区就多一个**,而那件事没有一处
+#: 会报错(作者写下的那一格根本不在,退出码 0、日志干净)。
+#: ⚠️ **加一层就往这儿加一行**,`tests/test_plugins.py` 那条用例逐格点名。
+STRICT_LEVELS = (
+    "plugin_keys", "fact_keys", "edge_keys", "kind_keys", "verb_keys",
+    "rule_keys", "emit_keys", "trigger_keys", "trigger_emit_keys",
+    "edge_effect_keys", "projected_source_keys",
+)
+
+
+def unknown_keys(label: str, spec: Any, allowed: tuple[str, ...],
+                 grid: str) -> list[str]:
+    """这一层多写了哪几个键 —— **一份判断,十一个层级共用**。
+
+    🔴 **一层一层收本身就是这个 bug 的形状**:每收一层,下一次总有人量出新的一层。
+    所以这一句写一遍,每层调它一次;而每层的名单都进契约(`STRICT_LEVELS`),
+    创作台那条"盲区不许变多"的闸因此收得到底。
+
+    不认识的键**照收然后丢掉**的下场,比"不支持"坏得多:作者写下的那一格
+    **根本不在**,而退出码 0、日志干净 —— 他只看得到「我写的那一格没生效」。
+    """
+    if not isinstance(spec, dict):
+        return []
+    odd = sorted(set(spec) - set(allowed))
+    if not odd:
+        return []
+    return [
+        f"{label}:不认识的键 {odd} —— 写下去它会被**静默丢掉**,"
+        f"而你看到的只是「我写的那一格没生效」。这一层收的是 {list(allowed)}"
+        f"(问 `contract --json` 的 `plugins.{grid}`,别照文档记一份清单)"
+    ]
+
 #: 🔴 **动词的 target 永远不收的那几个词**(裁决 ①,2026-08-26)。
 #:
 #: 它们不是"还没支持",是**这条路不从这儿走**:对着一个人做的动作要过同意那道门,
@@ -791,6 +858,7 @@ def _parse_kind(plugin_id: str, label: str, name: str, spec: Any) -> PluginKind:
     errors: list[str] = []
     if not isinstance(spec, dict):
         raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
+    errors += unknown_keys(label, spec, PLUGIN_KIND_KEYS, "kind_keys")
     prefix = next((p for p in KIND_PREFIXES if name.startswith(p)), "")
     if not prefix:
         errors.append(
@@ -1050,6 +1118,7 @@ def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:
         errors.append(f"{label}:边类型名不能为空,也不能带 {list(_BAD_FACT_MARKS)}")
     if not isinstance(spec, dict):
         raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
+    errors += unknown_keys(label, spec, EDGE_KEYS, "edge_keys")
 
     # ⚠️ **声明里这两个键仍然叫 `from` / `to`**(设计稿那两个词),而**表达式里**
     # 的前缀是 `src` / `dst` —— 因为 `from` 是 Python 关键字,`ast` 连语法都过不去。
@@ -1109,6 +1178,7 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
             errors.append(f"{label}:事实名里不能有 {mark!r}")
     if not isinstance(spec, dict):
         raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
+    errors += unknown_keys(label, spec, FACT_KEYS, "fact_keys")
 
     shape = str(spec.get("shape") or "number").strip()
     if shape in DEFERRED_SHAPES and shape not in shapes:
@@ -1462,6 +1532,8 @@ def _parse_trigger(
                 if not isinstance(body, dict):
                     errors.append(f"{where}.emit 必须是对象")
                     continue
+                errors += unknown_keys(f"{where}.emit", body, TRIGGER_EMIT_KEYS,
+                                       "trigger_emit_keys")
                 event_type = str(body.get("type") or "").strip()
                 if not event_type:
                     errors.append(f"{where}.emit 少了 type")
@@ -1519,6 +1591,8 @@ def _parse_link_effect(
     if not isinstance(body, dict):
         errors.append(f"{where}.{kind} 必须是对象")
         return None
+    errors += unknown_keys(f"{where}.{kind}", body, EDGE_EFFECT_KEYS,
+                           "edge_effect_keys")
     edge_type = str(body.get("type") or "").strip()
     if not edge_type:
         errors.append(f"{where}.{kind} 少了 type")

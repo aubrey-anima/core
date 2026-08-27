@@ -6669,8 +6669,16 @@ def contract_payload() -> dict[str, Any]:
         EDGE_END_PREFIXES,
         EDGE_FACT_SHAPES,
         EDGE_VERB_EFFECTS,
+        EDGE_EFFECT_KEYS,
+        EDGE_KEYS,
         EMIT_KEYS,
         EMIT_REQUIRED_KEYS,
+        FACT_KEYS,
+        PLUGIN_KEYS,
+        PLUGIN_KIND_KEYS,
+        RULE_REQUIRED_KEYS,
+        STRICT_LEVELS,
+        TRIGGER_EMIT_KEYS,
         KIND_LOCAL_PATTERN,
         RULE_EVERY_KEYS,
         RULE_KEYS,
@@ -7022,6 +7030,22 @@ def contract_payload() -> dict[str, Any]:
             # 只能眼看作者出包之后被引擎打回。形状照 `id_pattern` 那条先例:
             # **给每种名字一格正则**,别让下游自己写死判断。
             "version_required": True,
+            # 🆕 2026-08-27 收尾全扫:**`plugin` 记录每一个层级一格键名单**。
+            # 🔴 **一层一层收本身就是那个 bug 的形状** —— 创作台每换一次钉就量出
+            # 新的一层,所以这一轮把每层一次过完,并让 `plugins.strict_levels`
+            # 报出"哪几层是查的",好让它那条「盲区不许变多」的闸收得到底。
+            # **每一格都和引擎读同一份常量**,抄第二遍就是漂移的来路。
+            "strict_levels": list(STRICT_LEVELS),
+            "plugin_keys": list(PLUGIN_KEYS),
+            "fact_keys": list(FACT_KEYS),
+            "edge_keys": list(EDGE_KEYS),
+            "kind_keys": list(PLUGIN_KIND_KEYS),
+            # ⚠️ **和 `emit_keys` 不是同一份,别合成一格**:规律的 `emit` 有
+            # `when`/`on`/`importance`(门槛与边沿是规律那一层的概念),
+            # 触发器的 `emit` 已经"因一件事而发"了。合了,创作台那边就是假红。
+            "trigger_emit_keys": list(TRIGGER_EMIT_KEYS),
+            "edge_effect_keys": list(EDGE_EFFECT_KEYS),
+            "rule_required_keys": list(RULE_REQUIRED_KEYS),
             "rule_keys": list(RULE_KEYS),
             "rule_every_keys": list(RULE_EVERY_KEYS),
             "emit_keys": list(EMIT_KEYS),
