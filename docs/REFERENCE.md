@@ -5290,3 +5290,42 @@ gossip / closeness 全建在"关系可重放"上,钱的每一笔来路(`payment`
 
 契约新格:`plugins.fact_modes` / `projected_shapes` / `projected_delta_event` /
 `projected_delta_payload` / `projected_bearers`。**整格缺席 = 这支引擎没有这一模式。**
+
+
+### 10.12 内核保留的那条写路:四轴只由 `state_change` 写(3.8.0 第 2 期 2c)
+
+🔴 **老板 2026-08-26 拍的 D40 ③**:插件**读得到、emit 得出**内置关系四轴,
+**写不进**。四轴是 `state_change{kind:"sentiment_delta"}` 的**投影**,直写等于把
+关系从「可重放」变成「直接写」——`forget_player` / stance / gossip / closeness
+全建在"关系可重放"上。
+
+而 `together` 这一块**今天就在直写**:`Scheduler._settle_invitation_declined` 亲手
+发那条 `state_change`。它在搬成出厂插件**之前**先改掉,不是搬完再改 ——
+搬完再改的话,中间那一版是一个**明着违反自己刚立的边界**的出厂插件,
+而出厂插件正是给作者看的范例。
+
+这一下从此分两半:
+
+| 半 | 是什么 | 将来归谁 |
+|---|---|---|
+| **发生了什么** | `invitation.declined{agent_id, player_id, agent_name, player_name, target, verb, verb_label, target_name}`(`together.INVITATION_DECLINED`) | **插件**(第 2 期 2e) |
+| **她因此怎么想** | `state_change{kind:"sentiment_delta", cause:"invitation_declined", …}` | **永远内核**(`Scheduler.KERNEL_RELATION_CAUSES`) |
+
+- **那条 `state_change` 的载荷一格没变**(`kind` / `as` / `target` / `delta` /
+  `axes` / `as_name` / `target_name` / `cause` 八格逐字相同),判据
+  `tests/test_interaction_witness_and_invites.py::test_那条state_change的载荷逐格没变`。
+  ⚠️ **`cause` 的取值一个字都不许改**:`test_没人答_到点就过期` 那一族按
+  `cause == "invitation_declined"` 挑事件,改名之后那几条断言会变成**永远成立**,
+  于是「过期不记」这条老板拍的纪律从此没人守着,而它照绿。
+- **反应是同步的,就跟在语义事件后面**,不走插件那条触发器队列。队列在 tick 开头
+  快照、drain 一遍,自己 emit 的落进**下一** tick —— 对递归那是对的,对这一件不是:
+  这一下的因果是同一个瞬间的两半,隔一个 tick 的话,中间任何一次 `state()` 都会
+  看到一个「他已经拒绝了而她还没反应」的世界,**而那个世界会被写进日志、进重放、
+  进提示词**。
+- **`invitation.declined` 是插件命名空间形状的事件**(带点号),所以插件的触发器
+  订得到它,**不必进 `SUBSCRIBABLE_EVENTS` 那张白名单**。判据
+  `::test_订invitation_declined的触发器_真的响一次` —— 第 1 期验收 C 逮到五种
+  死事件之后立的规矩:每加一种能被订的事件,就配一条「真发一次、订它的触发器
+  响一次」。
+- **日志那一半**:除了新增的这一条,一条都没多、一条都没少
+  (`::test_只有语义事件那一条是新的_别的一条没多`)。

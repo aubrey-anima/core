@@ -126,6 +126,21 @@ DEFAULT_INVITES_PER_PLAYER_PER_DAY = 2
 # - `cancelled` 邀请的人自己撤了(她走开了 / 睡着了 / 手上有了别的事)。
 INVITE_OUTCOMES = ("accepted", "declined", "expired", "cancelled")
 
+#: 🆕 3.8.0 第 2 期 2c:「他回掉了这份邀请」这件事本身,落成的那条事件。
+#:
+#: 🔴 **它存在的理由是老板 2026-08-26 拍的 D40 ③**:插件读得到、emit 得出内置
+#: 关系四轴,**写不进** —— 四轴是 `state_change{kind:"sentiment_delta"}` 的投影,
+#: 直写等于把关系从「可重放」变成「直接写」。而 `together` 这一整块马上要搬成
+#: 出厂插件,所以这一下先分成两半:**发生了什么**(这一条,将来归插件)与
+#: **她因此怎么想**(那条 `state_change`,永远归内核,见
+#: `Scheduler.KERNEL_RELATION_CAUSES`)。
+#:
+#: ⚠️ **搬之前先改,不是搬完再改**:搬完再改的话,中间那一版是一个明着违反
+#: 自己刚立的边界的出厂插件 —— 而出厂插件正是给作者看的范例。
+#: ⚠️ 它是**插件命名空间形状**的事件(带点号),所以插件的触发器订得到它,
+#: 不必进 `events.SUBSCRIBABLE_EVENTS` 那张白名单。
+INVITATION_DECLINED = "invitation.declined"
+
 # 亲密度的三轴加权。**和 `contact.CLOSENESS_WEIGHTS` 是同一份**,理由也同一条:
 # `respect` 不进(敬重不使人想念,也不使人想一起吃饭),而 `sentiment` 必须占
 # 大头 —— 线上那个世界二十条关系的细三轴无一例外全是 0(见 contact.py 的长注释),

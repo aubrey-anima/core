@@ -3347,20 +3347,32 @@ class Scheduler:
         agent_name = str(row.get("agent_name") or self._relation_name(agent_id))
         label = str(row.get("verb_label") or row.get("verb") or "")
         what = str(row.get("target_name") or row.get("target") or "")
+        # 🔴 **先说发生了什么,再由内核去写四轴**(2026-08-26 第 2 期 2c,
+        # 落的是老板拍的 D40 ③)。这一句从前是直接发那条 `state_change` 的 ——
+        # 而 `together` 这一整块马上要搬成出厂插件,插件**写不进四轴**。
+        # 搬完再改的话,中间那一版是一个明着违反自己刚立的边界的出厂插件,
+        # 而作者会照着它写。
+        self._record_and_deliver({
+            "type": together_mod.INVITATION_DECLINED, "who": agent_id, "loc": here,
+            "payload": {
+                "agent_id": agent_id, "player_id": pid,
+                "agent_name": agent_name, "player_name": player_name,
+                "target": str(row.get("target") or ""),
+                "verb": str(row.get("verb") or ""),
+                "verb_label": label, "target_name": what,
+            },
+        })
         if abs(delta) >= 0.005:
             # 判了个 0 等于没判,别为它发一条事件(和 `pair_deltas` 的 `minimum`
             # 同一条)。**只发她 → 他这一条**:他推掉一次邀请,不该顺手改写
             # 他自己对她的感觉 —— 那是他的事,而世界不替他写。
-            self._record_and_deliver({
-                "type": "state_change", "who": agent_id, "loc": here,
-                "payload": {
-                    "kind": "sentiment_delta", "as": agent_id, "target": pid,
-                    "delta": float(delta),
-                    "axes": together_mod.decline_axes(delta),
-                    "as_name": agent_name, "target_name": player_name,
-                    "cause": "invitation_declined",
-                },
-            })
+            self._react_to_semantic_event(
+                together_mod.INVITATION_DECLINED,
+                {"as": agent_id, "target": pid, "delta": float(delta),
+                 "axes": together_mod.decline_axes(delta),
+                 "as_name": agent_name, "target_name": player_name},
+                loc=here,
+            )
         self._record_and_deliver({
             "type": "memory_seed", "who": agent_id, "loc": here,
             "payload": {
@@ -3375,6 +3387,44 @@ class Scheduler:
                 "importance": 0.5,
             },
         })
+
+    #: 语义事件 → 内核替它写四轴时盖在 `cause` 上的那个词。
+    #:
+    #: 🔴 **这张表是 D40 ③ 的落点**(老板 2026-08-26 拍):插件读得到、emit 得出
+    #: 内置关系四轴,**写不进** —— 四轴是 `state_change{kind:"sentiment_delta"}` 的
+    #: 投影,直写等于把关系从「可重放」变成「直接写」。于是每一件"该动关系"的事
+    #: 分两半:**发生了什么**(语义事件,将来归插件)与**她因此怎么想**
+    #: (这一条,永远归内核)。
+    #:
+    #: ⚠️ **`cause` 的取值一个字都不许改**:`test_没人答_到点就过期` 那一族按
+    #: `cause == "invitation_declined"` 挑事件,改名之后那几条断言会变成**永远
+    #: 成立**,于是"过期不记"这条老板拍的纪律从此没人守着,而它照绿。
+    KERNEL_RELATION_CAUSES: dict[str, str] = {
+        together_mod.INVITATION_DECLINED: "invitation_declined",
+    }
+
+    def _react_to_semantic_event(
+        self, semantic_type: str, axes_payload: Mapping[str, Any], *, loc: str = "",
+    ) -> bool:
+        """一件语义事件 → 那条写四轴的 `state_change`。**内核保留的唯一写路。**
+
+        为什么它是**同步**的、就跟在语义事件后面,而不是走插件那条触发器队列:
+        队列在 tick 开头快照、drain 一遍,自己 emit 的落进**下一** tick ——
+        对递归那是对的,对这一件不是。这一下的因果是同一个瞬间的两半
+        (他回掉了 / 她因此冷了一点),隔一个 tick 的话,中间任何一次
+        `state()` 都会看到一个"他已经拒绝了而她还没反应"的世界,
+        **而那个世界是真的存在过的**(它会被写进日志、进重放、进提示词)。
+        """
+        cause = self.KERNEL_RELATION_CAUSES.get(semantic_type)
+        if cause is None:
+            return False
+        self._record_and_deliver({
+            "type": "state_change", "who": str(axes_payload.get("as") or ""),
+            "loc": loc,
+            "payload": {"kind": "sentiment_delta", **dict(axes_payload),
+                        "cause": cause},
+        })
+        return True
 
     def _settle_invitations(self) -> None:
         """到点没人答的邀请,过期掉。**跑在 tick 线程上** —— 纯算术。

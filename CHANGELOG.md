@@ -330,6 +330,35 @@ payload 差一个字节都会红,被排除的只有"次序",而次序由线程�
 - 两道闸各自试过牙:删掉折叠端那一支 → 重开之后值变 0;删掉 `forget` 那一支 →
   他走了而钱包还在。回执 `docs/FOR-STUDIO.md` §3.40,`docs/REFERENCE.md` §10.11。
 
+### 第 2 期 2c:先堵 together 那个口 —— 四轴从今天起不是它自己写的
+
+任务单同上 §2c。老板 2026-08-26 拍的 D40 ③:**插件读得到、emit 得出内置关系四轴,
+写不进** —— 四轴是 `state_change{kind:"sentiment_delta"}` 的投影,直写等于把关系
+从「可重放」变成「直接写」。而 `Scheduler._settle_invitation_declined` **今天就在
+直写**,它是 `together` 这一块马上要搬成出厂插件的那一部分。
+
+🔴 **搬之前先改,不是搬完再改。** 搬完再改的话,中间那一版是一个明着违反自己刚立
+的边界的出厂插件 —— 而出厂插件正是给作者看的范例。
+
+- 这一下分两半:**发生了什么** = 新事件 `invitation.declined`(`together`
+  模块的 `INVITATION_DECLINED`,载荷八格)· **她因此怎么想** = 那条
+  `state_change`,由 `Scheduler.KERNEL_RELATION_CAUSES` 这张**内核保留**的表写。
+- **反应是同步的,不走触发器队列。** 队列在 tick 开头快照、drain 一遍,自己 emit
+  的落进下一 tick —— 对递归那是对的,对这一件不是:这一下的因果是同一个瞬间的
+  两半,隔一个 tick 的话,中间任何一次 `state()` 都会看到一个「他已经拒绝了而她
+  还没反应」的世界,**而那个世界会被写进日志、进重放、进提示词**。
+- **逐字节闸两条**:那条 `state_change` 的载荷**八格逐字钉死**;这一趟的事件日志
+  差集**只有** `invitation.declined` 一条(`invitation_settled` / `memory_seed` /
+  `state_change` 原样)。⚠️ `cause` 的取值一个字都不许改 —— `test_没人答_到点就过期`
+  那一族按 `cause == "invitation_declined"` 挑事件,改名之后那几条断言会变成
+  **永远成立**,于是「过期不记」这条老板拍的纪律从此没人守着,而它照绿。
+- **新事件真的到得了触发器**(第 1 期验收 C 逮到五种死事件之后立的规矩):
+  判据 `::test_订invitation_declined的触发器_真的响一次`。它是插件命名空间形状的
+  事件(带点号),所以**不必进 `SUBSCRIBABLE_EVENTS`**。
+- **三仓一件不用改**:邀请那三扇门的形状、`INVITE_OUTCOMES` 的取值、`outcome`
+  的五支、`state_change` 的载荷,一个字都没动。
+  回执 `docs/FOR-STUDIO.md` §3.41,`docs/REFERENCE.md` §10.12。
+
 ### 顺带:法务抹除回执那七句 gloss 是**玩家可见文案**,而第一版把它写成了开发笔记
 
 两条都是 player 那侧的验收逮的,记在这儿是因为**回执板只有一块**:

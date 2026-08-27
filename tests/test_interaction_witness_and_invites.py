@@ -1222,3 +1222,117 @@ def test_contract_答得出结局那扇门在不在():
         name = cell[key].split(".", 1)[1]
         assert callable(getattr(World, name)), (key, cell[key])
     assert cell["read_command"] is None, "这扇门有意没有 CLI —— 消费方是 Python 宿主"
+
+
+# ── 2c:他说"不去"这一下,四轴从此不是它自己写的 ─────────────────────────────
+#
+# 🔴 **老板 2026-08-26 拍的 D40 ③**:插件读得到、emit 得出内置关系四轴,
+# **写不进**。四轴是 `state_change{kind:"sentiment_delta"}` 的投影,直写等于把关系
+# 从「可重放」变成「直接写」。
+#
+# 而 `together` 这一块**今天就在直写**(`_settle_invitation_declined` 亲手发那条
+# `state_change`)—— 它要在搬成插件之前先改掉,不是搬完再改:搬完再改的话,
+# 中间那一版是一个**明着违反自己刚立的边界**的出厂插件,而作者会照着它写。
+
+
+def test_他说不去_落的是一件事_四轴由内核那条路写(world):
+    """**语义事件在前,四轴在后。**
+
+    这一下从此分两半:`together` 那一半只说「发生了什么」(他回掉了这份邀请),
+    「她因此对他冷了一点」由**内核保留**的那条关系反应去写。搬成插件之后,
+    插件手里只剩前一半 —— 而那正是 D40 ③ 要的形状。
+    """
+    world.player_move("p1", "cafe")
+    world.players["p1"]["display_name"] = "阿布"
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world.answer_invitation("p1", seq, accept=False)
+
+    said = _events(world, "invitation.declined")
+    assert len(said) == 1, "他说不去这件事本身没落成一条事件"
+    payload = said[0]["payload"]
+    assert payload["agent_id"] == "夏" and payload["player_id"] == "p1"
+    assert payload["target"] == "bench:oak" and payload["verb"] == "同坐"
+
+    # 四轴照旧动,而且**是同一条 `state_change` 在写** —— 换的是谁让它发的,
+    # 不是它写成什么样。
+    shifts = [e for e in _events(world, "state_change")
+              if (e["payload"] or {}).get("cause") == "invitation_declined"]
+    assert len(shifts) == 1, "四轴那条路断了"
+    world.scheduler.catch_up_projection()
+    rel = world.scheduler._memory_projection.relations.get(("夏", "p1"))
+    assert rel is not None and rel.sentiment < 0
+    assert world.scheduler._memory_projection.relations.get(("p1", "夏")) is None
+
+
+def test_那条state_change的载荷逐格没变(world):
+    """🔴 **这一条是 2c 的逐字节闸。**
+
+    改的是"谁让它发的",不是"它长什么样"。载荷里任何一格换了名字或换了值,
+    下游(投影、图谱边、planner 读的那份)都会安静地少认一件事 —— 而这一族的
+    错法此前已经吃过:一条 `cause` 改名,`test_没人答_到点就过期` 那两处按
+    `cause == "invitation_declined"` 挑事件的断言会**变成永远成立**,
+    于是"过期不记"这条老板拍的纪律从此没人守着,而它照绿。
+    """
+    from anima_world import together as together_mod
+
+    world.player_move("p1", "cafe")
+    world.players["p1"]["display_name"] = "阿布"
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world.answer_invitation("p1", seq, accept=False)
+
+    shift = [e for e in _events(world, "state_change")
+             if (e["payload"] or {}).get("cause") == "invitation_declined"][0]
+    step, _full = world.scheduler._joint_config()
+    delta = together_mod.decline_delta(0.0, step=step)
+    assert shift["who"] == "夏"
+    assert shift["payload"] == {
+        "kind": "sentiment_delta", "as": "夏", "target": "p1",
+        "delta": float(delta), "axes": together_mod.decline_axes(delta),
+        "as_name": "苏晚夏", "target_name": "阿布",
+        "cause": "invitation_declined",
+    }, "载荷不是改之前那一份了"
+
+
+def test_只有语义事件那一条是新的_别的一条没多(world):
+    """日志那一半的闸:**除了新增的 `invitation.declined`,一条都没多、一条都没少。**"""
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    before = [(e["type"], json.dumps((e["payload"] or {}), sort_keys=True,
+                                     ensure_ascii=False))
+              for e in world.history(limit=500)["events"]]
+    world.answer_invitation("p1", seq, accept=False)
+    after = [(e["type"], json.dumps((e["payload"] or {}), sort_keys=True,
+                                    ensure_ascii=False))
+             for e in world.history(limit=500)["events"]]
+    fresh = [row for row in after if row not in before]
+    kinds = sorted(t for t, _ in fresh)
+    assert kinds == ["invitation.declined", "invitation_settled",
+                     "memory_seed", "state_change"], kinds
+
+
+def test_订invitation_declined的触发器_真的响一次(open_world, tmp_path):
+    """🔴 **新事件进得了触发器队列吗** —— 第 1 期验收 C 逮到五种死事件之后立的规矩:
+    每加一种能被订的事件,就得配一条「真发一次、订它的触发器响一次」的测试。
+
+    那五种死事件的样子是这样的:事件真发了 4 次、触发 0 次、值一格没动、
+    **一处不报错**,而 `plugin list` 照旧印着「触发器 1」。
+    """
+    seed = json.loads(json.dumps(_SEED))
+    seed["plugins"] = [{
+        "id": "grudge", "version": "1.0.0", "label": "记仇",
+        "facts": {"次数": {"bearer": "agent", "shape": "number", "default": 0.0,
+                           "visibility": "self", "label": "被回掉过几回"}},
+        "triggers": [{"id": "被回掉了", "on": {"event": together.INVITATION_DECLINED},
+                      "effects": [{"set": {"grudge.次数": "grudge.次数 + 1"}}]}],
+    }]
+    world = open_world(world_file=write_seed_file(tmp_path / "g.cyberworld", seed))
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    world.answer_invitation("p1", seq, accept=False)
+    world.tick(1)          # 队列在 tick 开头快照,drain 一遍
+    assert world.stocks("agent:夏")["grudge.次数"] == 1.0, \
+        "订它的触发器一次都没响 —— 这是一条死事件"
