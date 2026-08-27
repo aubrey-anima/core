@@ -124,12 +124,20 @@ pip install -e ".[dev]"
 #   `.venv/bin/pip show anima-world | sed -n 2p` 与 `.venv/bin/anima-world --version`
 
 python3.13 -m pytest -q               # fakeredis,无需真 Redis;addopts 已屏蔽 ROS 插件
-# 最近一次实跑:**1976 passed / 19 skipped,0 failed**(2026-08-27,插件系统第 2 期
-#   **2d-①(只搬钱包)+ 2e(邀请的存储与过期规律)** + 复核那 5 条残余,397 秒;
-#   起跑 `uptime` load **0.59**、收尾 **1.31**,机器基本空着)。
-#   这 **+13** 是这一轮的判据(钱包三条 · 边规律 emit 三条 · unlink 那道闸一条 ·
-#   邀请三条 · 橱窗那条 · `edge_ends` / `plugin list` 各一)。
-#   **两道 parity 各单跑 3 趟全绿**(needs 14.0s×3、economy 21.1s×3,起跑 load 1.19)。
+# 最近一次实跑:**1982 passed / 19 skipped,0 failed**(2026-08-27,第三轮两路复核
+#   那 8 条,397 秒;起跑 `uptime` load **0.65**、收尾 **1.21**)。
+#   这 **+6** 是那 8 条各自的判据(transfer 两条 · 热更新物化一条 · 开机 rebuild
+#   一条 · 出厂两表键集一条 · `invitation.expired` 触发器一条;钱那条是**换掉**
+#   上一版那条假绿的,不算净增)。
+#   **两道 parity 各单跑 3 趟全绿**(needs 14.0s×3、economy 21.1s×3,起跑 load 1.03)。
+#   🔴 **那一轮的三条 P1,全是我上一轮的修法本身错了**,而且都不报错:
+#   `transfer` 预检问反了条件(**该成的永远成不了**,且零覆盖)· delta 预折一次
+#   导致**两份钱包** · 热更新不重建物化视图(**"重开才对上"是 2b 自己防过的那一族**)。
+#   两条假绿都是我亲口说"有牙"的那几条 —— `sources.round` 那条取 `0.1+0.2`
+#   (两种位数答案相同)· 开机 rebuild 那条**直接调方法、不走开机路**。
+#   **「试牙也要试对地方」到这一轮记了三次,三次都是我自己。**
+#   上一趟是 **1976 / 19 / 0 failed**(同日,2d-① + 2e + 复核 5 条残余,397 秒,
+#   起跑 load 0.59)。
 #   ⚠️ **那一轮全量跑出来的三条红,全是老闸逮的、全是真的**:源事件的物化视图
 #   "每来一条就逐个 owner 开门"(撞 `test_the_engine_scales_to_many_entities`)·
 #   `--help` 里一对裸 `**` · 「作者没写规律」碰上一个永远装的出厂规律。
