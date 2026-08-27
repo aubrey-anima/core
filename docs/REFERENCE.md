@@ -4435,6 +4435,12 @@ anima-world world setting --world-id w --set "…" --dry-run --json
 
 ### 4.8 anima-world contract —— 引擎自报它的对外契约
 
+🆕 **3.8.0(2026-08-27):`seed` 段多一格 `visibilities`** —— 量声明里 `visibility`
+认的那五个词(`self` / `connected` / `here` / `public` / `hidden`,**从窄到宽**)。
+此前整份契约一格都没列过它们,消费方只能手抄。这一格**和引擎读同一份常量**
+(`perception.VISIBILITIES`),防漂移闸在 `tests/test_contract_command.py`。
+⚠️ **「没声明 = 感知不到」不在表里** —— 那是缺席的语义,不是第六档。
+
 ```bash
 anima-world contract           # 人看的一屏
 anima-world contract --json    # 契约本身;持镜像的仓库拿它对账

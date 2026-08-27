@@ -304,12 +304,11 @@ def test_文档里承诺的每一条命令_真敲一遍(open_world, tmp_path):
         done = run_cli(*args)
         assert done.returncode == 0, f"{' '.join(args)} → {done.stderr}"
         assert done.stdout.strip(), f"{' '.join(args)} 什么都没印 —— 人敲完看不到结果"
-        # 🔴 **stderr 也要干净**(2026-08-27 C 视角验收补上的)。
-        # 上一版这条只看 rc 与 stdout,于是它**拦不住那个真 bug**:`world setting`
-        # 把 `_warn_if_live` 写在了 `World.open()` **之后**,而 open 会把本进程登记
-        # 成活人 —— 每写一次都印一句"有进程正在跑这个世界",报的是**它自己的 pid**,
-        # 而那句话的内容("那个进程不会重读")说的也正是它自己。
-        # **一条可用性判据不看 stderr,就看不见用户屏幕的一半。**
+        # ⚠️ **这里有意只看 rc 与 stdout。** stderr 那一半由下面
+        # `first_write` 那条单独钉,而且**只钉第一次** —— 理由写在那儿:
+        # `owner_pid` 关世界时不清,后续几次本来就会看见上一次留下的戳。
+        # (上一版这段注释写着"stderr 也要干净",而断言并不在这儿 ——
+        # **一句比判据宽的注释,和一盏假绿灯是同一件事**,C 视角验收点名的。)
         return done.stdout
 
     base = ["world", "setting", "--world-id", "w"]

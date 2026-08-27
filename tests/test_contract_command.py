@@ -162,3 +162,29 @@ def test_人看的那一份只印数与分类_不刷全表():
     assert "引擎声明过什么" in out, "没把那条边界印给人看"
     # 逐键那份走 --json:人这儿不该出现某个具体键的描述文本。
     assert "Closed-session summaries recalled into the prompt" not in out
+
+
+def test_可见性五档进了契约_而且和引擎读的是同一份常量():
+    """🆕 2026-08-27(创作台修镜像漂移时立的诉求,🟡)。
+
+    量声明里的 `visibility` 只认五个词,而**整份契约此前一格都没列过它们** ——
+    于是创作台只能照 FOR-STUDIO 手抄一份。那正是 `kind_keys` 当初那条假红的形状:
+    抄漏一个词,一份**完全合法**的声明被判红,而引擎这侧一声不吭。
+
+    这条是**防漂移闸**,判据不是"有这一格",是**这一格和引擎真正读的那份常量
+    逐位相等**:写死一份平行清单只是把漂移搬个家 —— 契约会和 `perception.py`
+    分叉,而分叉那天两边都不报错(照 `plugins.rule_selectors` 的先例)。
+    """
+    from anima_world.perception import VISIBILITIES
+
+    payload = json.loads(_contract("--json").stdout)
+    listed = payload["seed"]["visibilities"]
+    assert listed == list(VISIBILITIES), (
+        f"契约报的可见档和 `perception.VISIBILITIES` 对不上:{listed} vs "
+        f"{list(VISIBILITIES)} —— 这一格的全部意义就是消费方不必手抄"
+    )
+    # **次序是承重的**(从窄到宽),所以钉的是列表不是集合;顺带钉住"就是这五个",
+    # 免得哪天悄悄多一档而消费方的选择器少一项。
+    assert listed == ["self", "connected", "here", "public", "hidden"], listed
+    # ⚠️ **「没声明 = 感知不到」不在这张表里** —— 它是缺席的语义,不是第六档。
+    assert "none" not in listed and "" not in listed, listed

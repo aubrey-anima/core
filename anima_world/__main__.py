@@ -5391,20 +5391,38 @@ def _live_owner(redis: Any, world_id: str) -> tuple[str, str] | None:
     return (str(pid), str(host or "?")) if pid else None
 
 
-def _warn_if_live(redis: Any, world_id: str) -> None:
+# 「有人正跑着这个世界」这句提醒后半句说什么,**按出口分岔** —— 因为后果真的不同。
+# ⚠️ 这一格 2026-08-27 由 C 视角验收挑出来:那句话原先写死成 config 的语义
+# (「那个进程不会重读,要下次重启才生效」),而 `world setting` 挂上来之后它就成了
+# **一句假话** —— `:prompts` 没有进程内缓存,`ChatService` 每次拼提示词都现读
+# (`chat_service.py` 的 `self._prompt_store.get("world.setting", …)`),所以热改
+# **当场就生效**。一句写死的后半句,换一扇门就可能反过来。
+_LIVE_EFFECTS = {
+    # ConfigStore 有内存缓存,所以这句对配置是真的。
+    "config": "写进去的配置那个进程不会重读,要下次重启才生效。",
+    # 提示词是现读的,所以这句对世界观也是真的 —— 只是方向相反。
+    "world setting": "世界观是现读的,那个进程下一次拼提示词就会用上新的。",
+}
+
+
+def _warn_if_live(redis: Any, world_id: str, *, outlet: str = "config") -> None:
     """对一个正在跑的世界动手之前,说一声。
 
     只提示不拒绝:进程崩掉标记就陈旧,拿陈旧标记去拒绝操作,等于在真出事那天把人
-    挡在门外。Redis 时代 `config set` 写的行,运行中的进程**同样不会重读**
-    (ConfigStore 有内存缓存)—— 要下次重启才生效,这一点和 world.db 时代一样。
+    挡在门外。**后半句按 `outlet` 分岔**(`_LIVE_EFFECTS`):同一句"有人在跑",
+    对配置和对世界观意味着相反的两件事,而写死其中一句就是对另一扇门撒谎。
+
+    ⚠️ **`owner_pid` 关世界时并不清**(它是提示不是锁),所以这个戳可能是上一次
+    命令留下的陈旧值 —— 这是有意的,别把它读成"此刻真有人在跑"。
     """
     owner = _live_owner(redis, world_id)
     if owner is None:
         return
     pid, host = owner
+    effect = _LIVE_EFFECTS.get(outlet, _LIVE_EFFECTS["config"])
     print(
         f"  {onboarding.yellow('这个世界正被 pid ' + str(pid) + ' @ ' + str(host) + ' 跑着')}"
-        f" —— 写进去的配置那个进程不会重读,要下次重启才生效。",
+        f" —— {effect}",
         file=sys.stderr,
     )
 
@@ -6142,7 +6160,7 @@ def run_world_setting(args: argparse.Namespace) -> int:
     # **一句每次都出现的警告等于没有这句警告**,和 `doctor` 那条永远退 1 同一族。
     # 兄弟出口 `config set` 一直是先 warn 后开(:5517),照它。
     if not read_only:
-        _warn_if_live(redis, world_id)
+        _warn_if_live(redis, world_id, outlet="world setting")
     try:
         world = World.open(world_id, redis=redis, mysql=mysql)
     except (BeatScriptError, WorldSeedError) as exc:
@@ -6970,6 +6988,7 @@ def contract_payload() -> dict[str, Any]:
     from anima_world.projection import SETTLED_INVITATIONS_KEPT
     from anima_world.together import INVITE_OUTCOMES
     from anima_world.ontology import AFFORDANCE_KEYS, KIND_KEYS
+    from anima_world.perception import VISIBILITIES
     from anima_world.world_seed import (
         WORLD_SEED_AGENT_KEYS,
         WORLD_SEED_AGENT_OPTIONAL_KEYS,
@@ -7075,6 +7094,16 @@ def contract_payload() -> dict[str, Any]:
             # 不认这一格,对着一份完全合法的声明产出过一条**假红**。
             # **消费方问这一格,别照文档维护一份清单。**
             "kind_keys": sorted(KIND_KEYS),
+            # 🆕 2026-08-27:**可见性五档**(tool 修镜像漂移时立的诉求)。
+            # 量声明里的 `visibility` 只认这五个词,而**整份契约此前一格都没列过
+            # 它们** —— 于是创作台只能照 FOR-STUDIO 手抄一份,和 `kind_keys`
+            # 当初那条假红是同一个形状:抄漏一个词,一份完全合法的声明被判红。
+            # 照 `plugins.rule_selectors` 的先例给,**和引擎读同一份常量**
+            # (`perception.VISIBILITIES`)—— 手写一份平行清单就是把漂移搬个家。
+            # ⚠️ 顺序是承重的:`self`/`connected`/`here`/`public`/`hidden` 是**从窄
+            # 到宽**排的,消费方拿它画选择器时那个次序就是给作者看的次序。
+            # **没声明 = 感知不到**,这一条不在表里 —— 它是缺席的语义,不是第六档。
+            "visibilities": list(VISIBILITIES),
             # 本轮新的那一格,单独点名。**创作台按它在不在探测,不比版本号** ——
             # 同一个版本号下有过好几份不同的引擎,而"这支引擎会不会让在场的人
             # 记住这件事"猜错了**不报错**:世界照跑、日志干净,只是屋里的人什么
