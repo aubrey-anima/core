@@ -1650,3 +1650,44 @@ def test_出厂表那两张的键集必须一样():
     plugins = json.loads(out.stdout)["plugins"]
     assert plugins["factory"] == dict(FACTORY_PLUGINS)
     assert plugins["factory_scope"] == dict(FACTORY_SCOPE)
+
+
+def test_出厂钱包声明的进位就是账本的进位(tmp_path):
+    """🔴 **上一条闸验的是「折叠机制认不认声明」,不是「出厂那一格声明的是几」。**
+
+    它在自己的 specs 里写死了 `round: 2` —— 于是把 `economy.py` 里那份**真声明**
+    改成 6,全仓照样绿(复核评审实测:86 passed,而真世界 `stocks=63.1305`
+    对 `balance()=63.13`)。**一个自己造判据的闸,验的是它自己。**
+
+    所以这一条**不造 specs**:直接拿 `economy.factory_plugin()` 那份真声明去折,
+    和账本逐笔对。改那一格的位数,这里当场红。
+    """
+    from anima_world.economy import factory_plugin
+    from anima_world.projection import _apply_payment, fact_source_updates
+    from anima_world.types import Event, Projection
+
+    coins = parse_plugins([factory_plugin()],
+                          subscribable=("payment",))[0].facts["coins"]
+    # 注册表那一行**照 `_install_plugins` 拼**:各拼一遍的话,这条闸验的又是
+    # 它自己拼出来的那份,而不是真的跑起来的那份。
+    specs = [{**spec, "fact": coins.qualified} for spec in coins.sources]
+
+    ledger, wallet = Projection(), {}
+    for seq, amount in enumerate(_DIVERGING_AMOUNTS, start=1):
+        payload = {"from": "__town__", "to": "夏", "amount": amount}
+        _apply_payment(ledger, Event(seq=seq, ts=0, type="payment", who="",
+                                     loc="", payload=payload))
+        for owner, fact, delta in fact_source_updates(specs, payload):
+            digits = int(specs[0]["round"])
+            wallet[owner] = round(wallet.get(owner, 0.0) + delta, digits)
+    assert wallet["agent:夏"] == ledger.balances["夏"], (
+        f"**出厂那一格声明的位数和账本对不上**:插件 {wallet['agent:夏']} ≠ "
+        f"账本 {ledger.balances['夏']}(声明的是 round={specs[0]['round']})"
+    )
+    # 并把那个数本身钉死,连同**为什么是 2**:账本 `_apply_payment` 每一步折两位
+    # (二进制浮点存不下 0.1),而**门禁读的是这个数** —— 一笔"正好够"的交易
+    # 迟早会被它拒掉,而那一次不报错也不留痕。
+    assert specs[0]["round"] == 2, (
+        "出厂钱包的进位不是两位了 —— 钱有最小单位,而账本折的就是两位;"
+        "两处不一样就是两个钱包,它们只在小数第三位往后分家"
+    )
