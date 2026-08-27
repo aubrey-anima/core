@@ -337,6 +337,8 @@ class Scheduler:
         #: 声明了 `mode:"projected"` 的事实:`存储键 → 那条 delta 事件的 type`。
         #: 空的时候这一层整个不花钱 —— 和"声明本身就是开关"逐字同构。
         self.projected_facts: dict[str, str] = {}
+        #: 上一次动词边效果的回执(`_settle_birth_and_death` 填,`act()` 读)。
+        self._last_verb_edges: list[dict[str, Any]] = []
         self.plugins: list[Any] = []
         # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
         # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
@@ -2688,6 +2690,21 @@ class Scheduler:
             if busy is not None:
                 return no("busy", busy)
 
+            # 🔴 **边连不连得上,查在收费之前**(2026-08-26 验收 A/C 双复现)。
+            #
+            # 从前 `_apply_verb_edges` 把 `apply_edge_effect` 的返回值扔了 ——
+            # 而那个返回值的 docstring 自己写着「它是承重的」。下场是
+            # `exclusive` 拦下之后**代价照收、`ok: true`、边没建**,
+            # 三样都不报错。
+            #
+            # 拦在收费之前是本仓既有的那条纪律(`spawn` 那句「收了钱再发现生不出来,
+            # 她付的那一次在世界里什么也没换到」逐字同一条),也是「关口只在起头查
+            # 一次」的那一条:付了代价再被拒,她没有任何办法预防,
+            # 而预防不了的失败教不会她任何东西。
+            blocked = self._verb_edge_gate(agent_id, target, verb)
+            if blocked is not None:
+                return no("edge_blocked", blocked)
+
             # ── 跟谁一起 ────────────────────────────────────────────────────
             #
             # 两条都不许静默降级成单人:降级之后世界照跑,而作者写下的"这件事
@@ -2798,6 +2815,9 @@ class Scheduler:
                 "consumed": dict(outcome.consumed),
                 **({"spawned": born} if born else {}),
                 **({"destroyed": target} if affordance.destroys_target else {}),
+                # 边那几条到底做成没有 —— **只在真有边效果时出现**,
+                # 没有边效果的世界回执逐字节不变。
+                **({"edges": self._last_verb_edges} if self._last_verb_edges else {}),
             }
 
     def _display_name(self, who: str) -> str:
@@ -3936,20 +3956,55 @@ class Scheduler:
         默认位置(这件事发生的地方)要从一个已经被抹掉的东西身上问出来。
         """
         born: dict[str, Any] = {}
+        self._last_verb_edges = []
         if affordance.spawn is not None:
             born = self._spawn_entity(agent_id, target, verb, affordance.spawn, here)
         # 边效果排在**生之后、灭之前**:`sect.found` 那种「生出一个门派、再把自己
         # 连上去」要拿到新生的 id;而灭那一步会把挂在这个东西身上的边一并断掉,
         # 排在它后面的 `link` 会在一条刚被抹掉的边上重建一条指向坟墓的边。
-        self._apply_verb_edges(agent_id, target, verb, here, born)
+        self._last_verb_edges = self._apply_verb_edges(
+            agent_id, target, verb, here, born)
         if affordance.destroys_target:
             self._destroy_entity(agent_id, target, verb, here)
         return born
 
+    def _verb_edge_gate(self, agent_id: str, target: str, verb: str) -> str | None:
+        """这个动词声明的边,**这一刻连得上吗**。连不上就回一句人话。
+
+        ⚠️ **只查查得动的那几条。** `from`/`to` 指着 `spawned` 的连不了 ——
+        那个东西这一刻还不存在。分界照 `world check --edit` 那条:**查得动的照查,
+        查不动的说出来**,而不是"有一条查不动就整个跳过"(那正是 3.7.0 修的假绿)。
+        查不动的那几条由 `_apply_verb_edges` 事后如实报进回执。
+        """
+        specs = self.verb_edge_effects.get(
+            (target.split(":", 1)[0] if ":" in target else target, verb))
+        store = self.edge_store
+        if not specs or store is None:
+            return None
+        actor = self.stock_owner_of(agent_id)
+        for spec in specs:
+            if str(spec.get("op") or "") != "link":
+                continue
+            src = self._resolve_node(spec.get("from"), {"target": target}, None, actor)
+            dst = self._resolve_node(spec.get("to"), {"target": target}, None, actor)
+            if not src or not dst:
+                continue          # 指着 `spawned` 之类 —— 这一刻查不动
+            edge_type = str(spec.get("type") or "")
+            declared = self.edge_types.get(edge_type)
+            if declared is None:
+                continue
+            label = declared.label or declared.name
+            if declared.exclusive and store.of_src(edge_type, src):
+                return (f"{self._display_name(agent_id)}已经有一条「{label}」了 —— "
+                        "这一种一个人只能有一条")
+            if declared.exclusive_to and store.of_dst(edge_type, dst):
+                return f"「{label}」这一头已经有人占着了 —— 这一种只认一个"
+        return None
+
     def _apply_verb_edges(
         self, agent_id: str, target: str, verb: str, here: str,
         born: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """插件动词声明的 `link` / `unlink` / `transfer`。
 
         **和触发器那条路共用 `apply_edge_effect`** —— 各写一份的话,同一条 `link`
@@ -3957,19 +4012,30 @@ class Scheduler:
         `member_of` 同时挂着,提示词里她同时是两个门派的人。
         """
         if not self.verb_edge_effects:
-            return
+            return []
         kind_id = target.split(":", 1)[0] if ":" in target else target
         specs = self.verb_edge_effects.get((kind_id, verb))
         if not specs:
-            return
+            return []
         namespace = {
             "target": target,
             "spawned": str((born or {}).get("id") or ""),
         }
         actor = self.stock_owner_of(agent_id)
+        out: list[dict[str, Any]] = []
         for spec in specs:
-            self.apply_edge_effect(spec, namespace, {"who": actor, "loc": here},
-                                   owner=actor)
+            # 🔴 **返回值不许再扔掉**(验收 A/C)。`_verb_edge_gate` 已经把查得动的
+            # 那几条挡在收费之前了,这里剩下的是**查不动的那一支**(指着 `spawned`
+            # 之类)—— 它们真的可能失败,而失败必须到得了 `act()` 的回执里:
+            # 一个"什么都没做"的 `link` 和一个"建成了"的 `link` 在日志上长得一样。
+            ok = self.apply_edge_effect(spec, namespace, {"who": actor, "loc": here},
+                                        owner=actor)
+            out.append({"op": str(spec.get("op") or ""),
+                        "type": str(spec.get("type") or ""), "ok": bool(ok)})
+            if not ok:
+                logger.warning("动词 %s 上的 %s(%s)没做成 —— 回执里说了",
+                               verb, spec.get("op"), spec.get("type"))
+        return out
 
     def _spawn_entity(
         self, agent_id: str, target: str, verb: str, spawn: Any, here: str,
@@ -4939,8 +5005,16 @@ class Scheduler:
             return
         from anima_world.stocks import clock_names
 
+        # 🔴 **水位也要捞回来 / 落回去**(2026-08-26 验收 A)。
+        #
+        # 它从前只在 `_evaluate_world_rules` 里做,而那个函数在**只有边规律**的
+        # 世界里第一句就 `return` —— 于是一条 `every: {ticks: 5}` 的边规律
+        # **每次重开都多烧一轮**,而没有一处报错。
+        self._hydrate_rule_marks()
         clock = clock_names(self.clock, self._minutes_per_tick())
         pending: list[tuple[str, str, str, dict[str, Any]]] = []
+        evaluated = 0
+        skipped: list[tuple[str, str, str]] = []
         for rule in due:
             since = self._rule_last_run.get(rule.id)
             if since is not None and self.clock - since < rule.interval_ticks:
@@ -4957,13 +5031,16 @@ class Scheduler:
                 }
                 try:
                     if not all(c.evaluate(namespace) for c in rule.conditions):
+                        evaluated += 1
                         continue
                     updates = {key: float(expr.evaluate(namespace))
                                for key, expr in rule.outputs.items()}
                 except ExpressionError as exc:
                     logger.warning("边规律 %s 在 %s→%s 上算不出来:%s",
                                    rule.id, src, dst, exc)
+                    skipped.append((rule.id, f"{src}→{dst}", str(exc)))
                     continue
+                evaluated += 1
                 if updates:
                     pending.append((edge_type, src, dst, updates))
         for edge_type, src, dst, updates in pending:
@@ -4972,6 +5049,15 @@ class Scheduler:
                 continue          # 这一轮里被别人断掉了 —— 不复活它
             facts.update(updates)
             store.link(edge_type, src, dst, facts)
+            self._rule_stats["written"] += len(updates)
+        # 🔴 **仪表也要数这一趟**(验收 A):三处注释拿「`rule_stats()` 报 skipped」
+        # 当"这条边规律没跑"的信号,而那个信号从前根本不存在 —— 边规律一格都没进
+        # 这个仪表。**一个不存在的信号比没有信号更贵**:它让读的人以为自己查过了。
+        self._rule_stats["evaluated"] += evaluated
+        if skipped:
+            self._rule_stats["skipped"] += len(skipped)
+            self._rule_stats["last_error"] = skipped[-1]
+        self._persist_rule_marks()
 
     # ── 投影式事实(第 2 期 2b,设计稿 §9.3)──────────────────────────────
 

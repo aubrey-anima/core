@@ -850,15 +850,15 @@ _TIRED = {"id": "agent", "quantities": {
     "体力": {"default": 100.0, "visibility": "self", "label": "体力"}}}
 
 
-def _menpai_world(tmp_path, name="menpai", plugin=None):
+def _menpai_world(tmp_path, name="menpai", plugin=None, fresh=True):
     path = write_seed_file(tmp_path / f"{name}.cyberworld", {
         **BARE,
         "kinds": [dict(_TIRED)],
         "entities": [{"id": "menpai.sect:青云门", "name": "青云门", "location": "cafe"}],
         "plugins": [dict(plugin or MENPAI)],
     })
-    return open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
-                         force_mock_llm=True)
+    return open_world_at(str(tmp_path / f"{name}.db"),
+                         world_file=path if fresh else None, force_mock_llm=True)
 
 
 def test_动词连得起边来_而不是只有触发器那一条路(tmp_path):
@@ -1053,3 +1053,233 @@ def test_契约报得出投影式事实这一格():
     assert plugins["fact_modes"] == ["stored", "projected"]
     assert plugins["projected_shapes"] == ["number"]
     assert plugins["projected_delta_event"] == "<plugin>.<fact>.delta"
+
+
+# ── 三视角验收的 P1(2026-08-26)────────────────────────────────────────────
+#
+# 七条,而它们有一个共同的形状:**说过的话和跑出来的事对不上,且对不上时不报错。**
+
+
+def test_边连不上时_代价不许照收_而且回执要说出来(tmp_path):
+    """🔴 **A/C 双复现的那一条**:`exclusive` 拦下 `link` 之后,`apply_edge_effect`
+    答 `False`,而 `_apply_verb_edges` 把这个返回值扔了 —— 于是**代价照收、
+    `ok: true`、边没建**。
+
+    `apply_edge_effect` 的 docstring 自己写着「返回**这次到底动了没有**。⚠️ 它是
+    承重的」—— 承重的东西被扔掉,而扔掉它的是同一轮写的另一个函数。
+
+    修法照本仓既有的那条纪律:**拦在收费之前**(`spawn`/`destroys_target` 那句
+    「收了钱再发现生不出来,她付的那一次在世界里什么也没换到」逐字同一条)。
+    """
+    with _menpai_world(tmp_path, name="gate") as world:
+        first = world.act("阿岚", "interact",
+                          {"target": "menpai.sect:青云门", "verb": "入门"},
+                          surface="body")
+        assert first["ok"] is True
+        stamina = world.stocks("agent:阿岚")["体力"]
+
+        # 第二次:`member_of` 是 exclusive 的,连不上。
+        again = world.act("阿岚", "interact",
+                          {"target": "menpai.sect:青云门", "verb": "入门"},
+                          surface="body")
+        assert again["ok"] is False, f"边没建成,却答了成功:{again}"
+        # 拒绝那条路上 `act()` 只给一句人话(既有形状,不为这一件改冻结面);
+        # **机器读的那一格在 `perform_affordance` 上**,和别的四类拒绝并列。
+        assert "门籍" in again["error"], again
+        assert world.scheduler.perform_affordance(
+            "阿岚", "menpai.sect:青云门", "入门")["reason"] == "edge_blocked"
+        assert world.stocks("agent:阿岚")["体力"] == stamina, \
+            "被拒的那一趟收了代价 —— 她付的那一次在世界里什么也没换到"
+        assert len(world.scheduler.edge_store.all("menpai.member_of")) == 1
+        # 做成的那一趟,回执里说得出边做没做成 —— 一个"什么都没做"的 `link`
+        # 和一个"建成了"的 `link` 在日志上长得一样,所以这一格是承重的。
+        assert first["detail"]["edges"] == [
+            {"op": "link", "type": "menpai.member_of", "ok": True}]
+
+
+def test_插件伪造不了别家的投影(tmp_path):
+    """🔴 **A 逮到的那条**:折叠端只看 `payload.fact`,不看**这条事件是谁发的** ——
+    于是一个 `thief` 插件 emit 一条 `thief.伪造.delta{fact: "bank.存款"}` 就改得动
+    别家的钱包。
+
+    **它运行期不显形**(物化视图没动),**重开那一刻才长出来**,而且零报错 ——
+    这正是本仓最怕的那种坏法:两份真相里有一份在别人手上。
+    """
+    from anima_world.projection import _apply_fact_delta
+    from anima_world.types import Event, Projection
+
+    proj = Projection()
+    forged = Event(seq=1, ts=0, type="thief.伪造.delta", who="", loc="",
+                   payload={"owner": "agent:阿岚", "fact": "bank.存款",
+                            "delta": 999999.0, "cause": "偷"})
+    _apply_fact_delta(proj, forged)
+    assert proj.plugin_facts == {}, "别家的事实被一条伪造的 delta 折进去了"
+
+    honest = Event(seq=2, ts=0, type="bank.存款.delta", who="", loc="",
+                   payload={"owner": "agent:阿岚", "fact": "bank.存款",
+                            "delta": 3.0, "cause": "存"})
+    _apply_fact_delta(proj, honest)
+    assert proj.plugin_facts == {"agent:阿岚": {"bank.存款": 3.0}}
+
+
+def test_离线两扇门也编译插件的种类(tmp_path):
+    """🔴 **B/C 双复现**:`validate world` / `world check` 不编译 `plugin.kinds`,
+    于是一份**开得起来**的世界被它们答成「引用不到 kind」退 2。
+
+    而 tool 把退 2 当红灯 —— **第一个照着 FOR-STUDIO 写插件的作者,会先看到一盏
+    假红灯。** 本仓那条老纪律的反面:比开机严是**假红**,比它松是假绿,两种都比
+    没有校验器更坏。
+    """
+    path = write_seed_file(tmp_path / "menpai.cyberworld", {
+        **BARE, "kinds": [dict(_TIRED)],
+        "entities": [{"id": "menpai.sect:青云门", "name": "青云门", "location": "cafe"}],
+        "plugins": [dict(MENPAI)],
+    })
+    for argv in (("validate", "world", path), ("world", "check", path)):
+        out = run_cli(*argv)
+        assert out.returncode == 0, f"{argv} 退 {out.returncode}:{out.stdout}{out.stderr}"
+
+
+def test_动词的裸串target写错字_当场拒(tmp_path):
+    """🔴 **C 逮到的那条**:`target: "swrd"`(少了个 o)两扇门全绿、开机全绿,
+    然后**静默长出一个空种类**,永远不会有实例 —— 而作者看到的是「我的动词点不动」。
+
+    `_parse_verb` 只查带前缀的那一支,裸串那一支一个字都没查过。
+    """
+    from anima_world.world_seed import WorldSeedError
+
+    bad = {**MENPAI, "verbs": {"磨": {"target": "swrd", "label": "磨"}}}
+    with pytest.raises((WorldSeedError, Exception)) as raised:
+        _menpai_world(tmp_path, name="typo", plugin=bad).__enter__()
+    assert "swrd" in str(raised.value), raised.value
+
+
+def test_动词target写agent_是一句人话不是一段栈(tmp_path):
+    """🔴 **C:今天是 29 行 Python 栈,而末行怪的是 `kinds` 不是插件。**
+
+    裁决 ①:`agent` **永不**进 `verb_target_forms` —— 对人的动词走工具路 + 同意门
+    (第 3 期)。所以这里要的不是"以后支持",是**加载期一句说得清的中文**。
+    """
+    bad = {**MENPAI, "verbs": {"拜师": {"target": "agent", "label": "拜师"}}}
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([bad])
+    joined = "\n".join(raised.value.errors)
+    assert "agent" in joined and "工具" in joined, joined
+
+
+def test_契约里的edge_ends报全_别让tool拒掉跑得起来的世界():
+    """🔴 **C 实跑**:`edge_ends` 只列四个裸词,而 `_parse_edge` 真收
+    `entity:` / `group:` 前缀。**照契约判的 tool 会拒掉一个引擎跑得起来的世界。**"""
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    ends = json.loads(out.stdout)["plugins"]["edge_ends"]
+    assert "entity:<kind>" in ends and "group:<kind>" in ends, ends
+
+
+def test_边规律写emit_当场拒而不是静默无效():
+    """🔴 **B 逮到的那条**:契约里 `effects` 含 `emit`、`rule_selectors` 含 `edge`,
+    **没有一格说这个组合不成立** —— 而 `_evaluate_edge_rules` 一条 emit 都不发,
+    开机不拦、零 warning。
+
+    对照组是我自己在 `projected` 上写的那两条限制(加载期拒 + 说得出为什么)。
+    **将来要支持是加法,今天静默不支持是撒谎。**
+    """
+    bad = {**MENPAI, "rules": [{
+        "id": "熬资历", "every": {"ticks": 1}, "for_each": {"edge": "member_of"},
+        "set": {"menpai.资历": "edge.menpai.资历 + 1"},
+        "emit": [{"type": "menpai.熬出头了", "when": "edge.menpai.资历 > 10"}]}]}
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([bad])
+    joined = "\n".join(raised.value.errors)
+    assert "emit" in joined and "set" in joined, joined
+
+
+# ── 三视角验收的 P2 ─────────────────────────────────────────────────────────
+
+
+def test_边规律也进rule_stats_水位也过得了重开(tmp_path):
+    """🔴 **A 逮到的那条**:边规律一格都不进 `rule_stats()`,而**三处注释拿
+    "`rule_stats` 报 skipped" 当那件事的信号** —— 那个信号根本不存在。
+
+    连带一件同源的:水位(`_persist_rule_marks`)只在 `_evaluate_world_rules` 里落,
+    而那个函数在**只有边规律**的世界里第一句就 `return` —— 于是节流的边规律
+    每次重开都多烧一轮。
+    """
+    slow = {**MENPAI, "rules": [{
+        "id": "熬资历", "every": {"ticks": 5}, "for_each": {"edge": "member_of"},
+        "set": {"menpai.资历": "edge.menpai.资历 + 1"}}]}
+    with _menpai_world(tmp_path, name="stats", plugin=slow) as world:
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "入门"}, surface="body")
+        world.tick(6)
+        stats = world.rule_stats()
+        assert stats["evaluated"] >= 1, f"边规律一格都没进仪表:{stats}"
+        assert stats["written"] >= 1, stats
+        seniority = world.scheduler.edge_store.get(
+            "menpai.member_of", "agent:阿岚", "menpai.sect:青云门")["menpai.资历"]
+    # 重开:**节流水位要跟着世界走**,不然每次重开都多烧一轮。
+    with _menpai_world(tmp_path, name="stats", plugin=slow, fresh=False) as world:
+        world.tick(1)
+        again = world.scheduler.edge_store.get(
+            "menpai.member_of", "agent:阿岚", "menpai.sect:青云门")["menpai.资历"]
+        assert again == seniority, f"重开多烧了一轮:{seniority} → {again}"
+
+
+def test_边进提示词印的是名字不是裸id(tmp_path):
+    """🔴 **A 逮到的那条**:「你和 menpai.sect:青云门」—— 一个引擎的 id 漏进了
+    她读到的那句话。这是本仓反复修的同一类 bug(`place_name` 那条 docstring)。"""
+    from anima_world.perception import perceive
+
+    with _menpai_world(tmp_path, name="name") as world:
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "入门"}, surface="body")
+        block = perceive(agent_id="阿岚", here="cafe",
+                         stock_store=world.scheduler.stock_store,
+                         visibility=world.scheduler.visibility_store,
+                         ontology=world.scheduler.ontology,
+                         edges=world._edges_for("阿岚")).render()
+    edge_line = next(l for l in block.split("\n") if l.startswith("- 你和"))
+    assert edge_line.startswith("- 你和青云门:"), edge_line
+    # ⚠️ **只查这一行**:上面那行「这里的青云门[menpai.sect:青云门]」里的 id 是
+    # **有意的** —— 她要拿它去 `interact`。两件事别混成一条断言。
+    assert "menpai.sect:" not in edge_line, f"裸 id 漏进这一行了:{edge_line}"
+
+
+def test_plugin_list_报得出种类边和动词(tmp_path):
+    """🔴 **C 逮到的那条**:`plugin list` 对 kinds / edges / verbs **一字不报** ——
+    「挂在 」后面是一片空白(这个插件的事实一个都不挂在节点上,全在边上)。
+
+    连带给 `Verb.schema()` 接上第一个**生产路径的消费者**:它从前只有测试在读,
+    而一份没人读的 schema 和一份没有的 schema,坏起来长得一模一样。
+    """
+    with _menpai_world(tmp_path, name="pl"):
+        pass
+    out = run_cli("plugin", "list", "--world-id", "w", "--json")
+    assert out.returncode == 0, out.stderr
+    row = json.loads(out.stdout)["plugins"][0]
+    assert row["kinds"] == ["menpai.sect"], row
+    assert row["edges"] == ["menpai.member_of"], row
+    assert sorted(v["name"] for v in row["verbs"]) == ["menpai.入门", "menpai.拆了它",
+                                                       "menpai.退出"]
+    entry = next(v for v in row["verbs"] if v["name"] == "menpai.入门")
+    assert entry["parameters"]["required"] == ["target"]
+    assert entry["description"] == "递上名帖,拜入这个门派"
+    # 人眼那一份也不许再印一个光秃秃的「挂在 」。
+    human = run_cli("plugin", "list", "--world-id", "w")
+    assert human.returncode == 0, human.stderr
+    assert "挂在 \n" not in human.stdout and "种类 1" in human.stdout, human.stdout
+
+
+def test_只连边的动词_不许印成只是看看(tmp_path):
+    """🔴 **C 逮到的那条**:一个只 `link` 的动词 `changes_world: false`,
+    而 `ontology --json` 那条路把它印成「只是看看」——**它明明改了世界**。
+
+    病根是 `changes_world` 住在本体那一层,而边效果**有意**不住在那儿
+    (本体层不该认识插件的边)。所以补在**知道这件事的那一层**:`World.kinds()`。
+    """
+    with _menpai_world(tmp_path, name="cw") as world:
+        row = next(k for k in world.kinds() if k["id"] == "menpai.sect")
+        join = next(a for a in row["affordances"] if a["verb"] == "入门")
+        assert join["changes_world"] is True, join
+        assert join["edges"] == [{"op": "link", "type": "menpai.member_of"}], join
+        assert join["description"] == "递上名帖,拜入这个门派", join

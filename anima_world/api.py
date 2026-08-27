@@ -3749,7 +3749,22 @@ class World:
                         "label": a.label or a.verb,
                         "duration": a.duration,
                         "occupies": a.occupies if a.duration > 0 else False,
-                        "changes_world": a.changes_world,
+                        # 🔴 **边效果算不算"改变世界":算**(2026-08-26 验收 C)。
+                        #
+                        # `changes_world` 住在本体那一层,而边效果**有意**不住在
+                        # 那儿(本体层不该认识插件的边)—— 于是一个只 `link` 的
+                        # 动词答 `false`,`ontology --json` 那条路把它印成
+                        # 「只是看看」,而它明明改了世界。补在**知道这件事的
+                        # 那一层**,不是把边塞回本体去。
+                        "changes_world": a.changes_world
+                        or bool(self._verb_edges_of(kind.id, a.verb)),
+                        # 这个动词连的那几条边(只在真有时出现 —— 没有插件的
+                        # 世界这一行逐字节不变)。
+                        **({"edges": [{"op": e["op"], "type": e["type"]}
+                                      for e in self._verb_edges_of(kind.id, a.verb)]}
+                           if self._verb_edges_of(kind.id, a.verb) else {}),
+                        **({"description": self._verb_description(kind.id, a.verb)}
+                           if self._verb_description(kind.id, a.verb) else {}),
                         "needs_actor": a.needs_actor,
                         "conditions": [str(c) for c in a.conditions],
                         "sets": [f"{k} = {v}" for k, v in a.outputs.items()],
@@ -3784,6 +3799,21 @@ class World:
             }
             for kind in sorted(ontology.kinds.values(), key=lambda k: k.id)
         ]
+
+    def _verb_edges_of(self, kind_id: str, verb: str) -> tuple[dict[str, Any], ...]:
+        """这个动词声明的边效果。**问的是调度器,不是本体** —— 边有意不住在本体层。"""
+        return tuple(getattr(self.scheduler, "verb_edge_effects", {})
+                     .get((kind_id, verb), ()))
+
+    def _verb_description(self, kind_id: str, verb: str) -> str:
+        """插件动词那句 `description`(tool-calling schema 的第二格)。没有就是空串。"""
+        for plugin in getattr(self.scheduler, "plugins", ()):
+            for entry in getattr(plugin, "verbs", {}).values():
+                from anima_world.plugins import verb_kind_id
+
+                if entry.name == verb and verb_kind_id(plugin.id, entry.target) == kind_id:
+                    return entry.description
+        return ""
 
     def entities(self, kind: str | None = None) -> list[dict[str, Any]]:
         """世界里的实例;给了 `kind` 就只看那一类。
@@ -7964,14 +7994,24 @@ class World:
         return out
 
     def _node_name(self, node: str) -> str:
-        """一个节点的人话名字。答不出就原样回 id —— **不编**。"""
+        """一个节点的人话名字。答不出就原样回 id —— **不编**。
+
+        🔴 **实例与地点那两支是 2026-08-26 验收 A 补的**:在那之前她读到的是
+        「你和 menpai.sect:青云门」—— 一个引擎的 id 漏进了她读到的那句话,
+        而这是本仓反复修的同一类 bug(`place_name` 那条 docstring 里的教训:
+        `cart`/`noodle` 是键名不是地名)。
+        """
         if node.startswith("agent:"):
             who = node.split(":", 1)[1]
             if who.startswith("player:"):
                 info = self.players.get(who.split(":", 1)[1]) or {}
                 return str(info.get("display_name") or "").strip() or node
             return self.scheduler.agent_display_name(who) or node
-        return node
+        if node.startswith("location:"):
+            return self.scheduler.place_name(node.split(":", 1)[1]) or node
+        ontology = getattr(self.scheduler, "ontology", None)
+        entity = (ontology.entities.get(node) if ontology is not None else None)
+        return (getattr(entity, "name", "") or node) if entity is not None else node
 
     def _activities_now(self) -> dict[str, str]:
         """此刻每个人在做的那件事,渲染成一句人话 —— `{"agent:齐": "在陪一次夜播"}`。

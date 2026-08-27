@@ -880,10 +880,54 @@ def authored_layer_errors(
     """
     if not authored:
         return []
+    # 🔴 **插件声明的种类要先并进 `kinds`,和开机那条路一模一样**
+    # (2026-08-26 验收 B/C 双复现)。少了这一步,一份**开得起来**的世界
+    # 被这两扇门答成「引用不到 kind」退 2 —— 而 tool 把退 2 当红灯,
+    # 于是**第一个照着 FOR-STUDIO 写插件的作者,先看到的是一盏假红灯**。
+    # 本仓那条老纪律的反面:**开机是权威,比它严是假红、比它松是假绿,
+    # 两种都比没有校验器更坏。**
+    authored = _authored_with_plugin_kinds(authored)
     out: list[str] = list(_world_seed_errors(authored, complete=complete))
     for check in AUTHORED_LAYER_CHECKS:
         out += check(authored)
     return out
+
+
+def _authored_with_plugin_kinds(authored: dict[str, Any]) -> dict[str, Any]:
+    """作者层 + 插件编译出来的那几行 `kinds`。**离线那两扇门用的那一份。**
+
+    ⚠️ **坏插件在这里一声不吭地掉头** —— 它的错由 `world_plugin_errors` 逐条报,
+    在这儿再报一遍就是同一件事两个说法(而两个说法迟早分岔)。
+    ⚠️ **出厂插件不进这一份**:它们由 `needs.enabled` 之类的**世界配置**决定装不装,
+    而离线这一侧手上根本没有那个世界的配置。今天的出厂插件一个 `kinds` / `verbs`
+    都没声明,所以这一格是空的;哪天有了,那扇门要么拿到配置、要么明说它没查。
+    """
+    entries = authored.get("plugins")
+    if not entries:
+        return authored
+    from anima_world.plugins import (
+        PluginError, compile_kind_rows, order_plugins, parse_plugins,
+    )
+
+    try:
+        plugins = order_plugins(parse_plugins(entries))
+        rows = compile_kind_rows(plugins)
+    except (PluginError, Exception):  # noqa: BLE001 - 坏插件归 world_plugin_errors 报
+        return authored
+    if not rows:
+        return authored
+    merged = dict(authored)
+    by_id = {str(row.get("id")): dict(row)
+             for row in (merged.get("kinds") or []) if isinstance(row, dict)}
+    for row in rows:
+        have = by_id.get(str(row["id"]))
+        if have is None:
+            by_id[str(row["id"])] = row
+            continue
+        have.setdefault("quantities", {}).update(row.get("quantities") or {})
+        have.setdefault("affordances", {}).update(row.get("affordances") or {})
+    merged["kinds"] = list(by_id.values())
+    return merged
 
 
 #: 作者层的检查器**一张表**(`_world_seed_errors` 另算 —— 它多一个 `complete=`)。
@@ -2947,7 +2991,9 @@ def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
     种类是**法不是状态**,身上没有会随时间漂的东西。而动词是**合并**不是替换:
     一个插件给内核的 `agent` 加一个动词,不该把作者写在 `agent` 上的那些顶掉。
     """
-    from anima_world.plugins import compile_kind_rows, order_plugins, parse_plugins
+    from anima_world.plugins import (
+        PluginError, borrowed_kind_ids, compile_kind_rows, order_plugins, parse_plugins,
+    )
 
     bodies = _plugin_bodies(config_store, plugin_store, world_seed)
     if not bodies:
@@ -2959,6 +3005,23 @@ def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
     seed = dict(world_seed or {})
     by_id = {str(row.get("id")): dict(row)
              for row in (seed.get("kinds") or []) if isinstance(row, dict)}
+    # 🔴 **动词借用的那个种类,真的存在吗**(2026-08-26 验收 C)。
+    #
+    # 这一格只有在这儿查得动:插件那一层不认识作者写的 `kinds`,而这儿两份都在手上。
+    # 从前一个字都没查,于是 `target: "swrd"`(少了个 o)两扇门全绿、开机全绿,
+    # 然后**静默长出一个空种类,永远不会有实例** —— 作者看到的是「我的动词点不动」,
+    # 而没有一处会告诉他为什么。
+    borrowed = borrowed_kind_ids(plugins)
+    missing = sorted(kind_id for kind_id in borrowed if kind_id not in by_id)
+    if missing:
+        raise PluginError([
+            f"动词 {'、'.join(sorted(borrowed[kind_id]))} 的 target 指着 "
+            f"`{kind_id}`,而这个世界里没有这个种类 —— 是不是写错了字?"
+            f"这个世界声明过的种类是 {sorted(by_id)}。"
+            "**放行的下场是安静的**:它会长出一个空种类,永远不会有实例,"
+            "而你看到的只是「我的动词点不动」"
+            for kind_id in missing
+        ])
     for row in rows:
         kind_id = str(row["id"])
         have = by_id.get(kind_id)
@@ -6306,9 +6369,18 @@ def _authored_ontology_errors(
     - 第二行:`stocks` 的量名闸住在**播种**里(`_seed_stocks`),而播种在预检之后 ——
       于是它既漏出了这扇门,又让开机在**写过几张表之后**才失败(留下一个装了一半
       的世界,正是 `_precheck_ontology` 当初要修的那个形状)。这一轮把它搬进预检。
+
+    🆕 **3.8.0 第 2 期:插件声明的种类先并进来**(2026-08-26 验收 B/C 双复现)。
+    开机那条路在预检之前就把它们并进了 `world_seed["kinds"]`
+    (`build_serve_scheduler` 里那句 `_merge_plugin_kinds`),这儿从前没并 ——
+    于是同一份世界,开机说好、这扇门说「引用不到 `menpai.sect` 这个 kind」退 2。
+    **又是"比开机严"那一侧的假红**,而 tool 把退 2 当红灯:第一个照着 FOR-STUDIO
+    写插件的作者,先看到的是一盏指着不存在的问题的红灯。
     """
     from anima_world.ontology import OntologyError
     from anima_world.rules import RuleError
+
+    authored = _authored_with_plugin_kinds(authored)
 
     if not (authored.get("kinds") or []):
         # **声明本身就是开关** —— 和开机那一行逐字同一条判断。
@@ -6512,6 +6584,7 @@ def contract_payload() -> dict[str, Any]:
         DEFAULT_TEXT_MAX_CHARS,
         DEFERRED_SHAPES,
         EFFECTS,
+        BUILTIN_TARGETS,
         FACT_MODES,
         FACT_SHAPES,
         PROJECTED_SHAPES,
@@ -6904,6 +6977,23 @@ def contract_payload() -> dict[str, Any]:
             # `agent` 还不行(内置种类只准声明量,`ontology.DECLARABLE_BUILTINS`)——
             # 「拜某人为师」「把东西给某人」那一族因此这一期还写不出来。
             "verb_target_forms": list(KIND_PREFIXES) + ["<作者写的种类 id>"],
+            # 🔴 **永远不收的那几个词**(裁决 ①,2026-08-26 老板同意分期收窄)。
+            # 它们不是"还没做" —— 对着一个人做的动作要过**同意**那道门,而
+            # affordance 这一层没有同意的位置(邀请三扇门才有)。对人的动词走
+            # **工具路 + 同意门**,排第 3 期和判定同期。**tool 别把这一族画进界面。**
+            "verb_target_never": list(BUILTIN_TARGETS),
+            "verb_target_never_why": (
+                "对着一个人做的动作要过同意那道门,而能力(affordance)的形状是"
+                "「一个人、一样东西、一个瞬间」——把一个人放进 target 格,"
+                "`拜师` 就成了单方面把别人变成师父。这个引擎为「他肯不肯」建过"
+                "一整套东西(邀请三扇门 + joint_gate + INVITE_OUTCOMES),"
+                "**拒绝是一等公民**。对人的动词走工具路 + 同意门(设计 §12.3),第 3 期。"
+            ),
+            # 🔴 **边上的规律这一版只认 `set`**(2026-08-26 验收 B)。
+            # 从前 `effects` 含 `emit`、`rule_selectors` 含 `edge`,而**没有一格说
+            # 这个组合不成立** —— 写了 emit 一条事件都不发,开机不拦、零 warning。
+            # 现在是加载期拒 + 这一格说出来。**将来收 `emit` 是加法。**
+            "edge_rule_effects": ["set"],
             # `for_each` 认哪几种选择器。第 2 期多了 `edge`。
             "rule_selectors": list(RULE_SELECTORS),
             # 🆕 `bearer` 三个词(2026-08-26 老板自判):`actor` = 角色+玩家
@@ -7011,6 +7101,15 @@ def run_plugin(args: argparse.Namespace) -> int:
                     "facts": sorted(plugin.facts), "bearers": sorted(plugin.bearers()),
                     "rules": len(plugin.rules), "triggers": len(plugin.triggers),
                     "reads": sorted(plugin.reads),
+                    # 🆕 第 2 期这三样从前**一字不报**(2026-08-26 验收 C):
+                    # 一个只声明边和动词的插件,这一行印出来是「挂在 」加一片空白。
+                    # ⚠️ **动词报的就是 `Verb.schema()` 那一份**(tool-calling 形状)
+                    # —— 给它接上第一个生产路径的消费者:一份没人读的 schema
+                    # 和一份没有的 schema,坏起来长得一模一样。
+                    "kinds": sorted(k.kind_id for k in plugin.kinds.values()),
+                    "edges": sorted(e.qualified for e in plugin.edges.values()),
+                    "verbs": [v.schema() for v in
+                              sorted(plugin.verbs.values(), key=lambda v: v.name)],
                     # **装载顺序是答案的一部分**:依赖图定的那个顺序决定"我读的那个
                     # 量在我第一次求值时在不在库里",而它不是字母序。
                     "order": index,
@@ -7027,9 +7126,20 @@ def run_plugin(args: argparse.Namespace) -> int:
             for row in rows:
                 head = f"{row['id']} {row['version']}"
                 print(f"  {head:<24}{row['label'] or '—'}")
-                counts = (f"事实 {len(row['facts'])} · 规律 {row['rules']} · "
-                          f"触发器 {row['triggers']} · 挂在 {'、'.join(row['bearers'])}")
-                print(f"    {onboarding.dim(counts)}")
+                parts = [f"事实 {len(row['facts'])}", f"规律 {row['rules']}",
+                         f"触发器 {row['triggers']}"]
+                # **只印真有的那几样**:一个只声明边和动词的插件,从前这一行是
+                # 「挂在 」加一片空白 —— 一个空着的字段比没有这个字段更难读。
+                for label, key in (("种类", "kinds"), ("边", "edges"), ("动词", "verbs")):
+                    if row[key]:
+                        parts.append(f"{label} {len(row[key])}")
+                if row["bearers"]:
+                    parts.append(f"挂在 {'、'.join(row['bearers'])}")
+                print(f"    {onboarding.dim(' · '.join(parts))}")
+                for name in row["kinds"]:
+                    print(f"    {onboarding.dim('种类:' + name)}")
+                for spec in row["verbs"]:
+                    print(f"    {onboarding.dim('动词:' + spec['name'] + ' —— ' + spec['description'])}")
                 if row["reads"]:
                     print(f"    {onboarding.dim('读别人的:' + '、'.join(row['reads']))}")
             return 0

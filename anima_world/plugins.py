@@ -632,6 +632,21 @@ def _parse_one(
             continue
         rules = tuple(replace(r, selector_value=f"{plugin_id}.{local}")
                       if r is rule else r for r in rules)
+        if rule.emits:
+            # 🔴 **这一版边上的规律只认 `set`**(2026-08-26 验收 B)。
+            #
+            # 从前这里一个字都没查,而 `_evaluate_edge_rules` **一条 emit 都不发** ——
+            # 契约里 `effects` 含 `emit`、`rule_selectors` 含 `edge`,没有一格说这个
+            # 组合不成立,开机不拦、零 warning。**静默不支持是撒谎;将来支持是加法。**
+            # 对照组是同一份文件里 `projected` 那两条限制:加载期拒 + 说得出为什么。
+            errors.append(
+                f"{where}:**边上的规律这一版只认 `set`,不发 `emit`** —— "
+                "写了它一条事件都不会发,而世界照跑、日志干净。"
+                "要「到点发一件事」,今天的写法是把那个量写成一个事实、"
+                "让**节点上的**规律或触发器去发。"
+                "这一格问 `contract --json` 的 `plugins.edge_rule_effects`"
+                "(将来收 `emit` 是加法,不是这一版的行为)"
+            )
         for name in rule.outputs:
             fact_name = name[len(plugin_id) + 1:] if name.startswith(f"{plugin_id}.") \
                 else name
@@ -689,6 +704,16 @@ def _parse_one(
 
 #: 插件声明的节点两种前缀。`group` 多一个 `members` 记号(见 `PluginKind`)。
 KIND_PREFIXES = ("entity:", "group:")
+
+#: 🔴 **动词的 target 永远不收的那几个词**(裁决 ①,2026-08-26)。
+#:
+#: 它们不是"还没支持",是**这条路不从这儿走**:对着一个人做的动作要过同意那道门,
+#: 而 affordance 这一层没有同意的位置。连带一条更硬的:affordance 一旦挂得上
+#: `agent`,`spawn` / `destroys_target` 就**自动对人成立** —— 「造人」老板拍过走
+#: `create_agent` 工具路,「抹掉一个人」在这个引擎里根本没有语义(她的一生连着
+#: Brain / 记忆 / 转录 / 法务抹除)。要挡就得给 `agent` 开一张例外表,
+#: **而例外表本身就是"这一层不该管角色"的证据**。
+BUILTIN_TARGETS = ("agent", "actor", "player", "world", "location")
 
 #: 动词的 `effects` 这一版收哪几条。**`set` 不在这儿** —— 动词改量走它自己的
 #: `set`(本体那一层已经有了,`me_*` / `have_*` 都认),再开一个入口就是同一件事
@@ -775,6 +800,28 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
             "(今天的能力调用一律是 `act(她, interact, {target, verb})`),"
             "写了它这个世界就该开不了机,而不是装上去之后谁也点不动它"
         )
+    elif target in BUILTIN_TARGETS:
+        # 🔴 **裁决 ①(2026-08-26):`agent` 永不进 `verb_target_forms`。**
+        #
+        # 不是"这一期还没做",是**这条路不从这儿走**。affordance 的形状是
+        # 「一个人、一样东西、一个瞬间」,target 格里放进一个人,`拜师` 就是 A
+        # 单方面把 B 变成师父 —— 而这个引擎为「他肯不肯」建过一整套东西
+        # (邀请三扇门 + `joint_gate` + `INVITE_OUTCOMES`),老板 08-20 拍的第一条
+        # 纪律就是**拒绝必须是一等公民**。放开的代价不是多一种开机失败,是
+        # **把同意重新变成不可拒绝的**,而它的样子是安静的:世界照跑、日志干净、
+        # 边真的连上了。
+        #
+        # 从前这里一个字都没查,下场是**开机 29 行 Python 栈,而末行怪的是
+        # `kinds` 不是插件**(2026-08-26 验收 C 实测)。
+        errors.append(
+            f"{label}.target:**对着一个人做的动词不从这条路走**,`{target}` 不收。"
+            "能力(affordance)的形状是「一个人、一样东西、一个瞬间」—— 把一个人"
+            "放进 target 格,`拜师` 就成了单方面把别人变成师父,而这个引擎为"
+            "「他肯不肯」建过一整套东西(邀请三扇门),**拒绝是一等公民**。"
+            "对人的动词走**工具路 + 同意门**(设计 §12.3),排在第 3 期和判定同期。"
+            "这一格收什么,问 `contract --json` 的 `plugins.verb_target_forms` —— "
+            f"里面**没有** {sorted(BUILTIN_TARGETS)}"
+        )
     else:
         prefix = next((p for p in KIND_PREFIXES if target.startswith(p)), "")
         local = target[len(prefix):] if prefix else target
@@ -783,6 +830,11 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
                 f"{label}.target:这个插件没声明过 `{target}`;"
                 f"声明过的是 {sorted(KIND_PREFIXES[0] + k for k in kinds)}"
             )
+        # 🔴 **裸串那一支从前一个字都没查**(2026-08-26 验收 C):`target: "swrd"`
+        # (少了个 o)两扇门全绿、开机全绿,然后**静默长出一个空种类**,
+        # 永远不会有实例 —— 而作者看到的是「我的动词点不动」。
+        # 这一层不认识作者写的 `kinds`,所以真正的判在 `__main__._merge_plugin_kinds`
+        # (那儿两份种类都在手上);这里只把**这个插件自己声明过**的那一支收住。
 
     links: list[dict[str, Any]] = []
     raw_effects = spec.get("effects") or []
@@ -867,8 +919,10 @@ def compile_kind_rows(plugins: Iterable[Plugin]) -> list[dict[str, Any]]:
             kind_id = verb_kind_id(plugin.id, verb.target)
             row = by_kind.get(kind_id)
             if row is None:
-                # 挂在**别人的 / 内核的**种类上(`agent`、作者写的 `tree`)——
-                # 那一行不归这里造,交给调用方并进去。
+                # 挂在**作者写的**种类上(`tree`)—— 那一行不归这里造,交给调用方
+                # 并进去。⚠️ **调用方必须查它到底在不在**(`_merge_plugin_kinds`):
+                # 不查的下场是 `target: "swrd"`(少个 o)静默长出一个空种类,
+                # 永远不会有实例,而作者看到的是「我的动词点不动」(验收 C 实测)。
                 row = by_kind.setdefault(kind_id, {"id": kind_id, "quantities": {},
                                                    "affordances": {}, "_merge": True})
             row["affordances"][verb.name] = dict(verb.body)
@@ -878,11 +932,35 @@ def compile_kind_rows(plugins: Iterable[Plugin]) -> list[dict[str, Any]]:
     ]
 
 
+def borrowed_kind_ids(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
+    """动词挂到了**别人**种类上的那几个 id → 哪几个动词借的。
+
+    调用方(`__main__._merge_plugin_kinds`)拿它去查「这个种类真的存在吗」——
+    **只有那儿两份种类都在手上**(插件的 + 作者写在 `kinds` 里的)。
+    """
+    out: dict[str, list[str]] = {}
+    for plugin in plugins:
+        own = {kind.kind_id for kind in plugin.kinds.values()}
+        for verb in plugin.verbs.values():
+            kind_id = verb_kind_id(plugin.id, verb.target)
+            if kind_id in own:
+                continue
+            out.setdefault(kind_id, []).append(f"{plugin.id}.{verb.name}")
+    return out
+
+
 
 #: 边的两端认哪几种节点。⚠️ **和 `bearer` 不是一张表**:边连的是**节点**,
 #: 而 `actor` / `player` 那两个词说的是"给谁种事实" —— 一个是图上的位置,
 #: 一个是播种的范围。合成一张表会让 `{"from": "player"}` 读起来像是一种节点类型。
-EDGE_ENDS = ("agent", "player", "location", "world")
+EDGE_ENDS = ("agent", "player", "location", "world",
+             "entity:<kind>", "group:<kind>")
+
+#: 🔴 **上面那张表里,后两个是「形状」不是「值」**(2026-08-26 验收 C 实跑逮的)。
+#: 它从前只列四个裸词,而 `_parse_edge` 真收 `entity:` / `group:` 前缀 ——
+#: **照契约判的 tool 会拒掉一个引擎跑得起来的世界**,而那是这一族最贵的错法
+#: (假红灯:作者去改一个没错的东西)。判的时候用这个前缀集,别拿裸词做等值比较。
+EDGE_END_PREFIXES = ("entity:", "group:")
 
 
 def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:

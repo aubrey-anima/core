@@ -581,6 +581,18 @@ def _apply_fact_delta(proj: Projection, e: Event) -> None:
     fact = str(payload.get("fact") or "").strip()
     if not owner or not fact:
         return
+    # 🔴 **这条 delta 是谁发的,决定了它改得动谁的事实**(2026-08-26 验收 A 逮的)。
+    #
+    # 从前这儿只看 `payload.fact`,不看事件类型 —— 于是一个 `thief` 插件 emit 一条
+    # `thief.伪造.delta{fact: "bank.存款"}` 就改得动别家的钱包。**它运行期不显形**
+    # (物化视图没动),**重开那一刻才长出来**,而且零报错。
+    #
+    # 判据是**同一性**,不是白名单:事件类型必须**恰好**是 `<那个事实>.delta`。
+    # 于是"谁发的"和"改谁的"是同一个名字,插件的命名空间边界(emit 只发得出
+    # 自己命名空间的事件,加载期查过)自动把这道门也关上了 —— **一份判断,
+    # 不是第二道闸**。
+    if e.type != f"{fact}{FACT_DELTA_SUFFIX}":
+        return
     try:
         delta = float(payload.get("delta") or 0.0)
     except (TypeError, ValueError):

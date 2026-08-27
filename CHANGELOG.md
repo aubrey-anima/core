@@ -289,9 +289,12 @@ payload 差一个字节都会红,被排除的只有"次序",而次序由线程�
 - **`destroy` 连带 `unlink`**:`Scheduler._unmake` 从三张表变成**四**张。留着的下场
   和另外三样一样安静 —— 规律在一条指向坟墓的边上求值 → 跳过 → `rule_stats()` 报
   skipped;`connected` 那一档会把一个不存在的门派的门规继续念给她听。
-- **`contract --json` 的 `plugins` 段多七格**(纯增量,老引擎整格缺席):
+- **`contract --json` 的 `plugins` 段多八格**(纯增量,老引擎整格缺席):
   `kind_prefixes` / `kind_id_syntax` / `verb_declaration` / `verb_keys` /
   `verb_effects` / `verb_requires_target` / `verb_target_forms` / `rule_selectors`。
+  ⚠️ **这句原先写的是「七格」而下面列了八个**(2026-08-26 验收挑出来的)——
+  一个数和它旁边那张表对不上,而**没有一处会红**:这正是本仓那条
+  「能点名就别数数」的标本,数字是我手敲的,清单是真的。
 - **存储契约一个字没动**:边那个 hash 是**持久**世界内容(和 `:kinds` 同一类),
   不进 `volatile_keys` → platform 那条 deepEqual 照旧绿。
 - 回执 `docs/FOR-STUDIO.md` §3.39,`docs/REFERENCE.md` §10.10。
@@ -425,6 +428,54 @@ payload 差一个字节都会红,被排除的只有"次序",而次序由线程�
 ✅ 同一天新加的 `test_economy_plugin_parity.py` **没有这个病**:它采基线之前就把
 两个池都关了,并把"关掉之后这道闸验不了什么"一并写在文件里。
 **那才是这一族闸该有的顺序 —— 先决定比什么,再采基线,不是反过来。**
+
+### 三视角验收挑出来的十五条:P1 七条各带一道牙,P2 三条,P3 五条账面
+
+**七条 P1 有一个共同的形状:说过的话和跑出来的事对不上,而对不上时不报错。**
+
+1. **边连不上时,代价照收、`ok: true`、边没建**(A/C 独立双复现)。`_apply_verb_edges`
+   把 `apply_edge_effect` 的返回值扔了 —— 而那个返回值的 docstring 自己写着
+   「它是承重的」。修法照本仓既有的纪律:**拦在收费之前**(`_verb_edge_gate`,
+   和 `spawn` 那句「收了钱再发现生不出来」逐字同一条),新拒绝理由 `edge_blocked`;
+   查不动的那一支(指着 `spawned`)事后如实报进 `act()` 回执的 `edges` 格。
+2. 🔴 **插件伪造得了别家的投影**(A):`_apply_fact_delta` 只看 `payload.fact`,
+   不看**这条事件是谁发的** —— 一个 `thief` 插件 emit
+   `thief.伪造.delta{fact:"bank.存款"}` 就改得动别家钱包。**运行期不显形**
+   (物化视图没动),**重开那一刻 999999**,零报错。修法是**同一性**而不是白名单:
+   事件类型必须**恰好**是 `<那个事实>.delta` —— 于是"谁发的"和"改谁的"是同一个名字,
+   插件命名空间那道加载期的闸自动把这道门也关上,**一份判断,不是第二道闸**。
+3. **离线两扇门不编译 `plugin.kinds`**(B/C 双复现):一份**开得起来**的世界被
+   `validate world` / `world check` 答成「引用不到 kind」退 2,而 tool 把退 2 当红灯
+   —— **第一个照着 FOR-STUDIO 写插件的作者,先看到的是一盏假红灯**。
+   开机是权威:比它严是假红、比它松是假绿,两种都比没有校验器更坏。
+4. **动词的裸串 target 写错字**(`"swrd"`,C):两扇门全绿、开机全绿,然后**静默
+   长出一个空种类,永远不会有实例**。判在 `_merge_plugin_kinds`(**只有那儿两份
+   种类都在手上**),当场拒并列出这个世界声明过哪些种类。
+5. **`target: "agent"` 是 29 行 Python 栈,末行怪 `kinds` 不怪插件**(C)→ 加载期
+   一句中文,并引用 `verb_target_forms` 与裁决 ①。
+6. **`contract.plugins.edge_ends` 漏报**(C 实跑):只列四个裸词,而 `_parse_edge`
+   真收 `entity:` / `group:` 前缀 —— **照契约判的 tool 会拒掉一个引擎跑得起来的世界**。
+   已补两个形状格 + `EDGE_END_PREFIXES`。
+7. **边规律写 `emit` 静默无效**(B):契约 `effects` 含 emit、`rule_selectors` 含 edge,
+   **没有一格说这个组合不成立**,开机不拦零 warning。→ 加载期拒 + 新契约格
+   `edge_rule_effects: ["set"]`(将来收 emit 是加法)。对照组是同一份文件里
+   `projected` 那两条限制:**加载期拒 + 说得出为什么**。
+
+**P2 三条**:边规律一格都不进 `rule_stats()`(而三处注释拿它当信号 ——
+**一个不存在的信号比没有信号更贵**),连带它的节流水位在只有边规律的世界里
+每次重开多烧一轮 → 两件同源,一起修 · 边进提示词印裸节点 id(「你和
+menpai.sect:青云门」)→ `_node_name` 补实例与地点两支 · 只 `link` 的动词
+`changes_world: false` 被印成「只是看看」→ 补在**知道这件事的那一层**
+(`World.kinds()`),不是把边塞回本体;同轮给 `Verb.schema()` 接上第一个生产路径的
+消费者:`plugin list` 从此报 kinds / edges / verbs(它从前对这三样**一字不报**,
+人眼那一行是「挂在 」加一片空白)。
+
+**P3 五条账面**:`bearer` 三个词实落两个(`agent` 被读成 `actor`,「只角色」今天
+没有写法)—— **这一轮不改判,只把账说清**,并给出「照 `bearer_aliases` 判,别照
+`bearer_forms` 维护清单」· `invitation.declined` 与 `invitation_settled` 共用那扇
+**没有游标**的窗,每次拒绝多写一条 → 写进 FOR-STUDIO §3.41 · CHANGELOG 里
+「多七格」而下面列了八个(**能点名就别数数**)· fixture 过期提醒只点了 player 前端,
+补上后端六处(**只点一半的提醒和不提醒一样**)· `plugin list` 那一行见 P2。
 
 🔴 **同日裁决:上面那两条出路都建立在一个假前提上 —— 「旧路已经删了」。旧路没删,
 它在 git 里。** `fa1507b^` = **`a6b3da3`**(第 1 期地基已在、needs 还没搬的那一棵),
