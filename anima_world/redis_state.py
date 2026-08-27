@@ -2316,7 +2316,7 @@ def durability_warning(redis: Any) -> str | None:
             "`appendonly yes`(配 `appendfsync always` 更严)。"
         )
     return (
-        "**这个 Redis 不会把世界存下来**(save 是空的、appendonly 是 no)—— "
+        "「这个 Redis 不会把世界存下来」(save 是空的、appendonly 是 no)—— "
         "它一重启,这个世界就退回创世那一刻,而且不会报错,只会接着跑。\n"
         "      开 `appendonly yes`,或者至少给它一组 `save` 存盘点。"
     )

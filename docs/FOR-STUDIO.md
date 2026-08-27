@@ -4492,8 +4492,34 @@ switch (answer.state) {
 **判据一行**(抄它,别自己发明):
 
 ```js
-const 真绿 = rc === 0 && payload.loadable === true && payload.unchecked_layers.length === 0;
+// 收得下 = 这一版引擎不会因为这份包开不了机
+const 收得下 = rc === 0 && payload.loadable === true;
+// 而"我没看全"是**记一笔**,不是闸 —— 两格都记,别拿它们拦包
+const 没看全 = payload.unchecked_layers.length > 0
+            || payload.unchecked_state_tables.length > 0;
 ```
+
+🔴 **2026-08-27 更正,而且是把上一版写错的一句改回来**(C 视角验收挑出来的)。
+这儿原先写的是:
+
+```js
+const 真绿 = rc === 0 && loadable === true && unchecked_layers.length === 0;   // ❌ 别用
+```
+
+两处错:① 它**不读 `unchecked_state_tables`** —— 一份只有 `locations`/`item_defs`
+的纯 redis 包,`unchecked_layers` 是空的(那一层确实过了编译这一关),而**12 张表
+一张都没编译**,那一行照答"真绿";② 更要紧的是**「真绿」这个名字本身在骗人**:
+`unchecked_state_tables` 对**每一份真实的世界包**都非空(每个跑过的世界都带着
+`events` / `memories`),所以拿它当闸会拦下舰队上的每一份包 —— **那正是 D30 否决掉
+的修法 ①,换一扇门又走了回来。**
+
+所以两格的分工是硬的:**`loadable` 是闸,`unchecked_*` 是账。**
+`unchecked_layers === []` 说的只是"在场的每一层都过了它那道编译",
+**从来不是"这份包里每一个字节都被看过"** —— 后面这句话这扇门永远答不出来。
+
+⚠️ **platform:你 `100d6cc` 接的是上一版那行,请照上面这版刷一次。**
+行为上多半不用改(那行的 `loadable` 部分是对的),要改的是**别把 `unchecked_layers`
+当拒收条件**,并把 `unchecked_state_tables` 一起记进注册表。
 
 ⚠️ **`unchecked_layers` 非空不等于该拦。** 一个跑过的世界正常导出来就带着事件与
 转录,它照旧 `loadable: true` 且**开得起来** —— 拦下每一份正常导出包正是 D30 否决掉
@@ -4540,13 +4566,18 @@ $ # 起容器 → 屏幕上住着夏、遥、柔,不是作者写的那些人。�
 
 ```console
 $ anima-world world import 我的世界.cyberworld --world-id w
-[world import] …… **只有作者层**(agents、beats、locations),而导入不编译它 ——
-这一趟一个键都没落,`w` 仍然是一个空世界。⚠️ 空世界首启时装的是**内置橱窗**……
-所以这里拒绝,而不是报成成功。要装这份世界,别用 import,首启直接把文件指回来:
-`--world-file 我的世界.cyberworld`
+[world import] 我的世界.cyberworld 「只有作者层」(agents、locations),而导入不编译它
+—— 这一趟一个键都没落,`w` 仍然是一个空世界。⚠️ 空世界首启时装的是「内置橱窗」,不是
+你这份 —— 世界会照常跑起来、住着橱窗里那几个人,而且一处不报错。所以这里拒绝,而不是
+报成成功。要装这份世界,别用 import,首启直接把这份文件指回来 —— 整条命令是:
+  anima-world run --world-id w --world-file 我的世界.cyberworld
 $ echo $?
 2
 ```
+
+⚠️ **上面这段是 2026-08-27 从真机抄回来的**,改了两处(C 视角验收):强调从 `**`
+换成「」(屏幕上 `**` 就是两个星号),以及**最后那句给的是整条命令,不是一面旗子** ——
+一个刚被拦下来的人要的是"下一步敲什么",而 `--world-file X` 单独一行**敲不动**。
 
 **拒绝不留下半个世界**(那种包本来就不落键,这一条有用例钉着)。
 
@@ -4577,6 +4608,16 @@ $ echo $?
 ```
 
 **读到它非空,就知道这个世界还差一次 `--world-file` 的编辑。**
+
+### 一条**没修**的旧账,记在这儿(2026-08-27 C 视角验收点名)
+
+**三扇门的句子对上了,可第三扇门把那句话裹在一整段 Python traceback 里。**
+`simulate --ticks 0` 撞上作者层错误时吐的是栈,不是一份读得动的答案 ——
+这一条**不是这一单引入的**(3.6.0 同形),§3.30 的「记欠」表里已经列着它。
+**这一轮有意没修**:它要动的是开机那条路的错误呈现,和判包这一族是两件事,
+顺手改会把这一单的 diff 埋掉。
+**你们要一份读得动的答案,就用 `validate world` / `world check --json`** ——
+它们和开机同一份判断,而且退出码是设计过的。
 
 ---
 

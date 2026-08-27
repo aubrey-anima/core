@@ -775,13 +775,14 @@ def import_world_file(
                 f"而导入不编译它 —— 这一趟一个键都没落,`{world_id}` 仍然是一个空世界。"
                 f"⚠️ 空世界首启时装的是「内置橱窗」,不是你这份 —— 世界会照常跑起来、"
                 f"住着橱窗里那几个人,而且一处不报错。所以这里拒绝,而不是报成成功。"
-                f"要装这份世界,别用 import,首启直接把文件指回来:`--world-file {path}`"
+                f"要装这份世界,别用 import,首启直接把这份文件指回来 —— 整条命令是:\n"
+                f"  anima-world run --world-id {world_id} --world-file {path}"
             )
         else:
             if receipt is not None:
                 receipt["authored_sections_skipped"] = sorted(authored)
             logger.warning(
-                "%s 里有作者层(%s),而**导入不编译它** —— 状态记录已经落键,这个世界从此"
+                "%s 里有作者层(%s),而「导入不编译它」—— 状态记录已经落键,这个世界从此"
                 "不是空的了。要让作者层生效,首启时把同一份文件指回来:"
                 "`--world-file %s`(那是一次编辑,只填缺不覆盖)。",
                 path, "、".join(sorted(authored)), path,

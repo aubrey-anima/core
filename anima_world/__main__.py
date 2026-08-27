@@ -2991,9 +2991,9 @@ def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list
         return []
     return [
         f"这是一次编辑(--edit),而其中 {len(named)} 个种类重声明了量"
-        f"({'、'.join(named[:5])}{'…' if len(named) > 5 else ''})—— **重声明是整行替换**,"
-        "所以目标世界里那些**这份声明没写**的量会被撤掉;而引擎今天**不裁剪**它们:"
-        "值留在 `:stocks` 里、行留在 `:stock_visibility` 里,**顶着旧 label 继续进提示词**。"
+        f"({'、'.join(named[:5])}{'…' if len(named) > 5 else ''})—— 「重声明是整行替换」,"
+        "所以目标世界里那些「这份声明没写」的量会被撤掉;而引擎今天「不裁剪」它们:"
+        "值留在 `:stocks` 里、行留在 `:stock_visibility` 里,「顶着旧 label 继续进提示词」。"
         "「具体撤掉了哪几个」离线答不了(要比的是目标世界库里留着什么)。"
         "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问,开机会印一行 "
         "`dropped_quantities:`"
@@ -6133,18 +6133,26 @@ def run_world_setting(args: argparse.Namespace) -> int:
     redis, world_id, mysql = _world_args(args)
     if not _require_existing_world(redis, world_id, "world setting"):
         return 2
+
+    read_only = text is None and not args.clear
+    # ⚠️ **这一句必须在 `World.open()` 之前**,而第一版写在了后面(2026-08-27
+    # C 视角验收挑出来的)。`World.open()` 会把**本进程**登记成这个世界的活人,
+    # 于是那句"有进程正在跑这个世界"报的是**它自己的 pid** —— 每写一次都出,
+    # 而且话是假的:它警告的那个"不会重读配置的进程",就是正在写的这个。
+    # **一句每次都出现的警告等于没有这句警告**,和 `doctor` 那条永远退 1 同一族。
+    # 兄弟出口 `config set` 一直是先 warn 后开(:5517),照它。
+    if not read_only:
+        _warn_if_live(redis, world_id)
     try:
         world = World.open(world_id, redis=redis, mysql=mysql)
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[world setting] {exc}", file=sys.stderr)
         return 2
 
-    read_only = text is None and not args.clear
     try:
         if read_only:
             receipt = world.world_setting()
         else:
-            _warn_if_live(redis, world_id)
             receipt = world.set_world_setting(
                 text, clear=bool(args.clear), dry_run=bool(args.dry_run),
             )
@@ -6644,7 +6652,15 @@ def _state_layer_ontology_errors(state_seed: dict[str, Any]) -> list[str]:
       开机照样要把 `:world_rules` 解析出来。所以这两半在这里是分开的两问。
     - **`stocks` 这一格有意不查。** 状态层的量住 `stock:*` 一族,形状和作者层的
       `stocks` 段不是一回事;硬翻过去就是在写第二份判断。它落进"没查过"那一格
-      (`state_layer_tables` 数得到),这比猜一句诚实。
+      (`StateScan.unchecked_tables` 数得到),这比猜一句诚实。
+
+    ⚠️ **一种"空真",记在这儿免得下一个人当洞修**(2026-08-27 A 视角验收):
+    一份状态层里**只有** `locations` / `item_defs` 的包,这个函数实际上**一条都没
+    编译**(没有 `kinds` 就跳过本体、没有 `rules` 就跳过规律),而 `checked_layers`
+    照报 `redis`。看上去像"没查却说查了" —— **但它不是假绿**:A 核过**真开机对
+    同一份包同样放行**,那两张表本来就只是被引用方,自己没有可编译的声明。
+    **判据是"开机会不会因为它开不了机",而答案是不会。** 这一格要是"修"成报
+    `unchecked`,反倒会让一份开得起来的包看上去可疑。
     """
     from anima_world.rules import RuleError, parse_rules
 
@@ -6812,10 +6828,10 @@ def run_validate(args: argparse.Namespace) -> int:
                 # 预检(量名拼错、动词没 label、`spawn` 没写代价一起跳),而这句
                 # warning 只解释得了最后一件。**人会拿一条真的理由去覆盖整个遗漏。**
                 warnings.append(
-                    "这是一次编辑(--edit),**跨引用**没查:规律指向哪个种类 / 哪个"
+                    "这是一次编辑(--edit),「跨引用」没查:规律指向哪个种类 / 哪个"
                     "实例、实例在哪个地点、能力里的物品、`spawn` 生的是哪个种类 ——"
                     "这几样可以来自目标世界,而目标世界不在手上。"
-                    "包自己肚子里那几件**已经查过了**:量名两支都查"
+                    "包自己肚子里那几件「已经查过了」:量名两支都查"
                     "(`set:`/`costs:` 里读写的,以及 `stocks:` 里写初值的)、"
                     "动词的 label、`spawn` 有没有代价、不认识的字段、继承成环。"
                     "要连着世界查剩下的,用 `simulate --ticks 0 --world-file …`"
@@ -8426,7 +8442,15 @@ def run_world_check(args: argparse.Namespace) -> int:
                 "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
                 "装载时直接落键、不走作者层那几道闸。「状态层里开机会编译的那几张表"
                 "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了」;"
-                f"没查过的见 unchecked_state_tables:{state.unchecked_tables() or '(无)'}"
+                # ⚠️ **人话面不印 Python 的 list repr,也不指一个这一面没有的 JSON
+                # 键名**(2026-08-27 C 视角验收):`['agent', 'bt_actions', …]` 那串
+                # 引号与方括号是给机器看的,而"见 unchecked_state_tables"这句话
+                # 指向的那一格**只在 `--json` 里存在** —— 让人去查一个他这一屏上
+                # 根本没有的字段,等于没告诉他。
+                + (f"没查过的还有:{'、'.join(state.unchecked_tables())}"
+                   f"(这几张表开机不编译,读不懂它们不会让世界开不了机;"
+                   f"完整清单在 --json 的 unchecked_state_tables 一格)"
+                   if state.unchecked_tables() else "状态层里没有别的表了")
             )
         else:
             warnings += (
@@ -8439,9 +8463,9 @@ def run_world_check(args: argparse.Namespace) -> int:
             errors += _authored_ontology_errors(authored, edit=payload["edit"])
             if payload["edit"]:
                 warnings.append(
-                    "这是一次编辑(--edit),**跨引用**没查:规律指向哪个种类 / 哪个"
+                    "这是一次编辑(--edit),「跨引用」没查:规律指向哪个种类 / 哪个"
                     "实例、实例在哪个地点、能力里的物品、`spawn` 生的是哪个种类 ——"
-                    "这几样可以来自目标世界。包自己肚子里那几件**已经查过了**:"
+                    "这几样可以来自目标世界。包自己肚子里那几件「已经查过了」:"
                     "量名两支都查(`set:`/`costs:` 里读写的,以及 `stocks:` 里"
                     "写初值的)、动词的 label、`spawn` 有没有代价、不认识的字段"
                 )

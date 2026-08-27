@@ -7731,12 +7731,17 @@ class World:
 
         读那一侧,`{text, source, length}`。
 
-        ⚠️ **`source` 用的是 `prompt_list()` 那一套词**(`默认值` / `世界文件`),
+        ⚠️ **`source` 用的是 `prompt_list()` 那一套词**(`默认值` / `这个世界`),
         不另造一套。同一个概念在两条相邻的命令上有两种说法,消费方迟早各信各的
         —— 而这个仓库为"同一件事两个答案"付过的账已经够多了。
-        (那两个词自己有一点不准:热改写下的值也报 `世界文件`,而它来自一次
-        CLI 写口、不来自任何文件。改这两个词会破坏 `prompt list --json` 的消费方,
-        所以留着,并在这里说明。)
+        ✅ **2026-08-27 那句不准的话修掉了**(C 视角验收挑出来的):第二档原先叫
+        `世界文件`,而热改写下的值根本不来自任何文件 —— 更难看的是,`world setting`
+        同一屏上印的下一句正是「不会被世界文件里那段旧的盖回去」,**一条命令的两句话
+        自相矛盾**。上一版这儿写着"改词会破坏消费方所以留着",**那句是没量就下的结论**:
+        量过之后,`prompt` 这一层的 `source` 值四仓一个消费方都没有。
+        ⚠️ 而 `config list` 那一份**照旧叫 `世界文件`**,有意没动 —— 它真有消费方
+        (`test_config_provenance` / `test_flagship_seed` 钉着)。**同一个词两处不同
+        是这一轮有意留下的账**,写在 `prompt_store.merged_listing` 上。
 
         **两个来源在 `text` 上分不出来**,而它们是两件不同的事:一个作者写过的
         世界观,和一个"谁都没说话所以用了引擎默认值"的世界观,读起来一模一样。
@@ -7851,7 +7856,7 @@ class World:
         receipt = {
             "before": before["text"],
             "after": after_text,
-            "source": "默认值" if clear else "世界文件",
+            "source": "默认值" if clear else "这个世界",
             "length": len(after_text),
             "changed": bool(changed),
             "cleared": bool(clear),

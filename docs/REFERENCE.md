@@ -4236,6 +4236,9 @@ anima-world world import 我的世界.cyberworld --world-id w   # ← 只有作�
 anima-world run --world-id w --world-file 我的世界.cyberworld  # ← 这才是那条路
 ```
 
+拒绝语里**给的就是上面第二行那条整命令**(不是一面 `--world-file` 旗子):
+一个刚被拦下来的人要的是"下一步敲什么"。
+
 **下游代价实测为零**:运维台 v3 装载走的是 `--world-file`
 (`deploy/world-image/entrypoint.sh`),创作台一次都不调 `world import`。
 会被它拦下的调用方,今天拿到的本来就是一个空世界。
@@ -4296,12 +4299,22 @@ anima-world run --world-id w --world-file 我的世界.cyberworld  # ← 这才�
 和 `world drop` 归引擎是同一条理由):
 
 ```js
-const 真绿 = rc === 0 && payload.loadable === true && payload.unchecked_layers.length === 0;
+const 收得下 = rc === 0 && payload.loadable === true;          // ← 这是闸
+const 没看全 = payload.unchecked_layers.length > 0             // ← 这是账,不是闸
+            || payload.unchecked_state_tables.length > 0;
 ```
 
-⚠️ **`unchecked_layers` 非空不等于该拦。** 一个跑过的世界正常导出来就带着事件与
-转录,它照旧是 `loadable: true` 且**开得起来** —— 拦下每一份正常导出包正是 D30
-否决掉的那条修法。这一格要的是"记一笔我没看全",不是一盏红灯。
+🔴 **`loadable` 是闸,`unchecked_*` 是账 —— 这条分工是硬的。**
+这儿 2026-08-27 之前写的是 `真绿 = … && unchecked_layers.length === 0`,两处错:
+① 它不读 `unchecked_state_tables`,于是一份只有 `locations`/`item_defs` 的纯 redis 包
+(`unchecked_layers` 为空、12 张表一张没编译)会被判成"真绿";② **更要紧的是
+「真绿」这个名字在骗人** —— `unchecked_state_tables` 对**每一份真实世界包**都非空
+(每个跑过的世界都带 `events`/`memories`),拿它当闸就会拦下舰队上的每一份包,
+**那正是 D30 否决掉的修法 ①,换一扇门又走回来了**。
+
+⚠️ 所以:**`unchecked_layers` / `unchecked_state_tables` 非空不等于该拦。**
+`unchecked_layers === []` 说的只是"在场的每一层都过了它那道编译",
+**从来不是"这份包每个字节都被看过"** —— 后一句这扇门永远答不出来。
 
 ⚠️ **加一张新的「开机会编译的」状态表,就要在 `STATE_ONTOLOGY_TABLES` 里登记一行**,
 否则那一层又变成看不见的。改 Redis 键名同理 ——

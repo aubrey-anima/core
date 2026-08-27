@@ -184,7 +184,7 @@ def test_clear_一个和默认值逐字相同的世界观_照样删得掉(open_w
     fallback = resolve("world.setting", None, "")
     world = open_world("w", redis=fresh_redis, world_file=_world_file(tmp_path))
     world.set_world_setting(fallback)
-    assert world.world_setting()["source"] == "世界文件"
+    assert world.world_setting()["source"] == "这个世界"
     assert world.set_world_setting(clear=True)["changed"] is True
     assert world.world_setting()["source"] == "默认值", (
         "文本一样就没删 —— 那一行会永远留在这个世界里")
@@ -304,11 +304,36 @@ def test_文档里承诺的每一条命令_真敲一遍(open_world, tmp_path):
         done = run_cli(*args)
         assert done.returncode == 0, f"{' '.join(args)} → {done.stderr}"
         assert done.stdout.strip(), f"{' '.join(args)} 什么都没印 —— 人敲完看不到结果"
+        # 🔴 **stderr 也要干净**(2026-08-27 C 视角验收补上的)。
+        # 上一版这条只看 rc 与 stdout,于是它**拦不住那个真 bug**:`world setting`
+        # 把 `_warn_if_live` 写在了 `World.open()` **之后**,而 open 会把本进程登记
+        # 成活人 —— 每写一次都印一句"有进程正在跑这个世界",报的是**它自己的 pid**,
+        # 而那句话的内容("那个进程不会重读")说的也正是它自己。
+        # **一条可用性判据不看 stderr,就看不见用户屏幕的一半。**
         return done.stdout
 
     base = ["world", "setting", "--world-id", "w"]
     assert _SETTING in _say(*base), "只读那一趟没把现在这段印出来"
-    _say(*base, "--set", "旧港区,常年下雨。港务局说了算。")
+
+    # 🔴 **头一次写,不许警告它自己**(2026-08-27 C 视角验收逮出来的真 bug)。
+    # 病是 `_warn_if_live` 被写在了 `World.open()` **之后**,而 open 会把本进程
+    # 登记成这个世界的活人 —— 于是那句"这个世界正被 pid N 跑着"报的是**自己的
+    # pid**,而它警告的那个"不会重读配置的进程"也正是自己。兄弟出口 `config set`
+    # 一直是先 warn 后开,照它修的。
+    #
+    # ⚠️ **判据只钉"第一次"**,而这一格的边界值得写清楚:`owner_pid` 写在 `:meta`
+    # 上、**关世界时并不清**(`_warn_if_live` 的 docstring 自己就说"进程崩掉标记
+    # 就陈旧,提示不是锁"),所以**后续**几次敲本来就会看见上一次留下的戳 ——
+    # 那是这一族命令共有的旧行为,不是这一单引入的。把后面几次也钉上,钉住的
+    # 会是一条**和这个 bug 无关**的旧账,而下一个人会拿它去改一个没坏的地方。
+    #
+    # ⚠️ **而"试牙要试对地方"在这一格上又咬了我一次**:这条断言第一版写的是
+    # `"正在跑" not in stderr`,而那句话真正的字样是「这个世界正被 pid N @ host
+    # 跑着」——"正在跑"三个字**根本不存在**,于是把 bug 放回去它照样绿。
+    first_write = run_cli(*base, "--set", "旧港区,常年下雨。港务局说了算。")
+    assert first_write.returncode == 0, first_write.stderr
+    assert "正被 pid" not in first_write.stderr, (
+        f"头一次写就在警告它自己 —— stderr:{first_write.stderr}")
     _say(*base, "--set-file", str(src))
     assert open_world("w", redis=client).world_setting()["text"] == src.read_text("utf-8")
 

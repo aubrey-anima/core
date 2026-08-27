@@ -601,7 +601,7 @@ def parse_kinds(entries: Any) -> dict[str, Kind]:
                 errors.append(
                     f"{label}:内置种类 {kind_id!r} 只能声明 quantities,不能声明 {extra} —— "
                     f"她不是一样可以被 tend 的东西,她的能力在行为树和聊天工具里。"
-                    f"这里加的是**她身上的量**,好让能力看得见施动者"
+                    f"这里加的是「她身上的量」,好让能力看得见施动者"
                 )
                 continue
         if kind_id in raw_by_id:

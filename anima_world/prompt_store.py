@@ -387,7 +387,20 @@ def resolve(name: str, stored: str | None, default: str = "") -> str:
 
 
 def merged_listing(stored: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """引擎声明的模板加上世界里多出来的,每一行带 `source`。"""
+    """引擎声明的模板加上世界里多出来的,每一行带 `source`。
+
+    ⚠️ **`source` 的第二档 2026-08-27 从「世界文件」改叫「这个世界」**(C 视角验收
+    挑出来的)。旧那个词在**热改**这条路上是假的:`prompt_set` / `world setting
+    --set` 写下的值也报「世界文件」,而它根本不来自任何文件 —— 更难看的是,
+    `world setting` 同一屏上printed 的下一句正是「不会被世界文件里那段旧的盖回去」。
+    **同一条命令的两句话互相矛盾,读的人只能挑一句信。**
+
+    新词对**两种**来路都成立:创世时从作者层播下来的,和后来热改写下的 ——
+    这一层本来就不记来路,所以说到「这个世界自己有一行」为止,是它知道的全部。
+    ⚠️ `config_store.merged_listing` 那一份**照旧叫「世界文件」**,有意没动:
+    它是 `config list` 的面,而那句话在**四仓**都有消费方(`test_config_provenance`
+    / `test_flagship_seed` 钉着)。同一个词在两处不同,是**这一轮有意留下的账**,
+    不是漏改 —— 提示词这边没有外部消费方,配置那边有。"""
     items: list[dict[str, Any]] = []
     for name, (template, description) in _DEFAULTS.items():
         row = stored.get(name)
@@ -397,7 +410,7 @@ def merged_listing(stored: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             # 说明描述的是**这个槽位**而不是里面的值:作者改写模板时不必也写一份说明,
             # 写了就用他的。
             "description": (row.get("description") if row else None) or description,
-            "source": "默认值" if row is None else "世界文件",
+            "source": "默认值" if row is None else "这个世界",
         })
     for name in sorted(k for k in stored if k not in _DEFAULTS):
         row = stored[name]
@@ -405,6 +418,6 @@ def merged_listing(stored: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
             "name": name,
             "template": str(row.get("template", "")),
             "description": row.get("description"),
-            "source": "世界文件",
+            "source": "这个世界",
         })
     return items

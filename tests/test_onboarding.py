@@ -269,8 +269,12 @@ def test_屏幕上不许出现裸markdown星号():
     `**要花时间**` 会**原样印在玩家的按钮说明上**(`World.player_tools()`)。
 
     ⚠️ **它看不见什么** —— 别把它读成"屏幕上再也没有星号了"。字符串先落进一个
-    变量、再拼进 `print()`(或者走 `logger`、或者攒进一个 `warnings` 列表由别处印)
-    的那几条路,这个扫描一条都过不去。同一轮手工查出三条这样的,已经改掉:
+    变量、再拼进 `print()`,或者走 `logger`、走**异常**(`raise ValueError(...)`,
+    CLI 把它原样打到 stderr)的那几条路,这个扫描一条都过不去。
+    🆕 **2026-08-27 收回一条盲区**:`warnings.append(...)` 从今天起**扫**。
+    它原本写在上面这份"看不见"的名单里,而那份名单被当成了免死金牌 ——
+    `--edit` 那句 warning 里两对裸 `**` 就靠它躲了两轮,不带 `--json` 跑当场上屏。
+    **把一条盲区写下来,不等于可以一直留着它**:能扫的就扫,扫不动的才写进名单。同一轮手工查出三条这样的,已经改掉:
     `presence` 那句 `tail`、`--edit` 的图警告(`_edit_location_media_warnings`)、
     装载那条 `logger.info`。要拦住它们得做数据流分析,而**说清楚它守不住什么,
     比假装它守得住便宜** —— 上一版正是死在"读的人以为它守住了全部"。
@@ -297,8 +301,34 @@ def test_屏幕上不许出现裸markdown星号():
             if name == "print":
                 for arg in node.args:
                     scan(arg)
+            # 🆕 2026-08-27:**`warnings.append(...)` 也算一条上屏的路。**
+            # 上一版这道闸只认 `print()` 与 `help=`,而 `world check` /
+            # `validate world` 的 warnings 是**先攒进列表、再由 `_print_check_human`
+            # 逐条印出来的** —— 于是 `--edit` 那句里两对裸 `**` 在这儿躲了整整两轮,
+            # 而不带 `--json` 跑它就原样印在屏幕上。
+            # 判据从「三条出口各敲一遍」扩成「凡是攒进 warnings 的都算」:
+            # **一条只在我记得去敲的地方被执行的纪律,等于没有这条纪律** ——
+            # 这正是这条测试自己 docstring 里那句话,它第三次咬到自己。
+            if name == "append" and "warn" in (
+                getattr(node.func.value, "id", "") or ""
+            ).lower():
+                for arg in node.args:
+                    scan(arg)
             for kw in node.keywords:
                 if kw.arg in {"help", "description", "epilog"}:
                     scan(kw.value)
+
+        # 🆕 第三条路:**名字里带 `warning` 的函数,它 `return` 的字符串。**
+        # 这一条是 `redis_state.durability_warning` 逼出来的:`doctor` 把它塞进
+        # 一个 f-string 再 `print`,于是"扫 `print()` 实参"那条看到的只是一个
+        # `{warning}` 变量 —— 而屏幕上印的是那句话的全文,带着裸 `**`。
+        # **一个函数叫 warning,它的返回值就是给人看的**,按名字认最省事也最准。
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                "warning" in fn.name
+            ):
+                for n in ast.walk(fn):
+                    if isinstance(n, ast.Return) and n.value is not None:
+                        scan(n.value)
 
     assert not bad, f"这些字会原样印到终端 / 玩家屏幕上:{bad}"
