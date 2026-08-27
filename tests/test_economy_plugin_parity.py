@@ -29,6 +29,27 @@ docstring 里,不在这儿重复一遍 —— 两份说法迟早会分岔):
 | 事件日志(滤掉 `narrative`,按**多重集**比) | ✅ 逐条 |
 | `narrative` 那一支 / 次序 | ❌ 线程池,不由这份代码决定 |
 
+## 🔴 有意**不比**什么 —— 而这句话和"比过了"在闸红的那天意思完全不同
+
+**2d-① 只搬了钱包一格**(补裁 ⑤,FOR-STUDIO §3.43)。所以下面这几样
+**不是被这道闸验过了,是这一轮一行没动**:
+
+- **`World.player_buy` 那五句手写中文拒绝**(在路上 / 没落脚 / 不在这儿 /
+  卖光了 / 钱不够)。它们和 `perform_affordance` 那四类回执**形状与文字都对不上**,
+  而玩家那一屏印的就是这些话 —— 动词化 = 换调用路,**换了路的"逐字节相同"
+  从原理上不成立**。等第 3 期。
+- **`eat` 那条 BT 路**(`scheduler._handle_eat_purchase`,tick 循环里
+  `action.kind == "eat"`)。它根本不在 `interact` 那条路上,同上。
+- **货架**(`anima:{world_id}:shop_stock` 那个真 hash)。搬它是**换掉一个真键**,
+  而钱包那一格是**加法**;老包装进换了键的新引擎会**原样落键、没有一处再读它**。
+- **`economy.enabled` 的语义**(只挡 eat / wages,不挡 buy / give)—— 一个字没动。
+
+🔴 **还有一样是"搬不动",不是"没搬"**:`Projection.balances` 是一本按**任意持有者
+字符串**记的账(`__town__` / `shop:cafe` 也在里面),而插件的事实住在**有类型的
+载体**上(`bearer`)。**镇上的金库和店铺是持有者,不是载体** —— 所以
+`balance()` 这一轮照旧读账本,没有改成读那个事实,而那不是偷懒:
+把它们塞成 `agent:__town__` 会在世界里凭空建出一个没有人的人。
+
 ## 🔴 中途做一件事,不只比末态
 
 第 1 期验收 A 逮到的那条 P1 就死在这儿:parity 只比 288 tick 的末态,而
@@ -246,8 +267,52 @@ def test_中途那几下的回执逐格相同(tmp_path):
     assert got == GOLDEN["moves"], "买 / 给 / 那一屏,中途某一下的回执变了"
 
 
-def test_量表逐位相同(tmp_path):
-    assert run(tmp_path)["stocks"] == GOLDEN["stocks"], "量表变了"
+#: 这一轮**搬过去**的那几个键 —— 量表上唯一允许多出来的东西。
+#:
+#: 🔴 **逐键放行,不许写成「多出来的忽略掉」**(照 needs 那次的写法):
+#: 那样一个真的改坏了旧量的改动会从这条缝里溜过去。
+#: 每加一格搬家就往这儿加一行,而**加行的时候要问一句:它真的是搬家吗。**
+MOVED_KEYS = frozenset({"economy.coins"})
+
+
+def test_量表是旧的那份_外加搬过来的那一个(tmp_path):
+    """**这一条是 2d-① 唯一一处"预期会变",而变的形状要说死。**
+
+    钱包从「只住在事件投影里」变成「量表里也有一格物化视图」,所以量表必然多
+    `economy.coins` 一个键 —— 那**就是**这次搬家本身。**除此之外一个字节都不许动。**
+    """
+    got, want = run(tmp_path)["stocks"], GOLDEN["stocks"]
+    assert sorted(got) == sorted(want), (
+        "量表的 owner 名单变了 —— ⚠️ 最可能的原因是折出来的账按**任意持有者**记"
+        "(`__town__` / `shop:cafe`),而它们被凭空建了一行量表:世界里没有这个人"
+    )
+    for owner in sorted(want):
+        extra = set(got[owner]) - set(want[owner])
+        assert extra <= MOVED_KEYS, f"{owner} 上多出了搬家之外的量:{sorted(extra - MOVED_KEYS)}"
+        assert not set(want[owner]) - set(got[owner]), f"{owner} 上少了量"
+        for key, value in want[owner].items():
+            assert got[owner][key] == value, f"{owner}.{key} 变了(旧量不许动)"
+
+
+def test_钱包那一格和账本逐位相同(tmp_path):
+    """🔴 **搬过来那个数,必须**等于**账本折出来的那个数。**
+
+    两处不一致的下场:规划上下文读账本、她的表达式读量表,而两边都不报错 ——
+    正是这个仓库最怕的"两份真相里有一份不更新"。
+    ⚠️ 进位也得一样:账本 `_apply_payment` **每一步折到两位**,所以那个事实
+    声明了 `round: 2`。折到六位的话它们只在小数第三位往后分家。
+    """
+    got = run(tmp_path)
+    for holder, money in GOLDEN["balances"].items():
+        owner = f"agent:{holder}"
+        if owner not in got["stocks"]:
+            # `__town__` / `shop:cafe` 是**持有者**,不是**载体** —— 它们没有量表,
+            # 所以这一格搬不过去。见下面文件头那一段。
+            continue
+        assert got["stocks"][owner].get("economy.coins") == money, (
+            f"{holder}:量表 {got['stocks'][owner].get('economy.coins')} "
+            f"≠ 账本 {money}"
+        )
 
 
 def test_提示词逐字节相同(tmp_path):
@@ -275,3 +340,32 @@ def test_基线自己是可复现的(tmp_path):
     """**这条守的是这道闸本身。** 同一份代码连跑两趟必须给同一个答案 ——
     不然上面几条红起来时,分不出是搬家搬坏了还是这道闸自己在抖。"""
     assert run(tmp_path) == run(tmp_path)
+
+
+def test_钱包是投影_清掉物化值重放还能回来(tmp_path):
+    """🔴 **projected 那道牙,给钱包这一格再验一遍。**
+
+    量表里那个 `economy.coins` 只是**物化视图** —— 真相是日志里那一串 `payment`。
+    抹掉它、重开一次,它必须从账本折回来。**一个直接写的余额做不到这件事**,
+    而做不到的样子是"抹掉就是抹掉了"。
+    """
+    from _worldfile import open_world_at, redis_for
+
+    db = tmp_path / "econ-teeth.db"
+    redis_for(db)
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        world.config_set("economy.enabled", True)
+        world.tick(4)
+        owner = next(o for o in world.stock_owners()
+                     if o.startswith("agent:") and "economy.coins" in world.stocks(o))
+        had = world.stocks(owner)["economy.coins"]
+        assert had, "这个世界里没人有钱,这条用例什么也没验到"
+        world.scheduler.stock_store.set_many(
+            owner, {"economy.coins": 0.0}, tick=int(world.scheduler.clock))
+    with open_world_at(str(db), force_mock_llm=True) as world:
+        assert world.stocks(owner)["economy.coins"] == had, (
+            "抹掉物化视图之后没从账本折回来 —— 那这一格根本不是投影"
+        )
+        # 而且它**等于账本**:两处不一致的下场是规划上下文读一个、
+        # 她的表达式读另一个,而两边都不报错。
+        assert world.balance(owner.split(":", 1)[1]) == had

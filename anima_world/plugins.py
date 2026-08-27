@@ -153,7 +153,14 @@ FACT_MODES = ("stored", "projected")
 #:
 #: ⚠️ **符号是这张表里最容易写反、而且写反了不报错的一格**,所以两头分开写死成
 #: 两个键名(`credit` / `debit`),不给一个 `sign` 让作者自己算。
-PROJECTED_SOURCE_KEYS = ("event", "amount", "credit", "debit", "owner_form")
+PROJECTED_SOURCE_KEYS = ("event", "amount", "credit", "debit", "owner_form", "round")
+
+#: `round` 不写时折到第几位。**钱要写 2**,理由见 `projection._apply_payment` 的
+#: docstring:二进制浮点存不下 0.1,`60 − 5.23 − 1.16 − …` 折下来是
+#: `0.3799999999999921`;门禁读的是这个数,一笔"正好够"的交易迟早会被它拒掉,
+#: **而那一次不报错也不留痕**。两套进位就是两个钱包,而它们只在小数第三位往后
+#: 分家 —— 那正是"看着一样、判起来不一样"的形状。
+DEFAULT_FACT_ROUND = 6
 
 #: `owner_form` 的两个取值。`actor` = 载荷里那个名字是人的 id(`夏` / `player:p1`),
 #: 折进量表时要前缀成 `agent:…`(和 `Scheduler.stock_owner_of` 逐字同一条规则);
@@ -1259,9 +1266,18 @@ def _parse_sources(
         if owner_form not in OWNER_FORMS:
             errors.append(f"{where}.owner_form:只有 {list(OWNER_FORMS)}")
             continue
+        try:
+            digits = int(entry.get("round", DEFAULT_FACT_ROUND))
+        except (TypeError, ValueError):
+            errors.append(f"{where}.round:{entry.get('round')!r} 不是一个整数")
+            continue
+        if not 0 <= digits <= 12:
+            errors.append(f"{where}.round:只收 0~12 位")
+            continue
         out.append({"event": event,
                     "amount": str(entry.get("amount") or "amount").strip(),
-                    "credit": credit, "debit": debit, "owner_form": owner_form})
+                    "credit": credit, "debit": debit, "owner_form": owner_form,
+                    "round": digits})
     return tuple(out)
 
 

@@ -355,7 +355,10 @@ def test_无作者插件的世界_提示词里一点插件痕迹都没有(tmp_pa
         # 橱窗自己**没有一条作者写的 `plugin` 记录**;`needs` 是**出厂**那一个
         # (3.8.0 起它也是插件了,见 §9 的第一个搬家对象),而它三个事实全是
         # `hidden` —— 今天的 needs 一格都不进感知块,搬家没有动这一点。
-        authored = [p.id for p in world.scheduler.plugins if p.id != "needs"]
+        # `needs` 与 `economy` 都是**出厂**那两个(3.8.0;economy 只搬了钱包那一格),
+        # 它们的事实全是 `hidden` —— 一格都不进感知块,搬家没有动这一点。
+        authored = [p.id for p in world.scheduler.plugins
+                    if p.id not in ("needs", "economy")]
         assert authored == [], f"橱窗带上了作者插件:{authored}"
         assert world.scheduler._triggers_by_event == {}, "橱窗一个触发器都不该有"
         agent_id = next(iter(world.scheduler.agents))
@@ -1172,8 +1175,17 @@ def test_契约里的edge_ends报全_别让tool拒掉跑得起来的世界():
     `entity:` / `group:` 前缀。**照契约判的 tool 会拒掉一个引擎跑得起来的世界。**"""
     out = run_cli("contract", "--json")
     assert out.returncode == 0, out.stderr
-    ends = json.loads(out.stdout)["plugins"]["edge_ends"]
+    plugins = json.loads(out.stdout)["plugins"]
+    ends = plugins["edge_ends"]
     assert "entity:<kind>" in ends and "group:<kind>" in ends, ends
+    # 🔴 **而 P1.6 那一版只治了一半**(复核评审):两个模板混进一列字面值,
+    # 却没有一格说它们是模板 —— 照旧做等值比较的 tool **仍然会拒 `entity:sword`**。
+    assert plugins["edge_end_prefixes"] == ["entity:", "group:"], plugins
+    assert "占位符" in plugins["edge_ends_gloss"]
+    # 判据敲得动:一个真写法要么命中前缀、要么命中字面值。
+    for value in ("entity:sword", "agent"):
+        assert (any(value.startswith(p) for p in plugins["edge_end_prefixes"])
+                or value in ends), value
 
 
 def test_边规律写emit_当场拒而不是静默无效():
@@ -1268,6 +1280,8 @@ def test_plugin_list_报得出种类边和动词(tmp_path):
     human = run_cli("plugin", "list", "--world-id", "w")
     assert human.returncode == 0, human.stderr
     assert "挂在 \n" not in human.stdout and "种类 1" in human.stdout, human.stdout
+    # 数得出「边 1」而印不出它叫什么,等于让人再去问一次(复核评审)。
+    assert "边:menpai.member_of" in human.stdout, human.stdout
 
 
 def test_只连边的动词_不许印成只是看看(tmp_path):
@@ -1351,5 +1365,70 @@ def test_契约报得出sources这一格():
     assert out.returncode == 0, out.stderr
     plugins = json.loads(out.stdout)["plugins"]
     assert plugins["projected_source_keys"] == [
-        "event", "amount", "credit", "debit", "owner_form"]
+        "event", "amount", "credit", "debit", "owner_form", "round"]
     assert plugins["projected_source_events"] == "subscribable_events"
+
+
+# ── 2d-①:钱包搬成出厂插件的那一格 ────────────────────────────────────────
+
+
+def test_钱的进位跟着账本走_不是折到第六位(tmp_path):
+    """🔴 **`projected` 事实要能声明自己的进位,而钱是它的第一个使用者。**
+
+    `_apply_payment` 的 docstring 逐字写着为什么账本折到**两位**:二进制浮点存不下
+    0.1,`60 − 5.23 − 1.16 − …` 折下来是 `0.3799999999999921`;门禁读的是这个数,
+    一笔"正好够"的交易迟早会被它拒掉,**而那一次不报错也不留痕**。
+
+    折叠端默认折到六位。**两套进位就是两个钱包**,而它们只在小数第三位往后分家 ——
+    那正是"看着一样、判起来不一样"的形状。
+    """
+    from anima_world.projection import fact_source_updates
+
+    specs = [{"event": "payment", "amount": "amount", "credit": "to",
+              "fact": "w.钱", "owner_form": "actor", "round": 2}]
+    got = fact_source_updates(specs, {"to": "夏", "amount": 0.1 + 0.2})
+    assert got == [("agent:夏", "w.钱", 0.3)], got
+
+
+def test_出厂钱包插件装上了_而且只多一个键(tmp_path):
+    """**这一格是加法**:量表 hash 里多一个 `economy.coins`,和第 1 期 needs
+    那三个键逐字同构。`plugin list` 报得出它,契约那张出厂表也报得出。"""
+    with _purse_world(tmp_path, name="wal", plugin=QI) as world:
+        world.config_set("economy.enabled", True)
+        ids = [p.id for p in world.scheduler.plugins]
+        assert "economy" in ids, ids
+        fact = next(p for p in world.scheduler.plugins if p.id == "economy").facts["coins"]
+        assert fact.projected and fact.bearer == "actor"
+        assert fact.sources and fact.sources[0]["event"] == "payment"
+
+
+def test_出厂表报得出钱包这一格():
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    plugins = json.loads(out.stdout)["plugins"]
+    assert plugins["factory"]["economy"] == "economy.enabled", plugins["factory"]
+    assert plugins["factory"]["needs"] == "needs.enabled"
+    # 🔴 **这一格说的是"搬了哪几格",不是"搬完几个系统"**(补裁 ⑤b:
+    # 按系统计数正是把人推向换皮的那把尺子)。
+    assert "货架" in plugins["factory_scope"]["economy"], plugins["factory_scope"]
+
+
+def test_没入门就退出_同样拦在收费之前(tmp_path):
+    """🔴 **复核评审逮的那半截**:`_verb_edge_gate` 只预检了 `op == "link"`。
+
+    实测「没入门就退出」:体力 100→99、`ok: true`、边一条没断,只有回执里一条
+    `ok: false` 和一行 warning。**而「拦在收费之前」这句话对 `unlink` 一样查得动**
+    (`store.of_src` 是空的)—— 留半截的下场是同一件事在两个动词上两种下场,
+    而作者读不出为什么。
+    """
+    with _menpai_world(tmp_path, name="halfgate") as world:
+        before = world.stocks("agent:阿岚")["体力"]
+        out = world.act("阿岚", "interact",
+                        {"target": "menpai.sect:青云门", "verb": "退出"},
+                        surface="body")
+        assert out["ok"] is False, f"什么都没断,却答了成功:{out}"
+        assert "门籍" in out["error"], out
+        assert world.stocks("agent:阿岚")["体力"] == before, \
+            "被拒的那一趟收了代价"
+        assert world.scheduler.perform_affordance(
+            "阿岚", "menpai.sect:青云门", "退出")["reason"] == "edge_blocked"

@@ -616,10 +616,12 @@ def _apply_fact_source(proj: Projection, e: Event) -> None:
     **符号不给作者算**:`credit` 加、`debit` 减,两个键名写死。给一个 `sign` 让作者
     自己填的话,写反了不报错 —— 而一个反着记的账,对账即重放这条纪律就成了一句空话。
     """
-    for owner, fact, delta in fact_source_updates(
+    for owner, fact, delta, digits in _with_digits(
             proj.fact_sources.get(e.type, ()), e.payload or {}):
         row = proj.plugin_facts.setdefault(owner, {})
-        row[fact] = round(row.get(fact, 0.0) + delta, 6)
+        # **每一步都进位**,和 `_apply_payment` 逐字同一条:折完再进和边折边进,
+        # 在一串小数上给的是两个数。
+        row[fact] = round(row.get(fact, 0.0) + delta, digits)
 
 
 def fact_source_updates(
@@ -646,6 +648,9 @@ def fact_source_updates(
         if not amount:
             continue
         actor_form = str(spec.get("owner_form") or "actor") == "actor"
+        # **进位跟着这个事实自己声明的位数走**,不是折叠端写死一个 6:
+        # 钱要 2 位(见 `_apply_payment`),而两套进位就是两个钱包。
+        digits = int(spec.get("round", 6))
         for key, sign in ((str(spec.get("credit") or ""), 1.0),
                           (str(spec.get("debit") or ""), -1.0)):
             if not key:
@@ -660,5 +665,14 @@ def fact_source_updates(
             # 一条只给 `debit`):`payment` 的 `to` 可能是个人而 `from` 是
             # `__town__`。给一个 `owner_form` 让它同时管两头,是让作者在一个格子里
             # 说两件事 —— 而说不清的那一件会静默地记在一个没人读的名下。
-            out.append((f"agent:{who}" if actor_form else who, fact, sign * amount))
+            out.append((f"agent:{who}" if actor_form else who, fact,
+                        round(sign * amount, digits)))
     return out
+
+
+def _with_digits(specs: Any, payload: dict[str, Any]):
+    """`fact_source_updates` 的四元组版:多带一格"这个事实折到第几位"。"""
+    by_fact = {str(spec.get("fact") or ""): int(spec.get("round", 6))
+               for spec in (specs or ())}
+    for owner, fact, delta in fact_source_updates(specs, payload):
+        yield owner, fact, delta, by_fact.get(fact, 6)

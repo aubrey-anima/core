@@ -455,7 +455,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     plugin_commands = plugin_cmd.add_subparsers(dest="plugin_command")
     plugin_list = plugin_commands.add_parser(
-        "list", help="装着哪几个:id / 版本 / 几个事实 / 几条规律 / 几个触发器 / 装载顺序",
+        "list",
+        help="装着哪几个:id / 版本 / 事实 / 规律 / 触发器 / **种类 / 边 / 动词** / 装载顺序",
     )
     _add_world_args(plugin_list)
     plugin_list.add_argument(
@@ -3060,16 +3061,44 @@ def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
     出厂插件多起来时,那道钩子一个字都不用改。
     """
     store = config_store
-    if store is None or not store.get("needs.enabled", default=False):
+    if store is None:
         return []
-    from anima_world.needs import factory_plugin
+    from anima_world.economy import factory_plugin as economy_plugin
+    from anima_world.needs import factory_plugin as needs_plugin
 
-    return [factory_plugin()]
+    # **一个插件一个开关**,而那张表(`FACTORY_PLUGINS`)是唯一的权威 ——
+    # 这里按它遍历,加一个出厂插件不必再改这段代码的形状。
+    builders = {"needs": needs_plugin, "economy": economy_plugin}
+    out: list[dict[str, Any]] = []
+    for plugin_id, switch in FACTORY_PLUGINS.items():
+        if not store.get(switch, default=False):
+            continue
+        build = builders.get(plugin_id)
+        if build is not None:
+            out.append(build())
+    return out
 
 
 #: 出厂插件的 id → 决定它装不装的那个配置键。**`World.config_set` 读这张表**,
 #: 于是那道热更新的钩子里没有一个具体插件的名字。
-FACTORY_PLUGINS: dict[str, str] = {"needs": "needs.enabled"}
+FACTORY_PLUGINS: dict[str, str] = {
+    "needs": "needs.enabled",
+    # 🆕 3.8.0 第 2 期 2d-①:**只有钱包那一格**(补裁 ⑤)。
+    # 开关沿用 `economy.enabled`,而它的语义**一个字没动**(只挡 eat / wages,
+    # 不挡 buy / give)—— 这一格是加法,不是把那个开关的含义改宽。
+    "economy": "economy.enabled",
+}
+
+#: 每个出厂插件**搬了哪几格**。🔴 **不按"搬完几个系统"计数**(补裁 ⑤b:
+#: 按系统计数正是把人推向换皮的那把尺子)。消费方读这一格,别照文档记一份清单。
+FACTORY_SCOPE: dict[str, str] = {
+    "needs": "整条(三个量 + 衰减/恢复那六条规律;值从黑板搬进量表)",
+    "economy": (
+        "**只有钱包一格**(`economy.coins`,projected,认领 `payment`)。"
+        "货架仍住 `shop_stock` 那个真 hash、没变成边;`buy`/`eat`/`give` 仍是内核路;"
+        "`economy.enabled` 语义一个字没动。别把它读成「economy 已经是插件了」"
+    ),
+}
 FACTORY_SWITCH_KEYS = frozenset(FACTORY_PLUGINS.values())
 
 
@@ -6596,6 +6625,7 @@ def contract_payload() -> dict[str, Any]:
         BEARER_ALIASES,
         BEARER_FORMS,
         EDGE_ENDS,
+        EDGE_END_PREFIXES,
         EDGE_FACT_SHAPES,
         EDGE_VERB_EFFECTS,
         DEFAULT_TEXT_MAX_CHARS,
@@ -6969,6 +6999,13 @@ def contract_payload() -> dict[str, Any]:
             # 三条路里两条是坏的:改发一条新事件 = **破坏消费方**(`payment` 在
             # `subscribable_events` 上)· 两条都发 = **同一笔钱记两遍账**。
             # 只有"多一格声明"这条不破坏任何人,所以它是纯增量。
+            # 🆕 出厂插件那张表:**id → 决定它装不装的那个配置键**。
+            # 消费方读这一格,别照文档记一份清单。
+            "factory": dict(FACTORY_PLUGINS),
+            # 🔴 **每个出厂插件搬了哪几格** —— 不按"搬完几个系统"计数
+            # (补裁 ⑤b:按系统计数正是把人推向换皮的那把尺子)。
+            # `economy` 这一格说得很明白:只有钱包,货架和动词都没搬。
+            "factory_scope": dict(FACTORY_SCOPE),
             "projected_source_keys": list(PROJECTED_SOURCE_KEYS),
             # ⚠️ **只认内核白名单上那几种事件** —— 认别的插件的事件,等于让一张
             # 作者写的表把「谁发的 ≠ 改谁的」那扇门重新打开(只是这次是声明式地开)。
@@ -6986,6 +7023,19 @@ def contract_payload() -> dict[str, Any]:
             # 节点事实住在量表里(`[float, tick]`),边自己那一行本来就是一份 JSON。
             "edge_fact_shapes": list(EDGE_FACT_SHAPES),
             "edge_ends": list(EDGE_ENDS),
+            # 🔴 **上面那一列里,带 `<>` 的两个是「形状」不是「值」**
+            # (2026-08-26 复核评审:P1.6 那盏假红灯只治了一半 —— 契约把两个模板
+            # 混进了一列字面值,却没有一格说它们是模板,于是照旧做等值比较的 tool
+            # **仍然会拒掉 `entity:sword`**)。判的时候:先看是不是这两个前缀之一,
+            # 是就只查后面那个种类名;否则再和字面值比。
+            "edge_end_prefixes": list(EDGE_END_PREFIXES),
+            "edge_ends_gloss": (
+                "这一列里 `entity:<kind>` / `group:<kind>` 是**模板**,`<kind>` 是"
+                "占位符 —— 真正写进声明的是 `entity:sword` 这种。**别拿整列做等值"
+                "比较**:那样一个引擎跑得起来的世界会被校验器拒掉,而作者会去改一个"
+                "没错的东西。判据:`any(v.startswith(p) for p in edge_end_prefixes)` "
+                "或 `v in edge_ends`。"
+            ),
             "edge_storage_key": "anima:{world_id}:edge:{type}",
             # 表达式里边的三个前缀。🔴 **不是设计稿写的 `from`/`to`** ——
             # `from` 是 Python 关键字,而表达式是 `ast.parse` 解析的:
@@ -7013,8 +7063,12 @@ def contract_payload() -> dict[str, Any]:
             # 装上去让谁也点不动,比开不了机坏。
             "verb_requires_target": True,
             # ⚠️ **target 只认插件自己声明的种类,以及作者写在 `kinds` 里的种类。**
-            # `agent` 还不行(内置种类只准声明量,`ontology.DECLARABLE_BUILTINS`)——
-            # 「拜某人为师」「把东西给某人」那一族因此这一期还写不出来。
+            # 🔴 **`agent` 不是"还不行",是永远不收**(裁决 ①)——「拜某人为师」
+            # 「把东西给某人」那一族走**工具路 + 同意门**,不从 affordance 走。
+            # 理由见下面 `verb_target_never_why`。
+            # ⚠️ 这句话第一版写的是「这一期还写不出来」,和它下面三行正面矛盾
+            # (2026-08-26 复核评审逮的)—— **两句打架的话比两句里哪一句都糟**:
+            # 读的人会按"以后会支持"去规划,而那件事永远不会来。
             "verb_target_forms": list(KIND_PREFIXES) + ["<作者写的种类 id>"],
             # 🔴 **永远不收的那几个词**(裁决 ①,2026-08-26 老板同意分期收窄)。
             # 它们不是"还没做" —— 对着一个人做的动作要过**同意**那道门,而
@@ -7177,6 +7231,10 @@ def run_plugin(args: argparse.Namespace) -> int:
                 print(f"    {onboarding.dim(' · '.join(parts))}")
                 for name in row["kinds"]:
                     print(f"    {onboarding.dim('种类:' + name)}")
+                for name in row["edges"]:
+                    # 数得出「边 1」而印不出它叫什么,等于让人再去问一次
+                    # (2026-08-26 复核评审)。
+                    print(f"    {onboarding.dim('边:' + name)}")
                 for spec in row["verbs"]:
                     print(f"    {onboarding.dim('动词:' + spec['name'] + ' —— ' + spec['description'])}")
                 if row["reads"]:

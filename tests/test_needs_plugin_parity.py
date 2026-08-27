@@ -212,7 +212,13 @@ def test_量表是旧的那份_外加搬过来的那三个量(tmp_path):
     got, want = run["stocks"], GOLDEN["stocks"]
     assert sorted(got) == sorted(want), "量表的 owner 名单变了"
     for owner in sorted(want):
+        # 🔴 **每一格搬家在这儿加一行,而加行的时候要问一句:它真的是搬家吗。**
+        # `economy.coins` 是第 2 期 2d-① 那一格(钱包搬成 projected 事实)——
+        # 它落在这个橱窗世界上,因为橱窗把 `economy.enabled` 点亮了。
+        # ⚠️ **逐键放行,不许写成"多出来的忽略掉"**:那样一个真的改坏了旧量的
+        # 改动会从这条缝里溜过去。
         moved = {f"needs.{need}" for need in ("energy", "hunger", "social")}
+        moved |= {"economy.coins"}
         extra = set(got[owner]) - set(want[owner])
         assert extra <= moved, f"{owner} 上多出了搬家之外的量:{sorted(extra - moved)}"
         assert not set(want[owner]) - set(got[owner]), f"{owner} 上少了量"

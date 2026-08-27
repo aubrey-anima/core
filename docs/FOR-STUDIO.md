@@ -3813,9 +3813,16 @@ $ anima-world contract --json | jq '.plugins | {author_type, fact_shapes, effect
 它现在说的是"装不装 `needs` 这个出厂插件",而不是"跑不跑那段硬编码"。
 
 ```console
-$ anima-world plugin list --world-id w --json | jq '.plugins[] | {id, version, facts, rules}'
-{"id":"needs","version":"1.0.0","facts":["energy","hunger","social"],"rules":7}
+$ anima-world plugin list --world-id w --json \
+    | jq '.plugins[] | {id, version, facts, rules, kinds, edges, verbs: [.verbs[].name]}'
+{"id":"needs","version":"1.0.0","facts":["energy","hunger","social"],"rules":7,
+ "kinds":[],"edges":[],"verbs":[]}
+{"id":"economy","version":"1.0.0","facts":["coins"],"rules":0,
+ "kinds":[],"edges":[],"verbs":[]}
 ```
+⚠️ **`kinds` / `edges` / `verbs` 三格是第 2 期加的**(2026-08-26);`verbs` 每一项
+就是那份 tool-calling schema(`{name, description, parameters}`)。
+这个例子第一版少了那三格 —— 照它写的探测器会以为这条命令答不出种类与动词。
 
 | | 从前 | 3.8.0 |
 |---|---|---|

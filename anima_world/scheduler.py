@@ -3983,6 +3983,11 @@ class Scheduler:
     def _verb_edge_gate(self, agent_id: str, target: str, verb: str) -> str | None:
         """这个动词声明的边,**这一刻连得上吗**。连不上就回一句人话。
 
+        **三条都查**(`link` 的约束 / `unlink` 与 `transfer` 的"有没有那条边")——
+        🔴 **从前只查了 `link` 那一支**,于是「没入门就退出」体力照扣、`ok: true`、
+        边一条没断(2026-08-26 复核评审实测)。**留半截比不查更难读**:同一件事
+        在两个动词上两种下场,而作者看不出为什么。
+
         ⚠️ **只查查得动的那几条。** `from`/`to` 指着 `spawned` 的连不了 ——
         那个东西这一刻还不存在。分界照 `world check --edit` 那条:**查得动的照查,
         查不动的说出来**,而不是"有一条查不动就整个跳过"(那正是 3.7.0 修的假绿)。
@@ -3995,22 +4000,43 @@ class Scheduler:
             return None
         actor = self.stock_owner_of(agent_id)
         for spec in specs:
-            if str(spec.get("op") or "") != "link":
-                continue
+            op = str(spec.get("op") or "")
             src = self._resolve_node(spec.get("from"), {"target": target}, None, actor)
             dst = self._resolve_node(spec.get("to"), {"target": target}, None, actor)
-            if not src or not dst:
-                continue          # 指着 `spawned` 之类 —— 这一刻查不动
             edge_type = str(spec.get("type") or "")
             declared = self.edge_types.get(edge_type)
             if declared is None:
                 continue
             label = declared.label or declared.name
-            if declared.exclusive and store.of_src(edge_type, src):
-                return (f"{self._display_name(agent_id)}已经有一条「{label}」了 —— "
-                        "这一种一个人只能有一条")
-            if declared.exclusive_to and store.of_dst(edge_type, dst):
-                return f"「{label}」这一头已经有人占着了 —— 这一种只认一个"
+            if op == "link":
+                if not src or not dst:
+                    continue      # 指着 `spawned` 之类 —— 这一刻查不动
+                if declared.exclusive and store.of_src(edge_type, src):
+                    return (f"{self._display_name(agent_id)}已经有一条「{label}」了 —— "
+                            "这一种一个人只能有一条")
+                if declared.exclusive_to and store.of_dst(edge_type, dst):
+                    return f"「{label}」这一头已经有人占着了 —— 这一种只认一个"
+            elif op in ("unlink", "transfer"):
+                # 🔴 **断和转移一样查得动,而且查法就摆在那儿**(2026-08-26 复核评审)。
+                #
+                # 从前这两支整个跳过,于是「没入门就退出」体力照扣、`ok: true`、
+                # 边一条没断 —— 只有回执里一条 `ok: false` 和一行 warning。
+                # **留半截的下场是同一件事在两个动词上两种下场**,而作者读不出为什么。
+                #
+                # 判据和 `apply_edge_effect` 里那两支**读同一组函数**
+                # (`of_src` / `of_dst` / `get`)—— 各写一套的话,闸说"有"而执行说
+                # "没有",那是最难查的一种不一致。
+                if src and dst:
+                    have = store.get(edge_type, src, dst) is not None
+                elif src:
+                    have = bool(store.of_src(edge_type, src))
+                elif dst:
+                    have = bool(store.of_dst(edge_type, dst))
+                else:
+                    continue      # 两端都答不出来 —— 这一刻查不动
+                if not have:
+                    return (f"{self._display_name(agent_id)}身上没有这条「{label}」—— "
+                            "断不了一条本来就不存在的")
         return None
 
     def _apply_verb_edges(
@@ -4568,8 +4594,17 @@ class Scheduler:
 
         pending: dict[str, dict[str, float]] = {}
         for owner, fact, delta in fact_source_updates(specs, event.get("payload") or {}):
-            have = float((store.of(owner) or {}).get(fact, 0.0))
-            pending.setdefault(owner, {})[fact] = round(have + delta, 6)
+            have = store.of(owner)
+            # 和 `_materialize_projected_facts` 逐字同一条:**只写给真的有这张量表
+            # 的 owner** —— 折出来的账按任意持有者记,而事实住在有类型的载体上。
+            # 两处判得不一样的下场是:跑着的世界给 `__town__` 建了一行,
+            # 而重开之后那一行不见了。
+            if not have:
+                continue
+            digits = next((int(spec.get("round", 6)) for spec in specs
+                           if str(spec.get("fact") or "") == fact), 6)
+            pending.setdefault(owner, {})[fact] = round(
+                float(have.get(fact, 0.0)) + delta, digits)
         for owner, updates in pending.items():
             store.set_many(owner, updates, tick=int(self.clock))
 
@@ -5164,6 +5199,16 @@ class Scheduler:
             updates = {key: float(value) for key, value in row.items()
                        if key in self.projected_facts}
             if not updates:
+                continue
+            # 🔴 **只写给真的有这张量表的那些 owner**(2026-08-26 第 2 期 2d-①)。
+            #
+            # 折出来的那本账按**任意持有者字符串**记(`payment` 的两头可以是
+            # `__town__` / `shop:cafe`),而插件的事实住在**有类型的载体**上。
+            # 不滤的话,`agent:__town__` 会被凭空建出一行量表 —— 它进
+            # `stock_owners()`、进打包、进 `state()`,而**世界里没有这个人**。
+            # 判据用"这张表已经存在"而不是"猜它是不是人":载体那一半由
+            # `seed_actor_plugin_facts` 那个窄口负责,它才知道谁是谁。
+            if not store.of(owner):
                 continue
             store.set_many(owner, updates, tick=int(self.clock))
             written += len(updates)

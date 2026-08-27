@@ -5374,3 +5374,49 @@ gossip / closeness 全建在"关系可重放"上,钱的每一笔来路(`payment`
 判据 `tests/test_plugins.py::test_既有的内核事件认得成自己的delta`(**有牙**:
 把折叠端那一支关掉,它当场变 0)/ `::test_sources只认内核白名单上的事件_认不了别家插件的` /
 `::test_sources只给projected的事实`。
+
+### 10.14 出厂插件第二个:**economy 的钱包那一格**(3.8.0 第 2 期 2d-①)
+
+🔴 **别读成「economy 已经是插件了」。** 搬过来的是**一个事实**:
+
+```jsonc
+"facts": {"coins": {"bearer":"actor", "shape":"number", "mode":"projected",
+                    "visibility":"hidden", "label":"钱",
+                    "sources":[{"event":"payment", "amount":"amount",
+                                "credit":"to", "debit":"from", "round":2}]}}
+```
+
+| 这一期搬了 | 这一期**没搬**,而且各有理由 |
+|---|---|
+| `economy.coins`(projected,认领 `payment`) | `buy` / `eat` / `give` 仍是**内核路** · 货架仍住 `shop_stock` 那个真 hash · `economy.enabled` 语义一个字没动 |
+
+- **`give` 是永远不走 affordance**(§10.10 那一格,裁决 ①:target 是人);
+  **`buy` / `eat` 是这一期不走** —— `World.player_buy` 抛**五种**手写中文
+  `LookupError`,而 `perform_affordance` 是 `{ok, reason, refusal}` **四类**、
+  措辞另一套,**形状和文字都对不上**,而玩家那一屏印的就是这些话;`eat` 更直白,
+  它是 tick 循环里的 BT 动作,根本不在 `interact` 那条路上。
+  **换调用路 ⇒ 逐字节从原理上不成立** —— 那不是闸没写好,是被比的两样东西不是同一件事。
+- **货架不搬**:钱包是**加法**(量表多一个键),货架是**换掉一个真键**。差别承重在
+  **老包**上 —— 一份老包装进换了键的新引擎,`world import` 照旧把 `shop_stock`
+  原样落键而**没有一处再读它**:店里空了、退出码 0、日志干净。
+- 🔴 **`round: 2` 是承重的**:账本 `_apply_payment` **每一步折到两位**(二进制浮点
+  存不下 0.1,而门禁读的是这个数)。折到六位就是**第二个钱包**,而它们只在小数
+  第三位往后分家 —— 判据 `tests/test_plugins.py::test_钱的进位跟着账本走_不是折到第六位`
+  (⚠️ **economy 那道 parity 闸对这一格没有牙**:它那 8 笔钱都是干净的两位小数,
+  改成 6 位照样绿。**试牙也要试对地方。**)
+
+🔴 **一样"搬不动"、而不是"没搬"的**:`Projection.balances` 是一本按**任意持有者
+字符串**记的账(`__town__` / `shop:cafe` 也在里面),而插件的事实住在**有类型的
+载体**上。**镇上的金库和店铺是持有者,不是载体** —— 所以 `balance()` 这一轮照旧
+读账本。连带一条落在实现上:物化视图**只写给真的有量表的那些 owner**,
+不然 `agent:__town__` 会被凭空建出一行,进 `stock_owners()`、进打包、进 `state()`,
+而**世界里没有这个人**。
+
+**出厂插件那张表进了契约**:`plugins.factory`(id → 开关键)与
+`plugins.factory_scope`(**每个搬了哪几格**)。🔴 **不按"搬完几个系统"计数** ——
+按系统计数正是把人推向换皮的那把尺子。
+
+闸:`tests/test_economy_plugin_parity.py`(`balance()` / `player_shop` / `shop` /
+三份提示词 / `state()` 刨三格 / 事件日志多重集**逐字节**;量表白名单**恰好多一个**
+`economy.coins`;外加 projected 那道牙:清掉物化值重开 → 从账本折回来)。
+**文件头逐条写着这道闸有意不比什么** —— 那句话和"比过了"在闸红的那天意思完全不同。
