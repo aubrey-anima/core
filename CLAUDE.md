@@ -124,11 +124,18 @@ pip install -e ".[dev]"
 #   `.venv/bin/pip show anima-world | sed -n 2p` 与 `.venv/bin/anima-world --version`
 
 python3.13 -m pytest -q               # fakeredis,无需真 Redis;addopts 已屏蔽 ROS 插件
-# 最近一次实跑:**1963 passed / 19 skipped,0 failed**(2026-08-26,插件系统第 2 期
-#   2a–2c + 2d 地基 + 三视角验收那十五条 + 裁决 ②④,382 秒;
-#   起跑 `uptime` load **0.46**、收尾 **1.38**,机器基本空着)。
-#   ⚠️ **这一趟第一次是全绿的** —— 上一趟那 2 条红是 `test_needs_plugin_parity`,
-#   当天按裁决 ② 修完了(见下)。
+# 最近一次实跑:**1976 passed / 19 skipped,0 failed**(2026-08-27,插件系统第 2 期
+#   **2d-①(只搬钱包)+ 2e(邀请的存储与过期规律)** + 复核那 5 条残余,397 秒;
+#   起跑 `uptime` load **0.59**、收尾 **1.31**,机器基本空着)。
+#   这 **+13** 是这一轮的判据(钱包三条 · 边规律 emit 三条 · unlink 那道闸一条 ·
+#   邀请三条 · 橱窗那条 · `edge_ends` / `plugin list` 各一)。
+#   **两道 parity 各单跑 3 趟全绿**(needs 14.0s×3、economy 21.1s×3,起跑 load 1.19)。
+#   ⚠️ **那一轮全量跑出来的三条红,全是老闸逮的、全是真的**:源事件的物化视图
+#   "每来一条就逐个 owner 开门"(撞 `test_the_engine_scales_to_many_entities`)·
+#   `--help` 里一对裸 `**` · 「作者没写规律」碰上一个永远装的出厂规律。
+#   上一趟是 **1963 / 19 / 0 failed**(2026-08-26,2a–2c + 2d 地基 + 验收十五条 +
+#   裁决 ②④,382 秒,起跑 load 0.46)。⚠️ **那是本单第一次全绿** —— 再上一趟那 2 条红
+#   是 `test_needs_plugin_parity`,当天按裁决 ② 修完了(见下)。
 #   上一趟是 **1946 / 19 / 2 failed**(同日,2a–2c 那一轮,381 秒,起跑 load 0.37);
 #   这 **+17** 是验收那十五条与裁决 ④ 各自的判据(`test_plugins.py` +17:
 #   P1 七条 + P2 三条 + `plugin list` 报得出种类边动词 + `sources` 四条)。
