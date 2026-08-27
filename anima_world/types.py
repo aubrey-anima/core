@@ -103,6 +103,16 @@ class Projection:
     每个插件一个的话,一个卸掉的插件留下的那串 delta 会在下一次重放时
     **无人认领**,而无人认领的样子是"这个数悄悄回到 0"。
     """
+    fact_sources: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
+    """`事件类型 → (那几条 source 声明, …)`(3.8.0 第 2 期 ④)。
+
+    🔴 **它是注册表,不是折出来的东西** —— 由装载那一层在重放之前塞进来
+    (`__main__._install_plugins`),`reset_projection` 要把它**带过去**。
+    带不过去的下场是安静的:重开那一刻钱包从日志里折出来的是 0,而跑着的世界照旧对。
+
+    为什么必须有它:折叠端只认 `.delta` 后缀,而 `payment` 是**内核**事件 ——
+    改名破坏消费方,两条都发是同一笔钱记两遍账。**只有"多一格声明"这条不破坏任何人。**
+    """
     allowances: set[str] = field(default_factory=set)
     """领过见面礼的 holder。**这是"只给一次"那个一次的家。**
 

@@ -477,6 +477,31 @@ menpai.sect:青云门」)→ `_node_name` 补实例与地点两支 · 只 `link`
 「多七格」而下面列了八个(**能点名就别数数**)· fixture 过期提醒只点了 player 前端,
 补上后端六处(**只点一半的提醒和不提醒一样**)· `plugin list` 那一行见 P2。
 
+### 裁决 ④ 落地:`projected` 多一格 `sources` —— **2d 真正的第五块拦路石**
+
+折叠端只认 `.delta` 后缀,而设计 §9.3 说「`payment` 事件照旧是 `economy.coins`
+的 delta」—— **这两句对不上,而没有一处会红**。三条路里两条是坏的:改发
+`economy.coins.delta`(`payment` 在 `subscribable_events` 上,**改名 = 破坏消费方**)·
+两条都发(**同一笔钱记两遍账**)。只有"多一格声明"这条不破坏任何人。
+
+- 声明 `{event, amount, credit, debit, owner_form}`;**`credit` 加、`debit` 减,
+  两个键名写死** —— 给一个 `sign` 让作者自己填的话,写反了不报错,
+  而一个反着记的账让「对账即重放」成了一句空话。
+- 🔴 **只收内核白名单上的事件**,而这一条和上面那条「插件伪造不了别家的投影」
+  是**同一道边界的两面**:折叠端那道闸靠同一性关上了「谁发的 ≠ 改谁的」,
+  而 `sources` 是一张**作者写的**表 —— 认得了 `<别家>.<事实>.delta` 的话,
+  刚关上的门就从这儿又开了,**只是这次是声明式地开**。
+- **只有一份算法**(`projection.fact_source_updates`):重放与运行期写物化视图读
+  同一个函数。各写一遍 = 跑着的世界一个数、重开之后另一个数,两边都不报错。
+- **注册表要在折之前就位**(`Projection.fact_sources`,`reset_projection` 带过去);
+  有 `sources` 的世界**开机重折一遍** —— `Scheduler.__init__` 那次重放跑在插件装上
+  之前,那时注册表还是空的。这是设计 §9.3 写死的代价之一。
+- ⚠️ **一条事件的两头形状不同时要写成两条声明**(`payment` 的 `to` 可能是个人而
+  `from` 是 `__town__`)—— 让一个 `owner_form` 管两头,是让作者在一个格子里说两件事。
+- 契约四格纯增量:`projected_source_keys` / `projected_source_events` /
+  `projected_owner_forms` / `projected_source_gloss`。
+  回执 `docs/FOR-STUDIO.md` §3.42,`docs/REFERENCE.md` §10.13。
+
 🔴 **同日裁决:上面那两条出路都建立在一个假前提上 —— 「旧路已经删了」。旧路没删,
 它在 git 里。** `fa1507b^` = **`a6b3da3`**(第 1 期地基已在、needs 还没搬的那一棵),
 `git worktree` 一敲就在,一趟采样 **3.8 秒**。实测(2026-08-26,`6d0d0bc` 工作树):

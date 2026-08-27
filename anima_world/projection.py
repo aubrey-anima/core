@@ -70,6 +70,10 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_invitation_settled(proj, e)
     elif e.type.endswith(FACT_DELTA_SUFFIX):
         _apply_fact_delta(proj, e)
+    if proj.fact_sources and e.type in proj.fact_sources:
+        # ⚠️ **不是 elif**:一条内核事件可能既被别的分支折(`payment` 折 `balances`),
+        # 又被某个插件认成自己的 delta。两件事互不相干,都要做。
+        _apply_fact_source(proj, e)
 
 
 # ── 谁在等你回答 ────────────────────────────────────────────────────────────
@@ -599,3 +603,62 @@ def _apply_fact_delta(proj: Projection, e: Event) -> None:
         return
     row = proj.plugin_facts.setdefault(owner, {})
     row[fact] = round(row.get(fact, 0.0) + delta, 6)
+
+
+def _apply_fact_source(proj: Projection, e: Event) -> None:
+    """一条**内核**事件,被某个插件声明成了自己那个投影式事实的 delta(裁决 ④)。
+
+    🔴 **这一格是 2d 的前置**:设计 §9.3 说「`payment` 事件照旧是 `economy.coins`
+    的 delta」,而折叠端只认 `.delta` 后缀 —— 两句话对不上。改发一条新事件是
+    **破坏消费方**(`payment` 在白名单上),两条都发是**同一笔钱记两遍账**;
+    只有"多一格声明"这条不破坏任何人。
+
+    **符号不给作者算**:`credit` 加、`debit` 减,两个键名写死。给一个 `sign` 让作者
+    自己填的话,写反了不报错 —— 而一个反着记的账,对账即重放这条纪律就成了一句空话。
+    """
+    for owner, fact, delta in fact_source_updates(
+            proj.fact_sources.get(e.type, ()), e.payload or {}):
+        row = proj.plugin_facts.setdefault(owner, {})
+        row[fact] = round(row.get(fact, 0.0) + delta, 6)
+
+
+def fact_source_updates(
+    specs: Any, payload: dict[str, Any],
+) -> list[tuple[str, str, float]]:
+    """一条内核事件按 `sources` 折出来的 `(owner, 事实, 变化量)`。
+
+    🔴 **只有这一份算法。** 折叠端(重放)和调度器(运行期写物化视图)读的是同一个
+    函数 —— 各写一遍的下场是本仓最怕的那种:跑着的世界一个数、重开之后另一个数,
+    而两边都不报错。
+
+    **符号不给作者算**:`credit` 加、`debit` 减,两个键名写死。给一个 `sign` 让作者
+    自己填的话,写反了不报错 —— 而一个反着记的账,让「对账即重放」成了一句空话。
+    """
+    out: list[tuple[str, str, float]] = []
+    for spec in specs or ():
+        fact = str(spec.get("fact") or "")
+        if not fact:
+            continue
+        try:
+            amount = float(payload.get(str(spec.get("amount") or "amount")) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not amount:
+            continue
+        actor_form = str(spec.get("owner_form") or "actor") == "actor"
+        for key, sign in ((str(spec.get("credit") or ""), 1.0),
+                          (str(spec.get("debit") or ""), -1.0)):
+            if not key:
+                continue
+            who = str(payload.get(key) or "").strip()
+            if not who:
+                continue
+            # `actor` = 载荷里那个名字是人的 id → 前缀成量表的 owner key。
+            # **和 `Scheduler.stock_owner_of` 逐字同一条规则** —— 两处写岔的下场是
+            # 折进了一个没人读的 owner 名下,而那一格永远是 0、永远不报错。
+            # ⚠️ **一条事件的两头形状不同时,写成两条声明**(一条只给 `credit`、
+            # 一条只给 `debit`):`payment` 的 `to` 可能是个人而 `from` 是
+            # `__town__`。给一个 `owner_form` 让它同时管两头,是让作者在一个格子里
+            # 说两件事 —— 而说不清的那一件会静默地记在一个没人读的名下。
+            out.append((f"agent:{who}" if actor_form else who, fact, sign * amount))
+    return out

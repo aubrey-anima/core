@@ -4140,3 +4140,50 @@ target_name}`。它是**插件命名空间形状**的事件(带点号),所以触
 - **platform / player**:一件不用改。那条 `state_change` 的载荷**八格逐字没变**,
   邀请那三扇门的形状、`invitation_settled` 的取值集合、`outcome` 的五支
   **一个字都没动**。
+
+## 3.42 `projected` 多一格 `sources`:让一个事实认领引擎已经在发的事件(3.8.0,裁决 ④)
+
+§3.40 交的是「一个数说得出自己是怎么来的」,而它当时只认**插件自己发的**那条
+`<插件>.<事实>.delta`。这一格补的是另一半:**引擎已经在发的那些事件,也能当 delta 用。**
+
+```jsonc
+"facts": {"钱": {"bearer":"actor", "shape":"number", "mode":"projected",
+                 "sources": [{"event":"payment", "amount":"amount", "credit":"to"},
+                             {"event":"payment", "amount":"amount", "debit":"from",
+                              "owner_form":"raw"}]}}
+```
+
+🔴 **为什么值得多一格**(说给作者听的那一版):一个写「金币」的作者不该被迫在
+「用引擎的钱」和「自己记一套账」之间二选一。没有这一格,他要么改引擎发的事件名
+(那会**破坏所有已经在读 `payment` 的消费方**),要么两套账并行(**同一笔钱记两遍**)。
+
+### 作者写得到的五个键
+
+| 键 | 说什么 | 缺省 |
+|---|---|---|
+| `event` | 认哪一种事件。**只认引擎自己发的那几种**(`contract.plugins.subscribable_events`) | 必填 |
+| `amount` | 数在载荷的哪一格 | `amount` |
+| `credit` | 载荷里哪一格装着「加的那一头」的名字 | —— |
+| `debit` | 哪一格装着「减的那一头」 | —— |
+| `owner_form` | 那个名字是**人的 id**(`actor`)还是**照原样**(`raw`) | `actor` |
+
+`credit` / `debit` 至少要有一头。
+
+### 三条要说给作者的
+
+1. **符号不给你算。** `credit` 加、`debit` 减,写死。给一个 `sign` 让你自己填的话,
+   写反了引擎不会报错 —— 而一个反着记的账,「这笔钱从哪来」这个问题就再也答不对了。
+2. 🔴 **一条事件的两头形状不同时,写成两条声明**(上面那个例子)。`payment` 的
+   `to` 可能是个人(`夏` / `player:p1`),而 `from` 常常是 `__town__` —— 让一个
+   `owner_form` 同时管两头,是在一个格子里说两件事,而说不清的那一件会**静默地记在
+   一个没人读的名下**。
+3. **认不了别的插件的事件**,只认引擎自己发的那张白名单。写了别的**开不了机**,
+   并告诉你该问哪一格。理由和「插件写不进别家的事实」是同一条边界。
+
+### 你们要接的一件
+
+**校验器照 `contract.plugins.projected_source_keys` / `projected_owner_forms` 判,
+别硬编码**;`event` 那一格照 `subscribable_events` 判。
+**整格缺席 = 这支 core 只有 §3.40 那一半**(一律 `.get` 到底)。
+
+**platform / player 一件不用改**(不新增存储键,也不动任何冻结面)。

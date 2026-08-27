@@ -1283,3 +1283,73 @@ def test_只连边的动词_不许印成只是看看(tmp_path):
         assert join["changes_world"] is True, join
         assert join["edges"] == [{"op": "link", "type": "menpai.member_of"}], join
         assert join["description"] == "递上名帖,拜入这个门派", join
+
+
+# ── ④ 投影式事实的 `sources`:把既有的内核事件认成自己的 delta ────────────
+#
+# 🔴 **这一格是 2d 真正的拦路石**(裁决 ④):折叠端只认 `.delta` 后缀,而设计 §9.3
+# 说的是「`payment` 事件照旧是 `economy.coins` 的 delta」—— **这两句今天对不上**。
+# 三条路里两条是坏的:改发 `economy.coins.delta`(`payment` 在白名单上,改名 =
+# 破坏消费方)· 两条都发(同一笔钱记两遍账)。**只有 `sources` 不破坏消费方。**
+
+WALLET = {
+    "id": "wallet", "version": "1.0.0", "label": "钱包",
+    "facts": {"钱": {
+        "bearer": "actor", "shape": "number", "mode": "projected",
+        "default": 0.0, "visibility": "self", "label": "钱",
+        # `payment` 是**内核**事件,而且在那张白名单上 —— 一笔钱从 `from` 挪到 `to`。
+        "sources": [{"event": "payment", "amount": "amount",
+                     "debit": "from", "credit": "to"}]}},
+}
+
+
+def test_既有的内核事件认得成自己的delta(tmp_path):
+    """一笔 `payment` 折进 `wallet.钱`:**付钱那头减、收钱那头加**,一条事件两端。"""
+    with _purse_world(tmp_path, name="src", plugin=WALLET) as world:
+        world.player_move("p1", "cafe", display_name="阿檀")
+        world.player_topup("p1", 40.0)
+        world.scheduler.catch_up_projection()
+        assert world.scheduler._memory_projection.plugin_facts.get(
+            "agent:player:p1", {}).get("wallet.钱") == 40.0
+        # 物化视图也跟着走 —— 她的表达式与感知读的是量表,不是投影。
+        assert world.stocks("agent:player:p1")["wallet.钱"] == 40.0
+    # 重开:**从日志折回来**,而这一趟折的是 `payment`,不是 `.delta`。
+    with _purse_world(tmp_path, name="src", plugin=WALLET, fresh=False) as world:
+        assert world.stocks("agent:player:p1")["wallet.钱"] == 40.0
+
+
+def test_sources只认内核白名单上的事件_认不了别家插件的(tmp_path):
+    """🔴 **和「插件伪造不了别家的投影」是同一道边界的两面。**
+
+    `sources` 是一张作者写的表,如果它认得了 `<别家>.<事实>.delta`,那么上一轮
+    刚关上的那扇门就从这儿又开了 —— 只是这次是**声明式**地开。
+    所以这一格只收 `contract.plugins.subscribable_events` 上那几种**内核**事件。
+    """
+    bad = {"id": "thief", "version": "1.0.0", "facts": {"赃": {
+        "bearer": "actor", "shape": "number", "mode": "projected",
+        "sources": [{"event": "bank.存款.delta", "amount": "delta",
+                     "credit": "owner"}]}}}
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([bad])
+    joined = "\n".join(raised.value.errors)
+    assert "内核" in joined and "subscribable_events" in joined, joined
+
+
+def test_sources只给projected的事实():
+    """一个直接写的事实认一条事件当自己的 delta,是**两个写者**写同一个数 ——
+    而两份真相里有一份不更新,是这个仓库最怕的坏法。"""
+    bad = {"id": "w2", "version": "1.0.0", "facts": {"钱": {
+        "bearer": "actor", "shape": "number",
+        "sources": [{"event": "payment", "credit": "to"}]}}}
+    with pytest.raises(PluginError) as raised:
+        parse_plugins([bad])
+    assert any("projected" in e for e in raised.value.errors), raised.value.errors
+
+
+def test_契约报得出sources这一格():
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    plugins = json.loads(out.stdout)["plugins"]
+    assert plugins["projected_source_keys"] == [
+        "event", "amount", "credit", "debit", "owner_form"]
+    assert plugins["projected_source_events"] == "subscribable_events"

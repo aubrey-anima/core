@@ -37,7 +37,7 @@ from anima_world.perception import why_not_perceivable
 from anima_world import together as together_mod
 from anima_world.projection import project_events
 from anima_world.stocks import clock_names
-from anima_world.types import Event
+from anima_world.types import Event, Projection
 from anima_world.world_time import (
     DEFAULT_MINUTES_PER_TICK,
     WALL_CLOCK_FLOOR,
@@ -698,6 +698,9 @@ class Scheduler:
             # 碰巧调了哪一个(第 1 期就是这么让五种事件死掉的,见
             # `_enqueue_for_triggers` 的说明)。
             self._enqueue_for_triggers(event)
+            # 同一个理由的第二件:被某个插件认作 delta 的内核事件,顺手把物化视图
+            # 也写了 —— 不写的话跑着的世界读到 0,而重开之后它从日志里长出来。
+            self._materialize_source_event(event)
             self.recent_events.append(self._stream_event(event))
             self._event_signal.set()
             self._event_signal.clear()
@@ -1115,7 +1118,16 @@ class Scheduler:
 
         两个字段各写各的是那个洞本身,所以这里把它们焊死在一个方法里。
         """
-        self._memory_projection = project_events(events)
+        # 🔴 **注册表要带过去,而且要在折之前就位**(3.8.0 第 2 期 ④)。
+        #
+        # `fact_sources` 不是折出来的东西,是装载那一层塞进来的;而折叠端**边折
+        # 边读它** —— 折完再塞就等于这一趟一条 source 都没认。带不过去的下场同样
+        # 安静:重开那一刻钱包从日志里折出来是 0,而跑着的世界照旧对
+        # (运行期写的是物化视图)。又是"只有重开那一刻才错"的那一族。
+        base = Projection()
+        base.fact_sources = dict(
+            getattr(self._memory_projection, "fact_sources", {}) or {})
+        self._memory_projection = project_events(events, base)
         self._projection_seq = max((int(e.seq or 0) for e in events), default=0)
 
     def catch_up_projection(self) -> int:
@@ -4533,6 +4545,33 @@ class Scheduler:
     def _record_and_deliver(self, event: dict[str, Any]) -> dict[str, Any]:
         self._deliver(event)
         return self._record_event(event)
+
+    def _materialize_source_event(self, event: dict[str, Any]) -> None:
+        """一条被某个插件认作 delta 的**内核**事件 → 顺手把物化视图也写了(裁决 ④)。
+
+        🔴 **它必须和折叠端读同一个函数**(`projection.fact_source_updates`)——
+        各写一遍的下场是本仓最怕的那种:跑着的世界一个数、重开之后另一个数,
+        而两边都不报错。
+
+        挂在 `_record_event` 上,和 `_enqueue_for_triggers` 同一个理由:
+        **"发生了"在这个引擎里的定义就是进了日志**;挂在两个包装函数中的一个上,
+        等于让"折不折得到"取决于发它的人碰巧调了哪一个。
+        """
+        store = self.stock_store
+        sources = getattr(self._memory_projection, "fact_sources", None)
+        if store is None or not sources:
+            return
+        specs = sources.get(str(event.get("type") or ""))
+        if not specs:
+            return
+        from anima_world.projection import fact_source_updates
+
+        pending: dict[str, dict[str, float]] = {}
+        for owner, fact, delta in fact_source_updates(specs, event.get("payload") or {}):
+            have = float((store.of(owner) or {}).get(fact, 0.0))
+            pending.setdefault(owner, {})[fact] = round(have + delta, 6)
+        for owner, updates in pending.items():
+            store.set_many(owner, updates, tick=int(self.clock))
 
     def _enqueue_for_triggers(self, event: dict[str, Any]) -> None:
         """有人订这种事件吗 —— 有就排进队,**这一 tick 不处理**(见 `_trigger_queue`)。

@@ -136,6 +136,30 @@ EFFECTS = ("set", "emit", "link", "unlink", "transfer")
 #: **规律读到的是上一轮物化的值**(和双缓冲同构)。
 FACT_MODES = ("stored", "projected")
 
+#: `mode:"projected"` 那一格 `sources` 里,一条声明认哪几个键(裁决 ④,2026-08-26)。
+#:
+#: 🔴 **它是 2d 真正的拦路石**:折叠端只认 `.delta` 后缀,而设计 §9.3 说的是
+#: 「`payment` 事件照旧是 `economy.coins` 的 delta」—— **这两句对不上**。
+#: 三条路里两条是坏的:改发 `economy.coins.delta`(`payment` 在
+#: `SUBSCRIBABLE_EVENTS` 上,**改名 = 破坏消费方**)· 两条都发(**同一笔钱记两遍账**)。
+#: 只有"多一格声明"这条不破坏任何消费方。
+#:
+#:   `event`      —— 认哪一种事件。**只收内核白名单上的**(见 `_parse_sources`)。
+#:   `amount`     —— 数在载荷的哪一格(缺省 `amount`)。
+#:   `credit`     —— 载荷里哪一格装着"加的那一头"的名字。
+#:   `debit`      —— 哪一格装着"减的那一头"。两头至少要有一头。
+#:   `owner_form` —— 那个名字是**人的 id**(`actor`,折的时候前缀 `agent:`)
+#:                   还是**照原样**(`raw`,`__town__` / `shop:cafe` 那种)。缺省 `actor`。
+#:
+#: ⚠️ **符号是这张表里最容易写反、而且写反了不报错的一格**,所以两头分开写死成
+#: 两个键名(`credit` / `debit`),不给一个 `sign` 让作者自己算。
+PROJECTED_SOURCE_KEYS = ("event", "amount", "credit", "debit", "owner_form")
+
+#: `owner_form` 的两个取值。`actor` = 载荷里那个名字是人的 id(`夏` / `player:p1`),
+#: 折进量表时要前缀成 `agent:…`(和 `Scheduler.stock_owner_of` 逐字同一条规则);
+#: `raw` = 照原样(`__town__` / `shop:cafe` 这种不是人的持有者)。
+OWNER_FORMS = ("actor", "raw")
+
 #: `projected` 这一版只收 `number`,而理由不是"还没做":**delta 是一个差值**,
 #: 而一个枚举名(`state`)或一句话(`text`)身上没有"差值"这回事 ——
 #: 「从『外门』变成『内门』」折不成一个可以相加的数。
@@ -187,6 +211,8 @@ class Fact:
     namespaced: bool = True
     #: `stored`(默认)还是 `projected`。见 `FACT_MODES`。
     mode: str = "stored"
+    #: 把哪些**既有的内核事件**认成自己的 delta。见 `PROJECTED_SOURCE_KEYS`。
+    sources: tuple[dict[str, Any], ...] = ()
 
     @property
     def qualified(self) -> str:
@@ -541,7 +567,8 @@ def _parse_one(
     else:
         for key, spec in raw_facts.items():
             try:
-                fact = _parse_fact(plugin_id, f"{label}.facts.{key}", str(key), spec)
+                fact = _parse_fact(plugin_id, f"{label}.facts.{key}", str(key), spec,
+                                   subscribable=subscribable)
             except PluginError as exc:
                 errors.extend(exc.errors)
                 continue
@@ -1016,7 +1043,8 @@ def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:
 
 def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
                 *, shapes: tuple[str, ...] = FACT_SHAPES,
-                namespaced: bool = True) -> Fact:
+                namespaced: bool = True,
+                subscribable: Iterable[str] | None = None) -> Fact:
     errors: list[str] = []
     if not key.strip():
         raise PluginError([f"{label}:事实名不能为空"])
@@ -1068,6 +1096,8 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
             "上的可以"
         )
         mode = "stored"
+
+    sources = _parse_sources(label, spec, mode, errors, subscribable)
 
     bearer = str(spec.get("bearer") or "").strip()
     # 第 1 期写 `agent` 的插件要的是「今天的语义」(角色 + 玩家)—— 收紧一个刚发
@@ -1163,8 +1193,76 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
         visibility=visibility, label=str(spec.get("label") or "").strip(),
         unit=str(spec.get("unit") or "").strip(), bands=bands,
         band_notes=tuple(notes), values=tuple(values), low=low, high=high,
-        namespaced=namespaced, mode=mode,
+        namespaced=namespaced, mode=mode, sources=sources,
     )
+
+
+def _parse_sources(
+    label: str, spec: dict[str, Any], mode: str, errors: list[str],
+    subscribable: Iterable[str] | None,
+) -> tuple[dict[str, Any], ...]:
+    """`sources`:把哪些既有的**内核**事件认成这个事实的 delta(裁决 ④)。
+
+    🔴 **它和「插件伪造不了别家的投影」是同一道边界的两面。** 折叠端那道闸靠
+    **同一性**关上了「谁发的 ≠ 改谁的」那条路(事件类型必须恰好是
+    `<那个事实>.delta`);而 `sources` 是一张**作者写的**表 —— 它要是认得了
+    `<别家>.<事实>.delta`,刚关上的那扇门就从这儿又开了,只是这次是**声明式**地开。
+    所以这一格**只收 `SUBSCRIBABLE_EVENTS` 上那几种内核事件**:那张表上的每一条
+    都是引擎自己发的,没有一条来自别的插件。
+    """
+    raw = spec.get("sources")
+    if raw is None:
+        return ()
+    if mode != "projected":
+        errors.append(
+            f"{label}.sources:只有 `mode: \"projected\"` 的事实认得了别的事件 —— "
+            "一个直接写的事实再认一条事件当自己的 delta,就是**两个写者写同一个数**,"
+            "而两份真相里有一份不更新是这个仓库最怕的坏法"
+        )
+        return ()
+    if not isinstance(raw, list) or not raw:
+        errors.append(f"{label}.sources 必须是非空列表")
+        return ()
+    known = set(subscribable or ())
+    out: list[dict[str, Any]] = []
+    for position, entry in enumerate(raw):
+        where = f"{label}.sources[{position}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{where} 必须是对象")
+            continue
+        unknown = sorted(set(entry) - set(PROJECTED_SOURCE_KEYS))
+        if unknown:
+            errors.append(f"{where}:不认识的键 {unknown};认的是 "
+                          f"{list(PROJECTED_SOURCE_KEYS)}")
+            continue
+        event = str(entry.get("event") or "").strip()
+        if not event:
+            errors.append(f"{where} 少了 event")
+            continue
+        if known and event not in known:
+            errors.append(
+                f"{where}.event:`{event}` 不是**内核**事件 —— 这一格只认引擎自己发的"
+                f"那几种(`contract --json` 的 `plugins.subscribable_events`)。"
+                "认别的插件的事件等于让一张作者写的表把「谁发的 ≠ 改谁的」那扇门"
+                "重新打开,只是这次是声明式地开"
+            )
+            continue
+        credit = str(entry.get("credit") or "").strip()
+        debit = str(entry.get("debit") or "").strip()
+        if not credit and not debit:
+            errors.append(
+                f"{where}:`credit` / `debit` 至少要有一头 —— 一条谁也不加谁也不减的"
+                "声明,读的人会以为它在做什么"
+            )
+            continue
+        owner_form = str(entry.get("owner_form") or "actor").strip()
+        if owner_form not in OWNER_FORMS:
+            errors.append(f"{where}.owner_form:只有 {list(OWNER_FORMS)}")
+            continue
+        out.append({"event": event,
+                    "amount": str(entry.get("amount") or "amount").strip(),
+                    "credit": credit, "debit": debit, "owner_form": owner_form})
+    return tuple(out)
 
 
 def _parse_banded(

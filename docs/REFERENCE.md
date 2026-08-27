@@ -5329,3 +5329,48 @@ gossip / closeness 全建在"关系可重放"上,钱的每一笔来路(`payment`
   响一次」。
 - **日志那一半**:除了新增的这一条,一条都没多、一条都没少
   (`::test_只有语义事件那一条是新的_别的一条没多`)。
+
+### 10.13 `projected` 的 `sources`:把既有的**内核**事件认成自己的 delta(裁决 ④)
+
+```jsonc
+"facts": {"钱": {"bearer":"actor", "shape":"number", "mode":"projected",
+                 "sources": [{"event":"payment", "amount":"amount", "credit":"to"},
+                             {"event":"payment", "amount":"amount", "debit":"from",
+                              "owner_form":"raw"}]}}
+```
+
+🔴 **没有它,钱包搬不动。** 折叠端只认 `.delta` 后缀,而设计 §9.3 说的是
+「`payment` 事件照旧是 `economy.coins` 的 delta」—— **这两句对不上**。
+三条路里两条是坏的:
+
+| 路 | 为什么坏 |
+|---|---|
+| 改发 `economy.coins.delta` | `payment` 在 `subscribable_events` 上,**改名 = 破坏消费方**(和改线格式同级) |
+| 两条都发 | **同一笔钱记两遍账** |
+| **多一格 `sources`** | ✅ 纯增量,不破坏任何消费方 |
+
+- **只收 `contract.plugins.subscribable_events` 上那几种内核事件。**
+  🔴 这一条和「插件伪造不了别家的投影」是**同一道边界的两面**:折叠端那道闸靠
+  **同一性**关上了「谁发的 ≠ 改谁的」(事件类型必须恰好是 `<那个事实>.delta`);
+  而 `sources` 是一张**作者写的**表 —— 它要是认得了 `<别家>.<事实>.delta`,
+  刚关上的那扇门就从这儿又开了,**只是这次是声明式地开**。
+- **符号不给作者算**:`credit` 加、`debit` 减,两个键名写死。给一个 `sign` 让作者
+  自己填的话,写反了不报错 —— 而一个反着记的账,让「对账即重放」成了一句空话。
+- **`owner_form`**:`actor`(载荷里那个名字是人的 id,折的时候前缀 `agent:`,
+  和 `Scheduler.stock_owner_of` 逐字同一条规则)/ `raw`(`__town__` / `shop:cafe`
+  这种不是人的持有者)。⚠️ **一条事件的两头形状不同时,写成两条声明**
+  (上面那个例子就是)——让一个 `owner_form` 同时管两头,是让作者在一个格子里
+  说两件事,而说不清的那一件会静默地记在一个没人读的名下。
+- **只有一份算法**(`projection.fact_source_updates`):折叠端(重放)与调度器
+  (运行期写物化视图)读同一个函数。各写一遍的下场是本仓最怕的那种 ——
+  跑着的世界一个数、重开之后另一个数,而两边都不报错。
+- **注册表要在折之前就位**(`Projection.fact_sources`,由 `_install_plugins` 塞进来,
+  `reset_projection` 带过去)。折叠端**边折边读它**,折完再塞等于这一趟一条 source
+  都没认;而 `Scheduler.__init__` 那次重放跑在插件装上**之前**,所以有 `sources`
+  的世界开机要**重折一遍** —— 那正是设计 §9.3 写死的代价之一。
+
+契约新格:`plugins.projected_source_keys` / `projected_source_events` /
+`projected_owner_forms` / `projected_source_gloss`。
+判据 `tests/test_plugins.py::test_既有的内核事件认得成自己的delta`(**有牙**:
+把折叠端那一支关掉,它当场变 0)/ `::test_sources只认内核白名单上的事件_认不了别家插件的` /
+`::test_sources只给projected的事实`。

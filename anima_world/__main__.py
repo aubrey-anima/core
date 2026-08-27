@@ -2162,6 +2162,12 @@ def build_serve_scheduler(
         # ⚠️ 它同时是 `forget_player` 的下半场:折叠端把他那一行折掉了,
         # 视图上那个数得跟着归零,否则"他走了"这件事重开一次就自己撤销。
         if scheduler.projected_facts:
+            # ⚠️ **有 `sources` 的话要重折一遍**:`Scheduler.__init__` 那次重放
+            # 跑在插件装上**之前**,那时注册表还是空的,于是那几条 `payment`
+            # 一条都没被认成 delta。重折是设计 §9.3 写死的代价之一
+            # (「projected 事实开机要重放」),这儿只是把它落到实处。
+            if getattr(scheduler._memory_projection, "fact_sources", None):
+                scheduler.reset_projection(persisted)
             restored = scheduler._materialize_projected_facts()
             if restored:
                 logger.debug("投影式事实的物化视图重建了 %d 格", restored)
@@ -3154,6 +3160,17 @@ def _install_plugins(
     scheduler.projected_facts = {
         fact.qualified: fact.delta_event
         for plugin in plugins for fact in plugin.facts.values() if fact.projected
+    }
+    # 🆕 裁决 ④:把**既有的内核事件**认成某个投影式事实的 delta。
+    # 折叠端边折边读这张表,所以它必须在**重放之前**就位(见 `reset_projection`)。
+    sources: dict[str, list[dict[str, Any]]] = {}
+    for plugin in plugins:
+        for fact in plugin.facts.values():
+            for spec in fact.sources:
+                sources.setdefault(str(spec["event"]), []).append(
+                    {**spec, "fact": fact.qualified})
+    scheduler._memory_projection.fact_sources = {
+        event: tuple(rows) for event, rows in sources.items()
     }
     # 规律接进那条已经在跑的路(`stocks.evaluate_due`)—— **不另起一个求值器**:
     # 双缓冲、节流水位、骰子、"两条规律抢同一个量"那句警告,插件一样得吃到。
@@ -6587,6 +6604,8 @@ def contract_payload() -> dict[str, Any]:
         BUILTIN_TARGETS,
         FACT_MODES,
         FACT_SHAPES,
+        OWNER_FORMS,
+        PROJECTED_SOURCE_KEYS,
         PROJECTED_SHAPES,
         KIND_PREFIXES,
         PLUGIN_ID_PATTERN,
@@ -6943,6 +6962,26 @@ def contract_payload() -> dict[str, Any]:
             # `destroy` 抹掉,而一串折向一个不存在的主人的 delta,重放出来是一个
             # 没有主人的数。挂在 `actor` / `world` / `location` 上的可以。
             "projected_bearers": ["actor", "agent", "player", "world", "location"],
+            # 🆕 裁决 ④(2026-08-26):把**既有的内核事件**认成自己的 delta。
+            #
+            # 🔴 **没有它,钱包搬不动**:折叠端只认 `.delta` 后缀,而设计 §9.3 说
+            # 「`payment` 事件照旧是 `economy.coins` 的 delta」—— 两句话对不上。
+            # 三条路里两条是坏的:改发一条新事件 = **破坏消费方**(`payment` 在
+            # `subscribable_events` 上)· 两条都发 = **同一笔钱记两遍账**。
+            # 只有"多一格声明"这条不破坏任何人,所以它是纯增量。
+            "projected_source_keys": list(PROJECTED_SOURCE_KEYS),
+            # ⚠️ **只认内核白名单上那几种事件** —— 认别的插件的事件,等于让一张
+            # 作者写的表把「谁发的 ≠ 改谁的」那扇门重新打开(只是这次是声明式地开)。
+            "projected_source_events": "subscribable_events",
+            "projected_owner_forms": list(OWNER_FORMS),
+            "projected_source_gloss": (
+                "`credit` 加、`debit` 减,两个键名写死 —— **符号不给作者算**:"
+                "给一个 `sign` 让他自己填,写反了不报错,而一个反着记的账让"
+                "「对账即重放」成了一句空话。⚠️ 一条事件的两头形状不同时"
+                "(`payment` 的 `to` 可能是个人而 `from` 是 `__town__`),"
+                "**写成两条声明**:一条只给 `credit`、一条只给 `debit`。"
+                "让一个 `owner_form` 同时管两头,是让作者在一个格子里说两件事。"
+            ),
             # 🆕 第 2 期:**边上多收一个 `text`,而这不是偏心,是存储的形状** ——
             # 节点事实住在量表里(`[float, tick]`),边自己那一行本来就是一份 JSON。
             "edge_fact_shapes": list(EDGE_FACT_SHAPES),
