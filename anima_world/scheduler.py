@@ -339,6 +339,10 @@ class Scheduler:
         self.projected_facts: dict[str, str] = {}
         #: 上一次动词边效果的回执(`_settle_birth_and_death` 填,`act()` 读)。
         self._last_verb_edges: list[dict[str, Any]] = []
+        #: 源事件折出来、还没落库的那一批(`{owner: {事实: (变化量, 位数)}}`)。
+        #: **tick 里只攒,收尾一次性写** —— 逐个 owner 开门是这个引擎明说过的反面教材。
+        self._pending_source_writes: dict[str, dict[str, tuple[float, int]]] = {}
+        self._in_tick = False
         self.plugins: list[Any] = []
         # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
         # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
@@ -1621,6 +1625,17 @@ class Scheduler:
         with self._lock:
             if self._stopped:
                 return
+            self._in_tick = True
+            try:
+                self._tick_frame()
+            finally:
+                self._in_tick = False
+                # 攒了一整帧的源事件,**一次写回**(见 `_flush_source_writes`)。
+                self._flush_source_writes()
+
+    def _tick_frame(self) -> None:
+        """一帧的正文。`tick()` 只负责那对 `_in_tick` 的括号与收尾的一次写回。"""
+        if True:
             if not self._run_marked:
                 # **这一趟真的开始跑世界了** —— 盖一个 `doctor` 在别的进程里读得到
                 # 的水位。见 `RUN_SINCE_SEQ` 的 docstring:时机是第一 tick,不是 open。
@@ -4692,21 +4707,47 @@ class Scheduler:
             return
         from anima_world.projection import fact_source_updates
 
-        pending: dict[str, dict[str, float]] = {}
         for owner, fact, delta in fact_source_updates(specs, event.get("payload") or {}):
-            have = store.of(owner)
-            # 和 `_materialize_projected_facts` 逐字同一条:**只写给真的有这张量表
-            # 的 owner** —— 折出来的账按任意持有者记,而事实住在有类型的载体上。
-            # 两处判得不一样的下场是:跑着的世界给 `__town__` 建了一行,
-            # 而重开之后那一行不见了。
-            if not have:
-                continue
             digits = next((int(spec.get("round", 6)) for spec in specs
                            if str(spec.get("fact") or "") == fact), 6)
-            pending.setdefault(owner, {})[fact] = round(
-                float(have.get(fact, 0.0)) + delta, digits)
-        for owner, updates in pending.items():
-            store.set_many(owner, updates, tick=int(self.clock))
+            row = self._pending_source_writes.setdefault(owner, {})
+            had, _digits = row.get(fact, (0.0, digits))
+            row[fact] = (had + delta, digits)
+        # **tick 里只攒,收尾一次性写**;tick 外(宿主调 `player_topup` 那种)当场写,
+        # 因为下一句读它的可能就是同一个调用方。
+        if not self._in_tick:
+            self._flush_source_writes()
+
+    def _flush_source_writes(self) -> None:
+        """把攒下的那批源事件写进量表。**一轮一次 `write_round`,不逐个 owner 开门。**
+
+        🔴 **这一条是被 `test_the_engine_scales_to_many_entities` 逮出来的**:
+        第一版每来一条 `payment` 就 `of` + `set_many` 一次 —— 而那道闸盯的正是
+        "tick 里出现了逐个 owner 的门"。它不是风格问题:一千个人的世界里,
+        每 tick 逐个往返一次,是这个引擎明说过的那种 72ms/tick 的来路。
+        """
+        store = self.stock_store
+        batch, self._pending_source_writes = self._pending_source_writes, {}
+        if store is None or not batch:
+            return
+        # 现值一次批量问完(`snapshot_many` 收一列 owner、一次 pipeline),
+        # 而不是一个人一次 `of`。
+        snapshot = store.snapshot_many(sorted(batch))
+        pending: dict[str, dict[str, float]] = {}
+        for owner, deltas in batch.items():
+            have = snapshot.get(owner) or {}
+            # **只写给真的有这张量表的 owner** —— 折出来的账按任意持有者记
+            # (`__town__` / `shop:cafe`),而事实住在有类型的载体上。不滤的话
+            # 世界里会凭空多出一个没有人的人。
+            if not have:
+                continue
+            for fact, (delta, digits) in deltas.items():
+                base = have.get(fact)
+                base = base[0] if isinstance(base, tuple) else (base or 0.0)
+                pending[owner] = pending.get(owner, {})
+                pending[owner][fact] = round(float(base) + delta, digits)
+        if pending:
+            store.write_round(pending, tick=int(self.clock))
 
     def _enqueue_for_triggers(self, event: dict[str, Any]) -> None:
         """有人订这种事件吗 —— 有就排进队,**这一 tick 不处理**(见 `_trigger_queue`)。

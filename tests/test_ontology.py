@@ -564,12 +564,22 @@ def test_重开一个世界不会被塞进别人的物理法则(tmp_path, open_w
     path = tmp_path / "no_rules.json"
     path.write_text(json.dumps(seed, ensure_ascii=False), encoding="utf-8")
     world = open_world("norules", seed_path=str(path))
-    assert world.scheduler.world_rules == [], "作者没写规律,世界就不该有规律"
+    # ⚠️ **比的是"作者的规律",不是"一条规律都没有"**(2026-08-26 第 2 期 2e 改)。
+    # 出厂插件也把自己那几条挂在同一张表上(`invitation.过期` 没有开关、永远装),
+    # 而它们是**引擎声明的机制**,不是这个作者的物理法则 —— 两者的分界线就是
+    # `scheduler.plugin_rule_ids`,那张表本来就是为这件事存在的。
+    # **这条用例真正怕的那件事一格没松**:下面重开那一次,橱窗那条引用 `tree` 的
+    # 生长规律照旧不许进来。
+    def _authored_rules(w):
+        return [r for r in w.scheduler.world_rules
+                if r.id not in w.scheduler.plugin_rule_ids]
+
+    assert _authored_rules(world) == [], "作者没写规律,世界就不该有规律"
     world.close()
 
     # 重开 —— 这次手里是包自带的橱窗种子,它的规律引用 `tree`,而这里没有 tree。
     reopened = open_world("norules", redis=fresh_redis)
-    assert reopened.scheduler.world_rules == [], "别人的物理法则被塞了进来"
+    assert _authored_rules(reopened) == [], "别人的物理法则被塞了进来"
     assert [e["id"] for e in reopened.entities()] == ["bench:a"]
 
 

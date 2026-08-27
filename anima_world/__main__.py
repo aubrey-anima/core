@@ -456,7 +456,7 @@ def _build_parser() -> argparse.ArgumentParser:
     plugin_commands = plugin_cmd.add_subparsers(dest="plugin_command")
     plugin_list = plugin_commands.add_parser(
         "list",
-        help="装着哪几个:id / 版本 / 事实 / 规律 / 触发器 / **种类 / 边 / 动词** / 装载顺序",
+        help="装着哪几个:id / 版本 / 事实 / 规律 / 触发器 / 种类 / 边 / 动词 / 装载顺序",
     )
     _add_world_args(plugin_list)
     plugin_list.add_argument(

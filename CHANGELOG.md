@@ -503,6 +503,25 @@ hash · `economy.enabled` 语义一个字没动。理由逐条在 FOR-STUDIO §3
   所以出厂插件自己写全名。记在 FOR-STUDIO §3.44。
   回执 FOR-STUDIO §3.44,REFERENCE §10.15。
 
+### 全量跑出来的三条,全是**既有的闸**逮的(记在这儿,因为它们各说明一件事)
+
+1. 🔴 **源事件的物化视图第一版是"每来一条就逐个 owner 开一次门"** ——
+   而 `test_the_engine_scales_to_many_entities` 盯的正是「tick 里出现了逐个 owner 的
+   `set_many`」。它不是风格问题:一千个人的世界里每 tick 逐个往返一次,
+   就是这个引擎明说过的那种 72ms/tick 的来路。
+   改成**tick 里只攒、收尾一次 `write_round`**(现值走 `snapshot_many` 一次问完);
+   tick 外(宿主调 `player_topup` 那种)当场写,因为下一句读它的可能就是同一个调用方。
+2. **`plugin list --help` 里那对 `**`** 被 `test_屏幕上不许出现裸markdown星号` 逮住 ——
+   帮助文本是**印到终端上的**,而这个仓库有一道闸专管这件事。
+3. **`test_重开一个世界不会被塞进别人的物理法则`**:它断言「作者没写规律,
+   世界就不该有规律」,而 `invitation` 那条出厂规律没有开关、永远装。
+   改成比**作者的**规律(按 `scheduler.plugin_rule_ids` 分)——
+   那张表本来就是为这条分界存在的;**这条用例真正怕的那件事一格没松**:
+   重开时橱窗那条引用 `tree` 的生长规律照旧不许进来。
+
+**三条都不是新写的闸逮的,是老闸逮的** —— 而这正是「每个仓库的测试就是它的边界」
+那句话在这一轮的样子。
+
 ⚠️ **采样那一步有个坑**:`PYTHONPATH` 单独放是不够的 —— 本仓 editable 装的是一个
 `__editable__` 的 meta_path finder,它比 `sys.path` **先说话**,于是
 `anima_world.__file__` 会照旧指回工作树,**而采基线的人以为自己在旧树上跑**。
