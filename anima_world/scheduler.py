@@ -3230,6 +3230,11 @@ class Scheduler:
                 },
             })
             self._invited_today[key] = asked + 1
+            # 🆕 2e:边上也记一份(出厂插件 `invitation` 的存储那一半)。
+            # ⚠️ **它和 `Projection.invitations` 不是两份真相**:两边都从
+            # `agent_invites` / `invitation_settled` 折出来,事件仍然是唯一的真相
+            # (和钱包那一格逐字同构)。边多买到的是**那条过期规律跑得起来**。
+            self._link_invitation_edge(event, pid, now + ttl)
             return {
                 "ok": True, "invite_seq": int(event.get("seq") or 0),
                 "expires_tick": now + ttl, "round": asked + 1,
@@ -3288,6 +3293,8 @@ class Scheduler:
             if row is None:
                 return None
             settled = self._settle_invitation_event(invite_seq, outcome, row, note)
+            # 四种结局都断边 —— 留着的话「还等着几份」在边上和在投影上是两个答案。
+            self._unlink_invitation_edge(invite_seq)
             if str(outcome) == together_mod.INVITE_OUTCOMES[1]:   # "declined"
                 self._settle_invitation_declined(row)
             return settled
@@ -3470,19 +3477,112 @@ class Scheduler:
         pending = self._memory_projection.invitations
         if not pending:
             return
-        now = int(self.clock)
-        for invite_seq, row in sorted(list(pending.items())):
-            try:
-                expires = int(row.get("expires_tick") or 0)
-            except (TypeError, ValueError):
-                expires = 0
-            if expires > now:
+        # 🆕 2e:**「到点了没有」这道算术搬到边上那条规律去了**(裁决 ③)。
+        #
+        # 这里从前自己算 `expires_tick <= now`;现在读的是那条规律**标记过的状态**。
+        # 🔴 **落在哪一拍一格没挪**:规律跑在 tick 的 3.61,这里是 3.9,**同一个 tick**
+        # —— 而那一拍是玩家屏上「你没来得及答」的时刻,挪一格就是行为变更。
+        # ⚠️ **门还在内核**(裁决 ③:三扇门签名一格不变):搬的是"什么时候算过期",
+        # 不是"谁来给它一个结局"。
+        for invite_seq in self._expired_invitation_seqs():
+            row = pending.get(invite_seq)
+            if row is None:
                 continue
             self.settle_invitation(invite_seq, "expired")
             logger.info(
                 "%s 约 %s 的那一句没等到回话,过期了(第 %s 轮)",
                 row.get("agent_id"), row.get("player_id"), row.get("round"),
             )
+
+    @staticmethod
+    def _as_tick(raw: Any) -> int:
+        """载荷里那个 tick,读不出来就当 0(**当场过期**,和从前逐字相同)。"""
+        try:
+            return int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _expired_invitation_seqs(self) -> list[int]:
+        """边上被那条规律标记成"过期了"的邀请序号。**没装插件就回落成老算术。**
+
+        ⚠️ **回落那一支是承重的**:一个把 `invitation` 出厂插件卸掉的世界,
+        邀请照旧该过期 —— 不然那些邀请会永远挂着,而玩家屏上那句「还剩几拍」
+        会一直数下去、数成负的。**声明本身是开关,但"过期"不是一个可以关掉的东西。**
+        """
+        store = getattr(self, "edge_store", None)
+        pending = self._memory_projection.invitations
+        now = int(self.clock)
+        if store is None or together_mod.EDGE_TYPE not in self.edge_types:
+            return [seq for seq, row in sorted(pending.items())
+                    if self._as_tick(row.get("expires_tick")) <= now]
+        out: list[int] = []
+        for _src, _dst, facts in store.all(together_mod.EDGE_TYPE):
+            if float(facts.get(together_mod.FACT_STATE) or 0.0) < 1.0:
+                continue
+            out.append(int(float(facts.get(together_mod.FACT_SEQ) or 0)))
+        return sorted(seq for seq in out if seq in pending)
+
+    def rebuild_invitation_edges(self) -> int:
+        """把边重建成**投影的物化视图**。开机走一趟。
+
+        🔴 **这一步是这半个搬家成立的前提**(2026-08-26 被既有那条
+        `test_邀请是事件不是易失态` 逮出来的):边是**直接写**的,而
+        `Projection.invitations` 是**折出来**的。少了这一趟,一个丢了边、
+        或者从别的前缀重放出来的世界里,那几份邀请**永远不会过期** ——
+        清单上一直挂着,而玩家屏上「还剩几拍」会一直数下去、数成负的。
+
+        重建之后它和钱包那一格逐字同构:**事件是真相,边只是读得快的那一份。**
+        """
+        store = getattr(self, "edge_store", None)
+        if store is None or together_mod.EDGE_TYPE not in self.edge_types:
+            return 0
+        want: dict[tuple[str, str], dict[str, Any]] = {}
+        now = int(self.clock)
+        for seq, row in self._memory_projection.invitations.items():
+            who = str(row.get("agent_id") or "")
+            pid = str(row.get("player_id") or "")
+            if not who or not pid:
+                continue
+            expires = self._as_tick(row.get("expires_tick"))
+            want[(f"agent:{who}", self.stock_owner_of(f"{self.PLAYER_PREFIX}{pid}"))] = {
+                together_mod.FACT_EXPIRES: float(expires),
+                together_mod.FACT_SEQ: float(seq),
+                # **到点没到点在这儿就算得出来**,不必等下一 tick 那条规律 ——
+                # 否则一个停机很久的世界,重开那一刻清单上还挂着一堆早该过期的。
+                together_mod.FACT_STATE: 1.0 if expires <= now else 0.0,
+            }
+        for src, dst, _facts in store.all(together_mod.EDGE_TYPE):
+            if (src, dst) not in want:
+                store.unlink(together_mod.EDGE_TYPE, src, dst)
+        for (src, dst), facts in want.items():
+            store.link(together_mod.EDGE_TYPE, src, dst, facts)
+        return len(want)
+
+    def _link_invitation_edge(self, event: Any, pid: str, expires: int) -> None:
+        """她开口那一刻,边上记一条。**认不出 seq 就不记**(不猜)。"""
+        store = getattr(self, "edge_store", None)
+        if store is None or together_mod.EDGE_TYPE not in self.edge_types:
+            return
+        seq = int(getattr(event, "seq", 0) or (event or {}).get("seq", 0) or 0) \
+            if not isinstance(event, dict) else int(event.get("seq") or 0)
+        who = str(getattr(event, "who", "") or "") if not isinstance(event, dict) \
+            else str(event.get("who") or "")
+        if not seq or not who:
+            return
+        store.link(together_mod.EDGE_TYPE, f"agent:{who}",
+                   self.stock_owner_of(f"{self.PLAYER_PREFIX}{pid}"),
+                   {together_mod.FACT_EXPIRES: float(expires),
+                    together_mod.FACT_SEQ: float(seq),
+                    together_mod.FACT_STATE: 0.0})
+
+    def _unlink_invitation_edge(self, invite_seq: int) -> None:
+        """这份邀请有了结局 —— 边断掉。留着的话「还等着几份」有两个答案。"""
+        store = getattr(self, "edge_store", None)
+        if store is None or together_mod.EDGE_TYPE not in self.edge_types:
+            return
+        for src, dst, facts in store.all(together_mod.EDGE_TYPE):
+            if int(float(facts.get(together_mod.FACT_SEQ) or 0)) == int(invite_seq):
+                store.unlink(together_mod.EDGE_TYPE, src, dst)
 
     # ── 长过程:做一件事要花的那段时间 ──────────────────────────────────────
     #
@@ -5087,6 +5187,7 @@ class Scheduler:
         self._hydrate_rule_marks()
         clock = clock_names(self.clock, self._minutes_per_tick())
         pending: list[tuple[str, str, str, dict[str, Any]]] = []
+        fired: list[dict[str, Any]] = []
         evaluated = 0
         skipped: list[tuple[str, str, str]] = []
         for rule in due:
@@ -5107,8 +5208,36 @@ class Scheduler:
                     if not all(c.evaluate(namespace) for c in rule.conditions):
                         evaluated += 1
                         continue
+                    # **门槛在算之前是什么状态** —— 边沿触发要拿它做对照。
+                    # 整段照 `stocks._apply` 抄:没有边沿的话,一条熬够了的边会
+                    # 每 tick 发一次同一件事,直到世界末日。
+                    was = [bool(e.when.evaluate(namespace)) for e in rule.emits]
                     updates = {key: float(expr.evaluate(namespace))
                                for key, expr in rule.outputs.items()}
+                    after = {**namespace,
+                             **{f"edge.{k}": v for k, v in updates.items()}}
+                    for spec, before in zip(rule.emits, was):
+                        now_true = bool(spec.when.evaluate(after))
+                        if now_true == before:
+                            continue          # 没跨越
+                        edge = "rise" if now_true else "fall"
+                        if not spec.fires_on(edge):
+                            continue
+                        fired.append({
+                            "type": spec.type,
+                            # 一条边上的事件,**两端都要说得出** —— 不写清是哪两个
+                            # 之间的,读的人查不下去。`who` 只在起点是个人时才填
+                            # (`who` 在这个库里一直是角色 id 的语义)。
+                            "who": src.split(":", 1)[1] if src.startswith("agent:")
+                                   else None,
+                            "payload": {
+                                "rule": rule.id, "edge_type": edge_type,
+                                "src": src, "dst": dst,
+                                **{k: v for k, v in updates.items()},
+                                **spec.payload,
+                                "edge": edge, **spec.memory_fields(),
+                            },
+                        })
                 except ExpressionError as exc:
                     logger.warning("边规律 %s 在 %s→%s 上算不出来:%s",
                                    rule.id, src, dst, exc)
@@ -5127,6 +5256,13 @@ class Scheduler:
         # 🔴 **仪表也要数这一趟**(验收 A):三处注释拿「`rule_stats()` 报 skipped」
         # 当"这条边规律没跑"的信号,而那个信号从前根本不存在 —— 边规律一格都没进
         # 这个仪表。**一个不存在的信号比没有信号更贵**:它让读的人以为自己查过了。
+        # **事件排在写回之后**:和节点那一层逐字同一条 —— 事件说的是"跨过去了",
+        # 而跨没跨过去要拿写完的值算。⚠️ **没人订它也照发**:走的是
+        # `_emit_rule_event` → 落库那条路,"发生了"在这个引擎里的定义就是进了日志。
+        # 丢掉的话,「这条规律到底跑没跑」就再也答不出来。
+        for event in fired:
+            self._rule_stats["emitted"] += 1
+            self._emit_rule_event(event)
         self._rule_stats["evaluated"] += evaluated
         if skipped:
             self._rule_stats["skipped"] += len(skipped)

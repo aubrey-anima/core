@@ -2172,6 +2172,10 @@ def build_serve_scheduler(
             restored = scheduler._materialize_projected_facts()
             if restored:
                 logger.debug("投影式事实的物化视图重建了 %d 格", restored)
+        # 🆕 2e:邀请那几条边也是**投影的物化视图**,开机重建一趟。
+        # 少了它,一个丢了边(或者从别的前缀重放出来)的世界里那几份邀请
+        # **永远不会过期** —— 而清单上会一直挂着,「还剩几拍」一直数下去。
+        scheduler.rebuild_invitation_edges()
         if memory_store is not None and trigger_engine is not None:
             # ⚠️ 顺序要紧:`rebuild` 见了非空表就掉头(记忆是持久状态,重放一遍等于
             # 把她的一生按今天的触发器重新裁一遍)。所以合并进来的新人的创世记忆
@@ -3068,10 +3072,14 @@ def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
 
     # **一个插件一个开关**,而那张表(`FACTORY_PLUGINS`)是唯一的权威 ——
     # 这里按它遍历,加一个出厂插件不必再改这段代码的形状。
-    builders = {"needs": needs_plugin, "economy": economy_plugin}
+    from anima_world.together import factory_plugin as invitation_plugin
+
+    builders = {"needs": needs_plugin, "economy": economy_plugin,
+                "invitation": invitation_plugin}
     out: list[dict[str, Any]] = []
     for plugin_id, switch in FACTORY_PLUGINS.items():
-        if not store.get(switch, default=False):
+        # 空串 = 这个出厂插件没有开关(它搬的那件事今天也没有),永远装。
+        if switch and not store.get(switch, default=False):
             continue
         build = builders.get(plugin_id)
         if build is not None:
@@ -3083,6 +3091,13 @@ def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
 #: 于是那道热更新的钩子里没有一个具体插件的名字。
 FACTORY_PLUGINS: dict[str, str] = {
     "needs": "needs.enabled",
+    # 🆕 3.8.0 第 2 期 2e:邀请的**存储与过期规律**(裁决 ③)。
+    # 🔴 **空串 = 没有开关,永远装**,而这不是偷懒:**它搬的那件事今天也没有开关**
+    # (邀请不受 `social.enabled` 管 —— 那一格管的是八卦与小团体;
+    # `_invite` 走的是联合动词那条路,一个开关都不问)。
+    # 给它新造一个开关,就是给同一件事第二个答案 —— 而"两个开关必须永远说同一句话"
+    # 正是第 1 期有意不做 `plugins.default` 的那条理由。
+    "invitation": "",
     # 🆕 3.8.0 第 2 期 2d-①:**只有钱包那一格**(补裁 ⑤)。
     # 开关沿用 `economy.enabled`,而它的语义**一个字没动**(只挡 eat / wages,
     # 不挡 buy / give)—— 这一格是加法,不是把那个开关的含义改宽。
@@ -3093,13 +3108,21 @@ FACTORY_PLUGINS: dict[str, str] = {
 #: 按系统计数正是把人推向换皮的那把尺子)。消费方读这一格,别照文档记一份清单。
 FACTORY_SCOPE: dict[str, str] = {
     "needs": "整条(三个量 + 衰减/恢复那六条规律;值从黑板搬进量表)",
+    "invitation": (
+        "**只有存储与过期规律**(边 `invitation.invites` + 那条比 `now` 的规律)。"
+        "三扇门(`invitations_page` / `answer_invitation` / "
+        "`invitation_outcomes_page`)**留在内核,签名一格不变** —— 它们是冻结面。"
+        "别把它读成「邀请这条机制变成插件了」"
+    ),
     "economy": (
         "**只有钱包一格**(`economy.coins`,projected,认领 `payment`)。"
         "货架仍住 `shop_stock` 那个真 hash、没变成边;`buy`/`eat`/`give` 仍是内核路;"
         "`economy.enabled` 语义一个字没动。别把它读成「economy 已经是插件了」"
     ),
 }
-FACTORY_SWITCH_KEYS = frozenset(FACTORY_PLUGINS.values())
+#: 那道热更新钩子读的键集。**空串滤掉** —— 没有开关的出厂插件不该让
+#: `config_set("")` 这种事变成一次重装。
+FACTORY_SWITCH_KEYS = frozenset(k for k in FACTORY_PLUGINS.values() if k)
 
 
 def refresh_plugins(scheduler: Any) -> None:
@@ -7086,7 +7109,10 @@ def contract_payload() -> dict[str, Any]:
             # 从前 `effects` 含 `emit`、`rule_selectors` 含 `edge`,而**没有一格说
             # 这个组合不成立** —— 写了 emit 一条事件都不发,开机不拦、零 warning。
             # 现在是加载期拒 + 这一格说出来。**将来收 `emit` 是加法。**
-            "edge_rule_effects": ["set"],
+            # 🆕 2e:`emit` 收进来了 —— **纯加法**,而顺序是承重的:
+            # 先有使用者(邀请的过期规律「到点发一件事」),再开这个口子。
+            # 反过来就是本仓那三道闸挡的「超前于消费方」。
+            "edge_rule_effects": ["set", "emit"],
             # `for_each` 认哪几种选择器。第 2 期多了 `edge`。
             "rule_selectors": list(RULE_SELECTORS),
             # 🆕 `bearer` 三个词(2026-08-26 老板自判):`actor` = 角色+玩家

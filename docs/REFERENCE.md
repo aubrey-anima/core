@@ -5420,3 +5420,50 @@ gossip / closeness 全建在"关系可重放"上,钱的每一笔来路(`payment`
 三份提示词 / `state()` 刨三格 / 事件日志多重集**逐字节**;量表白名单**恰好多一个**
 `economy.coins`;外加 projected 那道牙:清掉物化值重开 → 从账本折回来)。
 **文件头逐条写着这道闸有意不比什么** —— 那句话和"比过了"在闸红的那天意思完全不同。
+
+### 10.15 出厂插件第三个:**邀请的存储与过期规律**(3.8.0 第 2 期 2e,裁决 ③)
+
+🔴 **别读成「邀请这条机制变成插件了」。** 搬过来的是**两样**:
+
+| 搬了 | **没搬**(留内核) |
+|---|---|
+| 边 `invitation.invites`(她 → 他)· 那条比 `now` 的过期规律 | 三扇门 `invitations_page` / `answer_invitation` / `invitation_outcomes_page`,**签名一格不变**(冻结面)· `settle_invitation` 那条给结局的路 · `INVITE_OUTCOMES` 四态 · 四轴那条(2c 已收进内核) |
+
+```jsonc
+"edges": {"invites": {"from":"agent", "to":"player", "facts": {
+    "expires_tick": {"shape":"number", "visibility":"hidden"},
+    "seq":          {"shape":"number", "visibility":"hidden"},
+    "state":        {"shape":"state", "default":"等着",
+                     "values":[{"name":"等着"},{"name":"过期了"}]}}}},
+"rules": [{"id":"过期", "for_each":{"edge":"invites"},
+           "when":["edge.invitation.state == 0", "now - edge.invitation.expires_tick >= 0"],
+           "set":{"invitation.state":"1"},
+           "emit":[{"type":"invitation.expired", "when":"edge.invitation.state >= 1"}]}]
+```
+
+- ⚠️ **`timer` 形状这一版仍然不收**,所以过期写成**存着 tick 的 `number` + 内核的
+  `now`** —— 那正是当初判「为一层语法糖开一道语法不划算」时说的写法,现在它有了
+  第一个真实使用者。
+- 🔴 **落在哪一拍一格没挪**:规律跑在 tick 的 **3.61**,`_settle_invitations` 在 **3.9**
+  —— **同一个 tick**。那一拍是玩家屏上「你没来得及答」的时刻,挪一格就是行为变更。
+  判据是既有那条 `test_没人答_到点就过期`(TTL−1 没结局、再走 2 拍有结局),
+  把规律改坏它当场红 —— **实测过**。
+- 🔴 **边是投影的物化视图,开机重建**(`Scheduler.rebuild_invitation_edges`)。
+  它是被既有那条 `test_邀请是事件不是易失态` 逮出来的:边是**直接写**的,而
+  `Projection.invitations` 是**折出来**的 —— 少了重建那一趟,一个丢了边、或者从别的
+  前缀重放出来的世界里,那几份邀请**永远不会过期**,清单上一直挂着、
+  「还剩几拍」一直数下去。
+- **`edge_rule_effects` 从 `["set"]` 扩成 `["set","emit"]`**(纯加法)。P1.7 那道
+  加载期拒绝这一轮放行,**而顺序是承重的**:先有使用者,再开口子。
+  ⚠️ **没人订它也照发** —— 走 `_emit_rule_event` → 落库那条路,"发生了"在这个引擎里
+  的定义就是**进了日志**;丢掉的话「这条规律到底跑没跑」就再也答不出来。
+- **它没有开关**(`plugins.factory` 里那一格是空串):**它搬的那件事今天也没有开关**
+  (邀请不受 `social.enabled` 管 —— 那一格管的是八卦与小团体)。
+  给它新造一个开关,就是给同一件事第二个答案。
+- **存储契约**:新增一个**持久**键 `anima:{world_id}:edge:invitation.invites`,
+  🟢 **不进 `volatile_keys`**(边是世界的内容,和 `:kinds` 同一类)——
+  platform 那条 deepEqual 照旧绿,打包按前缀扫、自己跟着走。
+
+✅ **橱窗第一次真的敲出来了**:`tests/test_flagship_seed.py::test_橱窗里她真的约得动人_而且到点会过期`。
+邀请门是 3.6.0 交的,而它**一次都没在内置那份世界上出现过** —— 三道闸里
+「橱窗里展示它」这一道到今天才补上。

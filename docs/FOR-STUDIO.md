@@ -4219,3 +4219,56 @@ target_name}`。它是**插件命名空间形状**的事件(带点号),所以触
 **你们要接的:一件都没有,但有一件别做** —— 别在校验器或界面上把 `buy`/`eat`/`give`
 当成插件动词,也别假设货架读得到 `contract.plugins` 里的边。判据照旧问契约:
 出厂插件声明了什么,`plugin list` 报得出来。
+
+## 3.44 邀请的**存储与过期规律**搬成出厂插件(3.8.0 第 2 期 2e,裁决 ③)
+
+🔴 **别读成「邀请这条机制变成插件了」** —— 和 §3.43 那句一样的提醒。
+搬的是**两样**:边 `invitation.invites` + 那条比 `now` 的过期规律。
+**三扇门留在内核,签名一格不变**(`/internal/v1/invitations*` 那条链**一个字不用改**)。
+
+### 三仓要跟什么
+
+- **platform**:**新增一个持久键** `anima:{world_id}:edge:invitation.invites`。
+  🟢 **不进 `volatile_keys`**(边是世界的内容,和 `:kinds` 同一类)——
+  `test/contract.test.js` 那条 deepEqual **照旧绿**,打包按前缀扫、新 hash 自己跟着走。
+  `/internal/v1/invitations` 三扇门的**形状一格没变**。
+- **player**:一件不用改。`invitations_page` / `answer_invitation` 的返回形状、
+  `INVITE_OUTCOMES` 四态、`outcome` 五支,一个字都没动。
+- **tool**:探测格 `contract --json` 的 `plugins.factory`(id → 开关键)与
+  `plugins.factory_scope`(**每个搬了哪几格**)。⚠️ `invitation` 那一格的开关是
+  **空串** = 它没有开关,永远装 —— 因为它搬的那件事今天也没有开关。
+
+### 一条给作者的:`timer` 还是不收,而过期这样写
+
+```jsonc
+"facts": {"expires_tick": {"shape":"number", "visibility":"hidden"}},
+"rules": [{"id":"过期", "for_each":{"edge":"invites"},
+           "when":["edge.<你的插件>.state == 0",
+                   "now - edge.<你的插件>.expires_tick >= 0"],
+           "set":{"<你的插件>.state":"1"},
+           "emit":[{"type":"<你的插件>.expired", "when":"edge.<你的插件>.state >= 1"}]}]
+```
+
+**存着 tick 的 `number` 加内核的 `now`,就是 `timer`**(当初判「为一层语法糖开一道
+语法不划算」时说的正是这个写法)。`when` 里那条 `state == 0` 是**关掉它自己** ——
+标记过一次之后这条规律不再命中,于是既不重写、也不再发一次话。
+
+### 🆕 边上的规律现在也发得出 `emit`
+
+`contract.plugins.edge_rule_effects` 从 `["set"]` 变成 `["set","emit"]`(**纯加法**)。
+上一轮它是一条**加载期拒绝**,理由是那时 `_evaluate_edge_rules` 一条都不发,
+而契约没有一格说这个组合不成立 —— **静默不支持是撒谎**。
+这一轮它有使用者了,所以收进来。**顺序是承重的:先有使用者,再开口子。**
+
+- **边沿触发**:门槛被跨过去那一下才发(不然一条熬够了的边会每 tick 发一次)。
+- 载荷里**两端都说得出**(`src` / `dst` / `edge_type`)—— 一条边上的事件,
+  不写清是哪两个之间的,读的人查不下去。
+- ⚠️ **没人订它也照发**:它走的是落库那条路,**"发生了"在这个引擎里的定义就是
+  进了日志**。没订户 ≠ 被丢掉 —— 丢掉的话「这条规律到底跑没跑」就再也答不出来。
+
+### ⚠️ 一笔该收而这一轮没收的账
+
+**规律那一层的 `emit.type` 今天不自动加命名空间**(触发器那一层会查、会拒),
+所以出厂插件自己写了全名 `invitation.expired`。两边不一致是一笔账 ——
+这一轮没收是因为收它会**改掉已经发出去的写法**(第 1 期的插件可能已经写了裸名字),
+而那是破坏消费方。**在它收掉之前:自己写全名,别指望引擎替你加。**

@@ -666,21 +666,15 @@ def _parse_one(
             continue
         rules = tuple(replace(r, selector_value=f"{plugin_id}.{local}")
                       if r is rule else r for r in rules)
-        if rule.emits:
-            # 🔴 **这一版边上的规律只认 `set`**(2026-08-26 验收 B)。
-            #
-            # 从前这里一个字都没查,而 `_evaluate_edge_rules` **一条 emit 都不发** ——
-            # 契约里 `effects` 含 `emit`、`rule_selectors` 含 `edge`,没有一格说这个
-            # 组合不成立,开机不拦、零 warning。**静默不支持是撒谎;将来支持是加法。**
-            # 对照组是同一份文件里 `projected` 那两条限制:加载期拒 + 说得出为什么。
-            errors.append(
-                f"{where}:**边上的规律这一版只认 `set`,不发 `emit`** —— "
-                "写了它一条事件都不会发,而世界照跑、日志干净。"
-                "要「到点发一件事」,今天的写法是把那个量写成一个事实、"
-                "让**节点上的**规律或触发器去发。"
-                "这一格问 `contract --json` 的 `plugins.edge_rule_effects`"
-                "(将来收 `emit` 是加法,不是这一版的行为)"
-            )
+        # 🆕 **边上的规律从 2e 起也发得出 `emit`。**
+        #
+        # 上一轮这里是一条**加载期拒绝**,而那不是保守:那时 `_evaluate_edge_rules`
+        # 一条 emit 都不发,而契约里 `effects` 含 `emit`、`rule_selectors` 含 `edge`,
+        # **没有一格说这个组合不成立** —— 静默不支持是撒谎。
+        # 这一轮它有使用者了(邀请的过期规律:到点发一件事),所以**收进来**,
+        # 而收进来是**加法**:`edge_rule_effects` 从 `["set"]` 变 `["set","emit"]`。
+        # **顺序是承重的**:先有使用者,再开口子 —— 反过来就是本仓那三道闸挡的
+        # 「超前于消费方」。
         for name in rule.outputs:
             fact_name = name[len(plugin_id) + 1:] if name.startswith(f"{plugin_id}.") \
                 else name

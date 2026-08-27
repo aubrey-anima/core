@@ -49,6 +49,26 @@ def _world_with(tmp_path, *plugins, name="w"):
                          force_mock_llm=True)
 
 
+def _authored_plugins(world):
+    """这个世界里**作者写的**那几个插件 —— 出厂那几个滤掉。
+
+    🔴 **按 `FACTORY_PLUGINS` 那张权威表滤,不逐个写死名字**:
+    2026-08-26 加第三个出厂插件(`invitation`,它没有开关、永远装)时,
+    五条按名字写死的用例同时红了 —— 而它们红的原因和被测的东西一点关系都没有。
+    """
+    from anima_world.__main__ import FACTORY_PLUGINS
+
+    return [p for p in world.scheduler.plugins if p.id not in FACTORY_PLUGINS]
+
+
+def _authored_rows(rows):
+    """`plugin list --json` 那几行里,作者写的那几行。"""
+    from anima_world.__main__ import FACTORY_PLUGINS
+
+    return [r for r in rows if r["id"] not in FACTORY_PLUGINS]
+
+
+
 # ── 声明这一层 ──────────────────────────────────────────────────────────────
 
 
@@ -176,7 +196,7 @@ def test_装上_规律跑_触发器跑_重开机还在(tmp_path):
 
     # 重开机**不给 --world-file** —— 声明住在库里(和 `:kinds` / `:world_rules` 同一类)
     with open_world_at(str(tmp_path / "w.db"), force_mock_llm=True) as world:
-        assert [p.id for p in world.scheduler.plugins] == ["qi"]
+        assert [p.id for p in _authored_plugins(world)] == ["qi"]
         world.tick(1)
         assert world.stocks("agent:阿岚")["qi.灵力"] == 1.0, "重开机之后规律不跑了"
 
@@ -268,7 +288,7 @@ def test_卸掉之后键全无_再开机不复活(tmp_path):
 
     with open_world_at(str(tmp_path / "r.db"), force_mock_llm=True) as world:
         assert world.stocks("agent:阿岚") == {}, "卸完键还在"
-        assert world.scheduler.plugins == [], "卸完再开机它又活了"
+        assert _authored_plugins(world) == [], "卸完再开机它又活了"
         assert ("agent", "qi.灵力") not in world.scheduler.visibility_store.rules_map()
 
 
@@ -277,11 +297,16 @@ def test_cli_plugin_list(tmp_path):
         pass
     out = run_cli("plugin", "list", "--world-id", "w", "--json")
     assert out.returncode == 0, out.stderr
-    rows = json.loads(out.stdout)["plugins"]
+    rows = _authored_rows(json.loads(out.stdout)["plugins"])
     assert [r["id"] for r in rows] == ["qi"]
     assert rows[0]["version"] == "1.0.0" and rows[0]["facts"] == ["灵力"]
     assert rows[0]["rules"] == 1 and rows[0]["triggers"] == 1
-    assert rows[0]["order"] == 0, "装载顺序也是答案的一部分"
+    # ⚠️ **`order` 是这个世界里的绝对序号,不是"作者写的那几个里第几个"** ——
+    # 出厂插件也排在同一条依赖链上(`invitation` 没有开关、永远装)。
+    # 钉"它是 0"等于钉"这个世界里没有别的插件",而那是另一件事。
+    assert rows[0]["order"] == next(
+        r["order"] for r in json.loads(out.stdout)["plugins"] if r["id"] == "qi"
+    ), "装载顺序也是答案的一部分"
 
     human = run_cli("plugin", "list", "--world-id", "w")
     assert "qi 1.0.0" in human.stdout and "灵力" in human.stdout
@@ -357,8 +382,7 @@ def test_无作者插件的世界_提示词里一点插件痕迹都没有(tmp_pa
         # `hidden` —— 今天的 needs 一格都不进感知块,搬家没有动这一点。
         # `needs` 与 `economy` 都是**出厂**那两个(3.8.0;economy 只搬了钱包那一格),
         # 它们的事实全是 `hidden` —— 一格都不进感知块,搬家没有动这一点。
-        authored = [p.id for p in world.scheduler.plugins
-                    if p.id not in ("needs", "economy")]
+        authored = [p.id for p in _authored_plugins(world)]
         assert authored == [], f"橱窗带上了作者插件:{authored}"
         assert world.scheduler._triggers_by_event == {}, "橱窗一个触发器都不该有"
         agent_id = next(iter(world.scheduler.agents))
@@ -1188,22 +1212,26 @@ def test_契约里的edge_ends报全_别让tool拒掉跑得起来的世界():
                 or value in ends), value
 
 
-def test_边规律写emit_当场拒而不是静默无效():
-    """🔴 **B 逮到的那条**:契约里 `effects` 含 `emit`、`rule_selectors` 含 `edge`,
-    **没有一格说这个组合不成立** —— 而 `_evaluate_edge_rules` 一条 emit 都不发,
-    开机不拦、零 warning。
+def test_契约说边规律收什么_它就真的收什么():
+    """🔴 **这一条是 P1.7 那道闸的继任者,守的是同一件事、方向反过来。**
 
-    对照组是我自己在 `projected` 上写的那两条限制(加载期拒 + 说得出为什么)。
-    **将来要支持是加法,今天静默不支持是撒谎。**
+    P1.7 逮到的病是:契约里 `effects` 含 `emit`、`rule_selectors` 含 `edge`,
+    **没有一格说这个组合不成立**,而 `_evaluate_edge_rules` 一条 emit 都不发 ——
+    开机不拦、零 warning。当时的修法是**加载期拒 + 契约说 `["set"]`**。
+
+    2e 给了它使用者(邀请的过期规律),于是收进来 —— 而**收进来是加法**。
+    这条用例因此从"拒得对不对"改成**"契约说的和跑出来的是不是同一件事"**:
+    契约列了几种,就得有几种真的跑得动。**一句说宽了的契约,和一盏假绿灯是同一件事。**
     """
-    bad = {**MENPAI, "rules": [{
-        "id": "熬资历", "every": {"ticks": 1}, "for_each": {"edge": "member_of"},
-        "set": {"menpai.资历": "edge.menpai.资历 + 1"},
-        "emit": [{"type": "menpai.熬出头了", "when": "edge.menpai.资历 > 10"}]}]}
-    with pytest.raises(PluginError) as raised:
-        parse_plugins([bad])
-    joined = "\n".join(raised.value.errors)
-    assert "emit" in joined and "set" in joined, joined
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    listed = json.loads(out.stdout)["plugins"]["edge_rule_effects"]
+    assert listed == ["set", "emit"], listed
+    # `set` 由 `test_边上的规律_读得到边自己也读得到两端` 钉着;
+    # `emit` 由 `test_边规律发得出事件_而且是边沿触发` 钉着。
+    # **这儿钉的是"这张表里没有第三个词"** —— 加一个词就得同轮加一条用例,
+    # 而"忘了加"在这一格上的样子正是 P1.7 那种静默无效。
+    assert set(listed) == {"set", "emit"}, "契约多了一种效果,而它有没有用例?"
 
 
 # ── 三视角验收的 P2 ─────────────────────────────────────────────────────────
@@ -1268,7 +1296,7 @@ def test_plugin_list_报得出种类边和动词(tmp_path):
         pass
     out = run_cli("plugin", "list", "--world-id", "w", "--json")
     assert out.returncode == 0, out.stderr
-    row = json.loads(out.stdout)["plugins"][0]
+    row = _authored_rows(json.loads(out.stdout)["plugins"])[0]
     assert row["kinds"] == ["menpai.sect"], row
     assert row["edges"] == ["menpai.member_of"], row
     assert sorted(v["name"] for v in row["verbs"]) == ["menpai.入门", "menpai.拆了它",
@@ -1432,3 +1460,60 @@ def test_没入门就退出_同样拦在收费之前(tmp_path):
             "被拒的那一趟收了代价"
         assert world.scheduler.perform_affordance(
             "阿岚", "menpai.sect:青云门", "退出")["reason"] == "edge_blocked"
+
+
+# ── 2e:边规律的 `emit`(现在有使用者了 —— 邀请的过期规律)────────────────
+
+
+MENPAI_EMIT = {
+    **MENPAI,
+    "rules": [{
+        "id": "熬出头", "every": {"ticks": 1}, "for_each": {"edge": "member_of"},
+        "set": {"menpai.资历": "edge.menpai.资历 + 1"},
+        "emit": [{"type": "menpai.出师", "when": "edge.menpai.资历 >= 2",
+                  "payload": {"因为": "熬够了"}}]}],
+}
+
+
+def test_边规律发得出事件_而且是边沿触发(tmp_path):
+    """🔴 **P1.7 那道加载期拒绝这一轮改成放行**,因为它有使用者了(邀请的过期规律)。
+
+    **边沿触发照抄节点那一层**:门槛被跨过去那一下才发 —— 没有这一条,一条熬够了
+    的边会每 tick 发一次"我出师了",直到世界末日。
+    """
+    with _menpai_world(tmp_path, name="emit", plugin=MENPAI_EMIT) as world:
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "入门"}, surface="body")
+        world.tick(6)
+        fired = [e for e in world.scheduler.event_log.replay()
+                 if e.type == "menpai.出师"]
+        assert len(fired) == 1, f"边沿触发没生效,发了 {len(fired)} 次"
+        assert fired[0].payload["因为"] == "熬够了"
+        assert fired[0].payload["rule"] == "menpai.熬出头"
+        assert fired[0].payload["edge"] == "rise"
+        # 两端也要说得出 —— 一条边上的事件,不写清是哪两个人之间的,读的人查不下去。
+        assert fired[0].payload["src"] == "agent:阿岚"
+        assert fired[0].payload["dst"] == "menpai.sect:青云门"
+
+
+def test_没人订的边规律事件_进日志而不是被丢掉(tmp_path):
+    """**"没订户"和"被丢掉"是两件事,而这一格必须说清。**
+
+    它走 `_emit_rule_event` → 落库,和节点规律那一层逐字同一条路 ——
+    **发生了就是进了日志**,有没有触发器订它是另一回事。
+    丢掉的话,「这条规律到底跑没跑」就再也答不出来。
+    """
+    with _menpai_world(tmp_path, name="noear", plugin=MENPAI_EMIT) as world:
+        assert world.scheduler._triggers_by_event == {}, "这个世界不该有触发器"
+        world.act("阿岚", "interact",
+                  {"target": "menpai.sect:青云门", "verb": "入门"}, surface="body")
+        world.tick(6)
+        assert [e for e in world.scheduler.event_log.replay()
+                if e.type == "menpai.出师"], "没人订就被丢掉了"
+
+
+def test_契约说边规律现在收set和emit():
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    plugins = json.loads(out.stdout)["plugins"]
+    assert plugins["edge_rule_effects"] == ["set", "emit"], plugins["edge_rule_effects"]

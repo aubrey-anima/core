@@ -473,15 +473,38 @@ def test_有人过不了闸时_她不先在他手机上响一下(world):
 
 
 def test_邀请是事件不是易失态(world, fresh_redis):
-    """**存储契约一格不动。** 它折进投影,不开新的 Redis 键 —— 于是它免费得到
-    跨进程一致(`catch_up_projection`)和可重放,运维台那侧的 deepEqual 也照旧。"""
+    """**邀请仍然不是易失态,而这条用例这一轮改过一次措辞 —— 值得读一遍为什么。**
+
+    它原先断言的是「不开新的 Redis 键」。2e 把**存储与过期规律**搬成出厂插件之后,
+    那句话不再成立:边 `anima:{w}:edge:invitation.invites` 是一个真键。
+    🔴 **而这条用例逮住了一件真的**:边是**直接写**的,投影是**折出来**的 ——
+    第一版少了"开机把边重建成投影的物化视图"那一趟,于是一个丢了边、或者从别的
+    前缀重放出来的世界里,那几份邀请**永远不会过期**,清单上一直挂着。
+
+    所以它现在钉的是那句话**真正要守的三件**:
+
+    1. **不进 `volatile_keys`** —— 边是世界的内容(和 `:kinds` 同一类),
+       运维台那侧的 deepEqual 照旧绿;
+    2. **它是派生的**:抹掉整张边表、重开一次,它从事件折回来;
+    3. **投影仍是那份清单的权威**(下一条用例钉着重放折得出同一份)。
+    """
     from anima_world.__main__ import contract_payload
 
     world.player_move("p1", "cafe")
     _invite(world)
-    assert [k for k in fresh_redis.keys("*") if "invit" in str(k).lower()] == []
-    storage = json.dumps(contract_payload()["storage"], ensure_ascii=False)
-    assert "invit" not in storage
+    storage = contract_payload()["storage"]
+    assert not [k for k in storage["volatile_keys"] if "edge" in k or "invit" in k], \
+        f"邀请的边跑进易失键了:{storage['volatile_keys']}"
+    # 它是派生的:抹掉再重建,一条不少。
+    scheduler = world.scheduler
+    before = scheduler.edge_store.all(together.EDGE_TYPE)
+    assert len(before) == 1
+    scheduler.edge_store.drop_type(together.EDGE_TYPE)
+    assert scheduler.edge_store.all(together.EDGE_TYPE) == []
+    scheduler.rebuild_invitation_edges()
+    after = scheduler.edge_store.all(together.EDGE_TYPE)
+    assert [(s, d) for s, d, _f in after] == [(s, d) for s, d, _f in before]
+    assert after[0][2][together.FACT_SEQ] == before[0][2][together.FACT_SEQ]
 
 
 def test_重放折得出同一份还等着的清单(world):
@@ -1336,3 +1359,59 @@ def test_订invitation_declined的触发器_真的响一次(open_world, tmp_path
     world.tick(1)          # 队列在 tick 开头快照,drain 一遍
     assert world.stocks("agent:夏")["grudge.次数"] == 1.0, \
         "订它的触发器一次都没响 —— 这是一条死事件"
+
+
+# ── 2e:邀请的**存储与过期规律**搬成出厂插件(裁决 ③)────────────────────
+#
+# 🔴 **搬的是存储与过期那一半,不是"这条机制变成插件了"。**
+# 三扇门(`invitations_page` / `answer_invitation` / `invitation_outcomes_page`)
+# **留在内核,签名一格不变** —— 它们是冻结面。变的是:
+#
+# - 「这份邀请什么时候过期」从一段 Python 算术,变成**边上的一条规律**
+#   (`timer` 形状这一版不收,所以写成 number 事实 `expires_tick` + 规律比 `now`);
+# - 「还等着的有哪几份」在**边**上也有一份(`invitation.invites`),
+#   而它和投影一样是从 `agent_invites` / `invitation_settled` 折出来的 —— 事件仍是真相。
+
+
+def test_还等着的那份邀请_边上也有一条(world):
+    world.player_move("p1", "cafe")
+    _invite(world)
+    rows = world.scheduler.edge_store.all("invitation.invites")
+    assert len(rows) == 1, f"边没建起来:{rows}"
+    src, dst, facts = rows[0]
+    assert src == "agent:夏" and dst == "agent:player:p1"
+    assert facts["invitation.expires_tick"] == int(world.scheduler.clock) + \
+        together.DEFAULT_INVITE_TTL_TICKS
+    assert facts["invitation.seq"] == world.invitations("p1")[0]["seq"]
+    # 有了结局就断掉 —— 留着的话「还等着几份」在边上和在投影上是两个答案。
+    world.answer_invitation("p1", facts["invitation.seq"], accept=False)
+    assert world.scheduler.edge_store.all("invitation.invites") == []
+
+
+def test_过期由那条规律驱动_而且落在同一个tick(world):
+    """🔴 **时机一格都不许挪。** 它是玩家屏上那句「你没来得及答」的时刻,
+    而 `invitations_page` 的 `expires_in` 每 tick 都在被读。
+
+    判据沿用既有那条(`test_没人答_到点就过期`):TTL-1 没结局、再走 2 拍有结局。
+    这里多钉一件:**结局那一下是那条规律发出来的**(`invitation.expired`)。
+    """
+    world.player_move("p1", "cafe")
+    _invite(world)
+    world.tick(together.DEFAULT_INVITE_TTL_TICKS - 1)
+    assert _events(world, "invitation_settled") == [], "还没到点"
+    world.tick(2)
+    settled = _events(world, "invitation_settled")
+    assert len(settled) == 1 and settled[0]["payload"]["outcome"] == "expired"
+    # 那条规律真的发过话 —— 少了它,过期就还是那段 Python 算术在做。
+    fired = _events(world, "invitation.expired")
+    assert len(fired) == 1, "过期不是那条规律驱动的"
+    assert fired[0]["payload"]["rule"] == "invitation.过期"
+    assert fired[0]["payload"]["src"] == "agent:夏"
+
+
+def test_出厂邀请插件报得出它搬了哪几格(world):
+    ids = {p.id for p in world.scheduler.plugins}
+    assert "invitation" in ids, ids
+    plugin = next(p for p in world.scheduler.plugins if p.id == "invitation")
+    assert "invites" in plugin.edges
+    assert [r.id for r in plugin.rules] == ["invitation.过期"]

@@ -692,3 +692,48 @@ def test_橱窗里的外链只许指着一台明摆着不存在的主机():
         f"要放真图请按本测试 docstring 里那三条路走;把一台主机加进 "
         f"`_SHOWCASE_ALLOWED_HOSTS` 之前,请先确认那些字节**真的**在那台机器上。"
     )
+
+
+def test_橱窗里她真的约得动人_而且到点会过期(open_world):
+    """🔴 **邀请这一族的第一道闸,到今天才真的敲出来**(第 2 期 2e)。
+
+    本仓那三道闸对每个特性都成立:**橱窗里展示它** · 有 CLI/API 出口 · 进 REFERENCE。
+    邀请门是 3.6.0 交的,而它**一次都没在橱窗里出现过** —— 橱窗有一个联合动词
+    (`树下小坐`,`participants` 1~2),`social.joint.npc_may_invite_player` 也默认开着,
+    可从来没有一条判据证明这两样在**内置那份世界**上真的接得上。
+    「做了却开箱看不见等于没做」,而这一条正是那句话说的那种。
+
+    顺带把 2e 那半个搬家在橱窗上验一遍:**过期按世界时钟判**,而它现在是边上
+    那条规律在算(`invitation.过期`)。
+    """
+    from anima_world import together
+
+    world = open_world()
+    world.player_move("p1", "cafe", display_name="访客")
+    out = world.act("夏", "interact",
+                    {"target": "tree:harbor_oak", "verb": "树下小坐",
+                     "with": ["player:p1"]}, surface="body")
+    # ⚠️ **`ok` 是 False,而那正是对的**:她开口问了,那件事还没发生 ——
+    # 「他肯不肯」是一等公民(老板 08-20 拍的第一条),所以这一下的产物是
+    # **一份等着回话的邀请**,不是一次做成了的联合动作。
+    assert out["ok"] is False and out["detail"]["reason"] == "invited", out
+    assert out["detail"]["invite_seq"], out
+
+    page = world.invitations_page("p1")
+    row = page["events"][0]
+    assert row["pending"] is True and row["outcome"] == ""
+    assert row["expires_in"] == together.DEFAULT_INVITE_TTL_TICKS
+    # 边上那一份也在 —— 2e 搬过去的存储那一半。
+    assert len(world.scheduler.edge_store.all(together.EDGE_TYPE)) == 1
+
+    # **到点就过期**,而且一个字都不写在他头上(老板 08-20 拍的那一条)。
+    world.tick(together.DEFAULT_INVITE_TTL_TICKS + 1)
+    settled = world.history(kind="invitation_settled", limit=20)["events"]
+    assert len(settled) == 1 and settled[0]["payload"]["outcome"] == "expired"
+    # ⚠️ **这儿不数记忆条数**:橱窗是一个活着的世界,这 13 拍里关系判定、八卦
+    # 都在跑,数字会动而那和邀请无关。**要钉的是那一句精确的话** ——
+    # 没答不是拒绝,所以不许有一条冲着他来的关系变化。
+    # (「过期不落种子」那条完整判据在 `test_interaction_witness_and_invites.py`。)
+    assert [e for e in world.history(kind="state_change", limit=500)["events"]
+            if (e["payload"] or {}).get("cause") == "invitation_declined"] == []
+    assert world.scheduler.edge_store.all(together.EDGE_TYPE) == [], "边没跟着断"

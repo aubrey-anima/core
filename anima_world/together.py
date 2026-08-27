@@ -555,3 +555,69 @@ def describe_invitation(
         company = f"(还有{'、'.join(others)})"
     lead = "" if verb_label.startswith("一起") else "一起"
     return f"{inviter}指着{target_name},叫你{lead}{verb_label}{company}"
+
+
+# ── 出厂插件:邀请的**存储与过期规律**(3.8.0 第 2 期 2e,裁决 ③)────────────
+
+PLUGIN_ID = "invitation"
+
+#: 边上那两个事实的存储键(内核写它们时也用这两个名字 —— **只有一份**)。
+EDGE_TYPE = f"{PLUGIN_ID}.invites"
+FACT_EXPIRES = f"{PLUGIN_ID}.expires_tick"
+FACT_SEQ = f"{PLUGIN_ID}.seq"
+FACT_STATE = f"{PLUGIN_ID}.state"
+
+#: 那条规律发出来的事件 —— `_settle_invitations` 读的不是它,读的是**边上的状态**;
+#: 这条事件是给**别的插件**订的(「她约我我没答」也是一件事)。
+EXPIRED_EVENT = f"{PLUGIN_ID}.expired"
+
+
+def factory_plugin() -> dict:
+    """出厂的邀请插件 —— **只搬存储与过期规律**(裁决 ③)。
+
+    🔴 **三扇门留在内核,签名一格不变**(`invitations_page` / `answer_invitation` /
+    `invitation_outcomes_page` 是冻结面)。搬过来的是两样:
+
+    - **「什么时候过期」**:从 `_settle_invitations` 里那段 `expires_tick <= now`
+      的 Python 算术,变成**边上的一条规律**。⚠️ `timer` 形状这一版不收
+      (`deferred_fact_shapes`),所以写成一个存着 tick 的 `number` 加内核的 `now`
+      —— 那正是当初判"为一层语法糖开一道语法不划算"时说的写法。
+    - **「还等着的有哪几份」**:边 `invitation.invites`(她 → 他)。
+      ⚠️ 它和 `Projection.invitations` **不是两份真相**:两边都从
+      `agent_invites` / `invitation_settled` 折出来,**事件仍然是唯一的真相**
+      (和钱包那一格逐字同构)。
+
+    **顺序是承重的**:规律在 tick 的 3.61 标记,`_settle_invitations` 在 3.9 收尾 ——
+    **同一个 tick**,所以过期落在的那一拍和从前逐位相同。那一拍是玩家屏上
+    「你没来得及答」的时刻,挪一格就是行为变更。
+    """
+    return {
+        "id": PLUGIN_ID, "version": "1.0.0", "label": "邀请",
+        "edges": {"invites": {
+            "label": "在等你点头", "from": "agent", "to": "player",
+            "facts": {
+                # **谁都看不见**:这一层是账,不是她感觉到的东西。
+                # 「有人在等你」是那三扇门的事,不是感知块的事。
+                "expires_tick": {"shape": "number", "default": 0.0,
+                                 "visibility": "hidden", "label": "到点"},
+                "seq": {"shape": "number", "default": 0.0,
+                        "visibility": "hidden", "label": "序号"},
+                "state": {"shape": "state", "default": "等着",
+                          "visibility": "hidden", "label": "状态",
+                          "values": [{"name": "等着"}, {"name": "过期了"}]},
+            }}},
+        "rules": [{
+            "id": "过期", "every": {"ticks": 1},
+            "for_each": {"edge": "invites"},
+            # `state == 0` 那一条是**关掉自己**:标记过一次之后这条规律不再命中,
+            # 于是它既不会每 tick 重写一遍,也不会每 tick 再发一次话。
+            "when": ["edge.invitation.state == 0",
+                     "now - edge.invitation.expires_tick >= 0"],
+            "set": {f"{PLUGIN_ID}.state": "1"},
+            # ⚠️ **写全名**:规律那一层的 `emit.type` 今天**不**自动加命名空间
+            # (触发器那一层会查、会拒)。两边不一致是一笔该收的账,记在
+            # FOR-STUDIO §3.44;在它收掉之前,出厂插件自己写全,别指望引擎替它加。
+            "emit": [{"type": EXPIRED_EVENT,
+                      "when": "edge.invitation.state >= 1"}],
+        }],
+    }
