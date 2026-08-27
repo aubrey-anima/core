@@ -1415,3 +1415,55 @@ def test_出厂邀请插件报得出它搬了哪几格(world):
     plugin = next(p for p in world.scheduler.plugins if p.id == "invitation")
     assert "invites" in plugin.edges
     assert [r.id for r in plugin.rules] == ["invitation.过期"]
+
+
+def test_边丢了_重开一次照样过期(open_world, tmp_path):
+    """🔴 **仓内那条 rebuild 用例直接调方法,不走开机路**(复核评审实测:
+    把 `__main__` 里那句 `rebuild_invitation_edges()` 注掉,65 条照样全绿)。
+
+    这一条走**真的开机**:抹掉整张边表 → 关掉世界 → 重开 → 到点照样过期。
+    少了开机那一趟,一个丢了边(或从别的前缀重放出来)的世界里那几份邀请
+    **永远不会过期** —— 清单上一直挂着,而「还剩几拍」一直数下去。
+    """
+    seed = json.loads(json.dumps(_SEED))
+    path = write_seed_file(tmp_path / "reb.cyberworld", seed)
+    world = open_world("reb", world_file=path)
+    world.player_move("p1", "cafe")
+    _invite(world)
+    seq = world.invitations("p1")[0]["seq"]
+    assert len(world.scheduler.edge_store.all(together.EDGE_TYPE)) == 1
+    # **把边整张抹掉** —— 模拟"换了个进程 / 从别的前缀重放出来 / 有人手抖删了"。
+    world.scheduler.edge_store.drop_type(together.EDGE_TYPE)
+    world.close()
+
+    # **同一个 world_id、同一个 fakeredis** = 真的重开这个世界。
+    reopened = open_world("reb")
+    assert len(reopened.scheduler.edge_store.all(together.EDGE_TYPE)) == 1, \
+        "开机没把边重建回来 —— 这份邀请从此永远不会过期"
+    reopened.tick(together.DEFAULT_INVITE_TTL_TICKS + 1)
+    settled = [e for e in reopened.history(kind="invitation_settled", limit=20)["events"]
+               if e["payload"]["invite_seq"] == seq]
+    assert len(settled) == 1 and settled[0]["payload"]["outcome"] == "expired"
+
+
+def test_订invitation_expired的触发器_真响一次(open_world, tmp_path):
+    """§2a 立的那条规矩:**每加一种能被订的事件,就配一条「真发一次、订它的
+    触发器响一次」的测试**(第 1 期验收 C 逮到五种死事件之后立的)。
+
+    `invitation.expired` 是 2e 新发的那一种 —— 契约评审手工探针证过行为对,
+    缺的只是这道闸。
+    """
+    seed = json.loads(json.dumps(_SEED))
+    seed["plugins"] = [{
+        "id": "miss", "version": "1.0.0", "label": "错过",
+        "facts": {"次数": {"bearer": "agent", "shape": "number", "default": 0.0,
+                           "visibility": "self", "label": "被放过几回"}},
+        "triggers": [{"id": "又没答", "on": {"event": together.EXPIRED_EVENT},
+                      "effects": [{"set": {"miss.次数": "miss.次数 + 1"}}]}],
+    }]
+    world = open_world(world_file=write_seed_file(tmp_path / "miss.cyberworld", seed))
+    world.player_move("p1", "cafe")
+    _invite(world)
+    world.tick(together.DEFAULT_INVITE_TTL_TICKS + 2)
+    assert world.stocks("agent:夏")["miss.次数"] == 1.0, \
+        "订它的触发器一次都没响 —— 这是一条死事件"

@@ -1400,22 +1400,58 @@ def test_契约报得出sources这一格():
 # ── 2d-①:钱包搬成出厂插件的那一格 ────────────────────────────────────────
 
 
-def test_钱的进位跟着账本走_不是折到第六位(tmp_path):
-    """🔴 **`projected` 事实要能声明自己的进位,而钱是它的第一个使用者。**
+#: 三笔**真的会分家**的钱。挑它们花了一次穷举 —— 而这正是上一版那条单测缺的东西:
+#: `0.1 + 0.2` 在 round 2 和 round 6 下答案相同,于是那条闸把 `round` 改成 6 也照绿。
+#: **一个不会分家的数,验不出"两处会不会分家"。**
+#:
+#:   逐笔先折再累加:round(1.005,2)=1.00,+round(0.055,2)=0.06 ⇒ **1.06**
+#:   只折累加结果  :round(0+1.005,2)=1.00,round(1.00+0.055,2) ⇒ **1.05**
+#: ⚠️ **一串长一点的钱反而可能又对上**(四笔那一串实测两边都是 1.19)——
+#: 所以这儿写死的是穷举出来**确实分家**的那一对,别顺手往里加数。
+_DIVERGING_AMOUNTS = (1.005, 0.055)
 
-    `_apply_payment` 的 docstring 逐字写着为什么账本折到**两位**:二进制浮点存不下
-    0.1,`60 − 5.23 − 1.16 − …` 折下来是 `0.3799999999999921`;门禁读的是这个数,
-    一笔"正好够"的交易迟早会被它拒掉,**而那一次不报错也不留痕**。
 
-    折叠端默认折到六位。**两套进位就是两个钱包**,而它们只在小数第三位往后分家 ——
-    那正是"看着一样、判起来不一样"的形状。
+def test_钱包和账本折出同一个数_逐笔比(tmp_path):
+    """🔴 **两处进位不一样就是两个钱包**(2026-08-27 复核评审实测:`balance()=63.13`
+    而量表 `63.12`)。
+
+    病根是**折的位置**,不是位数:`_apply_payment` 只折**累加结果**,而
+    `fact_source_updates` 第一版把**每一笔 delta 先折了一次**。三笔
+    `1.005 / 0.125 / 2.0005` 就分家 —— 而它们分家的那一位,正是"一笔正好够的交易
+    会不会被门禁拒掉"那一位。
+
+    ⚠️ **上一轮我给这一格写的那条单测是假绿的**(评审逮的):它取 `0.1 + 0.2`,
+    而那个数在 round 2 和 round 6 下答案相同 —— **把 `round` 改成 6,全仓照样全绿**。
+    所以这一条改成**拿两份真的折叠端逐笔对**:账本折一遍、插件折一遍,必须同一个数。
+    **一个不会分家的数,验不出"两处会不会分家"。**
     """
+    from anima_world.projection import _apply_fact_delta, _apply_payment
     from anima_world.projection import fact_source_updates
+    from anima_world.types import Event, Projection
 
     specs = [{"event": "payment", "amount": "amount", "credit": "to",
               "fact": "w.钱", "owner_form": "actor", "round": 2}]
-    got = fact_source_updates(specs, {"to": "夏", "amount": 0.1 + 0.2})
-    assert got == [("agent:夏", "w.钱", 0.3)], got
+    ledger, wallet = Projection(), {}
+    for seq, amount in enumerate(_DIVERGING_AMOUNTS, start=1):
+        payload = {"from": "__town__", "to": "夏", "amount": amount}
+        _apply_payment(ledger, Event(seq=seq, ts=0, type="payment", who="",
+                                     loc="", payload=payload))
+        for owner, fact, delta in fact_source_updates(specs, payload):
+            wallet[owner] = round(wallet.get(owner, 0.0) + delta, 2)
+    assert wallet["agent:夏"] == ledger.balances["夏"], (
+        f"两个钱包:插件 {wallet['agent:夏']} ≠ 账本 {ledger.balances['夏']}"
+    )
+    # 顺带钉死"位数是声明出来的":同一串钱折到 6 位,和账本**必然**分家 ——
+    # 这一条就是上一版那条单测缺的那颗牙。
+    six = [{**specs[0], "round": 6}]
+    loose = {}
+    for amount in _DIVERGING_AMOUNTS:
+        for owner, fact, delta in fact_source_updates(
+                six, {"from": "__town__", "to": "夏", "amount": amount}):
+            loose[owner] = round(loose.get(owner, 0.0) + delta, 6)
+    assert loose["agent:夏"] != ledger.balances["夏"], (
+        "折到 6 位竟然和账本一样 —— 那这条用例又挑了一串不会分家的数"
+    )
 
 
 def test_出厂钱包插件装上了_而且只多一个键(tmp_path):
@@ -1517,3 +1553,100 @@ def test_契约说边规律现在收set和emit():
     assert out.returncode == 0, out.stderr
     plugins = json.loads(out.stdout)["plugins"]
     assert plugins["edge_rule_effects"] == ["set", "emit"], plugins["edge_rule_effects"]
+
+
+MENPAI_TRANSFER = {
+    **MENPAI,
+    "verbs": {**MENPAI["verbs"], "过继": {
+        "target": "group:sect", "label": "把门籍过到自己名下",
+        "costs": {"体力": "me_体力 - 2"},
+        "effects": [{"transfer": {"type": "member_of", "from": "self",
+                                  "to": "target", "by_dst": True}}]}},
+}
+
+
+def test_transfer动词真的转得动_而不是被自己的预检拦死(tmp_path):
+    """🔴 **预检把判据写反了,于是 `transfer` 从此一次也成功不了**(复核评审实测)。
+
+    `apply_edge_effect` 判「有没有可转的边」用的是 `of_dst(dst) if by_dst else
+    of_src(src)`;而预检问的是 `get(type, src, dst)` —— **那是转移之后才会有的
+    那条边**。两个相反的条件,于是闸说"没有"、执行说"有",而闸先说话。
+
+    ⚠️ 它比 P1.1 那次更难查:那次是"该拒没拒",这次是**"该成的永远成不了"**,
+    而回执里那句话("你身上没有这条门籍")听起来完全合理。
+    """
+    with _menpai_world(tmp_path, name="tr", plugin=MENPAI_TRANSFER) as world:
+        sch = world.scheduler
+        sch.apply_edge_effect({"op": "link", "type": "menpai.member_of",
+                               "from": "agent:小竹", "to": "menpai.sect:青云门"}, {})
+        before = world.stocks("agent:阿岚")["体力"]
+        out = world.act("阿岚", "interact",
+                        {"target": "menpai.sect:青云门", "verb": "过继"},
+                        surface="body")
+        assert out["ok"] is True, f"转得动的一次被预检拦死了:{out}"
+        rows = [(s, d) for s, d, _f in sch.edge_store.all("menpai.member_of")]
+        assert rows == [("agent:阿岚", "menpai.sect:青云门")], rows
+        assert world.stocks("agent:阿岚")["体力"] == before - 2
+        assert out["detail"]["edges"] == [
+            {"op": "transfer", "type": "menpai.member_of", "ok": True}]
+
+
+def test_没边可转时_transfer也拦在收费之前(tmp_path):
+    """反面那一半:真的没得转,就得拒 —— 而且**照旧拦在收费之前**。"""
+    with _menpai_world(tmp_path, name="tr2", plugin=MENPAI_TRANSFER) as world:
+        before = world.stocks("agent:阿岚")["体力"]
+        out = world.act("阿岚", "interact",
+                        {"target": "menpai.sect:青云门", "verb": "过继"},
+                        surface="body")
+        assert out["ok"] is False, out
+        assert world.stocks("agent:阿岚")["体力"] == before, "被拒的那一趟收了代价"
+
+
+def test_运行中打开经济_钱包当场就对上_不必等重开(tmp_path):
+    """🔴 **「重开才对上」正是 2b 里我自己防过的那种形状**(复核评审逮的)。
+
+    `config_set` 那道热更新钩子走 `refresh_plugins`,它把插件重装了、把
+    `fact_sources` 注册表也换了 —— **但没有把物化视图重建一遍**。
+    于是运行中打开经济之后,量表里那一格停在 0,而账本早就有数;
+    重开一次它才长出来。**跑着的世界一个数、重开之后另一个数**,零报错。
+    """
+    with _purse_world(tmp_path, name="hot", plugin=QI) as world:
+        world.config_set("economy.enabled", False)
+        world.player_move("p1", "cafe", display_name="阿檀")
+        world.player_topup("p1", 40.0)
+        owner = "agent:player:p1"
+        assert world.stocks(owner).get("economy.coins") is None, "还没装就有了?"
+        world.config_set("economy.enabled", True)
+        assert world.stocks(owner).get("economy.coins") == 40.0, (
+            "运行中打开经济,量表停在 0 —— 要重开一次才对上"
+        )
+        assert world.balance("player:p1") == 40.0
+
+
+def test_出厂表那两张的键集必须一样():
+    """🔴 **`FACTORY_SCOPE` 是 `FACTORY_PLUGINS` 的第二份键集,而第二份键集会烂**
+    (契约链评审逮的)。
+
+    烂了的样子是安静的:加一个出厂插件却忘了写它搬了哪几格,
+    `contract --json` 那一格就少一行 —— 而**消费方读的正是那一格**
+    (「别按『搬完几个系统』计数,按『哪几格搬了』计」)。
+    少一行不会有任何一处报错,只是 tool 那边少知道一件事。
+
+    **能点名就别数数**:这儿点的是两张表的键集,不是"有几个"。
+    """
+    from anima_world.__main__ import FACTORY_PLUGINS, FACTORY_SCOPE
+
+    assert set(FACTORY_PLUGINS) == set(FACTORY_SCOPE), (
+        f"两张出厂表对不上:只在 FACTORY_PLUGINS 里的 "
+        f"{sorted(set(FACTORY_PLUGINS) - set(FACTORY_SCOPE))}、"
+        f"只在 FACTORY_SCOPE 里的 {sorted(set(FACTORY_SCOPE) - set(FACTORY_PLUGINS))}"
+    )
+    # 每一格都得真说了点什么 —— 一句空话和缺一行一样没用。
+    for plugin_id, scope in FACTORY_SCOPE.items():
+        assert len(scope) > 10, f"{plugin_id} 那一格没说清它搬了哪几格:{scope!r}"
+    # 契约那两格报的就是这两张表(消费方读的是契约,不是这两个常量)。
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    plugins = json.loads(out.stdout)["plugins"]
+    assert plugins["factory"] == dict(FACTORY_PLUGINS)
+    assert plugins["factory_scope"] == dict(FACTORY_SCOPE)

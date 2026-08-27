@@ -4132,26 +4132,36 @@ class Scheduler:
                 if declared.exclusive_to and store.of_dst(edge_type, dst):
                     return f"「{label}」这一头已经有人占着了 —— 这一种只认一个"
             elif op in ("unlink", "transfer"):
-                # 🔴 **断和转移一样查得动,而且查法就摆在那儿**(2026-08-26 复核评审)。
+                # 🔴 **断和转移一样查得动 —— 而"查法就摆在那儿"这句话我上一轮
+                # 说对了、抄错了**(2026-08-27 复核评审实测)。
                 #
-                # 从前这两支整个跳过,于是「没入门就退出」体力照扣、`ok: true`、
-                # 边一条没断 —— 只有回执里一条 `ok: false` 和一行 warning。
-                # **留半截的下场是同一件事在两个动词上两种下场**,而作者读不出为什么。
+                # 第一版对 `transfer` 问的是 `get(type, src, dst)`,而那是**转移
+                # 之后才会有的那条边**;`apply_edge_effect` 找的是**要搬走的那条**
+                # (`of_dst(dst) if by_dst else of_src(src)`)。两个相反的条件,
+                # 于是闸说"没有"、执行说"有",而闸先说话 —— **`transfer` 从此
+                # 一次也成功不了**,而回执那句「你身上没有这条门籍」听起来完全合理。
                 #
-                # 判据和 `apply_edge_effect` 里那两支**读同一组函数**
-                # (`of_src` / `of_dst` / `get`)—— 各写一套的话,闸说"有"而执行说
-                # "没有",那是最难查的一种不一致。
-                if src and dst:
+                # 它比上一轮那次更难查:那次是"该拒没拒",这次是**"该成的永远成不了"**。
+                # 修法只有一条:**照抄执行那一支的取行方式**,一个字都不自己想。
+                if op == "transfer":
+                    rows = (store.of_dst(edge_type, dst) if spec.get("by_dst")
+                            else store.of_src(edge_type, src))
+                    have = bool(rows)
+                    missing = (f"{self._display_name(agent_id)}这儿没有可以转的"
+                               f"「{label}」")
+                elif src and dst:
                     have = store.get(edge_type, src, dst) is not None
-                elif src:
-                    have = bool(store.of_src(edge_type, src))
-                elif dst:
-                    have = bool(store.of_dst(edge_type, dst))
+                    missing = (f"{self._display_name(agent_id)}身上没有这条"
+                               f"「{label}」—— 断不了一条本来就不存在的")
+                elif src or dst:
+                    have = bool(store.of_src(edge_type, src) if src
+                                else store.of_dst(edge_type, dst))
+                    missing = (f"{self._display_name(agent_id)}身上没有这条"
+                               f"「{label}」—— 断不了一条本来就不存在的")
                 else:
                     continue      # 两端都答不出来 —— 这一刻查不动
                 if not have:
-                    return (f"{self._display_name(agent_id)}身上没有这条「{label}」—— "
-                            "断不了一条本来就不存在的")
+                    return missing
         return None
 
     def _apply_verb_edges(

@@ -665,8 +665,13 @@ def fact_source_updates(
             # 一条只给 `debit`):`payment` 的 `to` 可能是个人而 `from` 是
             # `__town__`。给一个 `owner_form` 让它同时管两头,是让作者在一个格子里
             # 说两件事 —— 而说不清的那一件会静默地记在一个没人读的名下。
-            out.append((f"agent:{who}" if actor_form else who, fact,
-                        round(sign * amount, digits)))
+            # 🔴 **delta 不预折**(2026-08-27 复核评审实测:`balance()=63.13`
+            # 而量表 `63.12`)。`_apply_payment` 只折**累加结果**,这儿要是把
+            # 每一笔先折一次,两边就是**两个钱包** —— 而它们分家的那一位,
+            # 正是"一笔正好够的交易会不会被门禁拒掉"那一位。
+            # **位数交给累加那一处用**(`_apply_fact_source` / `_flush_source_writes`
+            # 都折累加值),这里只给差额。
+            out.append((f"agent:{who}" if actor_form else who, fact, sign * amount))
     return out
 
 

@@ -3137,6 +3137,24 @@ def refresh_plugins(scheduler: Any) -> None:
         return
     _install_plugins(scheduler, plugin_store, scheduler.stock_store,
                      scheduler.visibility_store, scheduler.location_store, None)
+    # 🔴 **重装之后要把物化视图也重建一遍**(2026-08-27 复核评审逮的)。
+    #
+    # `_install_plugins` 换掉的是**声明**(`projected_facts` 与 `fact_sources`
+    # 那张注册表),而投影式事实的**值**住在量表里,只有物化那一趟才写得进去。
+    # 少了这两句,运行中 `config_set("economy.enabled", True)` 之后,量表那一格
+    # 停在 0 而账本早就有数 —— **跑着的世界一个数、重开之后另一个数**,零报错。
+    # ⚠️ 那正是 2b 自己防过的形状(「只有重开那一刻才错」那一族),
+    # 而这一处是同一个洞的第二个入口:开机那条路补过了,热更新这条没补。
+    if getattr(scheduler, "projected_facts", None):
+        if getattr(scheduler._memory_projection, "fact_sources", None):
+            # 注册表刚换过,而 `Scheduler.__init__` 那趟重放是在旧注册表下折的 ——
+            # 和开机那条路逐字同一个理由,所以重折一遍。
+            log = getattr(scheduler, "event_log", None)
+            if log is not None:
+                scheduler.reset_projection(log.replay())
+        scheduler._materialize_projected_facts()
+    # 邀请那几条边同理:它是投影的物化视图,重装之后也要跟上。
+    scheduler.rebuild_invitation_edges()
 
 
 def _install_plugins(
