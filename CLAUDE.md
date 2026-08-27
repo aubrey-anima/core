@@ -124,8 +124,16 @@ pip install -e ".[dev]"
 #   `.venv/bin/pip show anima-world | sed -n 2p` 与 `.venv/bin/anima-world --version`
 
 python3.13 -m pytest -q               # fakeredis,无需真 Redis;addopts 已屏蔽 ROS 插件
-# 最近一次实跑:**1982 passed / 19 skipped,0 failed**(2026-08-27,第三轮两路复核
-#   那 8 条,397 秒;起跑 `uptime` load **0.65**、收尾 **1.21**)。
+# 最近一次实跑:**1986 passed / 19 skipped,0 failed**(2026-08-27,创作台接第 2 期
+#   测出来那三处「契约说不收、引擎照收」收口,401 秒;
+#   起跑 `uptime` load **0.97**、收尾 **1.54**)。
+#   这 **+4** 是那三条收紧的判据加一条出厂声明的进位闸。
+#   🔴 **那一轮最该记的一句**:第三条(规律 `emit.type` 不带命名空间)我上一轮用
+#   「收它 = 破坏消费方」推迟过,**而那句话量过之后不成立** —— 四仓 `plugin` 记录
+#   **0 条**、`3.8.0` 没打 tag、PyPI 停 `3.7.0`、线上镜像 `anima-world:3.7.0`。
+#   **一条推迟的理由,应该在推迟的那一刻就量,而不是等人来问。**
+#   上一趟是 **1982 / 19 / 0 failed**(同日,第三轮两路复核那 8 条,397 秒,
+#   起跑 load 0.65)。
 #   这 **+6** 是那 8 条各自的判据(transfer 两条 · 热更新物化一条 · 开机 rebuild
 #   一条 · 出厂两表键集一条 · `invitation.expired` 触发器一条;钱那条是**换掉**
 #   上一版那条假绿的,不算净增)。
