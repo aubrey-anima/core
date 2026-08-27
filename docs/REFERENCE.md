@@ -5236,3 +5236,57 @@ Python 关键字,而表达式是 `ast.parse` 解析的:`from.x` 连语法都过�
 | `verb_target_forms` | `["entity:","group:","<作者写的种类 id>"]` | ⚠️ **`agent` 不在里面** |
 | `rule_selectors` | `[…,"edge"]` | `for_each` 认哪几种 |
 | `edge_ends` / `edge_fact_shapes` / `edge_storage_key` / `edge_expression_prefixes` | | 边那一族(第 2 期 2a 地基那一轮已在) |
+
+### 10.11 投影式事实 `mode: "projected"`(3.8.0 第 2 期 2b)
+
+```jsonc
+"facts": {"钱": {"bearer":"actor", "shape":"number", "mode":"projected",
+                 "default":0, "visibility":"self", "label":"钱",
+                 "bands":[[0,"身无分文"],[5,"还有几个子儿"]]}}
+```
+
+| | `stored`(默认) | `projected` |
+|---|---|---|
+| 真相在哪儿 | 量表里那个数**就是**真相 | 日志里那一串 `<插件>.<事实>.delta` |
+| 量表里那个数 | 真相 | **物化视图** |
+| 抹掉那个数 | 就是抹掉了 | 重开一次从日志折回来 |
+| 「你为什么只剩三块钱」 | 答不出来 | 那一串 delta 就是答案 |
+
+🔴 **值得多这一种模式的理由只有一个,而它不是"更严谨"**:钱包与随身库存今天
+都是事件重放折出来的(`Projection.balances` / `inventories`,没有 `balances` 表),
+搬成一个直接写的事实就**丢掉了「可重放」** —— 而 `forget_player` / stance /
+gossip / closeness 全建在"关系可重放"上,钱的每一笔来路(`payment` 事件)是玩家屏上
+那句「你为什么只剩三块」的唯一答案。**一个直接写的余额答不出这个问题,
+而且它答不出来的时候不报错。**
+
+- **delta 事件**:`<插件>.<事实>.delta`,载荷 `{owner, fact, delta, cause}`。
+  `cause` 是"哪一条规律/触发器让它变的" —— 没有它,一串 delta 只是一串数字。
+  **0 不发**:一条什么都没变的 delta 只会让那串账变长。
+- **折叠端只有一个处理器**(`projection._apply_fact_delta`,认 `.delta` 后缀),
+  **不是每个插件一个**。每个插件各注册一个的话,一个**卸掉的**插件留下的那串
+  delta 在下一次重放时无人认领 —— 而无人认领的样子是"这个数悄悄回到 0",
+  且只在重开的那一刻发生。
+- **物化视图开机重建一次**(`Scheduler._materialize_projected_facts`,排在
+  `reset_projection` 与 `load_persisted_events` 之后)。少了这一趟,"换个进程读到的值"
+  和"日志折出来的值"各说各话,而**跑着的世界照旧对**,只有重开那一刻悄悄倒带。
+- **`forget_player` 折掉他那一行**(和 `_apply_player_departed` 折关系逐字同一条):
+  追加一条事实、折叠端认它。直接去量表里删是没用的 —— 下一次重放原样折回来。
+  ⚠️ **按整个 owner 比,不按子串**;⚠️ **历史一个字没删**,那几条 delta 原样躺在
+  日志里,走的是朝前看的那一半。
+- 🔴 **`projected` 这一版只收 `number`**,而这不是"还没做":**delta 是一个差值**,
+  一个枚举名(`state`)或一句话(`text`)身上没有"差"这回事 ——「从『外门』变成
+  『内门』」折不成一个可以相加的数。
+- 🔴 **挂在插件自己种类上的事实做不了 `projected`**:那样东西会被 `destroy` 抹掉,
+  而一串折向一个不存在的主人的 delta,重放出来是一个没有主人的数。挂在
+  `actor` / `world` / `location` 上的可以(`contract.plugins.projected_bearers`)。
+- **两条写死的代价**(设计 §9.3 原话):开机要重放一遍(内核对 `balances` 本来
+  就在做);**规律读到的是上一轮物化的值**(和双缓冲同构)。
+
+判据 `tests/test_plugins.py::test_投影式事实_落的是一条delta而不是一次直写` /
+`::test_把物化视图抹掉_重开一次它从日志里长回来`(**这条是牙**:删掉折叠端那一支,
+它当场变 0)/ `::test_forget_player之后_重放里不再有他那几条delta`
+(同样有牙,而且钉住"只折掉他那一行" —— 折成全局的下场是一次注销把所有人的
+钱包清零,而世界照跑、日志干净)。
+
+契约新格:`plugins.fact_modes` / `projected_shapes` / `projected_delta_event` /
+`projected_delta_payload` / `projected_bearers`。**整格缺席 = 这支引擎没有这一模式。**

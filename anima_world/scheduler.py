@@ -334,6 +334,9 @@ class Scheduler:
         #: `(种类 id, 动词) → 这个动词的边效果`(`link`/`unlink`/`transfer`)。
         #: 挂在这儿而不是挂在 affordance 上,理由见 `__main__._install_plugins`。
         self.verb_edge_effects: dict[tuple[str, str], tuple[dict[str, Any], ...]] = {}
+        #: 声明了 `mode:"projected"` 的事实:`存储键 → 那条 delta 事件的 type`。
+        #: 空的时候这一层整个不花钱 —— 和"声明本身就是开关"逐字同构。
+        self.projected_facts: dict[str, str] = {}
         self.plugins: list[Any] = []
         # 事件类型 → 订它的触发器。**建一次,tick 上只做一次字典查** ——
         # 每 tick 遍历全部触发器去比 type,是这一层最容易写成 O(触发器×事件) 的地方。
@@ -4920,6 +4923,100 @@ class Scheduler:
             facts.update(updates)
             store.link(edge_type, src, dst, facts)
 
+    # ── 投影式事实(第 2 期 2b,设计稿 §9.3)──────────────────────────────
+
+    def record_fact_delta(self, owner: str, fact: str, delta: float,
+                          *, cause: str = "", loc: str = "") -> None:
+        """一次变化落成一条 `<插件>.<事实>.delta`。**这才是真相。**
+
+        量表里那个数只是物化视图 —— 抹掉它、换个进程、重开一次,这一串折一遍就
+        回来了。`cause` 说的是"哪一条规律/触发器/动词让它变的";没有它,一串
+        delta 只是一串数字,而这一格正是玩家屏上那句「你为什么只剩三块钱」的下半句。
+
+        **0 不发。** 一条什么都没变的 delta 只会让那串账变长,而读它的人要在里面
+        找"到底哪几下动了钱"。
+        """
+        if not delta:
+            return
+        event_type = self.projected_facts.get(fact)
+        if not event_type:
+            return
+        self._record_and_deliver({
+            "type": event_type, "who": owner, "loc": loc,
+            "payload": {"owner": owner, "fact": fact,
+                        "delta": round(float(delta), 6), "cause": cause},
+        })
+
+    def _record_projected_writes(
+        self, pending: Mapping[str, Mapping[str, float]],
+        before: Mapping[str, Mapping[str, Any]],
+        causes: Mapping[tuple[str, str], str] | None = None,
+        cause: str = "",
+    ) -> None:
+        """一轮写入里,哪几格是投影式的 —— 给它们各补一条 delta。
+
+        ⚠️ **它跟在写入后面,不是替代写入**:量表照写(那是视图),日志多一条
+        (那是真相)。两件事**必须在同一个地方做完** —— 分开的话,一个只写了
+        视图的路径会让"重开一次"把这个数悄悄倒带,而倒带的那一刻没有一处报错。
+        """
+        if not self.projected_facts:
+            return
+        for owner, updates in pending.items():
+            prior = before.get(owner) or {}
+            for key, value in updates.items():
+                if key not in self.projected_facts:
+                    continue
+                was = prior.get(key)
+                if isinstance(was, tuple):        # 快照是 (值, tick)
+                    was = was[0]
+                self.record_fact_delta(
+                    owner, key, float(value) - float(was or 0.0),
+                    cause=(causes or {}).get((owner, key), cause))
+
+    def _materialize_projected_facts(self) -> int:
+        """把折出来的那份值写回量表。**开机走一趟,之后运行期自己维持。**
+
+        它是"物化视图"这三个字的落点:折叠端是真相,这里只是把真相摆到读得到的
+        地方(感知、表达式、`me_*` 全读量表)。⚠️ **只写声明过 `projected` 的那几个键**
+        —— 多写一格就等于让一个不再是投影的量被一串陈年 delta 倒带。
+        """
+        store = self.stock_store
+        if store is None or not self.projected_facts:
+            return 0
+        folded = getattr(self._memory_projection, "plugin_facts", None) or {}
+        written = 0
+        for owner, row in folded.items():
+            updates = {key: float(value) for key, value in row.items()
+                       if key in self.projected_facts}
+            if not updates:
+                continue
+            store.set_many(owner, updates, tick=int(self.clock))
+            written += len(updates)
+        # 折出来一个字都没有的 owner 上,那几格该是 0 而不是"上一次留下的数"——
+        # `forget_player` 折掉他那一行之后走的正是这一支。
+        for owner in self._owners_with_projected_facts():
+            if owner in folded:
+                continue
+            stale = {key: 0.0 for key in self.projected_facts
+                     if key in (store.of(owner) or {})}
+            if stale:
+                store.set_many(owner, stale, tick=int(self.clock))
+                written += len(stale)
+        return written
+
+    def _owners_with_projected_facts(self) -> list[str]:
+        """量表里此刻有投影式事实的那些 owner。**只扫 `stock_owners` 那张索引。**"""
+        store = self.stock_store
+        owners = getattr(store, "owners", None)
+        if not callable(owners):
+            return []
+        try:
+            return list(owners())
+        except Exception:  # noqa: BLE001 - 索引读不动不该掀翻开机
+            logger.warning("读 stock_owners 索引失败,跳过投影式事实的清零那一趟",
+                           exc_info=True)
+            return []
+
     def _drain_plugin_triggers(self) -> None:
         """把上一 tick 攒下的那批事件交给订它们的触发器,**drain 一遍就停**。
 
@@ -4937,23 +5034,28 @@ class Scheduler:
         batch, self._trigger_queue = self._trigger_queue, []
         pending: dict[str, dict[str, float]] = {}
         emitted: list[dict[str, Any]] = []
+        causes: dict[tuple[str, str], str] = {}
         for event in batch:
             for trigger in self._triggers_by_event.get(str(event.get("type") or ""), ()):
                 try:
-                    self._fire_trigger(trigger, event, pending, emitted)
+                    self._fire_trigger(trigger, event, pending, emitted, causes)
                 except ExpressionError as exc:
                     # 运行期降级:一条算不出来的触发器不该掀翻 tick(规律那条纪律)。
                     # 但绝不无声。
                     logger.warning("触发器 %s.%s 算不出来:%s",
                                    trigger.plugin, trigger.id, exc)
         if pending:
+            before = (self.stock_store.snapshot_many(sorted(pending))
+                      if self.projected_facts else {})
             self.stock_store.write_round(pending, tick=self.clock)
+            self._record_projected_writes(pending, before, causes=causes)
         for event in emitted:
             self._record_and_deliver(event)
 
     def _fire_trigger(
         self, trigger: Any, event: dict[str, Any],
         pending: dict[str, dict[str, float]], emitted: list[dict[str, Any]],
+        causes: dict[tuple[str, str], str] | None = None,
     ) -> None:
         """一个触发器对一条事件。**当事人从事件上取,不从这一刻的世界上猜。**
 
@@ -4961,6 +5063,7 @@ class Scheduler:
         存在的理由:一条事件落在谁头上,只有它自己说得出。拿"此刻在场的人"去猜的话,
         一件三分钟前发生的事会算在刚走进来的人头上,而没有一处会报错。
         """
+        causes = {} if causes is None else causes
         owner = self._trigger_bearer(trigger, event)
         if owner is None:
             return
@@ -4978,6 +5081,9 @@ class Scheduler:
                 return
         for name, expression in trigger.sets:
             pending.setdefault(owner, {})[name] = float(expression.evaluate(namespace))
+            # 谁让它变的 —— 投影式事实那条 delta 的 `cause`。**在这儿记**:
+            # `pending` 是一整轮攒起来的,到写入那一处已经分不出是哪条触发器了。
+            causes[(owner, name)] = f"{trigger.plugin}.{trigger.id}"
         for spec in trigger.links:
             self.apply_edge_effect(spec, namespace, event, owner)
         for spec in trigger.emits:
@@ -5125,6 +5231,10 @@ class Scheduler:
                 # 而那意味着**两个世界摇同一副骰子** —— 同名规律、同名 owner、
                 # 同一 tick 下同一个数。世界的名字本来就是这里世界的身份。
                 world_id=self.world_id or "",
+                # 投影式事实那一半:落库**之前**记下每一格的差值(设计 §9.3)。
+                # 空表时这个回调一次都不会被调用 —— 声明本身就是开关。
+                on_round=(self._record_projected_writes
+                          if self.projected_facts else None),
             )
         except Exception:  # noqa: BLE001 - 规律引擎自己挂了也不许掀翻 tick
             logger.warning("world-rules evaluation failed", exc_info=True)

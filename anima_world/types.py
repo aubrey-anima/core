@@ -90,6 +90,19 @@ class Projection:
     """economy-v4: folded from payment events. Audit = replay."""
     inventories: dict[str, dict[str, int]] = field(default_factory=dict)
     """economy-v4: holder → {item_id: qty}, folded from item_transfer/consume."""
+    plugin_facts: dict[str, dict[str, float]] = field(default_factory=dict)
+    """插件那些 `mode:"projected"` 的事实:`owner → {事实键: 值}`(3.8.0 第 2 期 2b)。
+
+    **和 `balances` 逐字同一种东西**:量表里那个数只是物化视图,真相是日志里
+    那一串 `<插件>.<事实>.delta`。搬成一个直接写的事实就丢掉了「可重放」——
+    而「你为什么只剩三块钱」的唯一答案正是那一串事件,一个直接写的余额答不出
+    这个问题,**而且它答不出来的时候不报错**。
+
+    🔴 **折叠端只有一个处理器,不是每个插件一个**(`_apply_fact_delta`):
+    事件类型按 `.delta` 结尾认,载荷里的 `owner` / `delta` 就是全部所需。
+    每个插件一个的话,一个卸掉的插件留下的那串 delta 会在下一次重放时
+    **无人认领**,而无人认领的样子是"这个数悄悄回到 0"。
+    """
     allowances: set[str] = field(default_factory=set)
     """领过见面礼的 holder。**这是"只给一次"那个一次的家。**
 

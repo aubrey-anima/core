@@ -118,8 +118,29 @@ BEARER_ALIASES = {"agent": "actor"}
 #: **为一层语法糖开一道语法,不划算** —— 那道语法正是第 1 期特意关掉的那一道。
 EDGE_FACT_SHAPES = ("number", "state", "text")
 
-#: 效果原语。第 2 期把边那三个补上;`spawn` / `destroy` 要插件声明的 kind,还欠着。
+#: 效果原语。第 2 期把边那三个补上;`spawn` / `destroy` 走动词那条路
+#: (它们编译成 affordance 的 `spawn` / `destroys_target`,见 `Verb`)。
 EFFECTS = ("set", "emit", "link", "unlink", "transfer")
+
+#: 一个事实的**真相住在哪儿**。这是第 2 期 2b 的全部内容(设计稿 §9.3)。
+#:
+#:   `stored`    —— 量表里那个数**就是**真相。默认,和第 1 期逐位相同。
+#:   `projected` —— 真相是日志里那一串 `<插件>.<事实>.delta`,
+#:                  量表里那个数只是**物化视图**。
+#:
+#: 🔴 **为什么值得多一种模式**:钱包与随身库存今天都是事件重放折出来的
+#: (`Projection.balances` / `inventories`),而搬成一个直接写的事实就**丢掉了
+#: 「可重放」** —— 「你为什么只剩三块钱」的唯一答案正是那一串 `payment` 事件。
+#: 一个直接写的余额答不出这个问题,而且它答不出来的时候不报错。
+#: 代价写死了两条:**开机要重放一遍**(内核对 `balances` 本来就在做),
+#: **规律读到的是上一轮物化的值**(和双缓冲同构)。
+FACT_MODES = ("stored", "projected")
+
+#: `projected` 这一版只收 `number`,而理由不是"还没做":**delta 是一个差值**,
+#: 而一个枚举名(`state`)或一句话(`text`)身上没有"差值"这回事 ——
+#: 「从『外门』变成『内门』」折不成一个可以相加的数。
+#: 要让一段状态可重放,它该是一串"变成了什么"的事件,那是另一种形状。
+PROJECTED_SHAPES = ("number",)
 
 #: `text` 形状将来的默认上限。这一版用不上,写在这儿是因为它已经进了契约。
 DEFAULT_TEXT_MAX_CHARS = 400
@@ -164,11 +185,22 @@ class Fact:
     #: 挂在**共用**载体上的(`actor` / `world` / `location`)照旧带 —— 那儿两个插件
     #: 各声明一个「重量」是会撞的。
     namespaced: bool = True
+    #: `stored`(默认)还是 `projected`。见 `FACT_MODES`。
+    mode: str = "stored"
 
     @property
     def qualified(self) -> str:
         """存储里那个键。见 `namespaced` —— 插件自己种类上的事实是**裸名字**。"""
         return f"{self.plugin}.{self.key}" if self.namespaced else self.key
+
+    @property
+    def projected(self) -> bool:
+        return self.mode == "projected"
+
+    @property
+    def delta_event(self) -> str:
+        """这个事实的每一次变化落成的那条事件。**只有 `projected` 的才发。**"""
+        return f"{self.plugin}.{self.key}.delta"
 
     @property
     def owner_kind(self) -> str:
@@ -933,6 +965,32 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
                "那儿存的是 `[float, tick]`)" if shape == "text" else "")
         )
 
+    mode = str(spec.get("mode") or "stored").strip()
+    if mode not in FACT_MODES:
+        errors.append(f"{label}:不认识的 mode `{mode}`;只有 {list(FACT_MODES)}")
+        mode = "stored"
+    elif mode == "projected" and shape not in PROJECTED_SHAPES:
+        errors.append(
+            f"{label}:`{shape}` 的事实做不了 `projected`,而这不是"
+            "「还没做」—— **delta 是一个差值**,而一个枚举名或一句话身上没有"
+            "「差」这回事:「从『甲』变成『乙』」折不成一个可以相加的数。"
+            f"`projected` 收的是 {list(PROJECTED_SHAPES)}"
+            "(按 `contract --json` 的 `plugins.projected_shapes` 探测)"
+        )
+        mode = "stored"
+    elif mode == "projected" and not namespaced:
+        # 挂在插件自己种类上的事实住在那个实例的量表里,而实例**会被 `destroy`
+        # 抹掉** —— 一串折向一个不存在的 owner 的 delta,重放出来的是一个没有主人
+        # 的数。要让"东西身上的量"可重放,先得回答"它没了之后那串账归谁",
+        # 而那是另一期的事。
+        errors.append(
+            f"{label}:挂在插件自己种类上的事实这一版做不了 `projected` —— "
+            "那样东西会被 `destroy` 抹掉,而一串折向一个不存在的主人的 delta,"
+            "重放出来是一个没有主人的数。挂在 `actor` / `world` / `location` "
+            "上的可以"
+        )
+        mode = "stored"
+
     bearer = str(spec.get("bearer") or "").strip()
     # 第 1 期写 `agent` 的插件要的是「今天的语义」(角色 + 玩家)—— 收紧一个刚发
     # 出去的词而不留兼容,下场是那些插件安静地少覆盖一半人。
@@ -969,7 +1027,7 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
                     default=0.0, visibility=visibility,
                     label=str(spec.get("label") or "").strip(),
                     text_default=str(spec.get("default") or ""),
-                    max_chars=max_chars, namespaced=namespaced)
+                    max_chars=max_chars, namespaced=namespaced, mode=mode)
     if shape == "state":
         raw_values = spec.get("values")
         if not isinstance(raw_values, list) or not raw_values:
@@ -1027,7 +1085,7 @@ def _parse_fact(plugin_id: str, label: str, key: str, spec: Any,
         visibility=visibility, label=str(spec.get("label") or "").strip(),
         unit=str(spec.get("unit") or "").strip(), bands=bands,
         band_notes=tuple(notes), values=tuple(values), low=low, high=high,
-        namespaced=namespaced,
+        namespaced=namespaced, mode=mode,
     )
 
 

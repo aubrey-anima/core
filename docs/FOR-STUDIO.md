@@ -3974,3 +3974,58 @@ $ anima-world plugin list --world-id w --json | jq '.plugins[] | {id, version, f
 
 **platform / player 照旧一件都不用改**(新键 `anima:{w}:edge:{type}` 是持久世界内容,
 不进 `volatile_keys`)。
+
+## 3.40 投影式事实:一个数**说得出自己是怎么来的**(3.8.0 第 2 期 2b)
+
+作者写一个「钱」「灵石」「声望」,今天有两种写法,而它们的差别不在精度上:
+
+```jsonc
+"facts": {"钱": {"bearer":"actor", "shape":"number", "mode":"projected", "default":0,
+                 "visibility":"self", "label":"钱",
+                 "bands":[[0,"身无分文"],[5,"还有几个子儿"]]}}
+```
+
+| | `stored`(默认,第 1 期那种) | `projected` |
+|---|---|---|
+| 真相在哪儿 | 量表里那个数**就是**真相 | 日志里那一串 `<插件>.<事实>.delta` |
+| 量表里那个数 | 真相 | **物化视图**(抹掉它,重开一次就折回来) |
+| 「你为什么只剩三块钱」 | **答不出来** | 那一串 delta 就是答案 |
+| 「他注销了,他的钱包呢」 | 得有人记得去删 | 折叠端折掉他那一行,重开即生效 |
+
+🔴 **这不是"更严谨"那种选项,是引擎里钱包与随身库存今天本来的样子**:它们是
+`payment` / `item_transfer` 事件折出来的(**没有 `balances` 表**),而一个直接写的
+余额丢掉了「可重放」—— **它答不出「为什么」,而且它答不出来的时候不报错。**
+
+### 作者要知道的四条
+
+1. **`mode` 只有两个值**(`contract.plugins.fact_modes`),不写 = `stored` =
+   第 1 期逐位相同。
+2. **`projected` 只收 `number`**(`projected_shapes`)。`state` / `text` 写了
+   **开不了机**,而理由不是"还没做":**delta 是一个差值**,而「从『外门』变成
+   『内门』」折不成一个可以相加的数。
+3. **挂在插件自己种类上的事实做不了 `projected`**(`projected_bearers` 里没有
+   `entity:` / `group:`):那样东西会被 `destroy` 抹掉,一串折向不存在的主人的
+   delta 重放出来是一个没有主人的数。挂在 `actor` / `world` / `location` 上的可以。
+4. **规律读到的是上一轮物化的值** —— 和双缓冲逐字同一笔账。
+
+### 事件形状(下游要读的那一份)
+
+`<插件>.<事实>.delta`,载荷 `{owner, fact, delta, cause}`
+(`contract.plugins.projected_delta_payload`)。`cause` 是「哪一条规律/触发器让它
+变的」—— **没有它,一串 delta 只是一串数字**,而这一格正是那句「你为什么只剩三块」
+的下半句。**0 不发**。
+它是一条插件命名空间的事件,所以**别的插件订得到它**(触发器的 `on.event` 写
+`purse.钱.delta`),不必进那张白名单。
+
+### 你们要接的两件
+
+1. **方言探测**:`d.get("plugins", {}).get("fact_modes")` —— **整格缺席 = 这支 core
+   只有 `stored`**(3.8.0 第 1 期及更早)。照旧 `.get` 到底。
+2. **校验器**:`mode` / `projected_shapes` / `projected_bearers` 三格全在契约里,
+   **别硬编码**。作者把 `mode:"projected"` 写在一个 `state` 上时,把引擎那句理由
+   原样印给他 —— 一句光秃秃的「不支持」会让他以为自己写错了字。
+
+**platform / player 一件都不用改**(不新增存储键,也不动任何冻结面)。
+⚠️ 一句给将来的:出厂 economy 搬成插件那一期(2d),钱包就是这一模式的第一个
+真实使用者 —— 那时 `payment` 事件与 `<插件>.<事实>.delta` **是两条并行的账**,
+怎么合并是那一期的事,别提前替作者许愿。

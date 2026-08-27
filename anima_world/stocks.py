@@ -48,8 +48,16 @@ def evaluate_due(
     emit: Callable[[dict[str, Any]], None] | None = None,
     minutes_per_tick: int = DEFAULT_MINUTES_PER_TICK,
     world_id: str = "",
+    on_round: Callable[
+        [dict[str, dict[str, float]], dict[str, dict[str, tuple[float, int]]],
+         dict[tuple[str, str], str]], None] | None = None,
 ) -> dict[str, Any]:
     """把到点的规律跑一遍。返回一份"这一轮干了什么"的小报告。
+
+    `on_round(pending, snapshots, causes)` 在**落库之前**叫一次(有东西要写才叫)。
+    它存在的理由只有一个:**投影式事实**(`plugin.FACT_MODES`)要把每一格的
+    **差值**记成一条事件,而差值只有在这一刻才同时拿得到"写之前"和"要写的"。
+    放在调用方那边算的话,它得再查一遍量表,而那一遍读到的已经是写完的值。
 
     `last_run` 由调用方持有(内存态):它只决定**要不要现在算**,不影响算出来的
     结果 —— 结果由 `dt` 决定,而 `dt` 来自量自己的 `updated_tick`。所以重启把
@@ -149,6 +157,7 @@ def evaluate_due(
     clock = clock_names(now, minutes_per_tick)
 
     pending: dict[str, dict[str, float]] = {}
+    causes: dict[tuple[str, str], str] = {}
     events: list[dict[str, Any]] = []
     for rule, owners in due:
         for owner in owners:
@@ -176,9 +185,13 @@ def evaluate_due(
                         owner, key, rule.id,
                     )
             slot.update(updates)
+            for key in updates:
+                causes[(owner, key)] = rule.id
             events.extend(fired)
 
     if pending:
+        if on_round is not None:
+            on_round(pending, snapshots, causes)
         report["written"] += store.write_round(pending, tick=now)   # 整轮一次 commit
     for event in events:
         report["emitted"] += 1

@@ -2109,6 +2109,18 @@ def build_serve_scheduler(
             persisted = event_log.replay()
             scheduler.reset_projection(persisted)   # 同一条:水位跟着挪
         scheduler.load_persisted_events(persisted)
+        # 🆕 3.8.0 第 2 期 2b:**投影式事实的物化视图,开机重建一次。**
+        #
+        # 它必须排在这儿 —— 折叠端(`reset_projection` / `Scheduler.__init__` 的
+        # 那一次重放)刚刚把那一串 delta 折完,而量表里那个数只是视图。少了这一趟,
+        # "换个进程读到的值"和"日志折出来的值"会各说各话,而两边都不报错:
+        # 跑着的世界照旧对(运行期写视图),只有**重开的那一刻**悄悄倒带。
+        # ⚠️ 它同时是 `forget_player` 的下半场:折叠端把他那一行折掉了,
+        # 视图上那个数得跟着归零,否则"他走了"这件事重开一次就自己撤销。
+        if scheduler.projected_facts:
+            restored = scheduler._materialize_projected_facts()
+            if restored:
+                logger.debug("投影式事实的物化视图重建了 %d 格", restored)
         if memory_store is not None and trigger_engine is not None:
             # ⚠️ 顺序要紧:`rebuild` 见了非空表就掉头(记忆是持久状态,重放一遍等于
             # 把她的一生按今天的触发器重新裁一遍)。所以合并进来的新人的创世记忆
@@ -3035,6 +3047,7 @@ def _install_plugins(
     scheduler._triggers_by_event = {}
     scheduler.edge_types = {}
     scheduler.verb_edge_effects = {}
+    scheduler.projected_facts = {}
     scheduler.world_rules = [
         rule for rule in scheduler.world_rules
         if rule.id not in scheduler.plugin_rule_ids
@@ -3070,6 +3083,14 @@ def _install_plugins(
     scheduler.verb_edge_effects = {
         (verb_kind_id(plugin.id, verb.target), verb.name): verb.links
         for plugin in plugins for verb in plugin.verbs.values() if verb.links
+    }
+    # 投影式事实登记 —— **存储键 → 那条 delta 事件的 type**(第 2 期 2b)。
+    # ⚠️ 它是从**这一趟真的装上的**那份声明里建的,不是从库里那几行:
+    # 一个刚被关掉的插件留下的键要是还在这张表上,它的量表被别人写一下就会
+    # 凭空多出一条没人认领的 delta。
+    scheduler.projected_facts = {
+        fact.qualified: fact.delta_event
+        for plugin in plugins for fact in plugin.facts.values() if fact.projected
     }
     # 规律接进那条已经在跑的路(`stocks.evaluate_due`)—— **不另起一个求值器**:
     # 双缓冲、节流水位、骰子、"两条规律抢同一个量"那句警告,插件一样得吃到。
@@ -6491,7 +6512,9 @@ def contract_payload() -> dict[str, Any]:
         DEFAULT_TEXT_MAX_CHARS,
         DEFERRED_SHAPES,
         EFFECTS,
+        FACT_MODES,
         FACT_SHAPES,
+        PROJECTED_SHAPES,
         KIND_PREFIXES,
         PLUGIN_ID_PATTERN,
         VERB_KEYS,
@@ -6828,6 +6851,25 @@ def contract_payload() -> dict[str, Any]:
             # 装得下什么,契约说的是**这一版引擎收不收** —— 差着 `timer` 与 `text`
             # 两种,它们写了**开不了机**并点名(理由各不相同,见 `plugins.py`)。
             "fact_shapes": list(FACT_SHAPES),
+            # 🆕 第 2 期 2b:一个事实的**真相住在哪儿**(设计稿 §9.3)。
+            # `stored` = 量表里那个数就是真相(默认,和第 1 期逐位相同)·
+            # `projected` = 真相是日志里那一串 `<插件>.<事实>.delta`,
+            # 量表里那个数只是**物化视图**。
+            # 🔴 **值得多这一种模式的理由只有一个**:一个直接写的事实丢掉了
+            # 「可重放」—— 而「你为什么只剩三块钱」的唯一答案正是那一串事件,
+            # 一个直接写的余额答不出这个问题,**而且它答不出来的时候不报错**。
+            "fact_modes": list(FACT_MODES),
+            # ⚠️ `projected` 这一版只收 `number`,而这不是"还没做":**delta 是一个
+            # 差值**,一个枚举名或一句话身上没有"差"这回事。
+            "projected_shapes": list(PROJECTED_SHAPES),
+            "projected_delta_event": "<plugin>.<fact>.delta",
+            # 载荷四格。`cause` 说的是"哪一条规律/触发器让它变的" —— 没有它,
+            # 一串 delta 只是一串数字。
+            "projected_delta_payload": ["owner", "fact", "delta", "cause"],
+            # ⚠️ **挂在插件自己种类上的事实做不了 `projected`**:那样东西会被
+            # `destroy` 抹掉,而一串折向一个不存在的主人的 delta,重放出来是一个
+            # 没有主人的数。挂在 `actor` / `world` / `location` 上的可以。
+            "projected_bearers": ["actor", "agent", "player", "world", "location"],
             # 🆕 第 2 期:**边上多收一个 `text`,而这不是偏心,是存储的形状** ——
             # 节点事实住在量表里(`[float, tick]`),边自己那一行本来就是一份 JSON。
             "edge_fact_shapes": list(EDGE_FACT_SHAPES),

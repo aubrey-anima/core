@@ -937,3 +937,119 @@ def test_契约报得出种类与动词怎么写():
     assert set(plugins["verb_effects"]) == {"link", "unlink", "transfer"}
     # `for_each` 认哪几种选择器 —— 第 2 期多了 `edge`。
     assert "edge" in plugins["rule_selectors"]
+
+
+# ── 2b:投影式事实 `mode: "projected"`(设计稿 §9.3)────────────────────────
+#
+# 钱包与随身库存今天都是**事件重放折出来的**,不是量。搬它们要先回答一个问题:
+# 一个直接写的事实**丢掉了"可重放"** —— 而「你为什么只剩三块钱」的唯一答案,
+# 正是那一串 `payment` 事件。声明了 `mode:"projected"` 的事实,存储里那个值只是
+# **物化视图**;真相是日志里那一串 `<插件>.<事实>.delta`。
+
+PURSE = {
+    "id": "purse", "version": "1.0.0", "label": "钱袋",
+    "facts": {"钱": {"bearer": "actor", "shape": "number", "mode": "projected",
+                     "default": 0.0, "visibility": "self", "label": "钱",
+                     "bands": [[0, "身无分文"], [5, "还有几个子儿"]]}},
+    "triggers": [{"id": "干活挣钱", "on": {"event": "entity_interaction"},
+                  "effects": [{"set": {"purse.钱": "purse.钱 + 3"}}]}],
+}
+_TREE = {"id": "tree", "quantities": {"树高": {"default": 1.0, "visibility": "here"}},
+         "affordances": {"照料": {"set": {"树高": "树高 + 1"}}}}
+
+
+def _purse_world(tmp_path, name="purse", plugin=None, fresh=True):
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", {
+        **BARE, "kinds": [dict(_TREE)],
+        "entities": [{"id": "tree:小树", "name": "小树", "location": "cafe"}],
+        "plugins": [dict(plugin or PURSE)],
+    })
+    return open_world_at(str(tmp_path / f"{name}.db"),
+                         world_file=path if fresh else None, force_mock_llm=True)
+
+
+def _earn(world, times=1):
+    for _ in range(times):
+        world.act("阿岚", "interact", {"target": "tree:小树", "verb": "照料"},
+                  surface="body")
+        world.tick(1)          # 触发器订的那批事件在下一 tick 才 drain
+
+
+def test_投影式事实_落的是一条delta而不是一次直写(tmp_path):
+    """**真相在日志里,存储里那个值只是视图。**
+
+    判据不是"值对不对"(直接写也对),是**日志里有没有那几条 delta** ——
+    没有它们的话,「你为什么只剩三块钱」这个问题在这个世界里没有答案。
+    """
+    with _purse_world(tmp_path) as world:
+        _earn(world, 3)
+        assert world.stocks("agent:阿岚")["purse.钱"] == 9.0
+        deltas = [e for e in world.scheduler.event_log.replay()
+                  if e.type == "purse.钱.delta"]
+        assert len(deltas) == 3, f"日志里只有 {len(deltas)} 条 delta"
+        assert [d.payload["delta"] for d in deltas] == [3.0, 3.0, 3.0]
+        assert {d.payload["owner"] for d in deltas} == {"agent:阿岚"}
+        # `cause` 说的是"哪一条规律/触发器让它变的" —— 没有它,一串 delta 只是
+        # 一串数字,而这一格正是玩家屏上那句"你为什么只剩三块"的下半句。
+        assert deltas[0].payload["cause"] == "purse.干活挣钱"
+
+
+def test_把物化视图抹掉_重开一次它从日志里长回来(tmp_path):
+    """🔴 **这条是这一期的牙。** 把重放那一半删掉,它当场变 0。
+
+    直接写的事实做不到这件事:抹掉就是抹掉了。投影式事实抹掉的只是一份缓存。
+    """
+    with _purse_world(tmp_path, name="rebuild") as world:
+        _earn(world, 3)
+        assert world.stocks("agent:阿岚")["purse.钱"] == 9.0
+        # 物化视图抹掉 —— 模拟"换了个进程 / 缓存坏了 / 有人手抖删了一行"
+        world.scheduler.stock_store.set_many(
+            "agent:阿岚", {"purse.钱": 0.0}, tick=int(world.scheduler.clock))
+    with _purse_world(tmp_path, name="rebuild", fresh=False) as world:
+        assert world.stocks("agent:阿岚")["purse.钱"] == 9.0, \
+            "重开之后没从日志折回来 —— 那这个事实根本不是投影式的"
+
+
+def test_forget_player之后_重放里不再有他那几条delta(tmp_path):
+    """和 `_apply_player_departed` 折掉关系逐字同一条:**追加一条事实,
+    折叠端认它** —— 直接删投影里那一行,下一次重放会原样把它折回来。"""
+    owner, other = "agent:player:p1", "agent:player:p2"
+    with _purse_world(tmp_path, name="forget") as world:
+        for pid, amount in (("p1", 7.0), ("p2", 4.0)):
+            world.player_move(pid, "cafe", display_name=pid)
+            who = f"agent:player:{pid}"
+            world.scheduler.record_fact_delta(who, "purse.钱", amount, cause="test")
+            world.scheduler.stock_store.set_many(who, {"purse.钱": amount}, tick=1)
+        assert world.stocks(owner)["purse.钱"] == 7.0
+        world.forget_player("p1", reason="注销")
+    with _purse_world(tmp_path, name="forget", fresh=False) as world:
+        assert world.stocks(owner).get("purse.钱", 0.0) == 0.0, \
+            "他走了,而他那几条 delta 还在往回折"
+        # **只折掉他那一行** —— 走的是一个人,不是这一格。折成全局的下场是
+        # 一次注销把所有人的钱包清零,而世界照跑、日志干净。
+        assert world.stocks(other).get("purse.钱") == 4.0, \
+            "别人的那一行跟着一起没了"
+        # ⚠️ **历史一个字没删**:那几条 delta 原样躺在日志里 —— 走的是朝前看的那一半。
+        assert len([e for e in world.scheduler.event_log.replay()
+                    if e.type == "purse.钱.delta"]) == 2, "delta 被删掉了 —— 那是伪造历史"
+
+
+def test_这一版只有number收得下projected_而且说得出为什么():
+    """`state` 与 `text` 加不出来:一个枚举名或一句话没有"差值"这回事。
+    **一句光秃秃的"不支持"会让作者以为自己写错了字。**"""
+    for shape, spec in (("state", {"shape": "state", "mode": "projected",
+                                   "values": [{"name": "甲"}, {"name": "乙"}]}),):
+        with pytest.raises(PluginError) as raised:
+            parse_plugins([{"id": "pj", "version": "1.0.0",
+                            "facts": {"x": {"bearer": "agent", **spec}}}])
+        assert any("projected" in e and "差" in e for e in raised.value.errors), \
+            raised.value.errors
+
+
+def test_契约报得出投影式事实这一格():
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    plugins = json.loads(out.stdout)["plugins"]
+    assert plugins["fact_modes"] == ["stored", "projected"]
+    assert plugins["projected_shapes"] == ["number"]
+    assert plugins["projected_delta_event"] == "<plugin>.<fact>.delta"

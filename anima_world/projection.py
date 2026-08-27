@@ -6,6 +6,13 @@ from typing import Any
 
 from anima_world.types import AgentState, Capability, Event, Projection, Relation
 
+#: 投影式插件事实的事件后缀:`<插件>.<事实>.delta`(3.8.0 第 2 期 2b)。
+#:
+#: 🔴 **折叠端认后缀,不认插件名 —— 只有一个处理器。** 每个插件各注册一个的话,
+#: 一个**卸掉的**插件留下的那串 delta 在下一次重放时无人认领,而无人认领的样子是
+#: "这个数悄悄回到 0";更糟的是它只在重放那一刻发生,跑着的世界看不出来。
+FACT_DELTA_SUFFIX = ".delta"
+
 SETTLED_INVITATIONS_KEPT = 200
 """结局记到第几份为止(`Projection.settled_invitations` 的上界)。
 
@@ -61,6 +68,8 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_agent_invites(proj, e)
     elif e.type == "invitation_settled":
         _apply_invitation_settled(proj, e)
+    elif e.type.endswith(FACT_DELTA_SUFFIX):
+        _apply_fact_delta(proj, e)
 
 
 # ── 谁在等你回答 ────────────────────────────────────────────────────────────
@@ -137,6 +146,15 @@ def _apply_player_departed(proj: Projection, e: Event) -> None:
         return
     for key in [k for k in proj.relations if player_id in k]:
         proj.relations.pop(key, None)
+    # 🆕 3.8.0 第 2 期 2b:他身上那些**投影式**插件事实也一起折掉。
+    #
+    # ⚠️ **按整个 owner 比,不按子串** —— `aubrey` 是 `aubrey-player` 的子串,
+    # 而两个人的名字长得像是常态(`RedisEdgeStore.touching` 那条同款教训)。
+    # ⚠️ **历史一个字没删**:那几条 delta 原样躺在日志里,走的是朝前看的那一半。
+    # 直接去量表里删那一行是没用的:下一次重放会原样把它折回来,世界照跑、
+    # 日志干净,而"他的钱包"一天之内自己长回来。
+    for owner in (f"agent:player:{player_id}", f"player:{player_id}", player_id):
+        proj.plugin_facts.pop(owner, None)
 
 
 # ── economy-v4: the ledger is a projection — audit = replay ────────────────
@@ -544,3 +562,28 @@ def _apply_user_message(proj: Projection, e: Event) -> None:
         "text": text,
         "ts": e.ts,
     })
+
+
+# ── 插件的投影式事实(3.8.0 第 2 期 2b)────────────────────────────────────
+
+
+def _apply_fact_delta(proj: Projection, e: Event) -> None:
+    """`<插件>.<事实>.delta` —— 一次变化。**折出来那个数才是真相。**
+
+    量表里那个值只是物化视图:抹掉它、换个进程、重开一次,这一串折一遍就回来了。
+    一个直接写的事实做不到这件事,而做不到的样子是"抹掉就是抹掉了"。
+
+    **不认识的载荷一律跳过,不猜。** 一条少了 `owner` 的 delta 折不进任何人身上,
+    而随便挑一个人正是这一层最贵的错法。
+    """
+    payload = e.payload or {}
+    owner = str(payload.get("owner") or "").strip()
+    fact = str(payload.get("fact") or "").strip()
+    if not owner or not fact:
+        return
+    try:
+        delta = float(payload.get("delta") or 0.0)
+    except (TypeError, ValueError):
+        return
+    row = proj.plugin_facts.setdefault(owner, {})
+    row[fact] = round(row.get(fact, 0.0) + delta, 6)
