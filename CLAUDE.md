@@ -124,9 +124,15 @@ pip install -e ".[dev]"
 #   `.venv/bin/pip show anima-world | sed -n 2p` 与 `.venv/bin/anima-world --version`
 
 python3.13 -m pytest -q               # fakeredis,无需真 Redis;addopts 已屏蔽 ROS 插件
-# 最近一次实跑:**1946 passed / 19 skipped / 2 failed**(2026-08-26,插件系统第 2 期
-#   2a–2c + 2d 地基,381 秒;起跑 `uptime` load **0.37**,机器基本空着)。
-#   这 **+40** 是第 2 期的判据(`test_plugins.py` +9:种类/动词/边效果/边规律/
+# 最近一次实跑:**1963 passed / 19 skipped,0 failed**(2026-08-26,插件系统第 2 期
+#   2a–2c + 2d 地基 + 三视角验收那十五条 + 裁决 ②④,382 秒;
+#   起跑 `uptime` load **0.46**、收尾 **1.38**,机器基本空着)。
+#   ⚠️ **这一趟第一次是全绿的** —— 上一趟那 2 条红是 `test_needs_plugin_parity`,
+#   当天按裁决 ② 修完了(见下)。
+#   上一趟是 **1946 / 19 / 2 failed**(同日,2a–2c 那一轮,381 秒,起跑 load 0.37);
+#   这 **+17** 是验收那十五条与裁决 ④ 各自的判据(`test_plugins.py` +17:
+#   P1 七条 + P2 三条 + `plugin list` 报得出种类边动词 + `sources` 四条)。
+#   再上一趟的 **+40** 是第 2 期的判据(`test_plugins.py` +9:种类/动词/边效果/边规律/
 #   destroy 连带/投影式事实那五条 · `test_interaction_witness_and_invites.py` +4:
 #   2c 那三条加一条"新事件到得了触发器" · `test_erase_player.py` +1:gloss 是玩家文案 ·
 #   `test_economy_plugin_parity.py` +8:2d 的旧路基线,新文件)。
