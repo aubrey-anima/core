@@ -782,7 +782,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     world_setting.add_argument(
         "--clear", action="store_true",
-        help="抹掉这个世界自己那一行,**回落到引擎内置那份**(不是变成空的);"
+        # ⚠️ 强调用「」不用 `**` —— 屏幕上 `**` 就是两个星号
+        # (`test_屏幕上不许出现裸markdown星号`,它当场逮住了这一句)。
+        help="抹掉这个世界自己那一行,「回落到引擎内置那份」(不是变成空的);"
              "不许和 --set/--set-file 一起给",
     )
     world_setting.add_argument(
@@ -6788,10 +6790,11 @@ def run_validate(args: argparse.Namespace) -> int:
         if not authored:
             # **作者层为空 = 没有种子,不是一个空种子。** 开机那条路一直这么判;
             # 这里从前不是,于是任何一份导出的世界在校验器嘴里都是非法的。
+            # 同上:强调用「」—— `validate world` 的 warnings 也会印在终端上。
             warnings.append(
                 "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
-                "装载时直接落键、不走作者层那几道闸。**状态层里开机会编译的那几张表"
-                "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了**;"
+                "装载时直接落键、不走作者层那几道闸。「状态层里开机会编译的那几张表"
+                "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了」;"
                 f"没查过的:{state.unchecked_tables() or '(无)'}"
             )
         else:
@@ -8414,10 +8417,15 @@ def run_world_check(args: argparse.Namespace) -> int:
         errors += _state_layer_ontology_errors(state_records_to_seed(state.rows))
         payload.update(_coverage_fields(state, authored=bool(authored)))
         if not authored:
+            # ⚠️ 强调用「」不用 `**`:这句话会**原样印在终端上**
+            # (`_print_check_human` 逐条打 warnings),而屏幕上 `**` 就是两个星号。
+            # `test_屏幕上不许出现裸markdown星号` 看不见这一条 —— 它只扫 `print()`
+            # 的实参与 `help=`,而这句话是先攒进列表再由别处印的,那正是它自己
+            # 写明的盲区。**它守不住的地方要靠手,这一条就是。**
             warnings.append(
                 "这份文件没有作者层(只有状态记录)—— 它是一个跑过的世界导出来的,"
-                "装载时直接落键、不走作者层那几道闸。**状态层里开机会编译的那几张表"
-                "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了**;"
+                "装载时直接落键、不走作者层那几道闸。「状态层里开机会编译的那几张表"
+                "(种类 / 实例 / 规律 / 地点 / 物品)这一趟已经查过了」;"
                 f"没查过的见 unchecked_state_tables:{state.unchecked_tables() or '(无)'}"
             )
         else:

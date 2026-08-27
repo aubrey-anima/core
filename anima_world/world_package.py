@@ -766,10 +766,14 @@ def import_world_file(
             # FOR-STUDIO §3.46 都记了。它的下游代价实测为零:运维台 v3 装载走的是
             # `--world-file`(`deploy/world-image/entrypoint.sh`),创作台一次都不调
             # `world import`。会被它拦下的调用方,今天拿到的本来就是一个空世界。
+            # ⚠️ 强调用「」不用 `**`:这句话从今天起**印在人的终端上**(CLI 把它
+            # 打到 stderr),而屏幕上 `**` 就是两个星号。上一版它只进 `logger`,
+            # 所以带着 markdown 也没人看见 —— **把一句日志升成一句人话,它的排版
+            # 规矩也跟着换了**,这一步很容易漏。
             raise PackageValidationError(
-                f"{path} **只有作者层**({'、'.join(sorted(authored))}),"
+                f"{path} 「只有作者层」({'、'.join(sorted(authored))}),"
                 f"而导入不编译它 —— 这一趟一个键都没落,`{world_id}` 仍然是一个空世界。"
-                f"⚠️ 空世界首启时装的是**内置橱窗**,不是你这份 —— 世界会照常跑起来、"
+                f"⚠️ 空世界首启时装的是「内置橱窗」,不是你这份 —— 世界会照常跑起来、"
                 f"住着橱窗里那几个人,而且一处不报错。所以这里拒绝,而不是报成成功。"
                 f"要装这份世界,别用 import,首启直接把文件指回来:`--world-file {path}`"
             )

@@ -7822,13 +7822,13 @@ class World:
                 )
             if not isinstance(text, str):
                 raise ValueError(
-                    f"世界观是**一段文本**,不是一张表(收到 {type(text).__name__})"
+                    f"世界观是「一段文本」,不是一张表(收到 {type(text).__name__})"
                     " —— 这一格从 .cyberworld 到 :prompts 再到她的提示词块,"
                     "全程是同一个字符串"
                 )
             if not text.strip():
                 raise ValueError(
-                    "拒绝把世界观写成一段空白:它是她提示词里的**第一块**,"
+                    "拒绝把世界观写成一段空白:它是她提示词里的「第一块」,"
                     "抹掉它这个世界里每个人下一句话都会变,而没有一处会报错。"
                     "真要回落到引擎内置那份,请明说 --clear"
                 )
