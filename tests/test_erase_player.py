@@ -882,3 +882,39 @@ def test_契约报得出这一格_老引擎是缺席不是null(tmp_path):
     payload = json.loads(out.stdout)
     assert payload["erasure"]["receipt_count_keys"] == list(_ERASE_COUNT_KEYS)
     assert "facts" in payload["erasure"]["receipt_count_keys"]
+
+
+def test_回执那七句是给玩家看的话_不是开发笔记():
+    """🔴 **`receipt_count_gloss` 是玩家可见文案。**
+
+    定这一格归谁,先例摆在那儿:它是**照 `blocked` / `blocked_text` 那一对**做的
+    (`__main__.contract_payload` 自己的注释这么写),而 `blocked_text` 是印在
+    玩家屏上的那一句 —— `api._BLOCKED_WORDS` 那张表旁边就钉着
+    `test_每一个挡住的理由都配了一句话`。站点那侧的纪律是**不译、有 gloss 就整排
+    用引擎原话**(player `e26a788`),所以这七句到底说人话还是说开发笔记,
+    **只有引擎改得动**。
+
+    第一版是开发笔记:`facts` 那句摘掉 markdown 之后上屏是
+    「……三档:整格缺席 = 这支引擎够不着量表 · null = 我没查成 · 0 = 我查过了…」。
+    **三档是给机器读的语义**,它的位置在 REFERENCE 与 `receipt_count_keys` 的说明里;
+    gloss 只回答一句「这一格数的是什么」。
+
+    ⚠️ **趁 platform 还没把这扇门带下来改** —— 链一通,这七句就是发出去收不回来的话。
+    """
+    from anima_world.api import _ERASE_COUNT_KEYS
+
+    out = run_cli("contract", "--json")
+    assert out.returncode == 0, out.stderr
+    gloss = json.loads(out.stdout)["erasure"]["receipt_count_gloss"]
+    assert set(gloss) == set(_ERASE_COUNT_KEYS), \
+        f"七格里有配不上话的:{sorted(set(_ERASE_COUNT_KEYS) - set(gloss))}"
+    # 上屏的是**原样这几个字**:没有一层 markdown 渲染,也没有一次翻译。
+    banned = ("*", "`", "null", "None", "缺席", "三档", "引擎", "字段", "键")
+    for key, line in gloss.items():
+        assert line.strip(), f"{key} 那一句是空的"
+        bad = [mark for mark in banned if mark in line]
+        assert not bad, f"{key}:{bad} 出现在玩家读得到的那句话里 —— {line}"
+        # 它是说给**他自己**听的(和 `blocked_text` 逐字同一个人称)。
+        # ⚠️ 剥掉 `其他` / `他人` 再查 —— 那两个词里的「他」不是在指他。
+        assert "他" not in line.replace("其他", "").replace("他人", ""), \
+            f"{key}:这句话是印给他自己看的,写「你」不写「他」 —— {line}"

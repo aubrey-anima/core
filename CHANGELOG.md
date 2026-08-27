@@ -296,6 +296,31 @@ payload 差一个字节都会红,被排除的只有"次序",而次序由线程�
   不进 `volatile_keys` → platform 那条 deepEqual 照旧绿。
 - 回执 `docs/FOR-STUDIO.md` §3.39,`docs/REFERENCE.md` §10.10。
 
+### 顺带:法务抹除回执那七句 gloss 是**玩家可见文案**,而第一版把它写成了开发笔记
+
+两条都是 player 那侧的验收逮的,记在这儿是因为**回执板只有一块**:
+
+1. **`receipt_count_gloss` 从没进过回执板**(视角 B)—— 它是第 1 期加的,而
+   `git grep receipt_count_gloss docs/` 答空,REFERENCE 那一行还停在**六**格
+   (第七格 `edges` 也没写)。**库里有而对方看不见,等于没有**,这一条这次咬的
+   是我们自己。已补 `docs/FOR-STUDIO.md` §3.33 与 `docs/REFERENCE.md` §2.9.10.1。
+2. **那七句的口吻错了**(视角 A)—— `facts` 那句摘掉 markdown 之后印在玩家
+   `/account` 屏上是「……三档:整格缺席 = 这支引擎够不着量表 · null = 我没查成 ·
+   0 = 我查过了…」,而站点按「不译」纪律**一个字改不动**。
+   **裁决:这一格是玩家文案**,先例就摆在它自己的注释里 —— 它照的是
+   `blocked` / `blocked_text` 那一对,而 `blocked_text` 就是印在玩家屏上的那一句。
+   七句改写成第二人称、无 markdown、无实现词;**「三档」那层语义留在
+   REFERENCE 与 `receipt_count_keys` 那一行**,gloss 只回答「这个数数的是什么」。
+   判据 `tests/test_erase_player.py::test_回执那七句是给玩家看的话_不是开发笔记`
+   逐句查 `*` / 反引号 / `null` / `缺席` / `三档` / 「引擎」/「字段」/「键」/ 第三人称。
+   ⚠️ **改得动是因为链还没通** —— platform 还没把这扇门带下来,当时还没有一个
+   玩家看见过旧句;链通之后改措辞就是改玩家屏。
+   ⚠️ player 的前端 fixture 逐字抄了旧句,**它这一刻是过期的**;不必单独开一轮,
+   链通那天随手刷新。
+   ⚠️ 给 platform 的一句:`receipt_count_gloss` 是 dict of str,**会被壳那道
+   按类型过滤的闸静默吃掉** —— 把它当 `dry_run` 的顶层兄弟键带下来,别塞进
+   `erasure` 那个计数 dict 里。
+
 ### 第 1 期(下半):**needs 搬成第一个出厂插件**
 
 设计稿 §9 的检验标准只有一条:**形状对不对,不看例子,看能不能把出厂的东西用同一
