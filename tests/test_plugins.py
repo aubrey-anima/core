@@ -1959,8 +1959,13 @@ def test_插件种类的实例_作者层里种得下_走的就是entities段(tmp
     ⚠️ **量名不带命名空间**(`声望`,不是 `menpai.声望`):种类上的事实住在那个
     实例自己的量表里,不和别人共用一张表。顶层 `facts` 那一族才带 —— 它们住在
     角色/世界/地点的量表上,跨插件共用一张,所以必须分得开。
-    这一条不写清楚的话,创作台的规律会照着 `menpai.声望` 写,而那个名字
-    **恒等于 0**:规律照跑、日志干净。
+
+    🔴 **上一版这里写着「照 `menpai.声望` 写规律,那个名字恒等于 0」,而那句是错的**
+    (2026-08-27 验收 C 实测、逐条敲过):**两种情形没有一种是它说的那样** ——
+    规律**读**它当场三扇门全红(「没声明过这个事实」);规律**只写**它,从前是
+    量表里并排住下 `声望` 与 `menpai.声望` 两个量(前者停在默认值、后者每 tick 在涨),
+    **而 `validate` 说绿、零 warning、日志零字**。写不到的从来不是「那个名字」,
+    是**那条规律更新了一个没人读的量**。第二种情形这一轮收了(见下一条用例)。
     """
     inst = {"id": "menpai.sect:青云门", "name": "青云门", "location": "cafe"}
     with _seeded_menpai_world(tmp_path, entities=[inst]) as world:
@@ -1972,8 +1977,8 @@ def test_插件种类的实例_作者层里种得下_走的就是entities段(tmp
         values = world.scheduler.stock_store.snapshot("menpai.sect:青云门")
         assert "声望" in values, f"种类上那个事实一格都没落地:{values}"
         assert "menpai.声望" not in values, (
-            "种类上的事实**不带命名空间** —— 带了的话创作台会照着写规律,"
-            "而那个名字恒等于 0"
+            "种类上的事实**不带命名空间** —— 而带了命名空间的那个名字不是"
+            "「恒等于 0」,是**另一个量**(下一条用例钉它)"
         )
         # 那条边真的连得上这个实例(**契约里那格节点 id 形状,拿它真跑一遍**)。
         assert world.scheduler.apply_edge_effect(
@@ -1983,6 +1988,105 @@ def test_插件种类的实例_作者层里种得下_走的就是entities段(tmp
             ("agent:阿岚", "menpai.sect:青云门", {"menpai.辈分": 0.0})
         ]
 
+
+
+def test_插件的规律写一个没声明过的事实_当场拒_而不是并排多一个量(tmp_path):
+    """🔴 **验收 C 逮的那一条,而它是这一族最贵的形状:两个量并排住着。**
+
+    种类上声明的事实量名是**裸的**(`声望`),而作者很自然会照顶层那一族的样子
+    写成 `menpai.声望`。从前:`bad_output_name` 只查前缀,`menpai.<任何字>` 一律放行
+    —— 于是那张量表里并排住下两个量,`声望` 停在默认值没人更新、`menpai.声望`
+    每 tick 在涨而**没有一处读它**;`validate` 说绿、零 warning、日志零字,
+    而 `rule_stats()` 报的是 written。作者看到的只有「我的声望不动」。
+
+    ⚠️ **触发器那一层早就这么查了** —— 所以这不是加一道新闸,是把**同一个插件里
+    两种写法的两种下场**抹平。
+
+    **真跑若干 tick**,不是只看创世那一刻:上一版那条用例只断了创世,而这个 bug
+    要等规律跑起来才现形。
+    """
+    seed = {**BARE, "entities": [{"id": "menpai.sect:青云门", "name": "青云门",
+                                  "location": "cafe"}]}
+    ghost = {
+        "id": "menpai", "version": "1.0.0",
+        "kinds": {"group:sect": {"gloss": "一个门派", "facts": {
+            "声望": {"shape": "number", "default": 0.0, "visibility": "public"}}}},
+        "rules": [{"id": "涨", "for_each": {"kind": "menpai.sect"},
+                   "set": {"menpai.声望": "now"}}],   # 只写不读 —— 从前一路绿到底
+    }
+    path = write_seed_file(tmp_path / "ghost.cyberworld", {**seed, "plugins": [ghost]})
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is False, (
+        "这条规律更新的是一个没人读的量,而两扇门说绿 —— 那正是这个 bug 的样子"
+    )
+    joined = "\n".join(payload["errors"])
+    assert "声望" in joined and "bearer" in joined, joined
+    with pytest.raises(Exception):      # noqa: B017 - 开机那一侧同一句话
+        open_world_at(str(tmp_path / "ghost.db"), world_file=path,
+                      force_mock_llm=True).close()
+
+    # **第二种写法是对的,而且真跑得动**:顶层 `facts` + `bearer: entity:<种类>`,
+    # 名字就带上命名空间了。⚠️ 这一条是给作者的替代写法,所以必须真敲。
+    ok = {
+        "id": "menpai", "version": "1.0.0",
+        "kinds": {"group:sect": {"gloss": "一个门派", "facts": {
+            "声望": {"shape": "number", "default": 0.0, "visibility": "public"}}}},
+        "facts": {"香火": {"bearer": "entity:menpai.sect", "shape": "number",
+                           "default": 0.0, "visibility": "public"}},
+        "rules": [{"id": "涨", "for_each": {"kind": "menpai.sect"},
+                   "set": {"menpai.香火": "menpai.香火 + 1"}}],
+    }
+    good = write_seed_file(tmp_path / "ok.cyberworld", {**seed, "plugins": [ok]})
+    assert json.loads(
+        run_cli("validate", "world", str(good), "--json").stdout)["valid"] is True
+    with open_world_at(str(tmp_path / "ok.db"), world_file=good,
+                       force_mock_llm=True) as world:
+        world.tick(3)
+        values = world.scheduler.stock_store.snapshot("menpai.sect:青云门")
+        assert values["menpai.香火"][0] == 3.0, values
+        assert values["声望"][0] == 0.0, "种类上那个事实照旧是裸名,谁也没动它"
+
+
+def test_插件没装上时_那句引用不到要说清是连带的(tmp_path):
+    """🔴 **一句字面上为真、而把人指向错误方向的报错**(2026-08-27 验收 C)。
+
+    插件坏了 → 它声明的种类一行都没编译出来 → 实例那条 `entity` 记录收到一句
+    「引用不到 —— 没有名叫 'menpai.sect' 的 kind」。那句话是真的,可作者会去改
+    实例、改种类名,而错在别处。**只加一句说清因果,不去猜哪几条是连带的** ——
+    猜错了比不猜更贵:把一条真错说成连带的,作者就再也不会去看它了。
+    """
+    seed = {
+        **BARE,
+        "kinds": [{"id": "tree",
+                   "quantities": {"树高": {"default": 1.0, "visibility": "here"}}}],
+        "entities": [{"id": "menpai.sect:青云门", "name": "青云门",
+                      "location": "cafe"}],
+        "plugins": [{
+            "id": "menpai", "version": "1.0.0",
+            "kinds": {"group:sect": {"gloss": "一个门派"}},
+            "rules": [{"id": "涨", "for_each": {"kind": "menpai.sect"},
+                       "set": {"别人.声望": "1"}}],       # 越界写:整条插件装不上
+        }],
+    }
+    path = write_seed_file(tmp_path / "cascade.cyberworld", seed)
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is False
+    joined = "\n".join(payload["errors"])
+    assert "没有名叫 'menpai.sect'" in joined, joined      # 那句误导话还在(它是真的)
+    assert "连带" in joined and "先修插件那几条" in joined, (
+        f"没告诉作者这几条是连带的,他会去改一个没错的地方:{payload['errors']}"
+    )
+    # **对照组:插件是好的时候,这句话不许响** —— 一句总在响的提示等于没有提示。
+    good = dict(seed)
+    good["plugins"] = [{
+        "id": "menpai", "version": "1.0.0",
+        "kinds": {"group:sect": {"gloss": "一个门派"}},
+    }]
+    ok_path = write_seed_file(tmp_path / "cascade-ok.cyberworld", good)
+    ok_payload = json.loads(
+        run_cli("validate", "world", str(ok_path), "--json").stdout)
+    assert ok_payload["valid"] is True, ok_payload["errors"]
+    assert not any("连带" in e for e in ok_payload["errors"])
 
 def test_一条边_作者层里种不下_而且报错会说它认得哪几个段(tmp_path):
     """**(a) 不能。** 作者层十三个段里没有边 —— 写一条 `type: "edge"` 的记录是
@@ -2070,6 +2174,30 @@ def test_声明了一种边而没人造得出它_引擎会说话(tmp_path):
     assert _authored_uncreatable_edges({"plugins": [dict(MENPAI_SEED)]}) == [], (
         "有动词造得出它,这句话就不该响"
     )
+    # 🔴 **`transfer` 不算造得出**(2026-08-27 验收 A):`apply_edge_effect` 的
+    # `transfer` 那一支是 `of_src` **把已有的行搬个家** —— 空表上一行都取不到、
+    # 当场返回 False。一个只有 `transfer` 动词的插件,边表**永远**是空的,
+    # 而上一版把它算成造法,于是这句警告对它**恰好不响**:
+    # 一条在最该响的时候闭嘴的警告,比没有这条警告更坏。
+    only_transfer = dict(MENPAI_SEED)
+    only_transfer["verbs"] = {"改投": {
+        "target": "group:sect", "description": "改投别的门派",
+        "effects": [{"transfer": {"type": "menpai.member_of",
+                                  "from": "self", "to": "target"}}]}}
+    said = _authored_uncreatable_edges({"plugins": [only_transfer]})
+    assert said and "menpai.member_of" in said[0], (
+        f"只有 transfer 的插件边表永远是空的,而这句话没响:{said}"
+    )
+    # 而它**真的**搬不动一张空表 —— 判据不是读代码推的。
+    with _seeded_menpai_world(tmp_path, name="mv") as world:
+        assert world.scheduler.edge_store.all("menpai.member_of") == []
+        assert world.scheduler.apply_edge_effect(
+            {"op": "transfer", "type": "menpai.member_of",
+             "from": "agent:阿岚", "to": "menpai.sect:青云门"}, {}) is False
+        assert world.scheduler.edge_store.all("menpai.member_of") == [], (
+            "空表上的 transfer 居然造出了一条边 —— 那这条规矩整个要重写"
+        )
+
     # 触发器那条路也算数(动词不是唯一的造法)。
     by_trigger = dict(MENPAI_SEED)
     by_trigger["verbs"] = {}
@@ -2150,9 +2278,17 @@ def test_契约说得出触发器从哪一格取人_而且那张表是全的():
     反向闸:`for_each.node` 收的那几种形式,`trigger_bearer_keys` 必须一种都不少 ——
     加一种 bearer 而忘了报,消费方就只能去猜,而猜错不报错。
     """
+    from anima_world.plugins import TRIGGER_BEARER_FORMS
+
     seg = json.loads(run_cli("contract", "--json").stdout)["plugins"]
     table = seg["trigger_bearer_keys"]
-    assert set(table) == {"agent", "world", "location", "entity:<kind>"}, sorted(table)
+    # 🔴 **和引擎自己那份受理名单逐格比,别写死一个字面量**(2026-08-27 验收 A:
+    # 上一版断的是四元集合字面量,而 A 把 `actor`/`player` 加进受理集合、契约不动,
+    # **它照样绿** —— 一条自称反向闸而其实两头都不看的断言)。
+    assert set(table) == set(TRIGGER_BEARER_FORMS), (
+        f"契约那一格和引擎真受理的对不上 —— 契约 {sorted(table)};"
+        f"引擎 {list(TRIGGER_BEARER_FORMS)}"
+    )
     assert "who" in table["agent"], table["agent"]
     assert "loc" in table["location"], table["location"]
     assert seg["trigger_bearer_gloss"].strip(), "光有表没有那句话,读的人会以为 parties 也算"

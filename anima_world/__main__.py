@@ -947,7 +947,11 @@ def _authored_with_plugin_kinds(authored: dict[str, Any]) -> dict[str, Any]:
     try:
         plugins = order_plugins(parse_plugins(entries))
         rows = compile_kind_rows(plugins)
-    except (PluginError, Exception):  # noqa: BLE001 - 坏插件归 world_plugin_errors 报
+    # ⚠️ **只吞 `PluginError`**(2026-08-27 验收 A):`(PluginError, Exception)` 里
+    # 第一项是多余的,而第二项会连**将来的**真 bug 一起吞掉 —— 而这个函数是
+    # 离线两扇门与开机共用的那一段,吞在这儿的下场是「什么都没查的绿灯」。
+    # 坏插件那一族照旧由 `world_plugin_errors` 逐条报,不在这儿说第二遍。
+    except PluginError:
         return authored
     if not rows:
         return authored
@@ -2975,7 +2979,7 @@ def _authored_uncreatable_edges(authored: dict[str, Any] | None) -> list[str]:
 
     try:
         plugins = order_plugins(parse_plugins(entries))
-    except (PluginError, Exception):  # noqa: BLE001 - 坏插件归 world_plugin_errors 报
+    except PluginError:      # 坏插件归 `world_plugin_errors` 逐条报,这儿闭嘴
         return []
     idle = uncreatable_edges(plugins)
     if not idle:
@@ -6684,6 +6688,7 @@ def _authored_ontology_errors(
     from anima_world.ontology import OntologyError
     from anima_world.rules import RuleError
 
+    broken = _plugins_did_not_compile(authored)
     authored = _authored_with_plugin_kinds(authored)
 
     if not (authored.get("kinds") or []):
@@ -6695,10 +6700,46 @@ def _authored_ontology_errors(
     try:
         _precheck_ontology(authored, empty, empty, None, None)
     except (OntologyError, RuleError) as exc:
-        return list(getattr(exc, "errors", None) or [str(exc)])
+        return _with_plugin_cascade_note(
+            list(getattr(exc, "errors", None) or [str(exc)]), broken)
     except Exception as exc:  # noqa: BLE001 - 坏声明的形状很多,一律当成一条错报出去
-        return [str(exc)]
+        return _with_plugin_cascade_note([str(exc)], broken)
     return []
+
+
+def _plugins_did_not_compile(authored: dict[str, Any] | None) -> bool:
+    """这份作者层里有插件,而它们**这一轮一条都没装上**吗?"""
+    entries = (authored or {}).get("plugins")
+    if not entries:
+        return False
+    from anima_world.plugins import PluginError, order_plugins, parse_plugins
+
+    try:
+        order_plugins(parse_plugins(entries))
+    except PluginError:
+        return True
+    return False
+
+
+def _with_plugin_cascade_note(errors: list[str], broken: bool) -> list[str]:
+    """🔴 **插件没装上时,本体那一摞多半是连带的**(2026-08-27 验收 C 挑出来的)。
+
+    一份插件坏了的文件里,它声明的种类**一行都没编译出来**(`_authored_with_plugin_kinds`
+    在坏插件面前一声不吭地掉头,那是有意的:错由 `world_plugin_errors` 逐条报,
+    在那儿再报一遍就是同一件事两个说法)。于是实例那条 `entity` 记录会收到一句
+    **「引用不到 —— 没有名叫 'menpai.sect' 的 kind」**:那句话字面上是真的,
+    可它把作者指向一个**没错的地方** —— 他会去改实例、改种类名,而错在别处。
+
+    **只加一句,不去猜哪几条是连带的**:猜错了比不猜更贵(把一条真错说成连带的,
+    作者就再也不会去看它了)。
+    """
+    if not (errors and broken):
+        return errors
+    return errors + [
+        "⚠️ 上面这几条多半是**连带的**:这份文件里的插件这一轮**一条都没装上**"
+        "(它自己的错另有几条,和这一摞印在一起),而插件声明的种类要装上了才存在 ——"
+        "所以「引用不到某个 kind」多半不是实例写错了。**先修插件那几条,再回头看这里。**"
+    ]
 
 
 def _state_layer_ontology_errors(state_seed: dict[str, Any]) -> list[str]:

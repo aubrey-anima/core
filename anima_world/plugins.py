@@ -666,6 +666,33 @@ def _parse_one(
                 )
         if rule.selector_kind != "edge":
             errors.extend(_undeclared_reads(where, rule.reads(), plugin_id, allowed))
+            # 🔴 **写的那一半从前没人查**(2026-08-27 验收 C 实测)。
+            #
+            # `bad_output_name` 只查了前缀:`menpai.<任何字>` 一律放行。于是一条
+            # **只写不读**的规律写下 `menpai.声望`(而这个插件的种类上那个事实
+            # 其实叫裸名 `声望`)—— **`validate` 说绿、零 warning、日志零字**,
+            # 而那张量表里并排住下两个量:`声望` 停在默认值没人更新,
+            # `menpai.声望` 每 tick 在涨而没有一处读它。
+            # 作者看到的只有「我的声望不动」,而 `rule_stats()` 报的是 written。
+            #
+            # ⚠️ **触发器那一层早就这么查了**(`_parse_trigger` 的 `set` 那一支),
+            # 所以这不是加一道新闸,是把**同一个插件里两种写法的两种下场**抹平 ——
+            # 一条 `set` 写在触发器里当场拒、写在规律里静默丢,作者读不出为什么。
+            for name in rule.outputs:
+                local = name[len(plugin_id) + 1:] \
+                    if name.startswith(f"{plugin_id}.") else name
+                if local in facts:
+                    continue
+                errors.append(
+                    f"{where}.set.{name}:这个插件的顶层 `facts` 里没有 `{local}`;"
+                    f"声明过的是 {sorted(facts)}。"
+                    "⚠️ **种类上声明的事实(`kinds.<…>.facts`)量名是裸的,"
+                    "规律写不到它** —— 要让规律改一个挂在这种东西身上的量,"
+                    f"把它声明成顶层 `facts` 并写 `\"bearer\": \"entity:{plugin_id}."
+                    "<你的种类>\"`,名字就带上命名空间了。"
+                    "放行的下场是安静的:那张量表里会并排住下两个量,"
+                    "规律更新的是没人读的那一个"
+                )
             continue
         # 🆕 第 2 期:`for_each: {"edge": …}`。**两道闸和节点那一层不是同一道**,
         # 因为读写的对象换了:读得到的是 `edge.*` / `src.*` / `dst.*`,
@@ -766,6 +793,16 @@ _KIND_LOCAL = re.compile(KIND_LOCAL_PATTERN)
 from anima_world.rules import (  # noqa: E402
     EMIT_KEYS, EMIT_REQUIRED_KEYS, RULE_EVERY_KEYS, RULE_KEYS,
 )
+
+#: 触发器的 `for_each.node` **真受理的那几种**。⚠️ 和 `BEARER_FORMS`(事实挂在谁
+#: 身上,六个词)**不是一张表**:这一层收四种,`actor` / `player` 当场拒。
+#: 两张表混用过一轮,下场是报错里点着自己拒的取值。
+TRIGGER_BEARER_NODES = ("agent", "world", "location")
+TRIGGER_BEARER_PREFIXES = ("entity:",)
+#: 上面两张表拼出来的**对外形状**,契约那一格(`plugins.trigger_bearer_keys`)的键集
+#: 必须和它逐格相等 —— 闸在 `tests/test_plugins.py`,加一种而忘了报,当场红。
+TRIGGER_BEARER_FORMS = (*TRIGGER_BEARER_NODES,
+                        *(f"{prefix}<kind>" for prefix in TRIGGER_BEARER_PREFIXES))
 
 #: 一条触发器里写得到的键;`id` / `on` / `effects` 三个必填。
 TRIGGER_KEYS = ("id", "on", "for_each", "when", "effects")
@@ -1090,10 +1127,16 @@ def uncreatable_edges(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
     而那张边表永远是 0 条,提示词里一个字都不会出现,`plugin list` 上也看不出
     "它本来就造不出来"和"还没有人入门"的差别。
 
-    判得动的理由很具体:**一条边只连得动声明它的那个插件自己的
-    `link` / `transfer`**(`_parse_link_effect` 那道闸),所以不必去猜别的插件会不会
-    来造它 —— 数自己这一份就够。
-    ⚠️ **`unlink` 不算造得出**:断一条不存在的边是空操作。
+    判得动的理由很具体:**一条边只连得动声明它的那个插件自己的**那几条效果
+    (`_parse_link_effect` 那道闸),所以不必去猜别的插件会不会来造它 ——
+    数自己这一份就够。
+
+    🔴 **只有 `link` 算「造得出」,`transfer` 和 `unlink` 都不算**(2026-08-27
+    验收 A 挑出来的,而它挑对了):`Scheduler.apply_edge_effect` 的 `transfer` 那一支
+    是 `of_src`(或 `of_dst`)**把已有的行搬个家** —— 空表上它一行都取不到,当场
+    返回 False。**一个只有 `transfer` 动词的插件,边表永远是空的**,而上一版把
+    `transfer` 也算成造法,于是这句警告对它**恰好不响** —— 一条在最该响的时候
+    闭嘴的警告,比没有这条警告更坏。`unlink` 同理:断一条不存在的边是空操作。
     ⚠️ **出厂插件不进这一趟**(离线那一侧手上只有作者层):`invitation` 那条边是
     内核直接物化的,没有任何动词造它 —— 拿这条规矩去量它会得到一句假警报。
     """
@@ -1103,7 +1146,7 @@ def uncreatable_edges(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
             str(spec.get("type") or "")
             for source in (*plugin.verbs.values(), *plugin.triggers)
             for spec in getattr(source, "links", ())
-            if spec.get("op") in ("link", "transfer")
+            if spec.get("op") == "link"      # ⚠️ transfer 只搬已有的行,见上
         }
         idle = sorted(edge.qualified for edge in plugin.edges.values()
                       if edge.qualified not in made)
@@ -1538,8 +1581,15 @@ def _parse_trigger(
 
     bearer = str(((spec.get("for_each") or {}) or {}).get("node") or "agent").strip() \
         if isinstance(spec.get("for_each"), dict) else "agent"
-    if bearer not in ("agent", "world", "location") and not bearer.startswith("entity:"):
-        errors.append(f"{label}.for_each.node:不认识的 `{bearer}`;{list(BEARER_FORMS)}")
+    # 🔴 **报错要印它真受理的那几个,不是 `BEARER_FORMS`**(2026-08-27 验收 A):
+    # 那张表有六个词,而这一层只收四种 —— 上一版把 `actor` / `player` 一起印了出去,
+    # 而它俩**正是这一层当场拒的**。一句点名了自己拒的取值的报错,会让作者照着它
+    # 再写一遍,再被拒一次。
+    if bearer not in TRIGGER_BEARER_NODES \
+            and not bearer.startswith(TRIGGER_BEARER_PREFIXES):
+        errors.append(f"{label}.for_each.node:不认识的 `{bearer}`;"
+                      f"这一层收的是 {list(TRIGGER_BEARER_FORMS)}"
+                      "(问 `contract --json` 的 `plugins.trigger_bearer_keys`)")
 
     conditions: list[Expression] = []
     raw_when = spec.get("when") or []

@@ -958,6 +958,12 @@ _PLUGIN_REJECTIONS: tuple[tuple[str, list, str], ...] = (
     ("动词的target指着一个这个世界里没有的种类",
      [_qi(verbs={"贴": {"target": "fu", "description": "把符贴上去"}})],
      "这个世界里没有这个种类"),
+    # 🔴 2026-08-27 验收 C 逮的:**只写不读**的那一支从前一路绿到底,
+    # 而放行的样子是量表里并排住下两个量,规律更新的是没人读的那一个。
+    ("规律写一个没声明过的事实",
+     [_qi(rules=[{"id": "涨", "for_each": {"kind": "agent"},
+                  "set": {"qi.没这个": "now"}}])],
+     "顶层 `facts` 里没有"),
 )
 
 
@@ -1073,6 +1079,9 @@ def test_编辑包里的插件_动词借世界里已有的种类_三扇门说同
         f"开机:{boot_errors}"
     )
     assert check_errors == errors, "两扇门自己先分叉了"
+    # **只断"两边一致"的话,两扇门一起答错还是绿的**(这个文件开头那条纪律)——
+    # 所以还要断它一致到哪一句上,而那一句正是这条用例 docstring 讲的那道闸。
+    assert any("这个世界里没有这个种类" in e for e in errors), errors
 
     # 后半截:把那个种类在同一份文件里再声明一遍,三扇门一起放行。
     both = _write(tmp_path / "edit-with-kind.cyberworld",
