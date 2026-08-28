@@ -2447,12 +2447,13 @@ class RedisOntologyStore:
     **读的时候**当场报错,不流到运行期。
     """
 
-    __slots__ = ("_kinds", "_entities", "_redis", "_rev_key", "_seq_key")
+    __slots__ = ("_kinds", "_entities", "_redis", "_rev_key", "_seq_key", "_world")
 
     def __init__(self, redis: Any, world_id: str) -> None:
         self._kinds = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:kinds")
         self._entities = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:entities")
         self._redis = redis
+        self._world = world_id
         # 实例表改过几次。**别用行数当版本** —— 一生一灭净变化是 0,而那正是
         # 世界跑起来之后最常见的一对。别的进程于是永远看不到这次更替。
         self._rev_key = f"{KEY_PREFIX}:{world_id}:entities_rev"
@@ -2531,11 +2532,29 @@ class RedisOntologyStore:
         rows = self._entities.all()
         return [rows[k]["definition"] for k in sorted(rows)]
 
-    def load(self, *, rules: Any = (), locations: Any = (), items: Any = ()) -> Any:
+    def _plugin_namespaces(self) -> tuple[str, ...]:
+        """这个世界此刻装着哪几个插件的 id —— **给本体那一层认名字用**。
+
+        🔴 **它必须从库里读,不能从"这次开机手上那份文件"读**(3.8.0,第三波 A3):
+        本体是**每次开机重新解析**的(`load()`),而一个从 `--world-file` 建起来的
+        世界,下一次开机手上没有那份文件。判据要是来自文件,同一份声明
+        **第一天绿、第二天红** —— 而世界会在第二天打不开。
+        ⚠️ 这一层只回答"这个命名空间有主吗";"那个事实声明没声明"归插件层判。
+        """
+        return tuple(RedisPluginStore(self._redis, self._world).all())
+
+    def load(self, *, rules: Any = (), locations: Any = (), items: Any = (),
+             namespaces: Any = ()) -> Any:
         """读 + 编译 + 解析全部引用。坏了当场 `OntologyError`。"""
         from anima_world.ontology import parse_entities, parse_kinds, resolve
 
-        kinds = parse_kinds(self.kind_definitions())
+        kinds = parse_kinds(
+            self.kind_definitions(),
+            # **库里那份 + 调用方手上那份**:创世那一趟插件还没装进库(装在本体
+            # 之后),只认库里那份的话,带插件的新世界第一次开机会被判成
+            # 「没有哪个插件叫 qi」,而第二次开机又好了 —— 同一份声明两天两个答案。
+            namespaces=(*self._plugin_namespaces(), *namespaces),
+        )
         entities = parse_entities(self.entity_definitions(), kinds)
         return resolve(kinds, entities, rules=rules, locations=locations, items=items)
 
@@ -2543,7 +2562,8 @@ class RedisOntologyStore:
         """运行期种一棵树。**种类照样要解析得到** —— 新实例不是绕过本体的后门。"""
         from anima_world.ontology import parse_entities, parse_kinds
 
-        kinds = parse_kinds(self.kind_definitions())
+        kinds = parse_kinds(self.kind_definitions(),
+                            namespaces=self._plugin_namespaces())
         entity = parse_entities([entry], kinds)[str(entry.get("id")).strip()]
         self._entities.put(entity.id, {"definition": entry, "updated_at": stamp})
         self._redis.incr(self._rev_key)

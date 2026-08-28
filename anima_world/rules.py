@@ -398,6 +398,20 @@ def _parse_one(rule_id: str, label: str, entry: dict[str, Any],
             importance = _parse_importance(emit_label, spec, errors)
             text = _parse_memory_text(emit_label, spec, errors)
             on = _parse_edge(emit_label, spec.get("on"), errors)
+            # 🆕 **形状先说,别让它掉进"表达式是空的"那句话里**(2026-08-28 第三波 C1)。
+            #
+            # `emit.when` 是**一句**门槛表达式(边沿触发就靠它跨没跨过去),
+            # 而规律自己的 `when` 是**一列**。作者把两者写混时,从前拿到的是
+            # 「表达式是空的」—— 那句话在说一个**他没写错的地方**(他明明写了内容),
+            # 于是他会去改表达式本身。**一句指错病灶的报错,和没有报错一样贵。**
+            if isinstance(spec.get("when"), (list, tuple)):
+                errors.append(
+                    f"{emit_label}.when:要写成**一句**表达式(字符串),收到一个列表 ——"
+                    "一列条件那种写法是**规律自己的** `when`(它和 `set` 平级);"
+                    "`emit.when` 是这条事件的门槛,边沿触发就看它跨没跨过去。"
+                    "要写好几个条件,用 `and` 连成一句"
+                )
+                continue
             try:
                 emits.append(Emit(when=compile_expression(spec.get("when"), dice=True),
                                   type=event_type, payload=dict(payload),

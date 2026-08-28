@@ -563,7 +563,7 @@ def owner_kind(owner: str) -> str:
 # ── 加载:第一阶段(读声明,建符号表) ─────────────────────────────────────────
 
 
-def parse_kinds(entries: Any) -> dict[str, Kind]:
+def parse_kinds(entries: Any, *, namespaces: Iterable[str] = ()) -> dict[str, Kind]:
     """把 JSON 里的种类声明编译成符号表。**任何一条坏了就整体拒绝。**
 
     和 `parse_rules` 同一条理由:本体是这个世界"有什么"的定义,少一条不是"少一点
@@ -643,7 +643,8 @@ def parse_kinds(entries: Any) -> dict[str, Kind]:
     if "agent" in raw_by_id:
         try:
             actor_quantities = dict(
-                _parse_one_kind("agent", raw_by_id["agent"], None, {}).quantities
+                _parse_one_kind("agent", raw_by_id["agent"], None, {},
+                                namespaces).quantities
             )
         except OntologyError as exc:
             errors.extend(exc.errors)
@@ -654,7 +655,7 @@ def parse_kinds(entries: Any) -> dict[str, Kind]:
         try:
             kinds[kind_id] = _parse_one_kind(
                 kind_id, raw_by_id[kind_id],
-                kinds.get(parents.get(kind_id, "")), actor_quantities,
+                kinds.get(parents.get(kind_id, "")), actor_quantities, namespaces
             )
         except OntologyError as exc:
             errors.extend(exc.errors)
@@ -773,6 +774,7 @@ def _parse_one_kind(
     entry: dict[str, Any],
     parent: Kind | None,
     actor_quantities: Mapping[str, Quantity],
+    namespaces: Iterable[str] = (),
 ) -> Kind:
     label = f"kinds ({kind_id})"
     errors: list[str] = []
@@ -816,7 +818,7 @@ def _parse_one_kind(
                     )
                     continue
                 affordance, affordance_errors = _parse_affordance(
-                    label, name, spec, quantities, actor_quantities
+                    label, name, spec, quantities, actor_quantities, namespaces
                 )
                 errors.extend(affordance_errors)
                 if affordance is not None:
@@ -847,12 +849,45 @@ def _parse_one_kind(
     )
 
 
+def _owned_by_plugin(name: str, namespaces: Iterable[str]) -> bool:
+    """这个名字是不是**这个世界里真装着的某个插件**的事实(3.8.0,第三波 A2/A3)。
+
+    🔴 **只认形状是不够的**(上一轮就是只认形状,而那放开了两件事):
+    ① 一个**没有插件**的世界里,作者层的 `set: {"qi.灵力": …}` 从此一路绿到底 ——
+       而那个量没有一处声明过,写下去就是量表里凭空多一个没人读的数;
+    ② 一个动词写 `me_qi.灵力` 而 `qi` 这个插件**根本不存在**,开机绿、
+       运行期每一次 `ok: False` —— 作者拿到的是「开机绿、动词永远调不动」。
+    所以判据是**这个命名空间在这个世界里有人声明过**;有人声明过之后,
+    「那个事实存不存在」才轮到插件层去判(它手上有声明,这一层没有)。
+    """
+    if not namespaced_output(name):
+        return False
+    return name.split(".", 1)[0] in set(namespaces or ())
+
+
+def _no_such_plugin(name: str, namespaces: Iterable[str]) -> str:
+    """长得像插件事实、而没有哪个插件认领它 —— **说这句话,别说作者层那句**。
+
+    作者层那句(「写不到别的实体身上……跨实体的相互作用 v1 还表达不了」)说的是
+    规律的扇入,和插件一点关系都没有;照它去改的是一条没错的行(第二波 ⑥)。
+    """
+    owner = name.split(".", 1)[0]
+    known = sorted(set(namespaces or ()))
+    return (
+        f"`{name}` 看着像一个插件的事实,而**这个世界里没有哪个插件叫 `{owner}`** —— "
+        f"装着的是 {known or '(一个都没有)'}。"
+        "写下去它会在这个 owner 名下建一个带 `.` 的怪名字,而没有一处读它。"
+        "要用插件的事实,先让那个插件进这个世界(作者层的 `plugin` 段)"
+    )
+
+
 def _parse_affordance(
     label: str,
     verb: str,
     spec: Any,
     quantities: Mapping[str, Quantity],
     actor_quantities: Mapping[str, Quantity] = {},
+    namespaces: Iterable[str] = (),
 ) -> tuple[Affordance | None, list[str]]:
     """编译一个能力的效果。**写得到的量必须是声明过的** —— 两边都是。
 
@@ -951,11 +986,15 @@ def _parse_affordance(
         # 「施法耗灵力」写不出来,而拒绝语指着一个完全不相干的病灶。
         # ⚠️ **这一层只认形状,不认名单**:那个插件在不在、那个事实声明没声明,
         # 由 `plugins._parse_verb` 判 —— 只有那儿两份声明都在手上。
-        if namespaced_output(name):
+        if _owned_by_plugin(name, namespaces):
             try:
                 outputs[name] = compile_expression(source)
             except ExpressionError as exc:
                 errors.append(f"{label}.affordances.{verb}.set.{name}:{exc}")
+            continue
+        if namespaced_output(name):
+            errors.append(f"{label}.affordances.{verb}.set.{name}:"
+                          f"{_no_such_plugin(name, namespaces)}")
             continue
         problem = bad_output_name(name)
         if problem:
@@ -991,11 +1030,15 @@ def _parse_affordance(
         raw_costs = {}
     for key, source in raw_costs.items():
         name = str(key).strip()
-        if namespaced_output(name):     # 同上:有主的名字,主是插件层
+        if _owned_by_plugin(name, namespaces):   # 同上:有主的名字,主是插件层
             try:
                 charges[name] = compile_expression(source)
             except ExpressionError as exc:
                 errors.append(f"{label}.affordances.{verb}.costs.{name}:{exc}")
+            continue
+        if namespaced_output(name):
+            errors.append(f"{label}.affordances.{verb}.costs.{name}:"
+                          f"{_no_such_plugin(name, namespaces)}")
             continue
         problem = bad_output_name(name)
         if problem:
@@ -1106,11 +1149,11 @@ def _parse_affordance(
                     # 有主的名字这一层不判(和 `set` / `costs` 那两处同一条):
                     # 它是某个插件的事实,而"那个插件在不在、声明没声明"只有
                     # 插件层答得出。这一层判它 = 拿一张查不到它的表去判,恒为假红。
-                    if namespaced_output(bare):
+                    if _owned_by_plugin(bare, namespaces):
                         continue
                     if bare not in actor_quantities:
                         mine.append(name)
-                elif namespaced_output(name):
+                elif _owned_by_plugin(name, namespaces):
                     continue
                 elif name not in quantities:
                     theirs.append(name)
@@ -1124,6 +1167,16 @@ def _parse_affordance(
             f"读到的会恒为 0,于是这个能力静默地永远做同一件事。"
             f"声明过的是 {sorted(quantities)}"
         )
+    fake = sorted({n for n in (*undeclared, *unknown_me)
+                   if namespaced_output(n[len(ME_PREFIX):]
+                                        if n.startswith(ME_PREFIX) else n)})
+    if fake:
+        # 长得像插件事实、而没有哪个插件认领它 —— 说插件那句话(第二波 ⑥)。
+        errors.append(f"{label}.affordances.{verb}:" + "".join(
+            _no_such_plugin(n[len(ME_PREFIX):] if n.startswith(ME_PREFIX) else n,
+                            namespaces) for n in fake[:1]))
+        undeclared = [n for n in undeclared if n not in fake]
+        unknown_me = [n for n in unknown_me if n not in fake]
     if unknown_me:
         errors.append(
             f"{label}.affordances.{verb}:读了 {unknown_me},但 `agent` 种类没声明过"

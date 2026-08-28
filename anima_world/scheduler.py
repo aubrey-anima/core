@@ -394,8 +394,8 @@ class Scheduler:
         #:
         #: 它治的病很具体:一条 `when` 恒为假的触发器,和一条**根本没被事件叫到**的
         #: 触发器,在屏幕上长得一模一样 —— 调度台那一趟一天 16 条 `travel` 一次没响,
-        #: 只能靠"把 `when` 去掉再跑一遍"这种对照实验才发现。**六个数分开记**,
-        #: 因为它们指向六种不同的修法:事件没来 / 取不着人 / 插件还没种到他头上 /
+        #: 只能靠"把 `when` 去掉再跑一遍"这种对照实验才发现。**七个数分开记**,
+        #: 因为它们指向不同的修法:事件没来 / 取不着人 / 插件还没种到他头上 /
         #: 条件不成立 / 算不出来 / 真落笔了。
         self._trigger_stats: dict[str, dict[str, int]] = {}
         # 她的树问到了哪些量(见 `_stock_watches`):agent_id -> (树对象, 量的列表)。
@@ -5483,7 +5483,7 @@ class Scheduler:
         return f"{trigger.plugin}.{trigger.id}"
 
     def _trigger_tally(self, trigger: Any, field: str, n: int = 1) -> None:
-        """给这条触发器的那一格加个数。**六个数分开记**,见 `_trigger_stats`。"""
+        """给这条触发器的那一格加个数。**七个数分开记**,见 `_trigger_stats`。"""
         row = self._trigger_stats.setdefault(
             self._trigger_key(trigger),
             {"matched": 0, "no_bearer": 0, "no_facts": 0, "when_false": 0,

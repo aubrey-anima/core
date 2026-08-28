@@ -13,7 +13,7 @@ import sys
 import time
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from anima_world import onboarding
 from anima_world.actions import ActionTable
@@ -2030,7 +2030,12 @@ def build_serve_scheduler(
         # 没声明的照旧走警告 —— 那条警告只对后者还有意义。
         scheduler.ontology_store = ontology_store
         scheduler.ontology = _load_ontology(
-            ontology_store, scheduler.world_rules, location_store, economy_store
+            ontology_store, scheduler.world_rules, location_store, economy_store,
+            # ⚠️ **库里那份 + 这次开机手上这份,两个来源都要**(第三波 A3):
+            # 插件是在本体之后才装的(`_install_plugins` 在下面),所以**创世那一趟
+            # 库里还是空的** —— 只认库里那份的话,一个带插件的新世界第一次开机
+            # 就会在本体那一层被判成"没有哪个插件叫 qi",而第二次开机又好了。
+            namespaces=_plugin_namespaces(world_seed),
         )
         _warn_unreachable_requirements(scheduler.ontology, scheduler.world_rules)
         # 种子的显式值先落(它此刻仍是空库,"空库一次"那条守得住),声明的默认值
@@ -2613,7 +2618,9 @@ def _authored_unreachable_requirements(authored: Any) -> list[str]:
     try:
         from anima_world.ontology import parse_kinds, unreachable_requirements as _check
 
-        return list(_check(parse_kinds(authored["kinds"]), rules))
+        return list(_check(
+            parse_kinds(authored["kinds"],
+                        namespaces=_plugin_namespaces(authored)), rules))
     except Exception:  # noqa: BLE001 - 坏声明的错同上
         return []
 
@@ -2710,7 +2717,8 @@ def _seed_ontology(
     if merge:
         kinds = _union_by_id(ontology_store.kind_definitions(), kinds, incoming_wins=True)
         entities = _union_by_id(ontology_store.entity_definitions(), entities)
-    parse_entities(entities, parse_kinds(kinds))   # 校验在这里,坏了当场抛
+    parse_entities(entities, parse_kinds(
+        kinds, namespaces=_plugin_namespaces(world_seed)))   # 校验在这里,坏了当场抛
     written, _ = ontology_store.seed(
         kinds, entities, datetime.now(timezone.utc).isoformat(),
         merge=merge, replace_kinds=merge)
@@ -2810,7 +2818,7 @@ def _precheck_ontology(
         kind_rows = _union_by_id(ontology_store.kind_definitions(), kind_rows,
                                  incoming_wins=True)
         entity_rows = _union_by_id(ontology_store.entity_definitions(), entity_rows)
-    kinds = parse_kinds(kind_rows)
+    kinds = parse_kinds(kind_rows, namespaces=_plugin_namespaces(world_seed))
     entities = parse_entities(entity_rows, kinds)
     ontology = resolve(kinds, entities, rules=rules, locations=sorted(set(locations)),
                        items=sorted({*items, *seed_items}))
@@ -2826,7 +2834,8 @@ def _precheck_ontology(
 
 
 def _load_ontology(
-    ontology_store: Any, rules: list[Any], location_store: Any, economy_store: Any = None
+    ontology_store: Any, rules: list[Any], location_store: Any, economy_store: Any = None,
+    namespaces: Iterable[str] = (),
 ) -> Any:
     """读出本体并解析全部引用。**没声明过种类的世界跳过这一整层。**
 
@@ -2843,7 +2852,8 @@ def _load_ontology(
     # 所以能力里的 `have_园艺剪` 查得起来 —— 拼错一个字的后果是那道门永远关着,
     # 而世界照跑、日志干净,正是这一层存在的理由。
     items = [str(row.get("id")) for row in (economy_store.items() if economy_store else ())]
-    return ontology_store.load(rules=rules, locations=locations, items=items)
+    return ontology_store.load(rules=rules, locations=locations, items=items,
+                               namespaces=namespaces)
 
 
 def _format_dropped_quantities(dropped: dict[str, list[str]]) -> str:
@@ -3039,7 +3049,8 @@ def _authored_dropped_quantities(authored: dict[str, Any] | None) -> list[str]:
     from anima_world.rules import RuleError, parse_rules
 
     try:
-        kinds = parse_kinds([dict(k) for k in (authored.get("kinds") or [])
+        kinds = parse_kinds(namespaces=_plugin_namespaces(authored),
+                            entries=[dict(k) for k in (authored.get("kinds") or [])
                              if isinstance(k, dict)])
     except (OntologyError, Exception):  # noqa: BLE001 - 坏声明由别的闸报,这里闭嘴
         return []
@@ -3089,6 +3100,24 @@ def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list
         "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问,开机会印一行 "
         "`dropped_quantities:`"
     ]
+
+
+def _plugin_namespaces(seed: Any) -> tuple[str, ...]:
+    """这份作者层里声明了哪几个插件 id —— **给本体那一层认名字用**(第三波 A2/A3)。
+
+    ⚠️ **只取 id,不解析**:插件声明坏了归 `world_plugin_errors` 报,而这一格只是
+    在回答「`qi.灵力` 这个名字有没有主」。解析一遍再报第二遍错,就是同一件事
+    两个说法。
+    ⚠️ **和库里那份是两个来源,而它们服务两条不同的路**:这一份答的是"这份文件
+    自己声明了什么"(离线两扇门与创世走它),`RedisOntologyStore._plugin_namespaces`
+    答的是"这个世界此刻装着什么"(每次开机重新解析本体时走它)。
+    """
+    rows = (seed or {}).get("plugins") if isinstance(seed, dict) else None
+    return tuple(
+        str(row.get("id") or "").strip()
+        for row in (rows or ())
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    )
 
 
 def _plugin_bodies(config_store: Any, plugin_store: Any,
@@ -6645,13 +6674,14 @@ def _package_only_ontology_errors(authored: dict[str, Any]) -> list[str]:
     from anima_world.ontology import Ontology, OntologyError, parse_kinds
 
     rows = [dict(k) for k in (authored.get("kinds") or []) if isinstance(k, dict)]
+    namespaces = _plugin_namespaces(authored)
     parse_rows = rows
     if not any(str(row.get("id") or "") == "agent" for row in rows):
         parse_rows = [{"id": "agent",
                        "quantities": {name: 0.0 for name in sorted(_me_names_used(rows))}}
                       ] + rows
     try:
-        kinds = parse_kinds(parse_rows)
+        kinds = parse_kinds(parse_rows, namespaces=namespaces)
     except OntologyError as exc:
         return list(getattr(exc, "errors", None) or [str(exc)])
     except Exception as exc:  # noqa: BLE001 - 坏声明的形状很多,一律当成一条错报出去
@@ -7725,11 +7755,19 @@ def contract_payload() -> dict[str, Any]:
                 "只许是**自己的**顶层 `facts`,而且要挂对身子:`costs` 扣施动者"
                 "(bearer `actor` / `player`),`set` 写目标(bearer "
                 "`entity:<这个动词的 target>`)。裸名字照旧归本体那一层判"
-                "(种类声明过的量)。🔴 **别人的事实读得到、写不了**:要拦一个"
-                "「买不起」的人,把它写进 `reads` 再用 `requires` 挡 —— 直接写有一条"
-                "更硬的理由:别人的事实可能是 `projected`(真相是事件流,量表里那个数"
+                "(种类声明过的量)。🔴 **别人的事实读得到、写不了**:直接写有一条"
+                "更硬的理由 —— 别人的事实可能是 `projected`(真相是事件流,量表里那个数"
                 "只是物化视图),**扣下去重开一次就回来了,而没有一处报错**。"
                 "🔴 **`projected` 的事实一律写不得**,自己的也不行。"
+                "\n**「读得到」照字面这么写**(2026-08-28 敲过一遍才写下来的):"
+                '`"reads": ["mana.魔力"]` + `"requires": ["me_mana.魔力 >= 5"]` —— '
+                "⚠️ **`requires` 只准读 `me_*`**,所以那个前缀不能省;"
+                "而 `reads` 在这条路上**是承重的**(2026-08-28 起):不写它,"
+                "两扇门与开机一起拒。"
+                "⚠️ **今天读不到出厂插件的事实**(`economy.coins` 那种):`reads` 要求"
+                "依赖是这个世界的**插件声明**里的一个,而出厂那几个不是作者记录 —— "
+                "两扇门与开机会一起说「没有装 `economy` 这个插件」。跨到出厂那几个"
+                "身上,等它们成为可声明的依赖那一期。"
             ),
             "actor_namespace_syntax": "me_<plugin>.<fact>",
             "state_in_expressions": "ordinal",

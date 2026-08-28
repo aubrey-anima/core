@@ -2885,3 +2885,200 @@ def test_既没有量也没有动词的东西_照旧不进提示词(tmp_path):
         assert "青云门" not in str(world.debug_prompt("yu")), (
             "一个既没有量也没有动词的东西白占了她的提示词"
         )
+
+
+# ── 第三波:一次放行开出来的三个洞,和三句念不通的话 ──────────────────────────
+
+_W3_SEED = {
+    "agents": [{"id": "yu", "name": "露", "location": "cafe", "personality": "安静"}],
+    "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"},
+                  {"id": "pier", "name": "码头", "description": "风很大"}],
+}
+
+
+def _w3(tmp_path, name, seed):
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", seed)
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    return path, payload
+
+
+def _wet(spell):
+    return {"id": "wet", "version": "1.0.0",
+            "facts": {"潮位": {"bearer": "world", "shape": "number", "default": 0.8},
+                      "身上": {"bearer": "actor", "shape": "number", "default": 0.0}},
+            "triggers": [{"id": "淋雨", "on": {"event": "travel"},
+                          "when": [f"{spell} > 0.3"],
+                          "effects": [{"set": {"wet.身上": "2"}}]}]}
+
+
+def test_触发器读得到自己挂在world上的事实(tmp_path):
+    """🟠 **第三波 A1**:② 只治了一半 —— 插件**自己**挂在 `world` 上的事实,
+    在它自己的触发器 `when` 里三种写法全不通:`world_wet.潮位` **开不了机**,
+    而拒绝语说「读了别的插件的 …,要读就写进 reads」;照着改,下一句变成
+    「这个世界里没有装 `world_wet` 这个插件」——**一条把作者引进死胡同的拒绝语**。
+
+    正确的写法就是 `world_<插件>.<事实>`(和规律那一层读全局量逐字同一个写法),
+    而这条用例把它敲通:触发器真响、身上真被写。
+    """
+    from anima_world.actions import ActionDescriptor
+
+    path, payload = _w3(tmp_path, "w3a1", {**_W3_SEED, "plugins": [_wet("world_wet.潮位")]})
+    assert payload["valid"] is True, payload["errors"]
+    with open_world_at(str(tmp_path / "w3a1.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.scheduler._start_journey(world.scheduler.agents["yu"].agent,
+                                       ActionDescriptor("walk", {"location": "pier"}))
+        world.tick(1)
+        assert world.stocks("agent:yu")["wet.身上"] == 2.0, (
+            "读自己挂在 world 上的事实,触发器一次没响"
+        )
+        assert world.trigger_stats()["wet.淋雨"]["errors"] == 0
+
+
+def test_读自己挂在world上的事实却漏了world前缀_装载期就拦(tmp_path):
+    """**从前这一支装载期全绿、运行期每来一条事件炸一次**,而声明面完全正常。
+    现在当场拦,并且**把该写的那串给他**。"""
+    _path, payload = _w3(tmp_path, "w3a1b", {**_W3_SEED, "plugins": [_wet("wet.潮位")]})
+    assert payload["valid"] is False, "它在运行期每次都炸,而两扇门说绿"
+    joined = "\n".join(payload["errors"])
+    assert "挂在 `world` 上" in joined and "world_wet.潮位" in joined, joined
+
+
+def test_动词读一个不存在的插件_装载期就拦_而且说插件的理由(tmp_path):
+    """🟡 **第三波 A2**:① 那次放行只补了「键」那一半,**表达式里的名字**没补 ——
+    `requires: ["me_qi.灵力 > 0"]` 而 `qi` 根本不存在,从前**开机绿**、运行期每一次
+    `ok: False`。作者拿到的是「开机绿、动词永远调不动」,那比开不了机坏得多。
+    """
+    forge = {"id": "forge", "version": "1.0.0",
+             "facts": {"精神": {"bearer": "actor", "shape": "number", "default": 50.0}},
+             "kinds": {"entity:炉": {"gloss": "一座炉", "facts": {
+                 "火": {"shape": "number", "default": 1.0, "visibility": "here"}}}},
+             "verbs": {"锻": {"target": "entity:炉", "description": "打一炉",
+                              "costs": {"forge.精神": "me_forge.精神 - 10"},
+                              "requires": ["me_qi.灵力 > 0"]}}}
+    _path, payload = _w3(tmp_path, "w3a2", {
+        **_W3_SEED,
+        "entities": [{"id": "forge.炉:一号", "name": "老炉", "location": "cafe"}],
+        "plugins": [forge]})
+    assert payload["valid"] is False
+    joined = "\n".join(payload["errors"])
+    # ⚠️ **这一句必须一口气说完两件事**,否则作者会走进和 A1 一样的死胡同:
+    # 照「写进 reads」改完,下一句变成「这个世界里没有装 `qi` 这个插件」。
+    assert "`reads` 里没有它" in joined, joined
+    assert "那个插件也得真的在这个世界里" in joined, joined
+    for phrase in _AUTHOR_LAYER_PHRASES:
+        assert phrase not in joined, joined
+
+    # 自己的命名空间、而事实没声明过 —— 同样当场拦(这一半是插件层判的)。
+    typo = json.loads(json.dumps(forge, ensure_ascii=False))
+    typo["verbs"]["锻"]["requires"] = ["me_forge.没这个 > 0"]
+    _path, payload = _w3(tmp_path, "w3a2b", {
+        **_W3_SEED,
+        "entities": [{"id": "forge.炉:一号", "name": "老炉", "location": "cafe"}],
+        "plugins": [typo]})
+    assert payload["valid"] is False
+    assert "顶层 `facts` 里没有" in "\n".join(payload["errors"]), payload["errors"]
+
+
+def test_一个插件都没有的世界_作者层写带命名空间的名字照旧拒(tmp_path):
+    """🟡 **第三波 A3**:那次放行是**只认形状**的,于是它把作者层也放开了 ——
+    一个**没有插件**的世界里 `set: {"qi.灵力": …}` 一路绿到底,而那个量没有一处
+    声明过。判据现在是**这个命名空间在这个世界里有人声明过**。"""
+    _path, payload = _w3(tmp_path, "w3a3", {
+        **_W3_SEED,
+        "kinds": [{"id": "tree",
+                   "quantities": {"树高": {"default": 1.0, "visibility": "here"}},
+                   "affordances": {"照料": {"set": {"qi.灵力": "1"}}}}],
+        "entities": [{"id": "tree:oak", "name": "橡树", "location": "cafe"}]})
+    assert payload["valid"] is False, "一个插件都没有的世界收下了 `qi.灵力`"
+    assert "没有哪个插件叫 `qi`" in "\n".join(payload["errors"]), payload["errors"]
+
+
+def test_拒绝语里的me_插件_事实_念得通(tmp_path):
+    """🟡 **第三波 B4**,而这条正是 §3.52 叫作者改去走的那条路。
+
+    `requires: ["me_mana.魔力 >= 5"]` 的拒绝语从前被绞成「你的mana 5」——
+    `.魔力` 和 `>=` 一起被吃掉。病根是 `ast.walk` 把 `Attribute` 和它里面那个
+    `Name` **各换了一次**,两处 span 重叠,而替换是从后往前盲改的。
+    **一句念不通的拒绝语和一句错的一样贵**:他会去找一样屏幕上不存在的东西。
+    """
+    mana = {"id": "mana", "version": "1.0.0",
+            "facts": {"魔力": {"bearer": "actor", "shape": "number", "default": 1.0,
+                               "visibility": "self", "label": "魔力"}},
+            "kinds": {"entity:杖": {"gloss": "一根杖", "facts": {
+                "光": {"shape": "number", "default": 0.0, "visibility": "here"}}}},
+            "verbs": {"施法": {"target": "entity:杖", "description": "举杖",
+                               "requires": ["me_mana.魔力 >= 5"],
+                               "set": {"光": "光 + 1"}}}}
+    path, payload = _w3(tmp_path, "w3b4", {
+        **_W3_SEED,
+        "entities": [{"id": "mana.杖:一号", "name": "旧杖", "location": "cafe"}],
+        "plugins": [mana]})
+    assert payload["valid"] is True, payload["errors"]
+    with open_world_at(str(tmp_path / "w3b4.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        out = world.act("yu", "interact",
+                        {"target": "mana.杖:一号", "verb": "施法"})
+        said = out["detail"]["refusal"]
+        assert "魔力" in said and ">=" in said, f"念不通:{said}"
+        assert "mana" not in said, f"命名空间漏给玩家了:{said}"
+
+
+def test_读别人的事实要写reads_动词这条路也不例外(tmp_path):
+    """⚪ **第三波 B5 的裁决**:`reads` 在动词表达式这条路上**承重**。
+
+    REFERENCE §10.2 把「读别人的要 `reads`」写成**这一层的边界**,而动词这条路
+    从前整个绕过它 —— **一条写在文档里而某条路不守的边界,比没有这条边界更坏**:
+    读的人会以为它守着。
+
+    ⚠️ 配方也在这条用例里敲了一遍(`requires` **只准读 `me_*`**,前缀不能省)。
+    """
+    mana = {"id": "mana", "version": "1.0.0",
+            "facts": {"魔力": {"bearer": "actor", "shape": "number", "default": 9.0,
+                               "visibility": "self", "label": "魔力"}}}
+
+    def shop(reads):
+        body = {"id": "shop", "version": "1.0.0",
+                "kinds": {"entity:柜": {"gloss": "一个柜台", "facts": {
+                    "存货": {"shape": "number", "default": 3.0,
+                             "visibility": "here"}}}},
+                "verbs": {"买一件": {"target": "entity:柜", "description": "买一件",
+                                     "requires": ["me_mana.魔力 >= 5"],
+                                     "set": {"存货": "存货 - 1"}}}}
+        if reads:
+            body["reads"] = ["mana.魔力"]
+        return body
+
+    seed = {**_W3_SEED,
+            "entities": [{"id": "shop.柜:一号", "name": "柜台", "location": "cafe"}]}
+    _path, payload = _w3(tmp_path, "w3b5a", {**seed, "plugins": [mana, shop(False)]})
+    assert payload["valid"] is False, "没写 `reads` 也读得动别人的事实"
+    joined = "\n".join(payload["errors"])
+    assert "`reads` 里没有它" in joined and "mana.魔力" in joined, joined
+
+    path, payload = _w3(tmp_path, "w3b5b", {**seed, "plugins": [mana, shop(True)]})
+    assert payload["valid"] is True, payload["errors"]
+    with open_world_at(str(tmp_path / "w3b5b.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        out = world.act("yu", "interact",
+                        {"target": "shop.柜:一号", "verb": "买一件"})
+        assert out["ok"] is True, out          # 9 >= 5,门开着
+        assert world.scheduler.stock_store.snapshot(
+            "shop.柜:一号")["存货"][0] == 2.0
+
+
+def test_规律的emit_when写成列表_说的是形状不是空(tmp_path):
+    """🟡 **第三波 C1**:从前报「表达式是空的」—— 那句话在说一个**他没写错的
+    地方**(他明明写了内容),于是他会去改表达式本身。`emit.when` 是**一句**,
+    规律自己的 `when` 是**一列**。"""
+    qi = {"id": "qi", "version": "1.0.0",
+          "facts": {"灵力": {"bearer": "actor", "shape": "number", "default": 1.0}},
+          "rules": [{"id": "喊", "for_each": {"kind": "agent"},
+                     "set": {"qi.灵力": "qi.灵力"},
+                     "emit": [{"type": "qi.累", "when": ["qi.灵力 < 1"],
+                               "importance": 0.5, "text": "他喘了口气"}]}]}
+    _path, payload = _w3(tmp_path, "w3c1", {**_W3_SEED, "plugins": [qi]})
+    assert payload["valid"] is False
+    joined = "\n".join(payload["errors"])
+    assert "要写成**一句**表达式" in joined and "规律自己的" in joined, joined
+    assert "表达式是空的" not in joined, joined

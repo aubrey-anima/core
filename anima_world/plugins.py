@@ -53,7 +53,9 @@ from typing import Any, Iterable, Mapping
 
 from anima_world.expressions import Expression, ExpressionError, compile_expression
 from anima_world.perception import VISIBILITIES, band_errors, parse_bands
-from anima_world.rules import Rule, RuleError, namespaced_output, parse_rules
+from anima_world.rules import (
+    WORLD_PREFIX, Rule, RuleError, namespaced_output, parse_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +622,7 @@ def _parse_one(
         for name, spec in raw_verbs.items():
             try:
                 verb = _parse_verb(plugin_id, f"{label}.verbs.{name}", str(name),
-                                   spec, kinds, edges, facts)
+                                   spec, kinds, edges, facts, reads)
             except PluginError as exc:
                 errors.extend(exc.errors)
                 continue
@@ -959,7 +961,8 @@ VERB_KEYS = ("target", "label", "description", "effects", *_VERB_PASSTHROUGH)
 def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
                 kinds: Mapping[str, PluginKind],
                 edges: Mapping[str, "EdgeType"] | None = None,
-                facts: Mapping[str, Fact] | None = None) -> Verb:
+                facts: Mapping[str, Fact] | None = None,
+                reads: Iterable[str] = ()) -> Verb:
     edges = edges or {}
     facts = facts or {}
     errors: list[str] = []
@@ -1048,7 +1051,8 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
     # 而从前它按"怪名字"一律拒 —— 下场是**一个插件的动词改不动它自己的事实**:
     # 「施法耗灵力」写不出来,而拒绝语指着一句和插件毫无关系的话
     # (「跨实体的相互作用 v1 还表达不了」,那说的是作者层规律的扇入)。
-    errors += _verb_namespaced_writes(plugin_id, label, spec, target, kinds, facts)
+    errors += _verb_namespaced_writes(plugin_id, label, spec, target, kinds, facts,
+                                      reads)
 
     # 🔴 **不认识的键当场拒,别静默丢**(2026-08-27,创作台接第 2 期时测出来的)。
     #
@@ -1080,6 +1084,7 @@ _ACTOR_BEARERS = ("actor", "player")
 def _verb_namespaced_writes(
     plugin_id: str, label: str, spec: dict[str, Any], target: str,
     kinds: Mapping[str, PluginKind], facts: Mapping[str, Fact],
+    reads: Iterable[str] = (),
 ) -> list[str]:
     """动词写到 `<插件>.<事实>` 上时,那个事实真的存在、而且挂对了身子吗。
 
@@ -1099,6 +1104,61 @@ def _verb_namespaced_writes(
        这和 `reads` 整套设计逐字一致。真正的跨插件扣费等 economy 动词化那一期。
     """
     out: list[str] = []
+    reads = set(reads)
+    # 🆕 **表达式里的名字也要判**(3.8.0,2026-08-28 第三波 A2)。
+    #
+    # 本体那一层从这一轮起放行「有主」的名字(那个命名空间真装着插件时),
+    # 于是 `me_qi.没这个` 这种**声明过的插件、没声明过的事实**在那一层过得去 ——
+    # 而运行期每一次 `ok: False`。作者拿到的是「开机绿、动词永远调不动」,
+    # 那比开不了机坏得多。**键那一半判在下面,名字这一半判在这儿。**
+    from anima_world.expressions import ExpressionError, compile_expression
+
+    sources: list[tuple[str, Any]] = []
+    for key in ("when", "requires"):
+        raw_list = spec.get(key)
+        if isinstance(raw_list, list):
+            sources += [(f"{key}[{i}]", src) for i, src in enumerate(raw_list)]
+    for key in ("costs", "set"):
+        raw_map = spec.get(key)
+        if isinstance(raw_map, dict):
+            sources += [(f"{key}.{n}", src) for n, src in raw_map.items()]
+    for where, source in sources:
+        try:
+            names = compile_expression(source).names
+        except ExpressionError:
+            continue                    # 写坏了的表达式归本体那一层报
+        for name in sorted(names):
+            bare = name[3:] if name.startswith("me_") else name
+            if not namespaced_output(bare):
+                continue                # 裸名字归本体那一层判
+            if not bare.startswith(f"{plugin_id}."):
+                # 🆕 **读别人的要 `reads` 声明,动词这条路也不例外**
+                # (3.8.0,第三波 B5 裁决)。REFERENCE §10.2 把这三条写成
+                # **这一层的边界**,而动词这条路从前整个绕过它 —— 一条写在文档里
+                # 而某条路不守的边界,比没有这条边界更坏:读的人会以为它守着。
+                # ⚠️ 它承重在**装载顺序**上:读别人事实的插件要排在它后面装,
+                # 否则第一轮读到的是一个还没种下的量。
+                if bare not in reads:
+                    out.append(
+                        f"{label}.{where}:读了别的插件的 `{name}`,而 `reads` 里"
+                        f'没有它。要读就写进 `"reads": ["{bare}"]`。'
+                        "⚠️ **而那个插件也得真的在这个世界里** —— `reads` 指着一个"
+                        "没装的插件同样开不了机;出厂那几个(`economy` / `needs` / "
+                        "`invitation`)**今天 `reads` 不到**,它们不是作者记录。"
+                        "**读别人的可以,写别人的不行**(见 "
+                        "`contract --json` 的 `plugins.namespaced_write_gloss`)"
+                    )
+                continue
+            local = bare[len(plugin_id) + 1:]
+            if local in facts:
+                continue
+            out.append(
+                f"{label}.{where}:读了 `{name}`,而这个插件的顶层 `facts` 里没有 "
+                f"`{local}`;声明过的是 {sorted(facts)}。"
+                "⚠️ 写在 `kinds.<…>.facts` 里的那一族**量名是裸的**,不带命名空间。"
+                "**放行的下场是开机绿、而这个动词每一次调用都算不出来** —— "
+                "作者看到的是「点不动」,没有一处说得出为什么"
+            )
     for where, raw, side in (("costs", spec.get("costs"), "actor"),
                              ("set", spec.get("set"), "target")):
         if not isinstance(raw, dict):
@@ -1766,6 +1826,7 @@ def _parse_trigger(
     for _name, expression in sets:
         reads |= expression.names
     errors.extend(_undeclared_reads(label, reads, plugin_id, allowed, event_ok=True))
+    errors.extend(_bearer_mismatch_reads(label, reads, plugin_id, facts, bearer))
 
     if errors:
         raise PluginError(errors)
@@ -1812,6 +1873,63 @@ def _parse_link_effect(
             "facts": dict(body.get("facts") or {})}
 
 
+#: `for_each.node` 那个词 → 这一层的事实挂在谁身上时才读得到(`bearer`)。
+#: ⚠️ `agent` 那一档收两个词:玩家和角色**同一个量表命名空间**。
+_BEARER_FOR_NODE: dict[str, tuple[str, ...]] = {
+    "agent": ("actor", "player"),
+    "world": ("world",),
+    "location": ("location",),
+}
+
+
+def _bearer_mismatch_reads(
+    label: str, names: Iterable[str], plugin_id: str,
+    facts: Mapping[str, "Fact"], node: str,
+) -> list[str]:
+    """读自己的事实,而那个事实**根本不在这条路够得着的那张量表上**(第三波 A1)。
+
+    🔴 **从前这一族装载期全绿、运行期每一次都炸**:一个 `for_each: {"node": "agent"}`
+    的触发器读自己挂在 `world` 上的事实,写 `wet.潮位` —— 那张量表是**她身上的**,
+    世界那份在另一个 owner 上。下场是每来一条事件就一条 `ExpressionError`,
+    触发器**一次不响**,而声明面完全正常。
+
+    正确的写法是 `world_<插件>.<事实>`(和规律那一层读全局量逐字同一个写法)——
+    所以这里不只是拒,**还要把该写的那串给他**。
+    """
+    want = _BEARER_FOR_NODE.get(node)
+    if want is None:                   # `entity:<kind>` 那一支:目标种类归别处判
+        want = (f"entity:{node[len('entity:'):]}",) if node.startswith("entity:") else ()
+    out: list[str] = []
+    for name in sorted(set(names)):
+        bare = name[3:] if name.startswith("me_") else name
+        prefixed = bare.startswith(WORLD_PREFIX)
+        if prefixed:
+            bare = bare[len(WORLD_PREFIX):]
+        if not bare.startswith(f"{plugin_id}."):
+            continue                   # 别人的事实归 `_undeclared_reads` 判
+        fact = facts.get(bare[len(plugin_id) + 1:])
+        if fact is None:
+            continue                   # 没声明过,同样归上面那道闸
+        if prefixed:
+            if fact.bearer != "world":
+                out.append(
+                    f"{label}:`{name}` 前面那个 `world_` 是「读世界身上那个量」,"
+                    f"而 `{bare}` 挂在 `{fact.bearer}` 上 —— 去掉 `world_` 直接写 "
+                    f"`{bare}`"
+                )
+            continue
+        if want and fact.bearer not in want:
+            fix = (f"`{WORLD_PREFIX}{bare}`" if fact.bearer == "world"
+                   else "把它挂到这条触发器够得着的那张量表上")
+            out.append(
+                f"{label}:读了 `{name}`,而它挂在 `{fact.bearer}` 上 —— 这条触发器"
+                f"落在 `{node}` 头上,读的是**那张量表**,`{fact.bearer}` 那份在另一个"
+                f"owner 上。**放行的下场是运行期每来一条事件炸一次、触发器一次不响,"
+                f"而声明面完全正常**。要读世界身上那个量,写 {fix}"
+            )
+    return out
+
+
 #: 表达式里**不必声明**就读得到的名字(内核的日历与流逝)。
 _BUILTIN_READS = frozenset({"dt", "now", "day", "hour", "minute", "minute_of_day"})
 
@@ -1835,6 +1953,16 @@ def _undeclared_reads(
                     name = name[len(prefix):]
                     break
         bare = name[3:] if name.startswith("me_") else name
+        # 🆕 **`world_` 也要剥**(3.8.0,2026-08-28 第三波 A1)。
+        #
+        # 读世界身上那个量的写法是 `world_<量名>`,而一个挂在 `world` 上的**插件
+        # 事实**的量名本来就是 `<插件>.<事实>` —— 于是正确的写法是
+        # `world_wet.潮位`。不剥的话,这道闸看到的是 `world_wet` 这个"插件 id",
+        # 于是报「读了别的插件的 …,要读就写进 reads」;作者照着改,下一句就变成
+        # 「这个世界里没有装 `world_wet` 这个插件」—— **一条把人引进死胡同的
+        # 拒绝语,比没有拒绝语更贵。**
+        if bare.startswith(WORLD_PREFIX) and bare not in allowed:
+            bare = bare[len(WORLD_PREFIX):]
         if name in _BUILTIN_READS or bare in _BUILTIN_READS:
             continue
         if event_ok and bare.startswith("event."):
@@ -1843,7 +1971,7 @@ def _undeclared_reads(
             # 光名字 = 内核的量(这个 bearer 自己身上那些)。插件读得到,
             # 但读不到别的插件的 —— 那一支下面判。
             continue
-        if name in allowed:
+        if name in allowed or bare in allowed:
             continue
         owner = bare.split(".", 1)[0]
         if owner == plugin_id:

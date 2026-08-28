@@ -339,6 +339,14 @@ def rewrite_source(
                             edits.append((found, found + len(symbol), said_symbol))
 
     if name_text is not None:
+        # 🔴 **整段换掉命名空间那一层之后,别再去换它里面那个 `Name`**
+        # (3.8.0,2026-08-28 第三波 B4)。`ast.walk` 会**两个都走到**:
+        # `me_mana.魔力` 先作为 `Attribute` 换成一句人话,里面的 `Name('me_mana')`
+        # 又被换第二次 —— 两处 span 重叠,而下面那趟替换是从后往前盲改的,
+        # 于是玩家屏幕上出现「你的mana 5」:`.魔力` 和 `>=` 一起被吃掉了。
+        # **一句念不通的拒绝语,和一句错的拒绝语一样贵** —— 他会去找一样
+        # 屏幕上根本不存在的东西(这一层的模块说明为同一件事写过两次)。
+        covered: set[int] = set()
         for node in ast.walk(expression._tree):
             # 命名空间那一层(`needs.energy`)整段换掉 —— 拿 `Name` 那一支去换的话
             # 只会换掉点号左边的 `needs`,而她读到的是「needs 的 energy 不够」。
@@ -353,8 +361,12 @@ def rewrite_source(
                 said = name_text(whole)
                 if said:
                     edits.append((*span(node), said))
+                    inner = base.value if isinstance(base, ast.Attribute) else base
+                    covered.add(id(inner))
                 continue
             if isinstance(node, ast.Name):
+                if id(node) in covered:
+                    continue
                 said = name_text(node.id)
                 if said:
                     edits.append((*span(node), said))
