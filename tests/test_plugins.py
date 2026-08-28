@@ -2610,3 +2610,66 @@ def test_插件的常数步长规律_也被那句提醒覆盖(tmp_path):
     dt_ok = json.loads(json.dumps(onair, ensure_ascii=False))
     dt_ok["rules"][0]["set"] = {"onair.人气": "clamp(onair.人气 - 1 * dt, 0, 100)"}
     assert _authored_drift_warnings({"plugins": [dt_ok]}) == []
+
+
+# ── ⑤ `doctor` 里终于有插件这一层了(第二波 ⑤)────────────────────────────────
+
+
+def test_doctor_报得出插件跑没跑_而不是只报声明了几条(tmp_path):
+    """🟡 二十行体检里从前**一行都没有**插件。
+
+    🔴 而这一节答的是「**有没有发生过**」,不是「声明了几条」—— `plugin list`
+    早就报得出声明面的计数,而调度台撞的那个病(一条 `when` 恒为假的触发器)
+    **在声明面上完全正常**:声明得好好的、装载顺序也对,就是一次没响。
+
+    从外面看得见的证据只有两样(所以只报这两样):事实的 `updated_tick`
+    (规律与触发器写一个数**不发事件**,日志里查不到它们)、以及它发出的
+    `<插件>.<type>` 事件条数。
+    """
+    db = tmp_path / "doc.db"
+    redis_for(db)
+    live = {"id": "qi", "version": "1.0.0",
+            "facts": {"灵力": {"bearer": "agent", "shape": "number",
+                               "default": 10.0, "range": [0, 100]}},
+            "rules": [{"id": "回气", "every": {"ticks": 1},
+                       "for_each": {"kind": "agent"},
+                       "set": {"qi.灵力": "clamp(qi.灵力 + 1 * dt, 0, 100)"}}]}
+    path = write_seed_file(tmp_path / "doc.cyberworld", {**BARE, "plugins": [live]})
+    with open_world_at(str(db), world_file=path, force_mock_llm=True) as world:
+        world.tick(5)
+
+    out = run_cli("doctor", "--world-id", "w", "--skip-probe")
+    assert "插件 qi" in out.stdout, out.stdout
+    assert "规律 1 条" in out.stdout, out.stdout
+    # **只看 qi 那一行** —— 出厂那几个也在这张表上,它们的数不是这条用例的事。
+    line = next(ln for ln in out.stdout.splitlines() if "插件 qi" in ln)
+    assert "写过的事实 1 个" in line, (
+        f"规律真的跑过,而体检说它一个字都没动过世界:{line}"
+    )
+    assert "一次都没动过世界" not in line
+    # **说出它看不见的那一半** —— 而不是假装查过了。
+    assert "trigger_stats" in out.stdout, out.stdout
+
+
+def test_doctor_对一条一次没动过世界的插件_会喊一声(tmp_path):
+    """对照组,而它正是调度台那个病的形状:声明面全对、一次没响。
+
+    ⚠️ **这一节不进退出码** —— 一个刚建好的世界什么都还没发生过,
+    而「一条永远红的检查等于没有这条检查」。
+    """
+    db = tmp_path / "quiet.db"
+    redis_for(db)
+    dead = {"id": "wet", "version": "1.0.0",
+            "facts": {"身上": {"bearer": "actor", "shape": "number",
+                               "default": 0.0}},
+            "triggers": [{"id": "淋雨", "on": {"event": "payment"},
+                          "when": ["world_没这个量 > 0.3"],
+                          "effects": [{"set": {"wet.身上": "2"}}]}]}
+    path = write_seed_file(tmp_path / "quiet.cyberworld", {**BARE, "plugins": [dead]})
+    with open_world_at(str(db), world_file=path, force_mock_llm=True) as world:
+        world.tick(5)
+
+    out = run_cli("doctor", "--world-id", "w", "--skip-probe")
+    assert "插件 wet" in out.stdout, out.stdout
+    assert "一次都没动过世界" in out.stdout, out.stdout
+    assert "写过的事实 0 个" in out.stdout and "发出的事件 0 条" in out.stdout, out.stdout

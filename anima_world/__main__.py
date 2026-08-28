@@ -8267,8 +8267,14 @@ def run_doctor(args: argparse.Namespace) -> int:
     # 那盏 `engagement_kept` 的灯它看不见 —— 水位是世界这一趟推第一 tick 时盖的戳
     # (`Scheduler.RUN_SINCE_SEQ`)。**戳不在 ≠ 没问题**,见 `_report_engagements_kept`。
     run_since_seq = _run_since_seq(redis, world_id)
+    plugin_events: dict[str, int] = {}
     for e in log.replay():
         payload = e.payload or {}
+        # 插件发的事件叫 `<插件>.<type>` —— 顺着这趟 replay 数,零额外成本
+        # (这条日志十几万条是常态,为它单开一趟就是按项数线性涨的代价)。
+        if "." in e.type:
+            plugin_events[e.type.split(".", 1)[0]] = \
+                plugin_events.get(e.type.split(".", 1)[0], 0) + 1
         if e.type == "agent_join" and e.who:
             joined.add(e.who)
         elif e.type == "entity_engage":
@@ -8342,6 +8348,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     mpt = int(store.get("world.minutes_per_tick", default=DEFAULT_MINUTES_PER_TICK))
     print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
 
+    _report_plugins(redis, world_id, plugin_events)
     problems += _report_autonomy_chain(redis, world_id, store)
     problems += _report_engagements_kept(
         engaged, dropped, finished=finished, gone=gone,
@@ -8354,6 +8361,68 @@ def run_doctor(args: argparse.Namespace) -> int:
     where_arg = "" if world_id == _world_id_default() else f" --world-id {world_id}"
     print(f"  {onboarding.green('一切正常。')} anima-world start{where_arg}\n")
     return 0
+
+
+def _report_plugins(redis: Any, world_id: str,
+                    plugin_events: dict[str, int]) -> None:
+    """插件这一层跑没跑 —— **二十行体检里从前一行都没有**(3.8.0,第二波 ⑤)。
+
+    🔴 **它答的是"有没有发生过",不是"声明了几条"**:`plugin list` 早就报得出
+    声明面的计数,而调度台那一趟撞的病(一条 `when` 恒为假的触发器)在声明面上
+    **完全正常** —— 声明得好好的、装载顺序也对,就是一次没响。
+
+    从**外面**看得见的证据只有两样,所以这里只报这两样:
+
+    - **事实被写过没有**:量表那一行的 `updated_tick`。规律与触发器写一个数
+      **不发事件**(连续变化不发事件是这一层的老纪律),所以日志里查不到它们 ——
+      `updated_tick` 是唯一的凭据(`World.rule_stats()` 的 docstring 早就这么写)。
+    - **它发的事件有几条**:`<插件>.<type>`,顺着 doctor 那趟 replay 数的。
+
+    ⚠️ **`when` 为假几次、取不着人几次,从外面看不见** —— 那是进程内的读数
+    (`World.trigger_stats()`)。**说出来而不是假装查过了**:这一节最后一行就是
+    指路的那句话。
+    ⚠️ **这一节不进退出码**:一个刚建好的世界什么都还没发生过,而
+    「一条永远红的检查等于没有这条检查」。
+    """
+    from anima_world.plugins import stored_bodies
+    from anima_world.redis_state import RedisPluginStore, RedisStockStore
+
+    try:
+        bodies = stored_bodies(RedisPluginStore(redis, world_id))
+    except Exception:  # noqa: BLE001 - 体检不该因为一段读不动的声明而中断
+        return
+    if not bodies:
+        return
+    stocks = RedisStockStore(redis, world_id)
+    # 从外面能看的那几个 owner:世界 + 名册(有界)。**东西身上的那些不扫** ——
+    # 一个世界里可以有一万棵树,而体检不该按世界的大小收费。
+    owners = ["world", *sorted(stocks.owners("agent"))]
+    written: dict[str, int] = {}
+    for owner in owners:
+        for key, (_value, tick) in (stocks.snapshot(owner) or {}).items():
+            if "." not in key or int(tick or 0) <= 0:
+                continue
+            written[key.split(".", 1)[0]] = written.get(key.split(".", 1)[0], 0) + 1
+    for body in bodies:
+        pid = str(body.get("id") or "")
+        rules = len(body.get("rules") or [])
+        triggers = len(body.get("triggers") or [])
+        moved = written.get(pid, 0)
+        fired = plugin_events.get(pid, 0)
+        # ⚠️ **出厂那几个不喊** —— 它们装不装由世界配置决定,写法作者也改不动;
+        # 一句他没处修的警告只会教他略过这一段(和 ④ 那条 lint 同一个理由)。
+        quiet = (rules or triggers) and not moved and not fired \
+            and pid not in FACTORY_PLUGINS
+        mark = (onboarding.yellow(onboarding.WARN) if quiet
+                else onboarding.green(onboarding.OK))
+        print(f"  {mark} 插件 {pid} {body.get('version') or ''}:"
+              f"规律 {rules} 条、触发器 {triggers} 条 —— "
+              f"写过的事实 {moved} 个(角色与世界身上),发出的事件 {fired} 条")
+        if quiet:
+            print(f"      {onboarding.dim('声明得好好的,而它一次都没动过世界。')}"
+                  f"{onboarding.dim('订的事件发生过吗?`when` 里的名字读得到吗?')}")
+    print(f"      {onboarding.dim('「when 为假几次 / 取不着人几次」从外面看不见 ——')}"
+          f"{onboarding.dim('那是进程内的读数:World.trigger_stats()')}")
 
 
 def run_simulate(args: argparse.Namespace) -> int:
