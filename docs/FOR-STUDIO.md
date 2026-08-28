@@ -4779,8 +4779,12 @@ Python 侧对应 `World.world_setting()` / `World.set_world_setting(text, clear=
 - 每一层的键名单(`plugin_keys` / `fact_keys` / …)—— 已有,一格没动;
 - 「这一版引擎认不认插件」= `plugins.author_type` 缺席 —— 已有。
 
-`plugins` 段仍然是 **62 格**(2026-08-27 实读)。**这一轮契约零变更**,
-所以你们钉的那个 commit 不必为这一节换。
+**这一节本身契约零变更** —— 它加的是判据,不是格子。
+⚠️ **别把这句话读成「今天的契约是 62 格」**:同一天的 §3.50 与 §3.51 各加了格,
+**2026-08-27 收工时 `plugins` 段是 69 格**(62 + 5 + 2,纯增量,一格取值都没改)。
+所以你们要不要换钉,看的是那两节,不是这一节。
+(这行数字**每加一格就烂一次**,判据是敲一遍:
+`anima-world contract --json | python -c "import json,sys;print(len(json.load(sys.stdin)['plugins']))"`。)
 
 ### 3. 🔴 顺手逮到的假绿:动词 target 写错字,离线答绿、开机退 1
 
@@ -4932,11 +4936,13 @@ menpai.member_of —— 那张表会永远是空的,而「造不出来」和「�
 ⚠️ 这一格**不是抄的**:闸里拿它和引擎真正在用的那个函数对了一遍
 (`tests/test_plugins.py::test_契约说得出这两个答案_而且那几格是真的`)。
 
-### 契约这一轮:**62 → 67 格,纯增量,一格取值都没改**
+### 契约这一节:**62 → 67 格,纯增量,一格取值都没改**
 
 新增五格:`kind_instance_section` / `kind_instance_id_syntax` /
 `kind_instance_gloss` / `edge_node_id_forms` / `deferred_author_sections`。
 老引擎上它们是**整格缺席**(不是 `null`)。
+⚠️ 同一天 §3.51 又加了两格,**收工时是 69 格** —— 别把这里的 67 当成今天的总数,
+敲一遍才算:`anima-world contract --json | python -c "import json,sys;print(len(json.load(sys.stdin)['plugins']))"`。
 
 ## 3.51 `travel.parties` 那一格骗过人:**触发器取人取的不是它**(3.8.0,2026-08-27)
 
