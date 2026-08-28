@@ -2673,3 +2673,71 @@ def test_doctor_对一条一次没动过世界的插件_会喊一声(tmp_path):
     assert "插件 wet" in out.stdout, out.stdout
     assert "一次都没动过世界" in out.stdout, out.stdout
     assert "写过的事实 0 个" in out.stdout and "发出的事件 0 条" in out.stdout, out.stdout
+
+
+# ── ⑥ 插件族的错,要说插件自己的理由(第二波 ⑥)────────────────────────────────
+#
+# 调度台点的两条:`costs` 那句拿的是作者层规律的理由(「跨实体的相互作用 v1 还
+# 表达不了」),级联那句「没有名叫 `menpai.sect` 的 kind」把人指向没错的地方。
+# 两条都修了(§3.52 / 上一轮 C4),而这一条把它们**钉住**:一句拒绝语说的是
+# 哪一层的病,不是措辞问题 —— **它决定作者去改哪一行**。
+
+#: 作者层那几句话,插件族的错里一句都不许出现。
+_AUTHOR_LAYER_PHRASES = ("跨实体的相互作用", "在 kinds 里写一条")
+
+_PLUGIN_MISTAKES = {
+    "costs 写自己没声明的事实": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵力": {"bearer": "actor", "shape": "number", "default": 1.0}},
+        "kinds": {"entity:符": {"gloss": "一张符"}},
+        "verbs": {"贴": {"target": "entity:符", "description": "贴上去",
+                         "costs": {"qi.没这个": "me_qi.没这个 - 1"}}},
+    },
+    "costs 写别的插件的事实": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵力": {"bearer": "actor", "shape": "number", "default": 1.0}},
+        "kinds": {"entity:符": {"gloss": "一张符"}},
+        "verbs": {"贴": {"target": "entity:符", "description": "贴上去",
+                         "costs": {"economy.coins": "economy.coins - 1"}}},
+    },
+    "规律写自己没声明的事实": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵力": {"bearer": "actor", "shape": "number", "default": 1.0}},
+        "rules": [{"id": "涨", "for_each": {"kind": "agent"},
+                   "set": {"qi.没这个": "now"}}],
+    },
+    "规律写到别人的命名空间": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵力": {"bearer": "actor", "shape": "number", "default": 1.0}},
+        "rules": [{"id": "涨", "for_each": {"kind": "agent"},
+                   "set": {"别人.数": "1"}}],
+    },
+    "触发器的 for_each 写错": {
+        "id": "qi", "version": "1.0.0",
+        "facts": {"灵力": {"bearer": "actor", "shape": "number", "default": 1.0}},
+        "triggers": [{"id": "t", "on": {"event": "conversation"},
+                      "for_each": {"node": "actor"},
+                      "effects": [{"set": {"qi.灵力": "1"}}]}],
+    },
+}
+
+
+@pytest.mark.parametrize("case", sorted(_PLUGIN_MISTAKES))
+def test_插件族的拒绝语_说的是插件自己的理由(tmp_path, case):
+    """🔴 **一句拒绝语说的是哪一层的病,不是措辞问题** —— 它决定作者去改哪一行。
+
+    调度台那一趟拿到的原话是作者层规律的理由(「跨实体的相互作用(挖矿让矿脉减少)
+    v1 还表达不了」),而他写的是一个插件的动词。**照着那句话去改,他会去改一条
+    根本没错的规律。**
+    """
+    path = write_seed_file(tmp_path / f"{hash(case) & 0xffff}.cyberworld",
+                           {**BARE, "plugins": [_PLUGIN_MISTAKES[case]]})
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is False, f"「{case}」被收下了"
+    joined = "\n".join(payload["errors"])
+    for phrase in _AUTHOR_LAYER_PHRASES:
+        assert phrase not in joined, (
+            f"「{case}」拿作者层那句「{phrase}」当理由 —— 照它去改的是一条没错的行:"
+            f"\n{joined}"
+        )
+    assert "qi" in joined or "插件" in joined, joined
