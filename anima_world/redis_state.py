@@ -2551,8 +2551,13 @@ class RedisOntologyStore:
         kinds = parse_kinds(
             self.kind_definitions(),
             # **库里那份 + 调用方手上那份**:创世那一趟插件还没装进库(装在本体
-            # 之后),只认库里那份的话,带插件的新世界第一次开机会被判成
-            # 「没有哪个插件叫 qi」,而第二次开机又好了 —— 同一份声明两天两个答案。
+            # 之后),只认库里那份的话,带插件的新世界**第一次开机就被判成
+            # 「没有哪个插件叫 qi」而开不了机**。
+            # ⚠️ **这里第一版写的是「而第二次开机又好了 —— 同一份声明两天两个答案」,
+            # 那句是错的**(2026-08-28 A 视角实测):第一次开不了机时插件
+            # **根本没进库**,第二次照样红 —— **红/红,不是红/绿**。
+            # 一句听上去很懂的因果,而它连自己描述的那个状态都不成立。
+            # (上面 `_plugin_namespaces` 那句「文件源」方向的话是对的,没动。)
             namespaces=(*self._plugin_namespaces(), *namespaces),
         )
         entities = parse_entities(self.entity_definitions(), kinds)

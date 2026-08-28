@@ -3092,7 +3092,13 @@ def test_规律的emit_when写成列表_说的是形状不是空(tmp_path):
 
 _W3_WET = {
     "id": "wet", "version": "1.0.0",
-    "facts": {"潮位": {"bearer": "world", "shape": "number", "default": 0.8}},
+    "facts": {"潮位": {"bearer": "world", "shape": "number", "default": 0.8},
+              # ⚠️ **这一格是给下面那条增量编辑用例当牙的**:作者层的 `kinds`
+              # 里有一条能力扣它(`costs: {"wet.体感": …}`),而那条能力**跟着
+              # 库里的 `:kinds` 走**。开机重解析时,名单要是只取"这次编辑那份
+              # 文件"就找不到 `wet` 这个命名空间 —— 问题 2 的触发条件正是它。
+              "体感": {"bearer": "actor", "shape": "number", "default": 5.0,
+                       "visibility": "self", "label": "体感"}},
     "kinds": {"entity:桶": {"gloss": "一个桶", "facts": {
         "水": {"shape": "number", "default": 0.0, "visibility": "here"}}}},
     "verbs": {"接水": {"target": "entity:桶", "description": "接一桶雨水",
@@ -3101,9 +3107,22 @@ _W3_WET = {
 }
 
 
+#: 🔴 **作者层写着插件的事实的那一行** —— 它住在库里的 `:kinds` 上,
+#: 而增量编辑那份文件里一个字都没有它。**问题 2 的牙就在这儿**:
+#: 把开机那份名单退回"只取文件",这一行当场解析不了,而作者没碰过它。
+_W3_TREE = {
+    "id": "tree",
+    "quantities": {"树高": {"default": 1.0, "visibility": "here"}},
+    "affordances": {"照料": {"set": {"树高": "树高 + 0.1"},
+                             "requires": ["me_wet.体感 >= 1"],
+                             "costs": {"wet.体感": "me_wet.体感 - 1"}}},
+}
+
+
 def _wet_world(tmp_path, name="wetv"):
-    seed = {**BARE, "plugins": [_W3_WET],
-            "entities": [{"id": "wet.桶:一号", "name": "旧桶", "location": "cafe"}]}
+    seed = {**BARE, "plugins": [_W3_WET], "kinds": [dict(_W3_TREE)],
+            "entities": [{"id": "wet.桶:一号", "name": "旧桶", "location": "cafe"},
+                         {"id": "tree:oak", "name": "橡树", "location": "cafe"}]}
     path = write_seed_file(tmp_path / f"{name}.cyberworld", seed)
     return path, open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
                                force_mock_llm=True)
@@ -3154,6 +3173,12 @@ def test_插件世界之后的增量编辑_只带kinds也开得了机(tmp_path):
         assert "wet.桶" in kinds, (
             f"插件的种类在这一趟里丢了 —— 名单和数据又不是同一次合并的:{kinds}"
         )
-        # 编辑之后那个动词照旧点得动(名单没了的话它会在本体那一层被判假红)。
+        assert "tree" in kinds, kinds
+        # 编辑之后两条路都照旧点得动:插件自己的动词,以及**作者层那条扣插件事实的
+        # 能力** —— 后者是这条用例的牙(名单退回"只取文件"时它当场解析不了,
+        # 而作者这次连碰都没碰它)。
         out = again.act("阿岚", "interact", {"target": "wet.桶:一号", "verb": "接水"})
         assert out["ok"] is True, out
+        tended = again.act("阿岚", "interact", {"target": "tree:oak", "verb": "照料"})
+        assert tended["ok"] is True, tended
+        assert again.stocks("agent:阿岚")["wet.体感"] == 4.0, again.stocks("agent:阿岚")
