@@ -92,7 +92,7 @@ PyPI**,而这一轮往 `contract --json` 里加了两段、往抹除回执里加
 **⑦ 脚本关不掉一场对话:不是缺出口,是叫错了名字。** `chat()` **有意不建会话行**
 (它只流式吐字,完整转录归宿主),所以 `conversations()` 答 `[]` 是对的;
 **建行 + 关行 + 发 `conversation` 事件的是 `record_chat_turn()`**,那才是无宿主那条路
-的提交口,而 `close_conversation(id)` 是给自己管着会话的宿主用的。
+的提交口,而 `close_conversation(conversation_id)` 是给自己管着会话的宿主用的。
 整条链真敲过(`chat` → `record_chat_turn` → 事件 → 订它的触发器落笔)。
 **`World` 门面没加方法** —— 这一条要的是一句话;而那句话写进了
 `conversations()` / `close_conversation()` 两个 docstring,**不只写在回执板上**:

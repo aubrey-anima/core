@@ -5203,15 +5203,15 @@ menpai.member_of —— 那张表会永远是空的,而「造不出来」和「�
 
 调度台按「先 `chat` 再 `close_conversation`」的直觉写脚本,卡住了:
 `chat()` 之后 `conversations(agent)` 答 `[]`,而 `close_conversation` 要一个
-**还不存在**的 id。于是订 `conversation` 的触发器那一趟没法验。
+**还不存在**的 `conversation_id`。于是订 `conversation` 的触发器那一趟没法验。
 
 **真相**:
 
 | 出口 | 它做什么 | 谁用 |
 |---|---|---|
 | `World.chat(...)` | **只流式吐字**,**有意不建会话行** —— 完整转录归宿主(README 第一条)| 所有人 |
-| `World.record_chat_turn(agent, player, messages)` | **建行 + 关行 + 发那条 `conversation` 事件 + 关系判定**,返回会话 id | **脚本 / CLI / 无宿主那条路** |
-| `World.close_conversation(id)` | 关掉一条**已经开着的**会话 | **自己管着会话的宿主**(网站那种:一个会话跨很多轮,id 攥在它手里)|
+| `World.record_chat_turn(agent_id, player_id, messages)` | **建行 + 关行 + 发那条 `conversation` 事件 + 关系判定**,返回会话 id | **脚本 / CLI / 无宿主那条路** |
+| `World.close_conversation(conversation_id)` | 关掉一条**已经开着的**会话 | **自己管着会话的宿主**(网站那种:一个会话跨很多轮,id 攥在它手里)|
 
 所以脚本要的那条链是:`chat(...)` → **`record_chat_turn(...)`** → `conversation` 事件
 → 订它的触发器落笔。**整条真敲过**:
