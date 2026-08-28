@@ -125,6 +125,17 @@ RULE_EVERY_KEYS = ("ticks", "days")
 #: 一条 `emit` 里写得到的键;`type` 与 `when` 两个是必填
 #: (少了 `type` 当场报,`when` 空表达式编译不过)。
 EMIT_KEYS = ("type", "when", "payload", "importance", "text", "on")
+
+#: 🆕 **这一层里"写了 A 就必须写 B"的那几对**(3.8.0,2026-08-27 第二波 ③)。
+#:
+#: 从前这条耦合只写在 `_parse_memory_text` 的代码里,而契约的 `emit_required_keys`
+#: 只列了 `type` / `when` —— 于是创作台的校验器对一份 `{"text": …}` 的 emit
+#: **判绿而引擎硬拒**。一条"契约说收、引擎不收"的差,比缺一格更贵:
+#: 消费方照契约做出来的东西,在引擎那儿开不了机。
+#: ⚠️ **它只管规律那一层的 `emit`**:触发器的 `emit`(`TRIGGER_EMIT_KEYS`)
+#: 根本没有 `importance` 这一格 —— 那儿的 `text` 是**载荷里的一句话**,
+#: 不进记忆,两层同名不同义。
+EMIT_KEY_REQUIRES: dict[str, tuple[str, ...]] = {"text": ("importance",)}
 EMIT_REQUIRED_KEYS = ("type", "when")
 
 #: 上面那张表的公开名字 —— `contract --json` 的 `plugins.rule_selectors` 报的就是它。
@@ -446,7 +457,9 @@ def _parse_memory_text(label: str, spec: dict[str, Any], errors: list[str]) -> s
     if not raw.strip():
         errors.append(f"{label}:text 是空的 —— 不写它会回落成事件类型,写个空串是白写")
         return ""
-    if "importance" not in spec:
+    # **判据就是上面那张表**,不是又写一遍键名:契约报的和引擎判的是同一份
+    # (`tests/test_rules.py` / `tests/test_plugins.py` 各钉一条)。
+    if any(need not in spec for need in EMIT_KEY_REQUIRES["text"]):
         errors.append(
             f"{label}:写了 text 却没写 importance —— 只有声明了 importance 的事件"
             "才进得了记忆,不然这句话一个人都读不到(只进日志)。"

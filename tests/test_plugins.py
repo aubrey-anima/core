@@ -2548,3 +2548,65 @@ def test_触发器六个数各指一种修法(tmp_path):
         assert stats["written"] == 0 and stats["when_false"] == 0, (
             f"取不着人被记成了「条件不成立」—— 两种病两种修法:{stats}"
         )
+
+
+# ── ③ `emit` 的「写了 A 就必须写 B」进契约了(第二波 ③)────────────────────────
+
+
+def test_emit写了text没写importance_引擎拒_而契约现在说得出这条耦合(tmp_path):
+    """🟡 **契约说收、引擎不收** —— 比缺一格更贵:创作台照契约判绿,而作者拿着
+    那份包去开机,当场红。现在那条耦合是契约里的一格,判据和引擎读的是同一份常量。"""
+    from anima_world.rules import EMIT_KEY_REQUIRES
+
+    seg = json.loads(run_cli("contract", "--json").stdout)["plugins"]
+    assert seg["emit_key_requires"] == {k: list(v)
+                                        for k, v in EMIT_KEY_REQUIRES.items()}
+    assert seg["emit_key_requires"] == {"text": ["importance"]}
+    # ⚠️ **触发器那一层没有 `importance`**,别把这条耦合套过去(套了就是假红)。
+    assert "importance" not in seg["trigger_emit_keys"]
+
+    bad = {"id": "qi", "version": "1.0.0",
+           "facts": {"灵力": {"bearer": "agent", "shape": "number", "default": 1.0}},
+           "rules": [{"id": "喊一声", "for_each": {"kind": "agent"},
+                      "set": {"qi.灵力": "qi.灵力"},
+                      "emit": [{"type": "qi.累了", "when": "qi.灵力 < 1",
+                                "text": "他喘了口气"}]}]}
+    path = write_seed_file(tmp_path / "emit.cyberworld", {**BARE, "plugins": [bad]})
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is False, "引擎收下了?那这一格报的就是假话"
+    assert any("importance" in e for e in payload["errors"]), payload["errors"]
+
+
+# ── ④ 常数步长那条 lint 覆盖插件的规律了(第二波 ④)──────────────────────────
+
+
+def test_插件的常数步长规律_也被那句提醒覆盖(tmp_path):
+    """🟡 调度台量出来的:`onair.淡忘`(`every days:1`,`人气 - 1`)和晚潮作者层那条
+    `梅雨` 是**同一种写法**,而引擎对后者说了三遍、对前者一个字都没有。
+
+    **一条只覆盖一半写法的 lint,比没有这条 lint 更难查**:作者会把"引擎没说"
+    读成"我这条没问题"。
+    """
+    from anima_world.__main__ import _authored_drift_warnings
+
+    onair = {"id": "onair", "version": "1.0.0",
+             "facts": {"人气": {"bearer": "actor", "shape": "number",
+                                "default": 20.0, "range": [0, 100]}},
+             "rules": [{"id": "淡忘", "every": {"days": 1},
+                        "for_each": {"kind": "agent"},
+                        "set": {"onair.人气": "clamp(onair.人气 - 1, 0, 100)"}}]}
+    said = _authored_drift_warnings({"plugins": [onair]})
+    assert said and any("淡忘" in w for w in said), (
+        f"插件的常数步长规律照旧没人喊:{said}"
+    )
+    # 两扇门上真的印得出来(作者手上只有这条命令)。
+    path = write_seed_file(tmp_path / "onair.cyberworld", {**BARE, "plugins": [onair]})
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is True, payload["errors"]
+    assert any("淡忘" in w for w in payload["warnings"]), payload["warnings"]
+
+    # **对照组**:同一条规律用了 `dt`,这句话就不许再响 ——
+    # 一句总在响的提醒等于没有提醒。
+    dt_ok = json.loads(json.dumps(onair, ensure_ascii=False))
+    dt_ok["rules"][0]["set"] = {"onair.人气": "clamp(onair.人气 - 1 * dt, 0, 100)"}
+    assert _authored_drift_warnings({"plugins": [dt_ok]}) == []

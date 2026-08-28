@@ -2546,13 +2546,40 @@ def _authored_drift_warnings(authored: Any) -> list[str]:
     开机却在报"。规律本身写坏了不归这儿管(`world_seed_errors` 已经列过),
     所以解析不动就安静退场,不重复报一遍错。
     """
+    out: list[str] = []
     entries = (authored or {}).get("rules") if isinstance(authored, dict) else None
+    if entries:
+        try:
+            out += list(drift_warnings(parse_rules(entries)))
+        except Exception:  # noqa: BLE001 - 坏规律的错由 world_seed_errors 负责报
+            pass
+    # 🆕 **插件的规律也要被这句话覆盖**(3.8.0,2026-08-27 第二波 ④)。
+    #
+    # 调度台那一趟量出来的:`onair.淡忘`(`every: {"days": 1}`,`onair.人气 - 1`)
+    # 和晚潮作者层那条 `梅雨` 是**同一种写法**,而引擎对后者说了三遍、对前者
+    # 一个字都没有。一条只覆盖一半写法的 lint,比没有这条 lint 更难查:
+    # 作者会以为"引擎没说 = 我这条没问题"。
+    out += _authored_plugin_drift_warnings(authored)
+    return out
+
+
+def _authored_plugin_drift_warnings(authored: Any) -> list[str]:
+    """插件那几条规律的「常数步长」lint —— 和作者层那半**共用同一个函数**。
+
+    ⚠️ **出厂插件不进这一趟**:离线这一侧手上只有作者层,而出厂那几个由世界配置
+    决定装不装;它们的写法也不是作者改得动的东西,喊了他也没有一处可修。
+    """
+    entries = (authored or {}).get("plugins") if isinstance(authored, dict) else None
     if not entries:
         return []
+    from anima_world.plugins import PluginError, parse_plugins
+
     try:
-        return list(drift_warnings(parse_rules(entries)))
-    except Exception:  # noqa: BLE001 - 坏规律的错由 world_seed_errors 负责报
-        return []
+        plugins = parse_plugins(entries)
+    except PluginError:
+        return []          # 坏插件归 `world_plugin_errors` 报,这儿闭嘴
+    rules = [rule for plugin in plugins for rule in plugin.rules]
+    return list(drift_warnings(rules)) if rules else []
 
 
 def _warn_unreachable_requirements(ontology: Any, rules: list[Any]) -> None:
@@ -3297,6 +3324,15 @@ def _install_plugins(
         tick=scheduler.clock, bodies={str(b.get("id")): b for b in bodies},
     )
     scheduler.plugins = list(plugins)
+    # 🆕 **常数步长那条 lint 也覆盖插件的规律**(第二波 ④)。开机那一侧的开口
+    # **恰好一处**,和 `_load_world_rules(warn=True)` 同一个安排 —— 说好几遍的
+    # 警告和没说过一样。⚠️ 出厂那几个滤掉:它们的写法作者改不动。
+    from anima_world.rules import drift_warnings as _drift
+
+    for warning in _drift([rule for plugin in plugins
+                           if plugin.id not in FACTORY_PLUGINS
+                           for rule in plugin.rules]):
+        logger.warning("%s", warning)
     # 边类型登记 —— `link` 那一刻查约束读的就是这张表。
     scheduler.edge_types = {
         edge.qualified: edge for plugin in plugins for edge in plugin.edges.values()
@@ -7045,6 +7081,7 @@ def contract_payload() -> dict[str, Any]:
         EDGE_VERB_EFFECTS,
         EDGE_EFFECT_KEYS,
         EDGE_KEYS,
+        EMIT_KEY_REQUIRES,
         EMIT_KEYS,
         EMIT_REQUIRED_KEYS,
         FACT_KEYS,
@@ -7456,6 +7493,13 @@ def contract_payload() -> dict[str, Any]:
             "rule_every_keys": list(RULE_EVERY_KEYS),
             "emit_keys": list(EMIT_KEYS),
             "emit_required_keys": list(EMIT_REQUIRED_KEYS),
+            # 🆕 **"写了 A 就必须写 B"的那几对**(3.8.0,2026-08-27 第二波 ③)。
+            # 从前这条耦合只活在代码里,而 `emit_required_keys` 只列 `type`/`when`
+            # —— 于是创作台对一份 `{"text": …}` 的 emit **判绿而引擎硬拒**。
+            # 「契约说收、引擎不收」比缺一格贵:照契约做出来的东西开不了机。
+            # ⚠️ **它只管规律那一层的 `emit`**:触发器的 `emit` 根本没有
+            # `importance` 这一格,那儿的 `text` 是载荷里的一句话、不进记忆。
+            "emit_key_requires": {k: list(v) for k, v in EMIT_KEY_REQUIRES.items()},
             "trigger_keys": list(TRIGGER_KEYS),
             "trigger_required_keys": list(TRIGGER_REQUIRED_KEYS),
             # 创作台在这一格上是全仓**唯一一处写死的空白判断**,所以它点名要了。

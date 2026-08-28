@@ -791,7 +791,7 @@ _KIND_LOCAL = re.compile(KIND_LOCAL_PATTERN)
 #: 规律那三格从 `rules` 转出来 —— **同一份常量,不抄第二遍**
 #: (抄一遍就是"契约说六个、引擎认七个"那种漂移的来路)。
 from anima_world.rules import (  # noqa: E402
-    EMIT_KEYS, EMIT_REQUIRED_KEYS, RULE_EVERY_KEYS, RULE_KEYS,
+    EMIT_KEY_REQUIRES, EMIT_KEYS, EMIT_REQUIRED_KEYS, RULE_EVERY_KEYS, RULE_KEYS,
 )
 
 #: 触发器的 `for_each.node` **真受理的那几种**。⚠️ 和 `BEARER_FORMS`(事实挂在谁
