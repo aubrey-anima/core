@@ -82,6 +82,38 @@ PyPI**,而这一轮往 `contract --json` 里加了两段、往抹除回执里加
 **已发布世界的 `engine_min` 一格没抬**(这一版没加作者层字段,老包照旧开得起来);
 动的只有橱窗自己的封皮(`test_flagship_seed` 的等号闸)。
 
+### `travel.parties` 那一格骗过人 —— 而错的不是代码,是引擎自己写的两句话(2026-08-27)
+
+`subscribable_events.travel` 报 `parties: ["player_id"]`,gloss 又写着「角色与玩家
+共用这一条」;而白名单那张表的说明当时写着「`parties` …… 决定触发器的 `for_each`
+能不能对得上人」。**三句话并排读会推出一个结论:角色出发时触发器对不上人。**
+
+**那个结论是错的。** 取人那条路(`Scheduler._trigger_bearer`)一个字都不读
+`parties`:`agent` 取**事件顶层的 `who`**(经 `stock_owner_of`)、`location` 取顶层
+`loc`、`entity:<kind>` 取载荷里的 `target`/`entity`、`world` 是常量。而 `travel`
+两条路的顶层 `who` 都写(角色 `Scheduler._start_journey`,玩家 `World.player_walk`)
+—— **两半都对得上**,实跑证过:一个订 `travel` 的触发器,角色出发让她那个事实 +1,
+玩家出发让他那个 +1。
+
+所以这一轮**没改行为,改的是三处说法 + 加一格**:
+
+- `events.SUBSCRIBABLE_EVENTS` 的表头说明(`parties` 是「这条事件里还写着谁」,
+  不是「落在谁头上」)、`travel` 那条的 `note`、`Scheduler._fire_trigger` 的
+  docstring(它此前写着「白名单每条都标了 `parties` —— 那正是这一格存在的理由」,
+  而这条路根本不读它);
+- 🆕 **契约多两格**(纯增量,67 → 69):`trigger_bearer_keys`(`for_each.node` →
+  从事件哪一格取人)与 `trigger_bearer_gloss`。**一格「从哪儿取」比一段「它决定
+  ……」值钱得多** —— 后者要人读、要人记,而它正好被记错了一轮
+  (`edge_end_prefixes` 那条先例的第二次应用)。反向闸钉着那张表是全的:
+  `for_each.node` 收几种形式,这一格就得有几行。
+
+⚠️ 顺带把一句没量过的话标准了:表头写着顶层 `who`「**每条都有**」——
+拿橱窗跑 300 tick 实测,**跑到的六种全都带**(`agent_join` / `entity_interaction` /
+`item_transfer` / `payment` / `state_change` / `travel`),另外四种那一趟没跑到。
+现在那句话带着日期与「量过几种」,而不是一句听起来像全称的断言。
+
+回执 `docs/FOR-STUDIO.md` §3.51,`docs/REFERENCE.md` §10.5 + §10.8。
+
 ### 作者层里种得下什么:**实例种得下,边种不下**(2026-08-27,创作台问的那两半)
 
 创作台做「组织」模板(门派 + `member_of` + 初始成员)时问了两件事,答案不一样,

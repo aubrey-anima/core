@@ -2079,3 +2079,86 @@ def test_声明了一种边而没人造得出它_引擎会说话(tmp_path):
         "effects": [{"link": {"type": "menpai.member_of", "from": "self",
                               "to": "menpai.sect:青云门"}}]}]
     assert _authored_uncreatable_edges({"plugins": [by_trigger]}) == []
+
+
+# ── `travel` 那一条:`parties` 说的不是「落在谁头上」(2026-08-27 复核)───────
+#
+# 契约里 `travel.parties == ["player_id"]`,而它的 gloss 写着「角色与玩家共用这一
+# 条」—— 两句话并排读会推出一个结论:**角色出发时触发器对不上人**。
+# 那个结论是错的,而错的不是代码,是**两处 gloss**(白名单那张表的说明,
+# 和 `_fire_trigger` 的 docstring):它们都说 `parties` 决定 `for_each` 取谁,
+# 而取人那条路一个字都不读它。下面这条把真相钉住。
+
+
+def test_travel那一条_角色与玩家两半都对得上人(tmp_path):
+    """🔴 **两半各真跑一次**,不是读代码推的。
+
+    角色那条走 `Scheduler._start_journey`(事件顶层 `who` = 她的 id,载荷里
+    **没有** `player_id`);玩家那条走 `World.player_walk`(顶层 `who` =
+    `player:<id>`,载荷里才有 `player_id`)。触发器取人取的是**顶层 `who`**,
+    所以两半都落得到人 —— 而照 `parties` 那一格推的话,角色那一半会被判成
+    「对不上人,只能当一次全局脉冲」。
+
+    ⚠️ **这条用例的价值在对照**:只跑玩家那一半的话,一个真的漏掉角色的实现
+    照样绿。
+    """
+    from anima_world.actions import ActionDescriptor
+
+    seed = {
+        "agents": [{"id": "阿岚", "name": "阿岚", "location": "cafe",
+                    "personality": "安静"}],
+        "locations": [
+            {"id": "cafe", "name": "咖啡馆", "description": "临海的小店"},
+            {"id": "pier", "name": "码头", "description": "风很大"},
+        ],
+        "plugins": [{
+            "id": "lu", "version": "1.0.0",
+            "facts": {"里程": {"bearer": "agent", "shape": "number",
+                               "default": 0.0, "visibility": "self"}},
+            "triggers": [{"id": "上路", "on": {"event": "travel"},
+                          "for_each": {"node": "agent"},
+                          "effects": [{"set": {"lu.里程": "lu.里程 + 1"}}]}],
+        }],
+    }
+    path = write_seed_file(tmp_path / "travel.cyberworld", seed)
+    with open_world_at(str(tmp_path / "travel.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        # ① 角色出发 —— 载荷里没有 `player_id` 那一格。
+        started = world.scheduler._start_journey(
+            world.scheduler.agents["阿岚"].agent,
+            ActionDescriptor("walk", {"location": "pier"}))
+        assert started, "夹具前提没成立:这个世界量不出两点之间的路"
+        world.tick(1)
+        assert world.stocks("agent:阿岚").get("lu.里程") == 1.0, (
+            "角色出发,而订 `travel` 的触发器一次都没响 —— 那才是 `parties` 那一格"
+            "会让人推出来的结论,而它不成立"
+        )
+
+        # ② 玩家出发 —— 这一半载荷里有 `player_id`。
+        world.player_move("p1", "cafe", display_name="阿宇")
+        world.tick(1)
+        assert world.player_walk("p1", "pier")["in_transit"]
+        world.tick(1)
+        assert world.stocks("agent:player:p1").get("lu.里程") == 1.0, (
+            "玩家那一半也得对得上人 —— 玩家和角色同一个量表命名空间"
+        )
+
+
+def test_契约说得出触发器从哪一格取人_而且那张表是全的():
+    """**一格「从哪儿取」比一段「它决定……」值钱得多。**
+
+    反向闸:`for_each.node` 收的那几种形式,`trigger_bearer_keys` 必须一种都不少 ——
+    加一种 bearer 而忘了报,消费方就只能去猜,而猜错不报错。
+    """
+    seg = json.loads(run_cli("contract", "--json").stdout)["plugins"]
+    table = seg["trigger_bearer_keys"]
+    assert set(table) == {"agent", "world", "location", "entity:<kind>"}, sorted(table)
+    assert "who" in table["agent"], table["agent"]
+    assert "loc" in table["location"], table["location"]
+    assert seg["trigger_bearer_gloss"].strip(), "光有表没有那句话,读的人会以为 parties 也算"
+    assert "parties" in seg["trigger_bearer_gloss"], (
+        "这一格存在的理由就是把 `parties` 那句假话按住,而它没提这件事"
+    )
+    # `travel` 那一条的 gloss 自己也要说清楚,别让两句话并排读推出一个错结论。
+    note = seg["subscribable_events"]["travel"]["note"]
+    assert "who" in note and "两半都对得上" in note, note

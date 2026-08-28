@@ -4937,3 +4937,68 @@ menpai.member_of —— 那张表会永远是空的,而「造不出来」和「�
 新增五格:`kind_instance_section` / `kind_instance_id_syntax` /
 `kind_instance_gloss` / `edge_node_id_forms` / `deferred_author_sections`。
 老引擎上它们是**整格缺席**(不是 `null`)。
+
+## 3.51 `travel.parties` 那一格骗过人:**触发器取人取的不是它**(3.8.0,2026-08-27)
+
+这一节是一次**更正**,而被更正的是引擎自己写的两句话。
+
+### 那两句话错在哪
+
+`contract --json` 里 `plugins.subscribable_events.travel` 长这样:
+
+```jsonc
+{"gloss": "有人出发去别的地方(角色与玩家共用这一条)", "parties": ["player_id"], …}
+```
+
+两句并排读会推出一个结论:**角色出发时,触发器对不上人** —— 因为 `player_id`
+只有玩家那条路才带。而白名单那张表的说明里当时正写着「`parties` …… 决定触发器的
+`for_each` 能不能对得上人」。
+
+**那个结论是错的,而错的不是代码,是那两句 gloss。** 取人那条路
+(`Scheduler._trigger_bearer`)**一个字都不读 `parties`**:
+
+| `for_each.node` | 从事件的哪一格取人 |
+|---|---|
+| `agent` | **事件顶层的 `who`**(经 `stock_owner_of` → `agent:<id>`;玩家是 `agent:player:<id>`)|
+| `location` | 事件顶层的 `loc` |
+| `entity:<kind>` | 载荷里的 `target`,没有就 `entity` |
+| `world` | 常量 `world`,不看事件 |
+
+而 `travel` 的两条路**顶层 `who` 都写**:角色那条是她的 id
+(`Scheduler._start_journey`),玩家那条是 `player:<id>`(`World.player_walk`)。
+**两半都对得上人** —— 实跑过:一个订 `travel` 的触发器,角色出发让她那个事实 +1,
+玩家出发让他那个 +1(`tests/test_plugins.py::test_travel那一条_角色与玩家两半都对得上人`)。
+
+### 给你们的一格(新,纯增量)
+
+```jsonc
+"trigger_bearer_keys": {
+  "agent":         "event.who(经 stock_owner_of → `agent:<id>`;玩家写成 …)",
+  "world":         "(常量 `world`,不看事件)",
+  "location":      "event.loc",
+  "entity:<kind>": "event.payload.target,没有就 event.payload.entity(…)"
+},
+"trigger_bearer_gloss": "🔴 `subscribable_events` 里那格 `parties` 不是取人的依据 …"
+```
+
+**`parties` 从今天起的读法是**:「这条事件里**还写着谁**」(对方、目标、收款人)——
+给作者读、给你们在界面上印,**不是**「这条事件落在谁头上」。
+反向闸钉着这张表是全的:`for_each.node` 收几种形式,这一格就得有几行
+(`test_契约说得出触发器从哪一格取人_而且那张表是全的`)。
+
+⚠️ **两条「不跑」要说给作者**,否则他会以为触发器坏了:
+
+1. **取不出人就整条不跑**(答 `None`,引擎**不猜**)—— 比如订 `location` 的触发器
+   碰上一条没有 `loc` 的事件;
+2. **取出来的人身上一个量都没有、而 bearer 是 `agent` 时也不跑** —— 那意味着
+   这个插件还没种到他头上(⚠️ 一个**在插件装上之后才进世界**的玩家会落在这一档,
+   直到他身上第一次有这个插件的量为止)。
+
+### 顺带:`agent_join` 订不到创世那一批
+
+同一趟量出来的(写在 §3.50 (a) 里,这儿再点一次名,因为它最容易被写成「入门礼」):
+**创世时那几条 `agent_join` 发生在插件装上之前**,队列里一条都没有 ——
+订它的触发器对**后来**加入的人有效,对创世那一批无效,而两者的差别在屏幕上
+看不出来。
+
+### 契约这一轮:**67 → 69 格**(`trigger_bearer_keys` + `trigger_bearer_gloss`),纯增量,老引擎上整格缺席

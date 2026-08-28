@@ -7506,6 +7506,31 @@ def contract_payload() -> dict[str, Any]:
             # 没有新段、没有新语法,只有一条:id 里那个种类名要写**全名**。
             "kind_instance_section": "entities",
             "kind_instance_id_syntax": "<plugin>.<local>:<实例名>",
+            # 🆕 **触发器的 `for_each` 到底从事件的哪一格取人**(2026-08-27)。
+            # 🔴 这一格治的是一句**写在两处的假话**:白名单那张表的说明与
+            # `_fire_trigger` 的 docstring 都写着「`parties` 决定 `for_each` 对不
+            # 对得上人」,而取人那条路**一个字都不读 `parties`**。`travel` 是它
+            # 最容易骗到人的地方 —— 那一条的 `parties` 只有 `player_id`
+            # (玩家那条路才带),照那句话推会得出「角色出发时触发器对不上人」,
+            # 而实测两半都对得上(顶层 `who` 两条路都写)。
+            # **一格「从哪儿取」比一段「它决定……」值钱得多**:后者要人读、要人记,
+            # 而它正好被记错了一轮(`edge_end_prefixes` 那条先例)。
+            "trigger_bearer_keys": {
+                "agent": "event.who(经 stock_owner_of → `agent:<id>`;"
+                         "玩家写成 `player:<id>`,于是 owner 是 `agent:player:<id>`)",
+                "world": "(常量 `world`,不看事件)",
+                "location": "event.loc",
+                "entity:<kind>": "event.payload.target,没有就 event.payload.entity"
+                                 "(取到的那个 id 的种类要对得上 `<kind>`)",
+            },
+            "trigger_bearer_gloss": (
+                "🔴 **`subscribable_events` 里那格 `parties` 不是取人的依据** ——"
+                "它说的是「这条事件里还写着谁」(对方、目标、收款人),给读的人看。"
+                "触发器落在谁头上,只看上面这张表。"
+                "⚠️ **取不出人就整条不跑**(`_trigger_bearer` 答 `None`,不猜);"
+                "**取出来的人身上一个量都没有时,`agent` 那一支也不跑** —— "
+                "那意味着这个插件还没种到他头上。"
+            ),
             "kind_instance_gloss": (
                 "插件声明的种类编译成**普普通通的本体种类**,所以它的实例走的就是"
                 "作者层已有的 `entity` 记录:`{\"id\": \"menpai.sect:青云门\", "

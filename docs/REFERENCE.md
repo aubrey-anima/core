@@ -5140,8 +5140,18 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 - **`triggers`** —— `{"id", "on": {"event": …}, "for_each": {"node": …}, "when", "effects"}`。
   `on.event` 必须在**可订事件白名单**上(`contract --json` 的
   `plugins.subscribable_events`,见 §2.1.1),或者是任何插件的 `<id>.<type>`。
-  当事人**从事件上取**(白名单每条标了 `parties`),不从"此刻在场的人"猜 ——
-  猜的话,一件三分钟前发生的事会算在刚走进来的人头上。
+  当事人**从事件上取**,不从"此刻在场的人"猜 —— 猜的话,一件三分钟前发生的事
+  会算在刚走进来的人头上。
+  🔴 **从哪一格取,问 `contract --json` 的 `plugins.trigger_bearer_keys`**:
+  `agent` 取**事件顶层的 `who`**(经 `stock_owner_of`)· `location` 取顶层的 `loc` ·
+  `entity:<kind>` 取载荷里的 `target` / `entity` · `world` 是常量。
+  ⚠️ **`subscribable_events` 里那格 `parties` 不是取人的依据**(2026-08-27 更正:
+  这句话此前写反了)—— 它说的是「这条事件里还写着谁」,给读的人看。
+  `travel` 是这句假话最容易骗到人的地方:它的 `parties` 只有 `player_id`
+  (玩家那条路才带),照那句话推会得出「角色出发时触发器对不上人」,
+  **而两半都对得上**(顶层 `who` 两条路都写;实测各让那个事实 +1)。
+  ⚠️ 两条不跑的情形:取不出人(答 `None`,**不猜**);取出来的人身上一个量都没有
+  且 bearer 是 `agent`(那意味着这个插件还没种到他头上)。
 
 🔴 **队列在 tick 开头快照、drain 一遍;触发器自己 `emit` 的落进下一 tick。**
 这是这一层唯一的结构性决定,理由和规律的双缓冲逐字相同:**同轮递归的下场不是算错,
@@ -5207,6 +5217,7 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 | `kind_instance_section` / `kind_instance_id_syntax` | `"entities"` / `<plugin>.<local>:<实例名>` | **插件种类的实例种在作者层哪个段、id 怎么写**(§10.16)|
 | `edge_node_id_forms` | 端形式 → 节点 id 的样子 | 写 `link` / `unlink` / `transfer` 的两端时照它拼。🔴 **玩家是 `agent:player:<id>`**,不是 `player:<id>` |
 | `deferred_author_sections` | `{段名: 为什么}` | **这一版作者层收不下的段,连理由一起报**(今天只有 `edge`)—— 和 `deferred_fact_shapes` 逐字同构;**这一格里没有它了 = 收得下了** |
+| `trigger_bearer_keys` / `trigger_bearer_gloss` | `for_each.node` → 从事件哪一格取人 | 🔴 **`parties` 不是取人的依据**(§10.5)。`agent` ← 顶层 `who`,`location` ← 顶层 `loc`,`entity:<kind>` ← 载荷 `target`/`entity`,`world` 是常量 |
 
 
 ### 10.9 第一个搬出去的出厂系统:**needs**(3.8.0)

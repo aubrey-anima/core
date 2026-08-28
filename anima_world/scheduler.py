@@ -5466,9 +5466,18 @@ class Scheduler:
     ) -> None:
         """一个触发器对一条事件。**当事人从事件上取,不从这一刻的世界上猜。**
 
-        白名单(`events.SUBSCRIBABLE_EVENTS`)每条都标了 `parties` —— 那正是这一格
-        存在的理由:一条事件落在谁头上,只有它自己说得出。拿"此刻在场的人"去猜的话,
-        一件三分钟前发生的事会算在刚走进来的人头上,而没有一处会报错。
+        拿"此刻在场的人"去猜的话,一件三分钟前发生的事会算在刚走进来的人头上,
+        而没有一处会报错。取人那一份判断在 `_trigger_bearer`。
+
+        🔴 **2026-08-27 更正:这段话此前写着「白名单每条都标了 `parties` —— 那正是
+        这一格存在的理由」,而这句是假的。** 这条路一个字都不读 `parties`:
+        `agent` 取的是**事件顶层的 `who`**、`location` 取顶层的 `loc`、
+        `entity:<kind>` 取载荷里的 `target` / `entity`。
+        `travel` 那一条正是这句假话最容易骗到人的地方 —— 它的 `parties` 只有
+        `player_id`(玩家那条路才带),照那句话推会得出"角色出发时触发器对不上人",
+        **而实测两半都对得上**(角色出发与玩家出发各让那个事实 +1,
+        `tests/test_plugins.py::test_travel那一条_角色与玩家两半都对得上人`)。
+        取人的那几格现在是契约里的一格:`plugins.trigger_bearer_keys`。
         """
         causes = {} if causes is None else causes
         owner = self._trigger_bearer(trigger, event)
