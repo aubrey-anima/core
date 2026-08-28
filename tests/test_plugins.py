@@ -1918,3 +1918,164 @@ def test_契约把每一层的键名单都报出来_而且不许漂():
     }, sorted(P.STRICT_LEVELS)
     for grid in P.STRICT_LEVELS:
         assert c.get(grid), f"契约少报了一层:{grid}"
+
+
+# ── 作者层里种得下什么:实例种得下,边种不下(2026-08-27,创作台问的那两半)────
+#
+# 创作台要做「组织」模板(门派 + `member_of` + 初始成员),于是问了两件事:
+# **(a) 一条边**、**(b) 插件种类的一个实例**,作者层里写不写得下?
+# 答案不一样,而两个答案都得有闸看着 —— 一句写在文档里的答案会烂,
+# 而烂了的样子是创作台按它画了一个画不出东西来的界面。
+
+MENPAI_SEED = {
+    "id": "menpai", "version": "1.0.0", "label": "门派",
+    "kinds": {"group:sect": {"gloss": "一个门派", "facts": {
+        "声望": {"shape": "number", "default": 0.0, "visibility": "public",
+                 "label": "声望"}}}},
+    "edges": {"member_of": {
+        "label": "门下", "from": "agent", "to": "group:sect", "exclusive": True,
+        "facts": {"辈分": {"shape": "state", "default": "外门",
+                           "visibility": "connected", "label": "辈分",
+                           "values": [{"name": "外门"}, {"name": "内门"}]}}}},
+    "verbs": {"入门": {"target": "group:sect", "description": "拜入这个门派",
+                       "effects": [{"link": {"type": "menpai.member_of",
+                                             "from": "self", "to": "target"}}]}},
+}
+
+
+def _seeded_menpai_world(tmp_path, *, entities=(), name="menpai"):
+    path = write_seed_file(tmp_path / f"{name}.cyberworld",
+                           {**BARE, "plugins": [dict(MENPAI_SEED)],
+                            "entities": [dict(e) for e in entities]})
+    return open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                         force_mock_llm=True)
+
+
+def test_插件种类的实例_作者层里种得下_走的就是entities段(tmp_path):
+    """**(b) 能。** 而且没有新段、没有新语法 —— 插件的种类编译成普普通通的本体
+    种类之后,它的实例就是普普通通的一条 `entity` 记录,只有一条要记:
+    id 里那个种类名要写**全名**(`<插件>.<局部名>`)。
+
+    ⚠️ **量名不带命名空间**(`声望`,不是 `menpai.声望`):种类上的事实住在那个
+    实例自己的量表里,不和别人共用一张表。顶层 `facts` 那一族才带 —— 它们住在
+    角色/世界/地点的量表上,跨插件共用一张,所以必须分得开。
+    这一条不写清楚的话,创作台的规律会照着 `menpai.声望` 写,而那个名字
+    **恒等于 0**:规律照跑、日志干净。
+    """
+    inst = {"id": "menpai.sect:青云门", "name": "青云门", "location": "cafe"}
+    with _seeded_menpai_world(tmp_path, entities=[inst]) as world:
+        rows = {e["id"]: e for e in world.entities()}
+        assert "menpai.sect:青云门" in rows, f"实例没种进去:{sorted(rows)}"
+        assert rows["menpai.sect:青云门"]["kind"] == "menpai.sect"
+        assert rows["menpai.sect:青云门"]["location"] == "cafe"
+        # 种类上声明的事实,**按默认值落地了**,而且量名是裸的。
+        values = world.scheduler.stock_store.snapshot("menpai.sect:青云门")
+        assert "声望" in values, f"种类上那个事实一格都没落地:{values}"
+        assert "menpai.声望" not in values, (
+            "种类上的事实**不带命名空间** —— 带了的话创作台会照着写规律,"
+            "而那个名字恒等于 0"
+        )
+        # 那条边真的连得上这个实例(**契约里那格节点 id 形状,拿它真跑一遍**)。
+        assert world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "menpai.member_of",
+             "from": "agent:阿岚", "to": "menpai.sect:青云门"}, {})
+        assert world.scheduler.edge_store.all("menpai.member_of") == [
+            ("agent:阿岚", "menpai.sect:青云门", {"menpai.辈分": 0.0})
+        ]
+
+
+def test_一条边_作者层里种不下_而且报错会说它认得哪几个段(tmp_path):
+    """**(a) 不能。** 作者层十三个段里没有边 —— 写一条 `type: "edge"` 的记录是
+    **开不了机的硬失败**(和一个拼错的 type 逐字同一种)。
+
+    ⚠️ **这条用例的方向是"钉住今天的答案"**:哪天 `edge` 成了第十四个段,它会红,
+    而那正是提醒 —— 契约里 `deferred_author_sections` 那一格、FOR-STUDIO §3.50、
+    以及 `_authored_uncreatable_edges` 那句警告,**三处都要跟着改口**。
+    """
+    import gzip
+
+    path = tmp_path / "edge.cyberworld"
+    rows = [
+        {"kind": "manifest", "version": 3, "world_id": "t", "engine_min": "3.8.0"},
+        {"kind": "author", "type": "plugin", "body": dict(MENPAI_SEED)},
+        {"kind": "author", "type": "edge",
+         "body": {"type": "menpai.member_of", "from": "agent:阿岚",
+                  "to": "menpai.sect:青云门"}},
+    ]
+    with gzip.GzipFile(path, "wb", mtime=0) as fh:
+        fh.write(("\n".join(json.dumps(r, ensure_ascii=False) for r in rows)
+                  + "\n").encode())
+
+    check = json.loads(run_cli("world", "check", str(path), "--edit", "--json").stdout)
+    assert check["loadable"] is False, "作者层收下了一条边?那这一节整个要重写"
+    joined = "\n".join(check["errors"])
+    assert "'edge'" in joined and "只认" in joined, joined
+    # **报错里那张表就是答案本身** —— 作者不必去翻文档才知道能写哪几个段。
+    for section in ("agent", "kind", "entity", "plugin"):
+        assert f"'{section}'" in joined, joined
+
+
+def test_契约说得出这两个答案_而且那几格是真的(tmp_path):
+    """🔴 **一格「怎么写」比一段「请注意」值钱得多**(`edge_end_prefixes` 那条先例)。
+
+    这里钉三件:实例走哪个段、节点 id 长什么样、以及**这一版收不下的作者层段
+    连理由一起报**(和 `deferred_fact_shapes` 逐字同构)。
+    ⚠️ 节点 id 那一格**不是抄的**:下面拿它和引擎真正在用的那个函数对了一遍。
+    """
+    from anima_world.world_file import AUTHOR_SECTIONS
+
+    seg = json.loads(run_cli("contract", "--json").stdout)["plugins"]
+
+    assert seg["kind_instance_section"] == "entities"
+    assert seg["kind_instance_section"] in AUTHOR_SECTIONS.values()
+    assert seg["kind_instance_id_syntax"] == "<plugin>.<local>:<实例名>"
+
+    # 🔴 **`edge` 不在作者层的段表上,而契约必须把这件事说出来** ——
+    # 两句话对不上时,以 `AUTHOR_SECTIONS` 为准(它是开机真读的那一份)。
+    assert "edge" not in AUTHOR_SECTIONS, (
+        "作者层多了 `edge` 段而契约还在说它收不下 —— 去改 `deferred_author_sections`"
+    )
+    deferred = seg["deferred_author_sections"]
+    assert "edge" in deferred and len(deferred["edge"].strip()) > 40, (
+        "一句光秃秃的「不支持」会让作者以为自己写错了字"
+    )
+
+    # 节点 id 那一格:**拿引擎自己的函数对一遍**,不是读文档抄的。
+    forms = seg["edge_node_id_forms"]
+    with _seeded_menpai_world(tmp_path, name="forms") as world:
+        assert forms["agent"].replace("<agent_id>", "阿岚") == \
+            world.scheduler.stock_owner_of("阿岚")
+        assert forms["player"].replace("<player_id>", "p1") == \
+            world.scheduler.stock_owner_of("player:p1")
+    assert forms["world"] == "world"
+    assert forms["location"].startswith("location:")
+    for template in ("entity:<kind>", "group:<kind>"):
+        assert template in forms, sorted(forms)
+
+
+def test_声明了一种边而没人造得出它_引擎会说话(tmp_path):
+    """**警告,不是错误** —— 开机是权威,而开机收得下这种声明。可**没有一处会
+    说话**才是病:那张表永远 0 条,而作者分不出「造不出来」和「还没有人连上」。
+
+    ⚠️ 对照组在后半截:给它一个带 `link` 的动词,这句话就不许再响 ——
+    **一句总在响的警告等于没有警告。**
+    """
+    from anima_world.__main__ import _authored_uncreatable_edges
+
+    idle = dict(MENPAI_SEED)
+    idle["verbs"] = {}                      # 把唯一那条 `link` 拿掉
+    said = _authored_uncreatable_edges({"plugins": [idle]})
+    assert said and "menpai.member_of" in said[0], said
+
+    assert _authored_uncreatable_edges({"plugins": [dict(MENPAI_SEED)]}) == [], (
+        "有动词造得出它,这句话就不该响"
+    )
+    # 触发器那条路也算数(动词不是唯一的造法)。
+    by_trigger = dict(MENPAI_SEED)
+    by_trigger["verbs"] = {}
+    by_trigger["facts"] = {"资历": {"bearer": "agent", "shape": "number"}}
+    by_trigger["triggers"] = [{
+        "id": "入门礼", "on": {"event": "conversation"},
+        "effects": [{"link": {"type": "menpai.member_of", "from": "self",
+                              "to": "menpai.sect:青云门"}}]}]
+    assert _authored_uncreatable_edges({"plugins": [by_trigger]}) == []

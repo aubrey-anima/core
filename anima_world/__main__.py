@@ -1227,7 +1227,12 @@ def _load_world_file(
         # 拼错的键只警告(`taglien` 什么也不做,但拦下来会让新版创作台配不了老引擎)。
         # **开机也要说** —— 这条警告此前只有 `validate world` 才看得到,而托管环境里
         # 没有人会去跑那条命令。
-        for problem in (_authored_media_warnings(authored) if authored else []):
+        # ⚠️ **开机这一侧也说** —— 三扇门对同一份文件说同一句话,warning 那一半
+        # 和 errors 那一半是同一条纪律:只有 `validate world` 看得到的警告,
+        # 在托管环境里等于没有(那儿没有人会去跑那条命令)。
+        for problem in ((_authored_media_warnings(authored)
+                         + _authored_uncreatable_edges(authored))
+                        if authored else []):
             logger.warning("%s: %s", path, problem)
         # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
         # 跑过的世界导出来、或者从 1.x 迁过来的,里面一条 author 记录都没有 ——
@@ -2944,6 +2949,44 @@ def _live_dropped_quantities(
         pairs = []
     return _dropped_quantities(
         declared, stock_rows=stock_rows, visibility_pairs=pairs, rules=rules)
+
+
+def _authored_uncreatable_edges(authored: dict[str, Any] | None) -> list[str]:
+    """作者声明了一种边,而这份文件里**没有一个动词或触发器造得出它**。
+
+    **警告,不是错误。** 开机是权威,而开机收得下这种声明(一个还没写完的世界是
+    正当的),比它严就是假红。可**没有一处会说话**才是这一格真正的病:那张边表
+    永远 0 条,提示词里一个字都不会出现,而作者分不出「它本来就造不出来」和
+    「还没有人入门」—— 这正是这个仓库最怕的那种安静。
+
+    ⚠️ **这一句会不会响,取决于这一版引擎能不能在作者层里种边** —— 今天不能
+    (`contract --json` 的 `plugins.deferred_author_sections` 里那条 `edge` 就是这件事),
+    所以"造得出它"只有动词与触发器两条路。哪天种得下了,这一句要跟着改口,
+    否则它会对一份**写着初始成员**的世界报一句假警报。
+    """
+    if not authored:
+        return []
+    entries = authored.get("plugins")
+    if not entries:
+        return []
+    from anima_world.plugins import (
+        PluginError, order_plugins, parse_plugins, uncreatable_edges,
+    )
+
+    try:
+        plugins = order_plugins(parse_plugins(entries))
+    except (PluginError, Exception):  # noqa: BLE001 - 坏插件归 world_plugin_errors 报
+        return []
+    idle = uncreatable_edges(plugins)
+    if not idle:
+        return []
+    return [
+        f"插件 `{plugin_id}` 声明了这几种边,而这份文件里没有一个动词或触发器"
+        f"造得出它们:{'、'.join(names)} —— 那张表会永远是空的,而"
+        "「造不出来」和「还没有人连上」在屏幕上长得一模一样。"
+        "要么给它一个带 `link` 的动词/触发器,要么先别声明它"
+        for plugin_id, names in sorted(idle.items())
+    ]
 
 
 def _authored_dropped_quantities(authored: dict[str, Any] | None) -> list[str]:
@@ -6851,6 +6894,7 @@ def run_validate(args: argparse.Namespace) -> int:
                 + _authored_unreachable_requirements(authored)
                 + _authored_media_warnings(authored)
                 + _authored_dropped_quantities(authored)
+                + _authored_uncreatable_edges(authored)
             )
             errors += _authored_ontology_errors(authored, edit=edit)
             if edit:
@@ -7457,6 +7501,55 @@ def contract_payload() -> dict[str, Any]:
             # 一件都不用重写。
             "kind_prefixes": list(KIND_PREFIXES),
             "kind_id_syntax": "<plugin>.<local>",
+            # 🆕 **插件种类的实例,作者层里种得下**(2026-08-27,创作台问的第二半)。
+            # 它编译成普通本体种类之后,实例就是普普通通的 `entity` 记录 ——
+            # 没有新段、没有新语法,只有一条:id 里那个种类名要写**全名**。
+            "kind_instance_section": "entities",
+            "kind_instance_id_syntax": "<plugin>.<local>:<实例名>",
+            "kind_instance_gloss": (
+                "插件声明的种类编译成**普普通通的本体种类**,所以它的实例走的就是"
+                "作者层已有的 `entity` 记录:`{\"id\": \"menpai.sect:青云门\", "
+                "\"name\": \"青云门\", \"location\": \"yard\"}`。"
+                "⚠️ **种类上声明的事实,量名不带命名空间**(`声望`,不是 "
+                "`menpai.声望`)—— 它住在那个实例自己的量表里,不和别人共用一张表;"
+                "顶层 `facts` 那一族才带(它们住在**角色/世界/地点**的量表上,"
+                "跨插件共用一张,所以必须分得开)。"
+                "⚠️ 实例记录**排在哪一行不承重**,但那个种类必须由这份文件里的"
+                "某个插件声明(离线两扇门与开机拿的是同一份判断)。"
+            ),
+            # 🆕 **边的两端写进声明时长什么样。** 这一格是问出来的:创作台要写
+            # `{"from": "agent:甲", "to": "menpai.sect:青云门"}`,而此前**整份契约
+            # 一格都没说过节点 id 的形状** —— 只能照 FOR-STUDIO 抄,而抄来的镜像
+            # 会烂(`visibilities` 那一格刚吃过同一种亏)。
+            # 🔴 **`player` 那一行最容易写错**:玩家的节点 id 是 `agent:player:<id>`,
+            # 不是 `player:<id>` —— 玩家和角色**同一个量表命名空间**
+            # (`stock_owner_of`),而边的两端用的就是那个 owner key。
+            "edge_node_id_forms": {
+                "agent": "agent:<agent_id>",
+                "player": "agent:player:<player_id>",
+                "location": "location:<location_id>",
+                "world": "world",
+                "entity:<kind>": "<kind>:<实例名>(就是那条 entity 记录的 id)",
+                "group:<kind>": "<kind>:<实例名>(同上)",
+            },
+            # 🔴 **这一版收不下的作者层段,连理由一起报** —— 和
+            # `deferred_fact_shapes` 逐字同构。一句光秃秃的「不支持」会让作者
+            # 以为自己写错了字;而**这一格在不在**就是消费方的探测位:
+            # 哪天 `edge` 从这儿消失、`AUTHOR_SECTIONS` 里多出它,就是种得下了。
+            "deferred_author_sections": {
+                "edge": (
+                    "作者层里**种不下一条边**(`{\"kind\": \"author\", "
+                    "\"type\": \"edge\"}` 当场开不了机,报错会列出认得的那几个 "
+                    "type)。边今天只有两条来路:动词的 `effects` 与触发器的 "
+                    "`effects`(`link` / `transfer`),两条都是**运行期**的。"
+                    "于是「门派的初始成员」这种**创世态**的东西写不出来 —— "
+                    "这是一个真缺口,不是一条设计判断,记在这儿等开单。"
+                    "⚠️ 别绕道去手写状态层的 `edge:<type>` 那个 hash:那是引擎的"
+                    "内部键形状(field 用 `\\x00` 分隔,还要顺带写 `edge_types` "
+                    "索引集合),让消费方各持一份对键形状的猜测正是 `world drop` "
+                    "当初归引擎的那条理由。"
+                ),
+            },
             # 🆕 动词。**按 tool-calling 的 JSON schema 声明**(设计 §12.3):
             # NPC 挑动词和玩家点按钮读的是同一份定义。
             "verb_declaration": "tool-calling",
@@ -8501,6 +8594,7 @@ def run_world_check(args: argparse.Namespace) -> int:
                 + _authored_unreachable_requirements(authored)
                 + _authored_media_warnings(authored)
                 + _authored_dropped_quantities(authored)
+                + _authored_uncreatable_edges(authored)
             )
             errors += _authored_ontology_errors(authored, edit=payload["edit"])
             if payload["edit"]:

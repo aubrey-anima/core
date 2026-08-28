@@ -1089,6 +1089,52 @@ def test_编辑包里的插件_动词借世界里已有的种类_三扇门说同
     )
 
 
+def test_声明了一种边而没人造得出它_两扇门都说这句话(tmp_path, fresh_redis, caplog):
+    """**警告那一半也归"三扇门说同一句话"管**(2026-08-27)。
+
+    作者声明了一种边,而这份文件里没有一个动词或触发器造得出它 —— 引擎**收**
+    (开机是权威,比它严就是假红),但那张表会永远是空的,而**没有一处会说话**
+    正是这个仓库最怕的形状。所以三扇门一起说:两扇离线门进 `warnings`,
+    开机进 `logger.warning` —— **只有 `validate world` 看得到的警告,在托管环境里
+    等于没有**(那儿没有人会去跑那条命令)。
+    """
+    import logging
+
+    idle = {"id": "menpai", "version": "1.0.0",
+            "edges": {"member_of": {"from": "agent", "to": "group:sect"}},
+            "kinds": {"group:sect": {"gloss": "一个门派"}}}
+    path = _plugin_file(tmp_path, idle, name="idle-edge")
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"这是一句警告不是一条错误,世界必须照旧开得起来:{errors}"
+
+    said_validate, said_check = _warnings(path)
+    assert any("menpai.member_of" in w for w in said_validate), said_validate
+    assert said_validate == said_check, "两扇门的 warnings 分叉了"
+
+    with caplog.at_level(logging.WARNING):
+        assert _boot_says(path, fresh_redis, "boot-idle")[0]
+    assert any("menpai.member_of" in r.getMessage() for r in caplog.records), (
+        "开机那一侧一个字都没说 —— 而托管环境里没有人会去跑 `validate world`"
+    )
+
+
+def test_边有人造得出时_那句话不许再响(tmp_path, fresh_redis):
+    """**一句总在响的警告等于没有警告。** 对照组和上一条只差一个动词。"""
+    made = {"id": "menpai", "version": "1.0.0",
+            "edges": {"member_of": {"from": "agent", "to": "group:sect"}},
+            "kinds": {"group:sect": {"gloss": "一个门派"}},
+            "verbs": {"入门": {"target": "group:sect", "description": "拜入门派",
+                               "effects": [{"link": {"type": "menpai.member_of",
+                                                     "from": "self",
+                                                     "to": "target"}}]}}}
+    path = _plugin_file(tmp_path, made, name="made-edge")
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, errors
+    said_validate, said_check = _warnings(path)
+    assert not any("造得出" in w for w in said_validate), said_validate
+    assert said_validate == said_check
+
+
 # ── 九、通用的那一条:**新开一种开机失败,三扇门必须一起认**(3.8.0 第 1 期)────
 
 

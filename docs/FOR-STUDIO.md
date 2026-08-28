@@ -4830,3 +4830,110 @@ Python 侧对应 `World.world_setting()` / `World.set_world_setting(text, clear=
 `contract --json` 的哪一格** —— 而另外十层都说。现在十一层同一句话
 (`plugins.projected_source_keys`)。**「每层的名单都进契约」这条纪律的另一半,
 正是让报错自己点名那一格**,否则读的人只能照文档记一份会烂的清单。
+
+## 3.50 作者层里种得下什么:**实例种得下,边种不下**(3.8.0,2026-08-27)
+
+你们做「组织」模板时问的两件事,答案不一样,而两个答案都**量过**(不是读代码
+推的:四条路各真开一次机)。
+
+### (b) 插件种类的实例 —— **种得下,而且没有新段、没有新语法**
+
+插件声明的种类编译成**普普通通的本体种类**,所以它的实例就是普普通通的一条
+`entity` 记录:
+
+```jsonc
+{"kind":"author","type":"entity","body":{
+   "id":"menpai.sect:青云门","name":"青云门","location":"yard"}}
+```
+
+三条要记:
+
+1. **id 里那个种类名写全名** —— `menpai.sect`(`<插件>.<局部名>`),不是 `sect`。
+   探测位:`contract --json` 的 `plugins.kind_instance_section`(= `"entities"`)与
+   `plugins.kind_instance_id_syntax`。**缺席 = 这支引擎答不出这个问题**,
+   照旧 `d.get("plugins", {}).get("kind_instance_section")`。
+2. 种类上声明的事实**按默认值落地**在那个实例自己的量表里(实测:`声望` = 0.0)。
+3. 🔴 **种类上的事实,量名不带命名空间** —— 是 `声望`,不是 `menpai.声望`。
+   顶层 `facts` 那一族才带。理由是**住在哪张表上**:种类上的事实住在那个实例
+   自己的量表里(不和别人共用),顶层那些住在角色 / 世界 / 地点的量表上,
+   跨插件共用一张,所以必须分得开。
+   ⚠️ **写错这一条的下场是安静的**:照 `menpai.声望` 写的规律里,那个名字
+   **恒等于 0**,规律照跑、日志干净。你们的模板生成器要按这一条分两种写法。
+
+判据 `tests/test_plugins.py::test_插件种类的实例_作者层里种得下_走的就是entities段`。
+
+### (a) 一条边 —— **种不下**,而这是一个真缺口
+
+作者层十三个段里**没有边**。写一条 `{"kind":"author","type":"edge", …}` 是
+**开不了机的硬失败**,报错会把认得的那十六个 type 一起列出来。
+所以「青云门的三位创派弟子」这种**创世态**的东西,今天写不出来。
+
+**探测位(新,纯增量)**:`contract --json` 的 `plugins.deferred_author_sections`
+—— 和 `deferred_fact_shapes` 逐字同构的一格,**连理由一起报**:
+
+```jsonc
+"deferred_author_sections": {"edge": "作者层里种不下一条边…(理由原文)"}
+```
+
+**判据是这一格里还有没有 `edge`**:有 = 种不下(把那句理由**原样**印给作者,
+别转述);哪天它从这一格里消失、`author_type` 那一族多出一个边的段,就是种得下了。
+⚠️ **整格缺席 = 老引擎**(3.8.0 之前),按老规矩 `d.get(…, {})` 到底。
+
+**替代写法(今天就能用,两条)**:
+
+1. **给那种边一个带 `link` 的动词**,让第一批成员在世界跑起来之后自己连上;
+2. **一条订得到的事件 + 触发器**(`conversation` / `entity_interaction` / …)。
+
+⚠️ **`agent_join` 那条订不到创世那一批**(实测:tick 3 之后边表仍是 0 条)——
+创世时那几条 `agent_join` 发生在插件装上之前,队列里一条都没有。
+**别把「入门礼」写成订 `agent_join`**:它对后来加入的人有效,对创世那一批无效,
+而两者的差别在屏幕上看不出来。
+
+🔴 **别绕道去手写状态层那个 hash。** 它物理上走得通(实测:写一条
+`{"kind":"redis","key":"edge:menpai.member_of","type":"hash", …}` 加一条
+`edge_types` 的 set 记录,开机之后边真的在),**而我不建议你们这么做**:
+field 用 `\x00` 分隔、还要顺带维护索引集合,那是**引擎的内部键形状** ——
+让消费方各持一份对键形状的猜测,正是 `world drop` 当初归引擎的那条理由。
+它今天对、下一版可能就不对,而不对的样子是安静的。
+
+### (c) 顺带:声明了一种边而**没人造得出它**,引擎从今天起会说话
+
+```
+插件 `menpai` 声明了这几种边,而这份文件里没有一个动词或触发器造得出它们:
+menpai.member_of —— 那张表会永远是空的,而「造不出来」和「还没有人连上」
+在屏幕上长得一模一样。要么给它一个带 `link` 的动词/触发器,要么先别声明它
+```
+
+**是警告不是错误**:开机是权威,而开机收得下这种声明(一个还没写完的世界是正当的),
+比它严就是假红。三扇门一起说 —— 两扇离线门进 `warnings`,开机进 `logger.warning`
+(**只有 `validate world` 看得到的警告,在托管环境里等于没有**)。
+你们那侧建议给 🟡,理由原样印。
+
+### 边的两端到底怎么写:**新增一格 `edge_node_id_forms`**
+
+写 `link` / `unlink` / `transfer` 的两端要拼节点 id,而**整份契约此前一格都没说过
+它的形状** —— 只能照 FOR-STUDIO 抄,而抄来的镜像会烂(`visibilities` 那一格刚吃过
+同一种亏)。现在有一格:
+
+```jsonc
+"edge_node_id_forms": {
+  "agent":         "agent:<agent_id>",
+  "player":        "agent:player:<player_id>",
+  "location":      "location:<location_id>",
+  "world":         "world",
+  "entity:<kind>": "<kind>:<实例名>(就是那条 entity 记录的 id)",
+  "group:<kind>":  "<kind>:<实例名>(同上)"
+}
+```
+
+🔴 **`player` 那一行最容易写错**:玩家的节点 id 是 **`agent:player:<id>`**,
+不是 `player:<id>` —— 玩家和角色**同一个量表命名空间**(`stock_owner_of`),
+而边的两端用的就是那个 owner key。
+⚠️ 这一格**不是抄的**:闸里拿它和引擎真正在用的那个函数对了一遍
+(`tests/test_plugins.py::test_契约说得出这两个答案_而且那几格是真的`)。
+
+### 契约这一轮:**62 → 67 格,纯增量,一格取值都没改**
+
+新增五格:`kind_instance_section` / `kind_instance_id_syntax` /
+`kind_instance_gloss` / `edge_node_id_forms` / `deferred_author_sections`。
+老引擎上它们是**整格缺席**(不是 `null`)。

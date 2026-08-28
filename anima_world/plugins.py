@@ -1081,6 +1081,37 @@ def compile_kind_rows(plugins: Iterable[Plugin]) -> list[dict[str, Any]]:
     ]
 
 
+def uncreatable_edges(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
+    """声明了、而**没有任何动词或触发器造得出**的那几种边。
+
+    🔴 **它是警告不是错误**,理由和 `_authored_unreachable_requirements` 逐字相同:
+    一个还没写完的世界是正当的,而**开机是权威** —— 引擎自己收得下这种声明,
+    离线比它严就是假红。但**没有一处会说话**才是真正的问题:作者以为门派建好了,
+    而那张边表永远是 0 条,提示词里一个字都不会出现,`plugin list` 上也看不出
+    "它本来就造不出来"和"还没有人入门"的差别。
+
+    判得动的理由很具体:**一条边只连得动声明它的那个插件自己的
+    `link` / `transfer`**(`_parse_link_effect` 那道闸),所以不必去猜别的插件会不会
+    来造它 —— 数自己这一份就够。
+    ⚠️ **`unlink` 不算造得出**:断一条不存在的边是空操作。
+    ⚠️ **出厂插件不进这一趟**(离线那一侧手上只有作者层):`invitation` 那条边是
+    内核直接物化的,没有任何动词造它 —— 拿这条规矩去量它会得到一句假警报。
+    """
+    out: dict[str, list[str]] = {}
+    for plugin in plugins:
+        made = {
+            str(spec.get("type") or "")
+            for source in (*plugin.verbs.values(), *plugin.triggers)
+            for spec in getattr(source, "links", ())
+            if spec.get("op") in ("link", "transfer")
+        }
+        idle = sorted(edge.qualified for edge in plugin.edges.values()
+                      if edge.qualified not in made)
+        if idle:
+            out[plugin.id] = idle
+    return out
+
+
 def borrowed_kind_errors(
     plugins: Iterable[Plugin], declared: Iterable[str],
 ) -> list[str]:

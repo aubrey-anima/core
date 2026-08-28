@@ -5204,6 +5204,9 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 | `storage_key` / `world_file_section` | | 库里住哪儿 / 世界文件里叫什么 |
 | `read_command` / `remove_command` | `plugin list` / `plugin remove <id> --yes` | ⚠️ `--yes` 一个都不能少:这条命令**默认是预演** |
 | `subscribable_events` | 第 0 期那张表(§2.1.1) | 触发器订得到哪几种 |
+| `kind_instance_section` / `kind_instance_id_syntax` | `"entities"` / `<plugin>.<local>:<实例名>` | **插件种类的实例种在作者层哪个段、id 怎么写**(§10.16)|
+| `edge_node_id_forms` | 端形式 → 节点 id 的样子 | 写 `link` / `unlink` / `transfer` 的两端时照它拼。🔴 **玩家是 `agent:player:<id>`**,不是 `player:<id>` |
+| `deferred_author_sections` | `{段名: 为什么}` | **这一版作者层收不下的段,连理由一起报**(今天只有 `edge`)—— 和 `deferred_fact_shapes` 逐字同构;**这一格里没有它了 = 收得下了** |
 
 
 ### 10.9 第一个搬出去的出厂系统:**needs**(3.8.0)
@@ -5613,3 +5616,56 @@ gossip / closeness 全建在"关系可重放"上,钱的每一笔来路(`payment`
 ✅ **橱窗第一次真的敲出来了**:`tests/test_flagship_seed.py::test_橱窗里她真的约得动人_而且到点会过期`。
 邀请门是 3.6.0 交的,而它**一次都没在内置那份世界上出现过** —— 三道闸里
 「橱窗里展示它」这一道到今天才补上。
+
+
+### 10.16 作者层里种得下什么:**实例种得下,边种不下**(3.8.0,2026-08-27)
+
+创作台做「组织」模板时问的两件事,答案不一样。
+
+**(a) 一条边:种不下。** 作者层十三个段里没有边 —— 写一条
+`{"kind": "author", "type": "edge", …}` 是**开不了机的硬失败**(报错会把认得的那
+十六个 type 一起列出来)。边今天只有两条来路,都是**运行期**的:动词的 `effects`
+与触发器的 `effects`(`link` / `transfer`)。
+
+于是「门派的初始成员」这种**创世态**的东西今天写不出来。⚠️ **这是一个真缺口,
+不是一条设计判断** —— 内核自己的关系图有作者层入口(`relation` 段),而插件的边
+没有,这处不对称记在 `contract --json` 的 `plugins.deferred_author_sections`
+里等开单。**别绕道去手写状态层那个 hash**:field 用 `\x00` 分隔、还要顺带写
+`edge_types` 索引集合,让消费方各持一份对内部键形状的猜测,正是 `world drop`
+当初归引擎的那条理由。
+
+**替代写法(今天就能用)**:给那种边一个带 `link` 的动词,让第一批成员在世界
+跑起来之后自己连上;或者一条订得到的事件 + 触发器。⚠️ **`agent_join` 那条订不到
+创世那一批** —— 创世时那几条 `agent_join` 发生在插件装上之前,队列里一条都没有
+(实测:tick 3 之后边表仍是 0 条)。
+
+**(b) 插件种类的一个实例:种得下,而且没有新段、没有新语法。** 插件声明的种类
+编译成**普普通通的本体种类**(id `<plugin>.<local>`),所以它的实例就是普普通通的
+一条 `entity` 记录:
+
+```jsonc
+{"kind":"author","type":"plugin","body":{
+   "id":"menpai","version":"1.0.0",
+   "kinds":{"group:sect":{"gloss":"一个门派",
+            "facts":{"声望":{"shape":"number","default":0.0,"visibility":"public"}}}},
+   "edges":{"member_of":{"from":"agent","to":"group:sect","exclusive":true}},
+   "verbs":{"入门":{"target":"group:sect","description":"拜入这个门派",
+            "effects":[{"link":{"type":"menpai.member_of","from":"self","to":"target"}}]}}}}
+{"kind":"author","type":"entity","body":{
+   "id":"menpai.sect:青云门","name":"青云门","location":"yard"}}
+```
+
+- **id 里那个种类名要写全名**(`menpai.sect`),`location` 照旧照写;
+- 种类上声明的事实**按默认值落地**在那个实例自己的量表里;
+- 🔴 **种类上的事实,量名不带命名空间**(`声望`,不是 `menpai.声望`)——
+  它住在那个实例自己的表里,不和别人共用;顶层 `facts` 那一族才带
+  (它们住在角色 / 世界 / 地点的量表上,跨插件共用一张,所以必须分得开)。
+  照 `menpai.声望` 写规律的话,那个名字**恒等于 0**:规律照跑、日志干净。
+
+判据 `tests/test_plugins.py::test_插件种类的实例_作者层里种得下_走的就是entities段`。
+
+**(c) 顺带一条会说话的警告**:声明了一种边而这份文件里**没有一个动词或触发器
+造得出它**,三扇门都会说一句 —— 两扇离线门进 `warnings`,开机进 `logger.warning`。
+**是警告不是错误**(开机是权威,而它收得下),可**没有一处会说话**才是病:
+那张表永远 0 条,而作者分不出「造不出来」和「还没有人连上」。
+⚠️ 哪天边种得下了,这句话要跟着改口,否则它会对一份写着初始成员的世界报假警报。
