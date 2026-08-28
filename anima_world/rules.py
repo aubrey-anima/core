@@ -62,6 +62,7 @@ needs 的衰减曲线、economy 的价格漂移都是写死在 Python 里的,而
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -466,6 +467,22 @@ def _parse_edge(label: str, raw: Any, errors: list[str]) -> str:
         )
         return "rise"
     return value
+
+
+#: **一个插件命名空间下的名字长什么样**(`<插件id>.<事实名>`)。
+#:
+#: 这个形状放在这儿而不是 `plugins.py`,是因为**两层都要认它而它们不许互相 import**:
+#: 本体那一层(affordance 的 `set` / `costs`)要认出"这个名字有主",插件那一层才知道
+#: 主是谁、声明没声明。⚠️ 它**只认形状,不认名单** —— "这个插件到底存不存在、
+#: 那个事实声明没声明"由插件层判(`plugins._parse_verb`),那儿两份声明都在手上。
+#: 闸在 `tests/test_plugins.py`:这条正则和 `plugins.PLUGIN_ID_PATTERN` 必须对得上,
+#: 各写一份的话,一个合法的插件 id 会在本体那一层被判成"怪名字"。
+_NAMESPACED = re.compile(r"^[a-z][a-z0-9_]{1,31}\.[^\s.:]+$")
+
+
+def namespaced_output(name: str) -> bool:
+    """这个写入目标是不是**某个插件命名空间下**的名字。"""
+    return bool(_NAMESPACED.match(name.strip()))
 
 
 def bad_output_name(name: str, *, namespace: str | None = None) -> str | None:

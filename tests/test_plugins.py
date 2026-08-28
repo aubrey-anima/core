@@ -2298,3 +2298,140 @@ def test_契约说得出触发器从哪一格取人_而且那张表是全的():
     # `travel` 那一条的 gloss 自己也要说清楚,别让两句话并排读推出一个错结论。
     note = seg["subscribable_events"]["travel"]["note"]
     assert "who" in note and "两半都对得上" in note, note
+
+
+# ── 动词写得到自己的事实了(3.8.0,2026-08-27 第二波 ①)────────────────────────
+#
+# 调度台拿真世界试出来的第一条:**一个插件的动词改不动它自己的事实**。
+# `costs: {"tape.精神": "me_tape.精神 - 10"}` 被本体那一层按"怪名字"拒掉,
+# 而拒绝语是作者层规律那句「跨实体的相互作用 v1 还表达不了」—— 一句和插件毫无
+# 关系的话。下场:「施法耗灵力」这种最基本的写法写不出来。
+
+_TAPE = {
+    "id": "tape", "version": "1.0.0", "label": "磁带",
+    "facts": {"精神": {"bearer": "actor", "shape": "number", "default": 50.0,
+                       "range": [0, 100], "visibility": "self", "label": "劲头"}},
+    "kinds": {"entity:tape": {"gloss": "一盒磁带", "facts": {
+        "录满": {"shape": "number", "default": 0.0, "range": [0, 1],
+                 "visibility": "here", "label": "录了多少"}}}},
+    "verbs": {"录一面": {
+        "target": "entity:tape", "label": "录一面", "description": "把话录进去",
+        "costs": {"嗓子": "me_嗓子 - 0.1", "tape.精神": "me_tape.精神 - 10"},
+        "set": {"录满": "clamp(录满 + 0.5, 0, 1)"},
+    }},
+    "rules": [{"id": "缓过来", "every": {"ticks": 1}, "for_each": {"kind": "agent"},
+               "set": {"tape.精神": "clamp(tape.精神 + 0.5 * dt, 0, 100)"}}],
+}
+_TAPE_SEED = {
+    "agents": [{"id": "yu", "name": "露", "location": "cafe", "personality": "安静"}],
+    "locations": [{"id": "cafe", "name": "咖啡馆", "description": "临海的小店"}],
+    "kinds": [{"id": "agent",
+               "quantities": {"嗓子": {"default": 1.0, "visibility": "self"}}}],
+    "entities": [{"id": "tape.tape:h1978", "name": "一号带", "location": "cafe"}],
+}
+
+
+def _tape_world(tmp_path, plugin=None, name="tape"):
+    path = write_seed_file(tmp_path / f"{name}.cyberworld",
+                           {**_TAPE_SEED, "plugins": [plugin or _TAPE]})
+    return path, open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                               force_mock_llm=True)
+
+
+def test_动词的costs写得到自己的插件事实_而且真扣(tmp_path):
+    """🔴 **第二波 ① 本身**,判据是调度台那份 `tape.json`:两扇门从红变绿,
+    `World.act` 真扣,**而且重开一次照旧收**(存的那一行要再解析一遍)。"""
+    path, world = _tape_world(tmp_path)
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is True, payload["errors"]
+    with world:
+        before = dict(world.stocks("agent:yu"))
+        assert before["tape.精神"] == 50.0 and before["嗓子"] == 1.0
+        out = world.act("yu", "interact",
+                        {"target": "tape.tape:h1978", "verb": "录一面"})
+        assert out["ok"] is True, out
+        after = dict(world.stocks("agent:yu"))
+        assert after["tape.精神"] == 40.0, f"自己的事实没被扣:{after}"
+        assert after["嗓子"] == 0.9, f"内核那一格也得照旧扣:{after}"
+        assert world.scheduler.stock_store.snapshot(
+            "tape.tape:h1978")["录满"][0] == 0.5
+
+    # 🔴 **重开一次** —— 本体是从 `:kinds` 那一行**重新解析**的
+    # (`RedisOntologyStore.load`),genesis 放行而重开拒的话,世界会在第二天打不开。
+    with open_world_at(str(tmp_path / "tape.db"), force_mock_llm=True) as again:
+        assert again.stocks("agent:yu")["tape.精神"] == 40.0
+
+
+def test_写不到别的插件的事实上_而且理由是投影那条(tmp_path):
+    """🔴 **裁决(第二波 ①.②):`costs` 也只写得到自己的命名空间。**
+
+    设计稿 §4.2 那个 `economy.coins - 500` 的例子写在这条边界定下来之前,以边界为准。
+    最硬的一条理由不是对称性,是**别人的事实可能是 `projected`** —— `economy.coins`
+    今天正是,量表里那个数只是物化视图,扣下去**重开一次就回来了,零报错**。
+    """
+    bad = json.loads(json.dumps(_TAPE, ensure_ascii=False))
+    bad["verbs"]["录一面"]["costs"]["economy.coins"] = "economy.coins - 500"
+    path = write_seed_file(tmp_path / "cross.cyberworld",
+                           {**_TAPE_SEED, "plugins": [bad]})
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is False, "跨插件写被收下了 —— 那这条裁决没有闸"
+    joined = "\n".join(payload["errors"])
+    assert "写不到别的插件的事实上" in joined and "projected" in joined, joined
+    assert "reads" in joined and "requires" in joined, (
+        f"拒绝了却没告诉他该怎么写(读得到、写不了):{joined}"
+    )
+
+
+def test_写自己命名空间下一个没声明的事实_当场拒并说清裸名那一族(tmp_path):
+    """拒绝语要**指着插件自己的病灶**,而不是作者层规律那句「跨实体的相互作用」。"""
+    bad = json.loads(json.dumps(_TAPE, ensure_ascii=False))
+    bad["verbs"]["录一面"]["costs"]["tape.没这个"] = "me_tape.没这个 - 1"
+    path = write_seed_file(tmp_path / "typo.cyberworld",
+                           {**_TAPE_SEED, "plugins": [bad]})
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is False
+    joined = "\n".join(payload["errors"])
+    assert "顶层 `facts` 里没有" in joined and "量名是裸的" in joined, joined
+    assert "跨实体的相互作用" not in joined, (
+        "还在拿作者层规律那句话当拒绝理由 —— 那正是第二波 ⑥ 说的「指错病灶」"
+    )
+
+
+def test_projected的事实写不得_而且costs要扣在人身上(tmp_path):
+    """两条**挂错身子**的写法各一条:`projected` 的事实写不得;
+    `costs` 扣的是施动者,挂在东西身上的事实扣不到人头上去。"""
+    mine = json.loads(json.dumps(_TAPE, ensure_ascii=False))
+    mine["facts"]["账"] = {"bearer": "actor", "shape": "number", "mode": "projected",
+                           "sources": [{"event": "payment", "credit": "to"}]}
+    mine["verbs"]["录一面"]["costs"]["tape.账"] = "me_tape.账 - 1"
+    path = write_seed_file(tmp_path / "proj.cyberworld",
+                           {**_TAPE_SEED, "plugins": [mine]})
+    joined = "\n".join(
+        json.loads(run_cli("validate", "world", str(path), "--json").stdout)["errors"])
+    assert "`projected` 的事实**写不得**" in joined, joined
+    assert "重开一次就回到折出来的那个数" in joined, joined
+
+    wrong = json.loads(json.dumps(_TAPE, ensure_ascii=False))
+    wrong["facts"]["温度"] = {"bearer": "world", "shape": "number", "default": 0.0}
+    wrong["verbs"]["录一面"]["costs"]["tape.温度"] = "tape.温度 - 1"
+    path = write_seed_file(tmp_path / "bearer.cyberworld",
+                           {**_TAPE_SEED, "plugins": [wrong]})
+    joined = "\n".join(
+        json.loads(run_cli("validate", "world", str(path), "--json").stdout)["errors"])
+    assert "扣的是**施动者**身上的量" in joined, joined
+
+
+def test_本体那一层的形状判据_和插件id那条正则对得上():
+    """两层各写一份形状的话,一个合法的插件 id 会在本体那一层被判成"怪名字"
+    (而那正是这一条要防的假红)。"""
+    import re
+
+    from anima_world.plugins import PLUGIN_ID_PATTERN
+    from anima_world.rules import namespaced_output
+
+    for good in ("qi", "a1", "a" * 32, "with_underscore"):
+        assert re.match(PLUGIN_ID_PATTERN, good), good
+        assert namespaced_output(f"{good}.灵力"), good
+    for bad in ("Qi", "1qi", "q", "q-i"):
+        assert not re.match(PLUGIN_ID_PATTERN, bad), bad
+        assert not namespaced_output(f"{bad}.灵力"), bad

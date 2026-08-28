@@ -77,7 +77,9 @@ from anima_world.expressions import (
     rewrite_source,
 )
 from anima_world.perception import HIDDEN, VISIBILITIES, band_word
-from anima_world.rules import BUILTIN_NAMES, WORLD_PREFIX, bad_output_name
+from anima_world.rules import (
+    BUILTIN_NAMES, WORLD_PREFIX, bad_output_name, namespaced_output,
+)
 from anima_world.world_time import DEFAULT_MINUTES_PER_TICK, clock_names
 
 logger = logging.getLogger(__name__)
@@ -941,6 +943,20 @@ def _parse_affordance(
         raw_set = {}
     for key, source in raw_set.items():
         name = str(key).strip()
+        # 🆕 **一个插件命名空间下的名字,这一层放行,由插件层判**(3.8.0,2026-08-27)。
+        #
+        # 从前这里一律按"怪名字"拒(`bad_output_name` 那句「跨实体的相互作用 v1 还
+        # 表达不了」),而那句话说的是**作者层规律**的扇入问题,和插件的事实一点
+        # 关系都没有 —— 下场是**一个插件的动词改不动它自己的事实**:
+        # 「施法耗灵力」写不出来,而拒绝语指着一个完全不相干的病灶。
+        # ⚠️ **这一层只认形状,不认名单**:那个插件在不在、那个事实声明没声明,
+        # 由 `plugins._parse_verb` 判 —— 只有那儿两份声明都在手上。
+        if namespaced_output(name):
+            try:
+                outputs[name] = compile_expression(source)
+            except ExpressionError as exc:
+                errors.append(f"{label}.affordances.{verb}.set.{name}:{exc}")
+            continue
         problem = bad_output_name(name)
         if problem:
             errors.append(f"{label}.affordances.{verb}.set.{name}:{problem}")
@@ -975,6 +991,12 @@ def _parse_affordance(
         raw_costs = {}
     for key, source in raw_costs.items():
         name = str(key).strip()
+        if namespaced_output(name):     # 同上:有主的名字,主是插件层
+            try:
+                charges[name] = compile_expression(source)
+            except ExpressionError as exc:
+                errors.append(f"{label}.affordances.{verb}.costs.{name}:{exc}")
+            continue
         problem = bad_output_name(name)
         if problem:
             errors.append(f"{label}.affordances.{verb}.costs.{name}:{problem}")
@@ -1080,8 +1102,16 @@ def _parse_affordance(
                     # 还看不见。`resolve` 拿着两边一起查(和地点、规律引用同一条路)。
                     continue
                 if name.startswith(ME_PREFIX):
-                    if name[len(ME_PREFIX):] not in actor_quantities:
+                    bare = name[len(ME_PREFIX):]
+                    # 有主的名字这一层不判(和 `set` / `costs` 那两处同一条):
+                    # 它是某个插件的事实,而"那个插件在不在、声明没声明"只有
+                    # 插件层答得出。这一层判它 = 拿一张查不到它的表去判,恒为假红。
+                    if namespaced_output(bare):
+                        continue
+                    if bare not in actor_quantities:
                         mine.append(name)
+                elif namespaced_output(name):
+                    continue
                 elif name not in quantities:
                     theirs.append(name)
         return (sorted(set(theirs)), sorted(set(mine)))

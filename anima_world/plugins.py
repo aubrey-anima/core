@@ -53,7 +53,7 @@ from typing import Any, Iterable, Mapping
 
 from anima_world.expressions import Expression, ExpressionError, compile_expression
 from anima_world.perception import VISIBILITIES, band_errors, parse_bands
-from anima_world.rules import Rule, RuleError, parse_rules
+from anima_world.rules import Rule, RuleError, namespaced_output, parse_rules
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +620,7 @@ def _parse_one(
         for name, spec in raw_verbs.items():
             try:
                 verb = _parse_verb(plugin_id, f"{label}.verbs.{name}", str(name),
-                                   spec, kinds, edges)
+                                   spec, kinds, edges, facts)
             except PluginError as exc:
                 errors.extend(exc.errors)
                 continue
@@ -958,8 +958,10 @@ VERB_KEYS = ("target", "label", "description", "effects", *_VERB_PASSTHROUGH)
 
 def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
                 kinds: Mapping[str, PluginKind],
-                edges: Mapping[str, "EdgeType"] | None = None) -> Verb:
+                edges: Mapping[str, "EdgeType"] | None = None,
+                facts: Mapping[str, Fact] | None = None) -> Verb:
     edges = edges or {}
+    facts = facts or {}
     errors: list[str] = []
     if not isinstance(spec, dict):
         raise PluginError([f"{label}:声明必须是对象,收到 {type(spec).__name__}"])
@@ -1040,6 +1042,14 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
             if spec_out is not None:
                 links.append(spec_out)
 
+    # 🔴 **`costs` / `set` 写到插件命名空间上,判在这儿**(3.8.0,2026-08-27,第二波 ①)。
+    #
+    # 本体那一层**有意不判**这一族(它手上没有插件的声明,判了就是恒为假红),
+    # 而从前它按"怪名字"一律拒 —— 下场是**一个插件的动词改不动它自己的事实**:
+    # 「施法耗灵力」写不出来,而拒绝语指着一句和插件毫无关系的话
+    # (「跨实体的相互作用 v1 还表达不了」,那说的是作者层规律的扇入)。
+    errors += _verb_namespaced_writes(plugin_id, label, spec, target, kinds, facts)
+
     # 🔴 **不认识的键当场拒,别静默丢**(2026-08-27,创作台接第 2 期时测出来的)。
     #
     # 从前这一行只挑认识的那几个,多写的**照收然后丢掉** —— 作者写下的那一格
@@ -1061,6 +1071,85 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
     return Verb(plugin=plugin_id, name=name, target=target, label=label_text,
                 description=str(spec.get("description") or "").strip(), body=body,
                 links=tuple(links))
+
+
+#: 动词的 `costs` 写在**施动者**身上,`set` 写在**目标**身上 —— 两侧收的 bearer 不同。
+_ACTOR_BEARERS = ("actor", "player")
+
+
+def _verb_namespaced_writes(
+    plugin_id: str, label: str, spec: dict[str, Any], target: str,
+    kinds: Mapping[str, PluginKind], facts: Mapping[str, Fact],
+) -> list[str]:
+    """动词写到 `<插件>.<事实>` 上时,那个事实真的存在、而且挂对了身子吗。
+
+    🔴 **裁决(2026-08-27,第二波 ①):写只写得到自己的命名空间,`costs` 也不例外。**
+    设计稿 §4.2 有一个 `costs: {"economy.coins": "economy.coins - 500"}` 的例子,
+    而它写在第 1 期定下那条边界之前 —— **以边界为准**,理由有三条,而第二条是硬的:
+
+    1. **三条写路必须给同一个答案。** 规律的 `set`、触发器的 `set`、动词的 `costs`
+       都是"写一个事实";其中两条早就只写得到自己的命名空间,第三条放开就是
+       同一件事两种规矩,而作者读不出为什么。
+    2. 🔴 **别人的事实可能是 `projected`,而直接写它下次重开就没了。**
+       `economy.coins` 今天正是 `mode: "projected"`(真相是 `payment` 事件流,
+       量表里那个数是物化视图)—— 一条 `costs` 把它扣掉,**下一次重开物化一遍
+       就回来了,而没有一处报错**。而"别人的事实是不是投影"不是写它的人管得着的。
+    3. **花钱那件事有它自己的路**:`payment` 事件 → 投影。要拦一个买不起的人,
+       用 `reads` 读别人的事实 + `requires` 挡住 —— **读别人的可以,写别人的不行**,
+       这和 `reads` 整套设计逐字一致。真正的跨插件扣费等 economy 动词化那一期。
+    """
+    out: list[str] = []
+    for where, raw, side in (("costs", spec.get("costs"), "actor"),
+                             ("set", spec.get("set"), "target")):
+        if not isinstance(raw, dict):
+            continue
+        for key in raw:
+            name = str(key).strip()
+            if not namespaced_output(name):
+                continue                       # 裸名字归本体那一层判
+            owner, local = name.split(".", 1)
+            if owner != plugin_id:
+                out.append(
+                    f"{label}.{where}.{name}:**写不到别的插件的事实上** —— "
+                    f"`{owner}` 那一格归它自己管。读得到、写不了:要拦一个"
+                    f"「买不起 / 不够格」的人,把 `{owner}.{local}` 写进 `reads`,"
+                    "再用 `requires` 挡住。🔴 直接写还有一条更硬的理由:"
+                    "别人的事实可能是 `projected`(它的真相是事件流,量表里那个数"
+                    "只是物化视图),**扣下去下一次重开就回来了,而没有一处报错**"
+                )
+                continue
+            fact = facts.get(local)
+            if fact is None:
+                out.append(
+                    f"{label}.{where}.{name}:这个插件的顶层 `facts` 里没有 "
+                    f"`{local}`;声明过的是 {sorted(facts)}。"
+                    "⚠️ 写在 `kinds.<…>.facts` 里的那一族**量名是裸的**,"
+                    f"直接写 `{local}` 就行,不带命名空间"
+                )
+                continue
+            if fact.projected:
+                out.append(
+                    f"{label}.{where}.{name}:`projected` 的事实**写不得** —— "
+                    "它的真相是那串 delta 事件,量表里的数只是物化视图,"
+                    "直接写下去**重开一次就回到折出来的那个数**,而没有一处报错。"
+                    "要改它,发一条它认领的事件"
+                )
+                continue
+            if side == "actor" and fact.bearer not in _ACTOR_BEARERS:
+                out.append(
+                    f"{label}.costs.{name}:`costs` 扣的是**施动者**身上的量,而 "
+                    f"`{local}` 挂在 `{fact.bearer}` 上 —— 扣不到人身上去。"
+                    f"施动者那一侧的 bearer 是 {list(_ACTOR_BEARERS)}"
+                )
+            elif side == "target":
+                want = f"entity:{verb_kind_id(plugin_id, target)}"
+                if fact.bearer != want:
+                    out.append(
+                        f"{label}.set.{name}:`set` 写的是**目标**身上的量,而 "
+                        f"`{local}` 挂在 `{fact.bearer}` 上,这个动词的目标是 "
+                        f"`{want}` —— 写下去落不到目标头上"
+                    )
+    return out
 
 
 def verb_kind_id(plugin_id: str, target: str) -> str:

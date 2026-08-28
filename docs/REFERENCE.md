@@ -5216,6 +5216,7 @@ anima:{w}:stock:agent:夏 qi.灵力` 真的读得到)。
 | `subscribable_events` | 第 0 期那张表(§2.1.1) | 触发器订得到哪几种 |
 | `kind_instance_section` / `kind_instance_id_syntax` | `"entities"` / `<plugin>.<local>:<实例名>` | **插件种类的实例种在作者层哪个段、id 怎么写**(§10.16)|
 | `edge_node_id_forms` | 端形式 → 节点 id 的样子 | 写 `link` / `unlink` / `transfer` 的两端时照它拼。🔴 **玩家是 `agent:player:<id>`**,不是 `player:<id>` |
+| `namespaced_write_scope` / `namespaced_write_gloss` | `"self"` | 动词的 `costs`/`set` 里**带命名空间的键**只许是自己的顶层 `facts`,且要挂对身子;`projected` 的一律写不得(§10.10)|
 | `deferred_author_sections` | `{段名: 为什么}` | **这一版作者层收不下的段,连理由一起报**(今天只有 `edge`)—— 和 `deferred_fact_shapes` 逐字同构;**这一格里没有它了 = 收得下了** |
 | `trigger_bearer_keys` / `trigger_bearer_gloss` | `for_each.node` → 从事件哪一格取人 | 🔴 **`parties` 不是取人的依据**(§10.5)。`agent` ← 顶层 `who`,`location` ← 顶层 `loc`,`entity:<kind>` ← 载荷 `target`/`entity`,`world` 是常量 |
 
@@ -5396,6 +5397,25 @@ Python 关键字,而表达式是 `ast.parse` 解析的:`from.x` 连语法都过�
 | `verb_target_forms` | `["entity:","group:","<作者写的种类 id>"]` | ⚠️ **`agent` 不在里面** |
 | `rule_selectors` | `[…,"edge"]` | `for_each` 认哪几种 |
 | `edge_ends` / `edge_fact_shapes` / `edge_storage_key` / `edge_expression_prefixes` | | 边那一族(第 2 期 2a 地基那一轮已在) |
+
+#### 动词写得到哪些量(3.8.0,2026-08-27)
+
+动词的 `costs` / `set` 的**键**分两族,判在两层:
+
+- **裸名字**(`录满` / `嗓子`)—— 本体那一层判:必须是那个种类(`set`)或 `agent`
+  (`costs`)声明过的量。⚠️ 写在 `kinds.<…>.facts` 里的插件事实**就是这一族**。
+- **带命名空间的名字**(`tape.精神`)—— **插件那一层判**,本体层一律放行
+  (它手上没有插件的声明,判了就是恒为假红)。规矩三条:
+  **只许自己的**(`<前缀>` == 这个插件的 id)· 必须在**顶层 `facts`** 里 ·
+  **挂对身子**(`costs` → bearer `actor`/`player`;`set` → bearer
+  `entity:<这个动词的 target>`)。
+
+🔴 **写只写得到自己的命名空间,`costs` 也不例外**(裁决,2026-08-27)。设计稿 §4.2
+那个 `costs: {"economy.coins": …}` 的例子写在这条边界定下来之前 —— **以边界为准**。
+最硬的理由:**别人的事实可能是 `projected`**,而 `economy.coins` 今天正是 ——
+量表里那个数只是物化视图,扣下去**重开一次就回来了,零报错**。
+要拦一个买不起的人:`reads` 读 + `requires` 挡。**读别人的可以,写别人的不行。**
+🔴 同源的一条:**`projected` 的事实一律写不得,自己的也不行。**
 
 ### 10.11 投影式事实 `mode: "projected"`(3.8.0 第 2 期 2b)
 

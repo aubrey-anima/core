@@ -7670,6 +7670,23 @@ def contract_payload() -> dict[str, Any]:
             # `expressions._validate` 那段:它是安全边界)。`me_` 前缀读的是
             # 施动者身上那一份,和内核的量逐字同构。
             "namespace_syntax": "<plugin>.<fact>",
+            # 🆕 **写只写得到自己的命名空间,`costs` 也不例外**(3.8.0,2026-08-27
+            # 第二波 ① 裁决)。三条写路(规律的 `set` / 触发器的 `set` / 动词的
+            # `costs` 与 `set`)从此给同一个答案。⚠️ 设计稿 §4.2 有一个
+            # `costs: {"economy.coins": …}` 的例子,它写在这条边界定下来之前 ——
+            # **以这一格为准**。
+            "namespaced_write_scope": "self",
+            "namespaced_write_gloss": (
+                "动词的 `costs` / `set` 里,**带命名空间的键**(`<插件>.<事实>`)"
+                "只许是**自己的**顶层 `facts`,而且要挂对身子:`costs` 扣施动者"
+                "(bearer `actor` / `player`),`set` 写目标(bearer "
+                "`entity:<这个动词的 target>`)。裸名字照旧归本体那一层判"
+                "(种类声明过的量)。🔴 **别人的事实读得到、写不了**:要拦一个"
+                "「买不起」的人,把它写进 `reads` 再用 `requires` 挡 —— 直接写有一条"
+                "更硬的理由:别人的事实可能是 `projected`(真相是事件流,量表里那个数"
+                "只是物化视图),**扣下去重开一次就回来了,而没有一处报错**。"
+                "🔴 **`projected` 的事实一律写不得**,自己的也不行。"
+            ),
             "actor_namespace_syntax": "me_<plugin>.<fact>",
             "state_in_expressions": "ordinal",
             "text_max_chars_default": DEFAULT_TEXT_MAX_CHARS,
