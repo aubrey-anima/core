@@ -656,7 +656,20 @@ def perceive(
                     for key, value in stock_store.of(owner).items()
                     if visibility_of(rules, kind, key) in (HERE, PUBLIC)
                 }
-                if not seen:
+                # 🔴 **一个身上没有量、但**能被做点什么**的东西,照样在这儿**
+                # (3.8.0,2026-08-27 第二波 ⑧,创作台验收 C 在真引擎上撞的)。
+                #
+                # 从前这一句是 `if not seen: continue` —— 而这一块带的不只是量,
+                # 还有**名字、gloss 和动词**,那三样一个都不依赖量。于是一个
+                # 「一个数都没有」的东西(门派、组织、一块牌子)**整条不出现在
+                # 她的提示词里**,连带它身上的动词她永远看不见 ——
+                # 而 `ontology` / `validate` / 创作台三处都说那个动词存在,
+                # `World.act` 直调也真的通。**三处说有,而没有一个角色到得了它。**
+                # ⚠️ 判据是「有没有她够得着的东西」,不是「有没有数」:
+                # 两样都没有的照旧跳过(那才是真的什么都没有)。
+                gloss, verbs = (ontology.describe(owner)
+                                if ontology is not None else ("", ()))
+                if not seen and not verbs:
                     continue
                 result.here[owner] = seen
                 words = {
@@ -677,7 +690,6 @@ def perceive(
                 if label:
                     result.labels[owner] = label   # 东西的名字,不是量的名字
                 if ontology is not None:
-                    gloss, verbs = ontology.describe(owner)
                     if gloss:
                         result.glosses[owner] = gloss
                     if verbs:

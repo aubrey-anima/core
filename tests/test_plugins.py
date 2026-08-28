@@ -2796,3 +2796,92 @@ def test_脚本产得出conversation事件_而订它的触发器真的响(tmp_pa
         )
         stats = world.trigger_stats()["onair.上过节目"]
         assert stats["matched"] == 1 and stats["written"] == 1, stats
+
+
+# ── ⑧ 一个「一个数都没有」的东西,她照样看得见(第二波 ⑧)──────────────────────
+#
+# 创作台验收 C 在真引擎上撞的:`group:` 种类的实例与角色同处一地,而她的工具块里
+# **整条不出现**,于是组织类插件的动词谁也调不动 —— 而 `ontology` / `validate` /
+# 工作台**三处都说那个动词存在**,`World.act` 直调也真的通。
+#
+# 🔴 **而病灶不是 `group:` 那个前缀**(这一条实测更正了诊断):`group` 那个记号
+# 在感知那一路上根本没有被过滤。真正的那一行是 `perception.perceive` 里的
+# `if not seen: continue` —— 而那一块带的不只是量,还有**名字、gloss 和动词**,
+# 那三样一个都不依赖量。**一个身上没有数的东西(门派、组织、一块牌子)于是整条
+# 不存在**,连带它身上的动词她永远看不见。
+
+_GROUP_PLUGIN = {
+    "id": "mp", "version": "1.0.0", "label": "门派",
+    "kinds": {"group:sect": {"gloss": "一个门派", "budget": 5},
+              "entity:tape": {"gloss": "一盒磁带", "budget": 5, "facts": {
+                  "录满": {"shape": "number", "default": 0.0,
+                           "visibility": "here", "label": "录了多少"}}}},
+    "edges": {"member_of": {"from": "agent", "to": "group:sect"}},
+    "verbs": {"拜入": {"target": "group:sect", "label": "拜入",
+                       "description": "拜入这个门派",
+                       "effects": [{"link": {"type": "mp.member_of",
+                                             "from": "self", "to": "target"}}]},
+              "听一面": {"target": "entity:tape", "label": "听一面",
+                         "description": "听这盒带子",
+                         "set": {"录满": "clamp(录满 - 0.1, 0, 1)"}}},
+}
+_GROUP_SEED = {
+    "agents": [{"id": "yu", "name": "露", "location": "obsdeck",
+                "personality": "安静"}],
+    "locations": [{"id": "obsdeck", "name": "观景台", "description": "风大"}],
+    "entities": [{"id": "mp.sect:青云门", "name": "青云门", "location": "obsdeck"},
+                 {"id": "mp.tape:一号带", "name": "一号带", "location": "obsdeck"}],
+}
+
+
+@pytest.mark.parametrize("with_facts", [True, False],
+                         ids=["门派身上有一个量", "门派身上一个量都没有"])
+def test_同地点的group实例_动词进得了她的提示词(tmp_path, with_facts):
+    """🔴 **两种都要过**,而**第二种正是那个 bug**:一个组织身上本来就可能一个数
+    都没有,而从前那种东西**整条不进提示词** —— 三处说那个动词存在,
+    却没有一个角色到得了它。
+
+    ⚠️ 第一种是对照组:没有它,一个"把 group 整个放行"的实现同样成立,而真正的
+    分界是**有没有她够得着的东西**,不是前缀。
+    """
+    plugin = json.loads(json.dumps(_GROUP_PLUGIN, ensure_ascii=False))
+    if with_facts:
+        plugin["kinds"]["group:sect"]["facts"] = {
+            "声望": {"shape": "number", "default": 0.0, "visibility": "here",
+                     "label": "声望"}}
+    path = write_seed_file(tmp_path / f"g{int(with_facts)}.cyberworld",
+                           {**_GROUP_SEED, "plugins": [plugin]})
+    with open_world_at(str(tmp_path / f"g{int(with_facts)}.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.tick(2)
+        text = str(world.debug_prompt("yu"))
+        assert "青云门" in text, "同处一地的门派整条不在她的提示词里"
+        assert "拜入" in text, (
+            "门派在提示词里,而它身上的动词不在 —— 那她照样调不动它"
+        )
+        assert "一号带" in text and "听一面" in text, "`entity:` 那一半也不许掉"
+        # **她够得着**:直调那条路本来就通,这里钉的是两条路说同一句话。
+        out = world.act("yu", "interact",
+                        {"target": "mp.sect:青云门", "verb": "拜入"})
+        assert out["ok"] is True, out
+        assert world.scheduler.edge_store.all("mp.member_of") == [
+            ("agent:yu", "mp.sect:青云门", {})
+        ]
+
+
+def test_既没有量也没有动词的东西_照旧不进提示词(tmp_path):
+    """**判据是「有没有她够得着的东西」,不是「有没有数」** —— 两样都没有的照旧
+    跳过。放开成"只要在场就进"的话,一堆纯摆设会白占她的提示词预算,
+    而「没声明 = 感知不到」那条默认值就从背面被拆掉了。"""
+    plugin = json.loads(json.dumps(_GROUP_PLUGIN, ensure_ascii=False))
+    plugin["kinds"]["group:sect"] = {"gloss": "一个门派", "budget": 5}
+    plugin["verbs"].pop("拜入")
+    plugin["edges"] = {}
+    path = write_seed_file(tmp_path / "bare.cyberworld",
+                           {**_GROUP_SEED, "plugins": [plugin]})
+    with open_world_at(str(tmp_path / "bare.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.tick(2)
+        assert "青云门" not in str(world.debug_prompt("yu")), (
+            "一个既没有量也没有动词的东西白占了她的提示词"
+        )
