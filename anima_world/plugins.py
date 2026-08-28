@@ -1081,6 +1081,33 @@ def compile_kind_rows(plugins: Iterable[Plugin]) -> list[dict[str, Any]]:
     ]
 
 
+def borrowed_kind_errors(
+    plugins: Iterable[Plugin], declared: Iterable[str],
+) -> list[str]:
+    """动词借的那个种类,这个世界里真的有吗 —— **开机与离线两扇门共用这一份**。
+
+    🔴 **它从前只住在开机那一侧**(`__main__._merge_plugin_kinds`),于是
+    `target: "swrd"`(少了个 o)这种写法**离线两扇门答绿、真开机退 1** ——
+    正是 §3.28 治过的那一族假绿的又一格,而这一次它是插件带进来的。
+    创作台出包前那道闸读的就是离线那两扇门:绿灯放行,作者拿着一份开不了机的包
+    去发布,而怪罪的方向多半还是错的。
+
+    ⚠️ **判据里那份 `declared` 是作者自己写的 `kinds`,不是并过插件行的那一份** ——
+    并过之后每一个借来的名字都"存在"了(`compile_kind_rows` 给它造了一行),
+    这道闸就永远查不出东西来。开机那侧本来就是拿并之前那份判的,两边必须同一份。
+    """
+    known = {str(k) for k in declared}
+    borrowed = borrowed_kind_ids(plugins)
+    return [
+        f"动词 {'、'.join(sorted(borrowed[kind_id]))} 的 target 指着 "
+        f"`{kind_id}`,而这个世界里没有这个种类 —— 是不是写错了字?"
+        f"这个世界声明过的种类是 {sorted(known)}。"
+        "**放行的下场是安静的**:它会长出一个空种类,永远不会有实例,"
+        "而你看到的只是「我的动词点不动」"
+        for kind_id in sorted(set(borrowed) - known)
+    ]
+
+
 def borrowed_kind_ids(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
     """动词挂到了**别人**种类上的那几个 id → 哪几个动词借的。
 
@@ -1359,10 +1386,13 @@ def _parse_sources(
         if not isinstance(entry, dict):
             errors.append(f"{where} 必须是对象")
             continue
-        unknown = sorted(set(entry) - set(PROJECTED_SOURCE_KEYS))
+        # **和另外十层同一句话**(2026-08-27):从前这一层的报错不说该去问契约的
+        # 哪一格,于是读它的人只能照文档记一份会烂的清单 —— 而"每层的名单都进契约"
+        # 这条纪律的一半正是**让报错自己点名那一格**。
+        unknown = unknown_keys(where, entry, PROJECTED_SOURCE_KEYS,
+                               "projected_source_keys")
         if unknown:
-            errors.append(f"{where}:不认识的键 {unknown};认的是 "
-                          f"{list(PROJECTED_SOURCE_KEYS)}")
+            errors.extend(unknown)
             continue
         event = str(entry.get("event") or "").strip()
         if not event:

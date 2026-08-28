@@ -915,8 +915,14 @@ def authored_layer_errors(
     # 于是**第一个照着 FOR-STUDIO 写插件的作者,先看到的是一盏假红灯**。
     # 本仓那条老纪律的反面:**开机是权威,比它严是假红、比它松是假绿,
     # 两种都比没有校验器更坏。**
-    authored = _authored_with_plugin_kinds(authored)
-    out: list[str] = list(_world_seed_errors(authored, complete=complete))
+    # ⚠️ **并过插件行的那一份只喂给本体那道闸,检查器表拿的是原件**
+    # (2026-08-27 分开的)。理由是它们问的是两个问题:本体那道闸问「这些引用
+    # 解析得开吗」,少了插件的种类它会对一个**开得起来**的世界报假红;而
+    # `world_plugin_errors` 问的是「作者写的这几条插件立不立得住」,拿并过的那份
+    # 去问,`compile_kind_rows` 替每一个借来的名字都造了一行,于是
+    # 「动词借的种类根本不存在」这道闸永远查不出东西 —— **一盏什么都没查的绿灯**。
+    out: list[str] = list(
+        _world_seed_errors(_authored_with_plugin_kinds(authored), complete=complete))
     for check in AUTHORED_LAYER_CHECKS:
         out += check(authored)
     return out
@@ -991,14 +997,25 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
     if entries is None:
         return []
     from anima_world.events import SUBSCRIBABLE_EVENTS
-    from anima_world.plugins import PluginError, order_plugins, parse_plugins
+    from anima_world.plugins import (
+        PluginError, borrowed_kind_errors, order_plugins, parse_plugins,
+    )
 
     try:
         plugins = parse_plugins(entries, subscribable=SUBSCRIBABLE_EVENTS)
-        order_plugins(plugins)
+        ordered = order_plugins(plugins)
     except PluginError as exc:
         return list(exc.errors)
-    return []
+    # 🔴 **开机那条路上还有第三处拒绝,而它从前不在这扇门上**(2026-08-27):
+    # 动词借的那个种类到底存不存在。它判的是插件与**作者写的 `kinds`** 之间的
+    # 引用,所以只有拿到整份作者层才判得动 —— 而这个函数正好拿到了。
+    # ⚠️ 用的是**没并过插件行**的那一份 `kinds`(见 `authored_layer_errors` 里
+    # 那两行的分工):并过之后借来的名字个个都"存在",这道闸就永远是空的。
+    return borrowed_kind_errors(
+        ordered,
+        {str(row.get("id") or "") for row in (authored.get("kinds") or [])
+         if isinstance(row, dict)},
+    )
 
 
 def world_beat_errors(authored: dict[str, Any] | None) -> list[str]:
@@ -3031,7 +3048,8 @@ def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
     一个插件给内核的 `agent` 加一个动词,不该把作者写在 `agent` 上的那些顶掉。
     """
     from anima_world.plugins import (
-        PluginError, borrowed_kind_ids, compile_kind_rows, order_plugins, parse_plugins,
+        PluginError, borrowed_kind_errors, compile_kind_rows, order_plugins,
+        parse_plugins,
     )
 
     bodies = _plugin_bodies(config_store, plugin_store, world_seed)
@@ -3050,17 +3068,12 @@ def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
     # 从前一个字都没查,于是 `target: "swrd"`(少了个 o)两扇门全绿、开机全绿,
     # 然后**静默长出一个空种类,永远不会有实例** —— 作者看到的是「我的动词点不动」,
     # 而没有一处会告诉他为什么。
-    borrowed = borrowed_kind_ids(plugins)
-    missing = sorted(kind_id for kind_id in borrowed if kind_id not in by_id)
+    # ⚠️ **这几句话现在住在 `plugins.borrowed_kind_errors` 里,离线那两扇门调的是
+    # 同一个函数**(2026-08-27):它从前只在这儿,于是 `target: "swrd"` 离线答绿、
+    # 开机退 1 —— §3.28 那一族假绿的又一格。**判断只有一份**是修法的全部内容。
+    missing = borrowed_kind_errors(plugins, by_id)
     if missing:
-        raise PluginError([
-            f"动词 {'、'.join(sorted(borrowed[kind_id]))} 的 target 指着 "
-            f"`{kind_id}`,而这个世界里没有这个种类 —— 是不是写错了字?"
-            f"这个世界声明过的种类是 {sorted(by_id)}。"
-            "**放行的下场是安静的**:它会长出一个空种类,永远不会有实例,"
-            "而你看到的只是「我的动词点不动」"
-            for kind_id in missing
-        ])
+        raise PluginError(missing)
     for row in rows:
         kind_id = str(row["id"])
         have = by_id.get(kind_id)

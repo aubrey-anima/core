@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import copy
 import gzip
 import json
 
@@ -868,6 +869,224 @@ def test_不带量的编辑包不说这句(tmp_path):
     for label, said in zip(("validate world", "world check"),
                            _warnings(path, edit=True)):
         assert not [w for w in said if "重声明是整行替换" in w], label
+
+
+# ── 八之二、插件那一族:每一种装载期拒绝,三扇门说同一句话(3.8.0)────────────
+#
+# 创作台 `docs/引擎接口诉求-插件.md` 「欠的第一条」问的就是这件事:一条越界写、
+# 一条没声明的 `reads`,`validate world` 到底答什么?REFERENCE §10.2 承诺三条边界
+# 违反了**都是开不了机** —— 而那句承诺对消费方成立,靠的是离线这两扇门也这么说
+# (创作台出包前那道闸、运维台判包的一次性容器,读的都是它们)。
+#
+# ⚠️ **下面第九节那条通用的挡不住这一族。** 它钉的是「`world_plugin_errors` 在不在
+# `AUTHORED_LAYER_CHECKS` 上」,而在表上**不等于**它覆盖了开机会拒的每一种:
+# 开机那条路上还有一处拒绝根本不在 `parse_plugins` 里(`_merge_plugin_kinds` 的
+# 「动词借的那个种类真的存在吗」),而通用那条对它一个字都不会说 ——
+# **逐条枚举是唯一能让那种漏出现在屏幕上的写法**,这一节就是那份枚举。
+
+
+_QI = {
+    "id": "qi", "version": "1.0.0", "label": "灵力",
+    "facts": {"灵力": {"bearer": "agent", "shape": "number", "default": 10.0,
+                       "range": [0, 100], "visibility": "self"}},
+    "rules": [{"id": "回气", "every": {"ticks": 1}, "for_each": {"kind": "agent"},
+               "set": {"qi.灵力": "clamp(qi.灵力 + 1.0 * dt, 0, 100)"}}],
+}
+#: 十一层共用的那个"多写的键"。同一个词,免得哪一层的断言其实在验别的东西。
+_ODD = "颜色"
+
+
+def _qi(**over) -> dict:
+    """写对的那一份 + 改掉几格。**深拷** —— 一条用例改到的格子不许漏给下一条。"""
+    body = copy.deepcopy(_QI)
+    body.update(copy.deepcopy(over))
+    return body
+
+
+def _plugin_file(tmp_path, *bodies, name="plug") -> str:
+    """一个写得完整的世界 + 这几条 `plugin` 记录。"""
+    rows = [_MANIFEST, _YARD, _JIA]
+    rows += [{"kind": "author", "type": "plugin", "body": body} for body in bodies]
+    return _write(tmp_path / f"{name}.cyberworld", rows)
+
+
+def test_写对的插件_三条路都放行(tmp_path, fresh_redis):
+    """对照组。没有它,下面那一摞对一个"插件一律拦"的实现同样成立。"""
+    path = _plugin_file(tmp_path, _QI, name="ok")
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"一份写对的插件被拦下来了:{errors}"
+
+
+#: 开机会拒的每一种,一行一条。**`needle` 是报错里必须出现的那几个字** ——
+#: 只断"两边一致"的话,两扇门**一起**答错还是绿的(这个文件开头那条纪律)。
+_PLUGIN_REJECTIONS: tuple[tuple[str, list, str], ...] = (
+    ("越界写",
+     [_qi(rules=[{"id": "抢别人的", "for_each": {"kind": "agent"},
+                  "set": {"mana.法力": "1"}}])],
+     "只写得到自己的命名空间"),
+    ("reads没声明",
+     [_qi(rules=[{"id": "回气", "for_each": {"kind": "agent"},
+                  "set": {"qi.灵力": "qi.灵力 + mana.法力"}}])],
+     "`reads` 里没有它"),
+    ("依赖缺失",
+     [_qi(reads=["mana.法力"])],
+     "没有装 `mana`"),
+    ("依赖成环",
+     [_qi(reads=["mana.法力"]),
+      {"id": "mana", "version": "1.0.0", "reads": ["qi.灵力"],
+       "facts": {"法力": {"bearer": "agent", "shape": "number", "default": 1.0}}}],
+     "成环"),
+    ("规律的emit写了裸名",
+     [_qi(rules=[{"id": "耗尽", "for_each": {"kind": "agent"},
+                  "set": {"qi.灵力": "qi.灵力"},
+                  "emit": [{"type": "耗尽了", "when": "qi.灵力 < 1"}]}])],
+     "只发得出自己命名空间的事件"),
+    ("动词多写了一个键",
+     [_qi(kinds={"entity:符": {"gloss": "一张符"}},
+          verbs={"贴": {"target": "entity:符", "description": "把符贴上去",
+                        _ODD: "朱红"}})],
+     "不认识的键"),
+    ("projected挂在插件自己的种类上",
+     [_qi(kinds={"entity:符": {"gloss": "一张符"}},
+          facts={"灵力": {"bearer": "agent", "shape": "number", "default": 10.0},
+                 "香火": {"bearer": "entity:qi.符", "shape": "number",
+                          "mode": "projected"}})],
+     "做不了 `projected`"),
+    ("动词的target是人",
+     [_qi(verbs={"拜": {"target": "agent", "description": "拜他为师"}})],
+     "对着一个人做的动词不从这条路走"),
+    ("动词的target指着一个这个世界里没有的种类",
+     [_qi(verbs={"贴": {"target": "fu", "description": "把符贴上去"}})],
+     "这个世界里没有这个种类"),
+)
+
+
+@pytest.mark.parametrize(
+    "case, bodies, needle", _PLUGIN_REJECTIONS,
+    ids=[case for case, _bodies, _needle in _PLUGIN_REJECTIONS],
+)
+def test_插件的每一种装载期拒绝_三扇门说同一句话(
+    tmp_path, fresh_redis, case, bodies, needle,
+):
+    """**开机是权威**:比它松是假绿(作者信了绿灯再去撞开机),比它严是假红
+    (作者去改一个没错的东西)。这一族逐条枚举,是因为通用那条只看得见"表上有没有
+    这一格",看不见"这一格覆盖了几种"。"""
+    path = _plugin_file(tmp_path, *bodies, name="bad")
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, f"「{case}」开机是拦的,离线那两扇门必须一起拦"
+    assert any(needle in e for e in errors), (case, errors)
+
+
+#: **十一层键名单,一层一条。** 反向闸在下面那条:`STRICT_LEVELS` 加一层而这儿
+#: 没跟上,当场红 —— 「一层一层收本身就是这个 bug 的形状」那条纪律的三扇门版。
+_ONE_FACT = {"bearer": "agent", "shape": "number", "default": 10.0}
+_ONE_RULE = {"id": "回气", "every": {"ticks": 1}, "for_each": {"kind": "agent"},
+             "set": {"qi.灵力": "qi.灵力"}}
+_ONE_TRIGGER = {"id": "干活耗气", "on": {"event": "entity_interaction"},
+                "effects": [{"set": {"qi.灵力": "qi.灵力 - 1"}}]}
+
+_STRICT_LEVEL_CASES: dict[str, dict] = {
+    "plugin_keys": _qi(**{_ODD: "朱红"}),
+    "fact_keys": _qi(facts={"灵力": {**_ONE_FACT, _ODD: "朱红"}}),
+    "edge_keys": _qi(edges={"同门": {"from": "agent", "to": "agent", _ODD: "朱红"}}),
+    "kind_keys": _qi(kinds={"entity:符": {"gloss": "一张符", _ODD: "朱红"}}),
+    "verb_keys": _qi(kinds={"entity:符": {"gloss": "一张符"}},
+                     verbs={"贴": {"target": "entity:符", "description": "贴上去",
+                                   _ODD: "朱红"}}),
+    "rule_keys": _qi(rules=[{**_ONE_RULE, _ODD: "朱红"}]),
+    "emit_keys": _qi(rules=[{**_ONE_RULE,
+                             "emit": [{"type": "qi.耗尽", "when": "qi.灵力 < 1",
+                                       _ODD: "朱红"}]}]),
+    "trigger_keys": _qi(triggers=[{**_ONE_TRIGGER, _ODD: "朱红"}]),
+    "trigger_emit_keys": _qi(triggers=[{
+        **_ONE_TRIGGER, "effects": [{"emit": {"type": "qi.耗尽", _ODD: "朱红"}}]}]),
+    "edge_effect_keys": _qi(
+        edges={"同门": {"from": "agent", "to": "agent"}},
+        triggers=[{**_ONE_TRIGGER,
+                   "effects": [{"link": {"type": "qi.同门", "from": "self",
+                                         "to": "agent:甲", _ODD: "朱红"}}]}]),
+    "projected_source_keys": _qi(facts={
+        "灵力": dict(_ONE_FACT),
+        "香火": {"bearer": "actor", "shape": "number", "mode": "projected",
+                 "sources": [{"event": "payment", "credit": "amount",
+                              _ODD: "朱红"}]}}),
+}
+
+
+def test_十一层键名单_每一层都有一条三扇门用例():
+    """🔴 **反向闸**:`STRICT_LEVELS` 是「这份记录里每一个会查不认识键的层级」,
+    加一层却没有对应的三扇门用例,下场是安静的 —— 那一层的拒绝可能只在开机那侧
+    发生,而离线两扇门照答绿灯,**没有一处会红**。"""
+    from anima_world.plugins import STRICT_LEVELS
+
+    assert sorted(_STRICT_LEVEL_CASES) == sorted(STRICT_LEVELS), (
+        "这张表和引擎那张层名单对不上 —— 多出来的是过期用例,少掉的是没人验的那一层"
+    )
+
+
+@pytest.mark.parametrize("level", sorted(_STRICT_LEVEL_CASES))
+def test_十一层里多写一个键_三扇门都拦(tmp_path, fresh_redis, level):
+    """不认识的键**照收然后丢掉**比"不支持"坏得多:作者写下的那一格根本不在,
+    而退出码 0、日志干净。这一条钉的是"离线那两扇门也看得见这件事"。"""
+    path = _plugin_file(tmp_path, _STRICT_LEVEL_CASES[level], name=level)
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, f"`{level}` 这一层多写一个键,开机是拦的,离线两扇门也得拦"
+    assert any(_ODD in e for e in errors), (level, errors)
+    assert any(f"plugins.{level}" in e for e in errors), (
+        f"`{level}` 那条报错没说该去问契约的哪一格 —— **每层的名单都进了契约**,"
+        f"而报错不点名的话读的人只能照文档记一份会烂的清单:{errors}"
+    )
+
+
+def test_编辑包里的插件_动词借世界里已有的种类_三扇门说同一句话(tmp_path, fresh_redis):
+    """**`--edit` 豁免的是跨引用,而这一格不在豁免里** —— 开机自己也拦。
+
+    形状值得记:一个**跑着的**世界里有 `tree`,作者拿一份只含插件的编辑包去给它加
+    一个挂在 `tree` 上的动词 —— **开机拒**(`_merge_plugin_kinds` 手上只有这份文件的
+    `kinds`,那是空的)。这不是这一轮改出来的行为,是它一直如此;这一轮改的是
+    **离线那两扇门从此说同一句话**(此前它们答绿,而作者要到真开机才知道)。
+
+    替代写法就在这条用例的后半截:**同一份编辑包里把那个 `kind` 再声明一遍**。
+    作者层是「只填缺不覆盖」,重声明一个已有的种类不会把世界跑出来的现在倒带,
+    它只是让这份文件自己说得清"我这个动词挂在谁身上"。
+    ⚠️ **这后半截必须真敲一遍**:FOR-STUDIO 里写给创作台的正是这句话,而
+    「文档里承诺了一句用户会照着敲的命令,就去敲一遍」是这个仓库的老账。
+    """
+    from anima_world.api import World
+
+    base = _write(tmp_path / "base.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, _tree_kind(), _OAK])
+    World.open("w", redis=fresh_redis, world_file=base, force_mock_llm=True).close()
+
+    verb = {"id": "qi", "version": "1.0.0",
+            "facts": {"灵力": {"bearer": "agent", "shape": "number", "default": 1.0}},
+            "verbs": {"施法": {"target": "tree", "description": "对着树施法",
+                               "set": {"树高": "树高 + 0.1"}}}}
+    bare = _write(tmp_path / "edit-bare.cyberworld",
+                  [_MANIFEST, {"kind": "author", "type": "plugin", "body": verb}])
+    ok_validate, errors = _validate_says(bare, edit=True)
+    ok_check, check_errors = _check_says(bare, edit=True)
+    ok_boot, boot_errors = _boot_says(bare, fresh_redis, "w")
+    assert not ok_boot, "开机居然收了 —— 那这条用例钉的东西整个变了,先去看开机那侧"
+    assert ok_validate == ok_boot and ok_check == ok_boot, (
+        f"离线两扇门和开机不是同一个答案 —— validate:{errors};check:{check_errors};"
+        f"开机:{boot_errors}"
+    )
+    assert check_errors == errors, "两扇门自己先分叉了"
+
+    # 后半截:把那个种类在同一份文件里再声明一遍,三扇门一起放行。
+    both = _write(tmp_path / "edit-with-kind.cyberworld",
+                  [_MANIFEST, _tree_kind(),
+                   {"kind": "author", "type": "plugin", "body": verb}])
+    ok_validate, errors = _validate_says(both, edit=True)
+    ok_check, check_errors = _check_says(both, edit=True)
+    # ⚠️ **仍然装进同一个世界 `w`** —— 换一个空的 world_id 就不是"编辑"了,
+    # 那是创世,而创世本来就要一份完整的名册与地图(上面 `--edit` 那条钉着这一半)。
+    ok_boot, boot_errors = _boot_says(both, fresh_redis, "w")
+    assert ok_validate and ok_check and ok_boot, (
+        f"替代写法被拦下来了 —— validate:{errors};check:{check_errors};"
+        f"开机:{boot_errors}"
+    )
 
 
 # ── 九、通用的那一条:**新开一种开机失败,三扇门必须一起认**(3.8.0 第 1 期)────
