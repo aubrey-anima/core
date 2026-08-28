@@ -3082,3 +3082,78 @@ def test_规律的emit_when写成列表_说的是形状不是空(tmp_path):
     joined = "\n".join(payload["errors"])
     assert "要写成**一句**表达式" in joined and "规律自己的" in joined, joined
     assert "表达式是空的" not in joined, joined
+
+
+# ── 第三波那次修法自己开出来的两个洞(2026-08-28,A 视角 FAIL 排回来的)──────────
+#
+# 两条都是**回归**:上一波真的能跑的写法,被这一波的新闸拦下了。
+# 记在一起是因为它们是同一种错的两面:**一份判断有两个副本 / 一份名单和它要判的
+# 那份数据来自两次不同的合并。**
+
+_W3_WET = {
+    "id": "wet", "version": "1.0.0",
+    "facts": {"潮位": {"bearer": "world", "shape": "number", "default": 0.8}},
+    "kinds": {"entity:桶": {"gloss": "一个桶", "facts": {
+        "水": {"shape": "number", "default": 0.0, "visibility": "here"}}}},
+    "verbs": {"接水": {"target": "entity:桶", "description": "接一桶雨水",
+                       "when": ["world_wet.潮位 > 0.3"],
+                       "set": {"水": "水 + world_wet.潮位"}}},
+}
+
+
+def _wet_world(tmp_path, name="wetv"):
+    seed = {**BARE, "plugins": [_W3_WET],
+            "entities": [{"id": "wet.桶:一号", "name": "旧桶", "location": "cafe"}]}
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", seed)
+    return path, open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                               force_mock_llm=True)
+
+
+def test_动词读得到自己挂在world上的事实(tmp_path):
+    """🔴 **回归 + 死胡同复活**(A 视角 FAIL 第 1 条)。
+
+    A1 只在**读的那道闸**里剥了 `world_`,而同一轮**我自己新加的**「动词表达式
+    名字闸」没剥 —— 于是同一句 `world_wet.潮位` 写在触发器里过得去、写在动词里
+    被判成「读了别的插件的 …,写进 reads」,照着改下一句变成
+    「没有装 `world_wet` 这个插件」。**同一条死胡同我在两处各修过一次,
+    而第二处是我自己开的:剥前缀这件事只该有一份判断。**
+    """
+    path, world = _wet_world(tmp_path)
+    payload = json.loads(run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is True, payload["errors"]
+    with world:
+        out = world.act("阿岚", "interact", {"target": "wet.桶:一号", "verb": "接水"})
+        assert out["ok"] is True, out
+        assert world.scheduler.stock_store.snapshot("wet.桶:一号")["水"][0] == 0.8, (
+            "`when` 与 `set` 里那个 `world_wet.潮位` 没读到世界身上那个量"
+        )
+
+
+def test_插件世界之后的增量编辑_只带kinds也开得了机(tmp_path):
+    """🔴 **回归**(A 视角 FAIL 第 2 条),而它直接打在创作台的增量编辑流程上。
+
+    一个建好的插件世界,之后做**任何**带 `kinds` 的增量编辑(哪怕新种类和插件
+    毫无关系)开不了机 —— 报的是作者**没碰过**的那一行,还断言「装着的是
+    (一个都没有)」,而那个插件明明就在库里。
+
+    病根:喂给本体那一层的 `kinds` 是**库合并之后的全集**,而那份「有哪些命名空间」
+    的名单只取了**文件**那一份。**两份东西必须来自同一次合并** —— 这正是
+    `_seed_ontology` 自己 docstring 反对的那件事(喂全集、判局部)。
+    ⚠️ 「让作者在编辑文件里把 plugins 段抄一遍」**不算修**:那是让他维护一份
+    迟早会不一致的抄件,而作者层「只填缺不覆盖」当初就是为了不逼他抄。
+    """
+    _path, world = _wet_world(tmp_path, name="wedit")
+    world.close()
+    edit = write_seed_file(tmp_path / "edit.cyberworld", {"kinds": [
+        {"id": "bench", "quantities": {"油漆": {"default": 1.0,
+                                                "visibility": "here"}}}]})
+    with open_world_at(str(tmp_path / "wedit.db"), world_file=edit,
+                       force_mock_llm=True) as again:
+        kinds = sorted(again.scheduler.ontology.kinds)
+        assert "bench" in kinds, f"这次编辑什么都没装进去:{kinds}"
+        assert "wet.桶" in kinds, (
+            f"插件的种类在这一趟里丢了 —— 名单和数据又不是同一次合并的:{kinds}"
+        )
+        # 编辑之后那个动词照旧点得动(名单没了的话它会在本体那一层被判假红)。
+        out = again.act("阿岚", "interact", {"target": "wet.桶:一号", "verb": "接水"})
+        assert out["ok"] is True, out

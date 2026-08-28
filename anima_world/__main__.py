@@ -1812,9 +1812,24 @@ def build_serve_scheduler(
         world_seed = _merge_plugin_kinds(
             config_store, RedisPluginStore(redis, world_id), world_seed)
 
+    # 🔴 **这一趟到底有哪几个插件命名空间:文件那份 + 库里那份 + 出厂那几个**
+    # (2026-08-28 修回归)。喂给本体那一层的 `kinds` 是**库合并之后的全集**
+    # (`_union_by_id`),而名单从前只取文件那一份 —— 于是一个建好的插件世界,
+    # 之后做**任何**带 `kinds` 的增量编辑(哪怕新种类和插件毫无关系)就开不了机:
+    # 报的是作者**没碰过**的那一行,还断言「装着的是(一个都没有)」,
+    # 而那个插件明明就在库里。**两份东西必须来自同一次合并**,这正是
+    # `_seed_ontology` 自己 docstring 反对的那件事(喂全集、判局部)。
+    boot_namespaces = tuple(
+        str(body.get("id") or "")
+        for body in _plugin_bodies(config_store, RedisPluginStore(redis, world_id),
+                                   world_seed)
+        if str(body.get("id") or "")
+    )
+
     if seed_author_layer and world_seed and world_seed.get("kinds"):
         _precheck_ontology(world_seed, rules_store, location_store, economy_store,
-                           ontology_store if merge_author else None)
+                           ontology_store if merge_author else None,
+                           namespaces=boot_namespaces)
 
     # ── 节拍:作者层的第十二个段(3.7.0,看板 D1)──────────────────────────
     #
@@ -2020,7 +2035,8 @@ def build_serve_scheduler(
             _seed_stock_places(world_seed, visibility_store, merge=merge_author)
         # 返回的是作者这次真的改动过的种类 —— 可见性那张表是声明的镜像,得跟着改。
         redeclared_kinds = _seed_ontology(
-            ontology_store, world_seed, fresh_world=seed_author_layer, merge=merge_author)
+            ontology_store, world_seed, fresh_world=seed_author_layer,
+            merge=merge_author, namespaces=boot_namespaces)
         # `warn=True` 全仓库只有这一处:装载走一次,拿到的又是**这个世界真正在跑
         # 的那份**规律(播种那份可能根本没落库,预检那份还没落库)。
         scheduler.world_rules = _load_world_rules(
@@ -2035,7 +2051,7 @@ def build_serve_scheduler(
             # 插件是在本体之后才装的(`_install_plugins` 在下面),所以**创世那一趟
             # 库里还是空的** —— 只认库里那份的话,一个带插件的新世界第一次开机
             # 就会在本体那一层被判成"没有哪个插件叫 qi",而第二次开机又好了。
-            namespaces=_plugin_namespaces(world_seed),
+            namespaces=boot_namespaces,
         )
         _warn_unreachable_requirements(scheduler.ontology, scheduler.world_rules)
         # 种子的显式值先落(它此刻仍是空库,"空库一次"那条守得住),声明的默认值
@@ -2668,7 +2684,7 @@ def _warn_unresolved_rule_names(stock_store: Any, rules: list[Any]) -> None:
 
 def _seed_ontology(
     ontology_store: Any, world_seed: dict[str, Any] | None, *, fresh_world: bool,
-    merge: bool = False
+    merge: bool = False, namespaces: Iterable[str] | None = None,
 ) -> list[str]:
     """种子里的本体(`"kinds"` / `"entities"`)→ `:kinds` / `:entities`。**只在创世。**
 
@@ -2717,8 +2733,8 @@ def _seed_ontology(
     if merge:
         kinds = _union_by_id(ontology_store.kind_definitions(), kinds, incoming_wins=True)
         entities = _union_by_id(ontology_store.entity_definitions(), entities)
-    parse_entities(entities, parse_kinds(
-        kinds, namespaces=_plugin_namespaces(world_seed)))   # 校验在这里,坏了当场抛
+    known = _plugin_namespaces(world_seed) if namespaces is None else tuple(namespaces)
+    parse_entities(entities, parse_kinds(kinds, namespaces=known))  # 坏了当场抛
     written, _ = ontology_store.seed(
         kinds, entities, datetime.now(timezone.utc).isoformat(),
         merge=merge, replace_kinds=merge)
@@ -2747,7 +2763,7 @@ def _union_by_id(
 
 def _precheck_ontology(
     world_seed: dict[str, Any], rules_store: Any, location_store: Any, economy_store: Any,
-    ontology_store: Any = None
+    ontology_store: Any = None, *, namespaces: Iterable[str] | None = None,
 ) -> None:
     """在动任何一张表之前,先把作者写的 `kinds` / `entities` 验一遍。
 
@@ -2818,7 +2834,8 @@ def _precheck_ontology(
         kind_rows = _union_by_id(ontology_store.kind_definitions(), kind_rows,
                                  incoming_wins=True)
         entity_rows = _union_by_id(ontology_store.entity_definitions(), entity_rows)
-    kinds = parse_kinds(kind_rows, namespaces=_plugin_namespaces(world_seed))
+    known = _plugin_namespaces(world_seed) if namespaces is None else tuple(namespaces)
+    kinds = parse_kinds(kind_rows, namespaces=known)
     entities = parse_entities(entity_rows, kinds)
     ontology = resolve(kinds, entities, rules=rules, locations=sorted(set(locations)),
                        items=sorted({*items, *seed_items}))

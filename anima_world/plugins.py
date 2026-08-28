@@ -1129,6 +1129,14 @@ def _verb_namespaced_writes(
             continue                    # 写坏了的表达式归本体那一层报
         for name in sorted(names):
             bare = name[3:] if name.startswith("me_") else name
+            # 🔴 **`world_` 也要剥,和 `_undeclared_reads` 那一处同一条**
+            # (2026-08-28 修回归):读自己挂在 `world` 上的事实,写法就是
+            # `world_<插件>.<事实>` —— 不剥的话这道闸看到的是 `world_wet` 这个
+            # "别人的插件 id",于是报「写进 reads」,照着改下一句变成
+            # 「没有装 `world_wet` 这个插件」。**同一条死胡同我在两处各修过一次,
+            # 而第二处是我自己新开的** —— 剥前缀这件事只该有一份判断。
+            if bare.startswith(WORLD_PREFIX) and not bare.startswith(f"{plugin_id}."):
+                bare = bare[len(WORLD_PREFIX):]
             if not namespaced_output(bare):
                 continue                # 裸名字归本体那一层判
             if not bare.startswith(f"{plugin_id}."):
