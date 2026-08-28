@@ -2741,3 +2741,58 @@ def test_插件族的拒绝语_说的是插件自己的理由(tmp_path, case):
             f"\n{joined}"
         )
     assert "qi" in joined or "插件" in joined, joined
+
+
+# ── ⑦ 外部进程产得出 `conversation` 事件吗:产得出,只是名字不叫 close ──────────
+
+
+def test_脚本产得出conversation事件_而订它的触发器真的响(tmp_path):
+    """⚪ **第二波 ⑦ 的答案:不是缺出口,是叫错了名字。**
+
+    调度台按"先 `chat` 再 `close_conversation`"的直觉写脚本,卡在这儿:
+    `chat()` 之后 `conversations()` 答 `[]`、`close_conversation` 要一个**还不存在**
+    的 id,于是订 `conversation` 的触发器那一趟没法验。
+
+    真相是 `chat()` **有意不建会话行** —— 它是流式吐字,完整转录归宿主
+    (README 第一条)。**建行 + 关行 + 发那条 `conversation` 事件的是
+    `record_chat_turn()`**,它就是"这一轮结束了"的提交口。
+    `close_conversation(id)` 是给**自己管着会话**的宿主用的(网站那种)。
+
+    这条用例把整条链敲一遍:`chat` → `record_chat_turn` → `conversation` 事件 →
+    订它的触发器真的落笔。
+    """
+    fame = {"id": "onair", "version": "1.0.0",
+            "facts": {"人气": {"bearer": "actor", "shape": "number",
+                               "default": 20.0, "range": [0, 100],
+                               "visibility": "self"}},
+            "triggers": [{"id": "上过节目", "on": {"event": "conversation"},
+                          "effects": [{"set": {
+                              "onair.人气": "clamp(onair.人气 + 5, 0, 100)"}}]}]}
+    path = write_seed_file(tmp_path / "onair.cyberworld",
+                           {**BARE, "plugins": [fame]})
+    with open_world_at(str(tmp_path / "onair.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe", display_name="阿宇")
+        list(world.chat("阿岚", [{"role": "user", "content": "你好"}],
+                        player_id="p1", display_name="阿宇"))
+        # ⚠️ **这一格是有意的,不是 bug**:流式那一趟不建会话行。
+        assert world.conversations("阿岚") == [], (
+            "`chat()` 建了会话行 —— 那 README 那句「完整转录归你的应用管」就变了"
+        )
+        cid = world.record_chat_turn("阿岚", "p1", [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "你好呀"},
+        ])
+        assert isinstance(cid, int)
+        rows = world.conversations("阿岚")
+        assert [r["status"] for r in rows] == ["closed"], rows
+        types = [getattr(e, "type", "") for e in world.scheduler.event_log.replay()]
+        assert types.count("conversation") == 1, (
+            "「整场只发这一条,在关闭时」—— 而这一趟一条都没发"
+        )
+        world.tick(1)
+        assert world.stocks("agent:阿岚")["onair.人气"] == 25.0, (
+            "订 `conversation` 的触发器没响 —— 而事件确实发了"
+        )
+        stats = world.trigger_stats()["onair.上过节目"]
+        assert stats["matched"] == 1 and stats["written"] == 1, stats

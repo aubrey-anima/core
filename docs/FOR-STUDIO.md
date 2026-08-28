@@ -5198,3 +5198,26 @@ menpai.member_of —— 那张表会永远是空的,而「造不出来」和「�
   而体检不该按世界的大小收费。
 - **这一节不进退出码**,出厂插件也不喊:一个刚建好的世界什么都还没发生过,
   而「一条永远红的检查等于没有这条检查」。
+
+## 3.56 脚本怎么产出一条 `conversation` 事件 —— **不是缺出口,是叫错了名字**(2026-08-27,第二波 ⑦)
+
+调度台按「先 `chat` 再 `close_conversation`」的直觉写脚本,卡住了:
+`chat()` 之后 `conversations(agent)` 答 `[]`,而 `close_conversation` 要一个
+**还不存在**的 id。于是订 `conversation` 的触发器那一趟没法验。
+
+**真相**:
+
+| 出口 | 它做什么 | 谁用 |
+|---|---|---|
+| `World.chat(...)` | **只流式吐字**,**有意不建会话行** —— 完整转录归宿主(README 第一条)| 所有人 |
+| `World.record_chat_turn(agent, player, messages)` | **建行 + 关行 + 发那条 `conversation` 事件 + 关系判定**,返回会话 id | **脚本 / CLI / 无宿主那条路** |
+| `World.close_conversation(id)` | 关掉一条**已经开着的**会话 | **自己管着会话的宿主**(网站那种:一个会话跨很多轮,id 攥在它手里)|
+
+所以脚本要的那条链是:`chat(...)` → **`record_chat_turn(...)`** → `conversation` 事件
+→ 订它的触发器落笔。**整条真敲过**:
+`tests/test_plugins.py::test_脚本产得出conversation事件_而订它的触发器真的响`。
+
+⚠️ **`chat()` 之后 `conversations()` 答 `[]` 是对的,不是丢了东西** —— 这一句现在
+写在 `conversations()` 与 `close_conversation()` 两个 docstring 上,而不只在这儿:
+下一个人是在 IDE 里读到它的,不是在这份文档里。
+**契约没加格,`World` 门面没加方法** —— 这一条要的是一句话,不是一个新出口。

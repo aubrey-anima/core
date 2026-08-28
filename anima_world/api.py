@@ -3610,13 +3610,28 @@ class World:
         return conversation_id
 
     def conversations(self, agent_id: str) -> list[dict[str, Any]]:
+        """这个角色的会话行(新的在前)。
+
+        ⚠️ **`chat()` 不建会话行** —— 它是**流式吐字**,完整转录归宿主
+        (README 的第一条:"完整转录归你的应用管")。**建行 + 关行 + 发那条
+        `conversation` 事件的是 `record_chat_turn()`**,它就是"这一轮结束了"的提交口。
+        所以 `chat()` 之后立刻问这里,答 `[]` 是对的,不是丢了东西。
+        (2026-08-27 记:一个脚本按"先 chat 再 close"的直觉写,会卡在这儿 ——
+        `close_conversation` 要一个 id,而那个 id 在提交之前根本不存在。)
+        """
         return self.chat_store.list_conversations(agent_id)
 
     def conversation_messages(self, conversation_id: int) -> list[dict[str, Any]]:
         return self.chat_store.messages_for(conversation_id)
 
     def close_conversation(self, conversation_id: int) -> bool:
-        """手动关闭会话(摘要 + 事件 + 判定);返回是否发了世界事件。"""
+        """手动关闭会话(摘要 + 事件 + 判定);返回是否发了世界事件。
+
+        ⚠️ **它是给"自己管着会话"的宿主用的**(网站那种:一个会话跨很多轮,
+        id 攥在宿主手里)。**脚本与 CLI 不必走它** —— `record_chat_turn()` 已经
+        建行、关行、发事件一次做完,那才是无宿主那条路的提交口。
+        ⚠️ **`chat()` 之后没有 id 可关**:`chat()` 不建会话行(见 `conversations`)。
+        """
         emitted = self._bridge.run(self.session_manager.close_conversation(conversation_id))
         self.scheduler.checkpoint()  # 交互即检查点
         return emitted
