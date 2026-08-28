@@ -34,6 +34,7 @@ from anima_world.expressions import ExpressionError
 from anima_world import memory_store as memory_store_mod
 from anima_world.narrative import NarrativeProvider
 from anima_world.perception import why_not_perceivable
+from anima_world.rules import WORLD_OWNER, WORLD_PREFIX
 from anima_world import together as together_mod
 from anima_world.projection import project_events
 from anima_world.stocks import clock_names
@@ -389,6 +390,14 @@ class Scheduler:
         self._rule_stats: dict[str, Any] = {
             "evaluated": 0, "written": 0, "emitted": 0, "skipped": 0, "last_error": None,
         }
+        #: 🆕 **每条触发器的仪表**(3.8.0,2026-08-27 第二波 ②)。
+        #:
+        #: 它治的病很具体:一条 `when` 恒为假的触发器,和一条**根本没被事件叫到**的
+        #: 触发器,在屏幕上长得一模一样 —— 调度台那一趟一天 16 条 `travel` 一次没响,
+        #: 只能靠"把 `when` 去掉再跑一遍"这种对照实验才发现。**六个数分开记**,
+        #: 因为它们指向六种不同的修法:事件没来 / 取不着人 / 插件还没种到他头上 /
+        #: 条件不成立 / 算不出来 / 真落笔了。
+        self._trigger_stats: dict[str, dict[str, int]] = {}
         # 她的树问到了哪些量(见 `_stock_watches`):agent_id -> (树对象, 量的列表)。
         # 树换了(`build_tree` 重建)`id()` 就变,缓存自然失效。
         self._stock_watch_cache: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {}
@@ -5442,13 +5451,24 @@ class Scheduler:
         pending: dict[str, dict[str, float]] = {}
         emitted: list[dict[str, Any]] = []
         causes: dict[tuple[str, str], str] = {}
+        # 🆕 **世界的全局量,只在真有触发器读它时取一次**(3.8.0,第二波 ②)——
+        # 和 `stocks.evaluate_due` 那一段逐字同一条判断。
+        #
+        # 🔴 病灶:`world_雨势` 在**作者层规律**里是合法写法(晚潮自己在用),而
+        # 触发器这条路上它既不在命名空间里、装载期也不拒 —— 于是
+        # `when: ["world_雨势 > 0.3"]` **恒为假**:一天 16 条 `travel` 一次没响,
+        # 去掉 `when` 当场就响。**两条路对同一个写法给两个答案,而错的那一边不说话。**
+        world_values = self._trigger_world_values(batch)
         for event in batch:
             for trigger in self._triggers_by_event.get(str(event.get("type") or ""), ()):
+                self._trigger_tally(trigger, "matched")
                 try:
-                    self._fire_trigger(trigger, event, pending, emitted, causes)
+                    self._fire_trigger(trigger, event, pending, emitted, causes,
+                                       world_values=world_values)
                 except ExpressionError as exc:
                     # 运行期降级:一条算不出来的触发器不该掀翻 tick(规律那条纪律)。
                     # 但绝不无声。
+                    self._trigger_tally(trigger, "errors")
                     logger.warning("触发器 %s.%s 算不出来:%s",
                                    trigger.plugin, trigger.id, exc)
         if pending:
@@ -5459,10 +5479,48 @@ class Scheduler:
         for event in emitted:
             self._record_and_deliver(event)
 
+    def _trigger_key(self, trigger: Any) -> str:
+        return f"{trigger.plugin}.{trigger.id}"
+
+    def _trigger_tally(self, trigger: Any, field: str, n: int = 1) -> None:
+        """给这条触发器的那一格加个数。**六个数分开记**,见 `_trigger_stats`。"""
+        row = self._trigger_stats.setdefault(
+            self._trigger_key(trigger),
+            {"matched": 0, "no_bearer": 0, "no_facts": 0, "when_false": 0,
+             "written": 0, "emitted": 0, "errors": 0},
+        )
+        row[field] = row.get(field, 0) + n
+
+    def _trigger_world_values(self, batch: list[dict[str, Any]]) -> dict[str, float]:
+        """这一趟要不要把世界的全局量读出来(`world_*`)—— **有人读才读**。
+
+        和 `stocks.evaluate_due` 里那一段同一条判断:一次 `HGETALL`,而且只在真有
+        触发器写了 `world_x` 的时候才发。没人读时这里是一次集合判空。
+        """
+        if self.stock_store is None:
+            return {}
+        wanted = False
+        for event in batch:
+            for trigger in self._triggers_by_event.get(str(event.get("type") or ""), ()):
+                for expression in (*trigger.conditions,
+                                   *(e for _n, e in trigger.sets)):
+                    if any(n.startswith(WORLD_PREFIX) for n in expression.names):
+                        wanted = True
+                        break
+                if wanted:
+                    break
+            if wanted:
+                break
+        if not wanted:
+            return {}
+        return {f"{WORLD_PREFIX}{key}": value
+                for key, value in self.stock_store.of(WORLD_OWNER).items()}
+
     def _fire_trigger(
         self, trigger: Any, event: dict[str, Any],
         pending: dict[str, dict[str, float]], emitted: list[dict[str, Any]],
         causes: dict[tuple[str, str], str] | None = None,
+        world_values: dict[str, float] | None = None,
     ) -> None:
         """一个触发器对一条事件。**当事人从事件上取,不从这一刻的世界上猜。**
 
@@ -5482,11 +5540,14 @@ class Scheduler:
         causes = {} if causes is None else causes
         owner = self._trigger_bearer(trigger, event)
         if owner is None:
+            self._trigger_tally(trigger, "no_bearer")
             return
         values = {k: v for k, (v, _t) in self.stock_store.snapshot(owner).items()}
         if not values and trigger.bearer == "agent":
+            self._trigger_tally(trigger, "no_facts")
             return          # 这个人身上一个量都没有 = 插件还没种到他头上
         namespace: dict[str, Any] = {
+            **(world_values or {}),
             **values,
             **clock_names(self.clock, self._minutes_per_tick()),
             "dt": 0, "now": self.clock,
@@ -5494,15 +5555,19 @@ class Scheduler:
         }
         for condition in trigger.conditions:
             if not condition.evaluate(namespace):
+                self._trigger_tally(trigger, "when_false")
                 return
         for name, expression in trigger.sets:
             pending.setdefault(owner, {})[name] = float(expression.evaluate(namespace))
             # 谁让它变的 —— 投影式事实那条 delta 的 `cause`。**在这儿记**:
             # `pending` 是一整轮攒起来的,到写入那一处已经分不出是哪条触发器了。
             causes[(owner, name)] = f"{trigger.plugin}.{trigger.id}"
+        if trigger.sets:
+            self._trigger_tally(trigger, "written", len(trigger.sets))
         for spec in trigger.links:
             self.apply_edge_effect(spec, namespace, event, owner)
         for spec in trigger.emits:
+            self._trigger_tally(trigger, "emitted")
             emitted.append({
                 "type": spec["type"], "who": event.get("who"), "loc": event.get("loc"),
                 "payload": {**spec["payload"], "plugin": trigger.plugin,

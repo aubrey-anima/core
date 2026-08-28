@@ -4104,6 +4104,31 @@ class World:
         """
         return dict(self.scheduler._rule_stats)
 
+    def trigger_stats(self) -> dict[str, dict[str, int]]:
+        """**每条插件触发器**跑得怎么样 —— 六个数,一条一行(3.8.0)。
+
+        它治的病很具体,而那个病是在一个真世界上撞出来的:一条 `when` 恒为假的
+        触发器,和一条**根本没被事件叫到**的触发器,在屏幕上长得一模一样 ——
+        一天十六条 `travel` 一次没响,只有靠"把 `when` 去掉再跑一遍"这种对照实验
+        才发现。**六个数分开记,因为它们指向六种不同的修法**:
+
+        | 格 | 意思 | 它为零时该去查什么 |
+        |---|---|---|
+        | `matched` | 事件真的到了这条触发器 | 订的事件名对不对、那件事这个世界里发不发生 |
+        | `no_bearer` | 取不着当事人 | `for_each.node` 和这种事件对不对得上(`plugins.trigger_bearer_keys`)|
+        | `no_facts` | 那个人身上一个量都没有 | 插件还没种到他头上(比如插件装上之后才进世界的玩家)|
+        | `when_false` | 条件不成立 | 表达式读的名字在不在这条路的命名空间里 |
+        | `written` | 真落笔了几个事实 | —— |
+        | `emitted` | 真发了几条事件 | —— |
+        | `errors` | 算不出来(运行期降级,只跳过这一条) | 表达式本身 |
+
+        ⚠️ **本次运行内的计数,不是历史**(和 `rule_stats()` 逐字同一条):内存态,
+        重开世界即清零 —— 它是诊断,不是账。**一条一次都没被叫到的触发器根本不会
+        出现在这张表里**,那本身就是一个读数:它订的那件事没发生过。
+        """
+        return {key: dict(row)
+                for key, row in sorted(self.scheduler._trigger_stats.items())}
+
     # ── autonomy:没人跟她说话时的定时轮次 ──────────────────────────────────
 
     def _autonomy_enabled(self) -> bool:

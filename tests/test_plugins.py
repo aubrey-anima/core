@@ -2435,3 +2435,116 @@ def test_本体那一层的形状判据_和插件id那条正则对得上():
     for bad in ("Qi", "1qi", "q", "q-i"):
         assert not re.match(PLUGIN_ID_PATTERN, bad), bad
         assert not namespaced_output(f"{bad}.灵力"), bad
+
+
+# ── 触发器读得到 `world_*` 了,而且每条触发器有六个数(第二波 ②)──────────────
+#
+# 调度台在真世界上撞到的:`on:{event:"travel"}` + `when:["world_雨势 > 0.3"]`,
+# 雨势 0.8,一天十六条 `travel` **一次没响**;把 `when` 去掉、升 1.0.1,当场就响。
+# `world_雨势` 在**作者层规律**里是合法写法(晚潮自己在用),而触发器这条路上
+# 它既不在命名空间里、装载期也不拒 —— **两条路对同一个写法给两个答案,
+# 而错的那一边不说话。**
+
+_WET = {
+    "id": "wet", "version": "1.0.0", "label": "淋雨",
+    "facts": {"身上": {"bearer": "actor", "shape": "state", "default": "干爽",
+                       "visibility": "here", "label": "身上",
+                       "values": [{"name": "干爽"}, {"name": "潮乎乎"},
+                                  {"name": "湿透"}]}},
+    "triggers": [{"id": "出门淋雨", "on": {"event": "travel"},
+                  "when": ["world_雨势 > 0.3"],
+                  "effects": [{"set": {"wet.身上": "2"}}]}],
+}
+_WET_SEED = {
+    "agents": [{"id": "yu", "name": "露", "location": "cafe", "personality": "安静"}],
+    "locations": [
+        {"id": "cafe", "name": "咖啡馆", "description": "临海的小店"},
+        {"id": "pier", "name": "码头", "description": "风很大"},
+    ],
+    "stocks": [{"owner": "world", "values": {"雨势": 0.8}}],
+}
+
+
+def _walk(world, who="yu", to="pier"):
+    from anima_world.actions import ActionDescriptor
+
+    return world.scheduler._start_journey(
+        world.scheduler.agents[who].agent, ActionDescriptor("walk", {"location": to}))
+
+
+def test_触发器的when读得到world_全局量(tmp_path):
+    """🔴 **第二波 ② 本身**,判据用的就是调度台那份 `wet.json` 1.0.0(带 `when`)。
+
+    ⚠️ **对照组在同一条用例里**:把世界的雨势调到 0.1,同一条触发器就不许再落笔 ——
+    否则这条用例对一个"`when` 整个不算"的实现同样成立。
+    """
+    path = write_seed_file(tmp_path / "wet.cyberworld",
+                           {**_WET_SEED, "plugins": [_WET]})
+    with open_world_at(str(tmp_path / "wet.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        assert json.loads(
+            run_cli("validate", "world", str(path), "--json").stdout)["valid"]
+        assert world.stocks("agent:yu")["wet.身上"] == 0.0
+        assert _walk(world), "夹具前提没成立:这个世界量不出两点之间的路"
+        world.tick(1)
+        assert world.stocks("agent:yu")["wet.身上"] == 2.0, (
+            "`world_雨势` 在触发器的 `when` 里恒为假 —— 一天十六条 travel 一次没响,"
+            "而作者层规律里同一个写法是合法的"
+        )
+        stats = world.trigger_stats()["wet.出门淋雨"]
+        assert stats["matched"] == 1 and stats["written"] == 1, stats
+        assert stats["when_false"] == 0, stats
+
+    # 对照组:雨停了,同一条触发器不许落笔,而且**说得出它是因为 `when`** 不响的。
+    dry = {**_WET_SEED, "stocks": [{"owner": "world", "values": {"雨势": 0.1}}],
+           "plugins": [_WET]}
+    path = write_seed_file(tmp_path / "dry.cyberworld", dry)
+    with open_world_at(str(tmp_path / "dry.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        assert _walk(world)
+        world.tick(1)
+        assert world.stocks("agent:yu")["wet.身上"] == 0.0
+        stats = world.trigger_stats()["wet.出门淋雨"]
+        assert stats["matched"] == 1 and stats["when_false"] == 1, stats
+        assert stats["written"] == 0, stats
+
+
+def test_没人读world的时候_一次多余的查询都不发(tmp_path):
+    """`world_*` 那一趟是**有人读才读**(和 `stocks.evaluate_due` 同一条判断)——
+    否则每一条事件都要多一次 `HGETALL`,而绝大多数插件根本不读世界的量。"""
+    plain = json.loads(json.dumps(_WET, ensure_ascii=False))
+    plain["triggers"][0].pop("when")
+    path = write_seed_file(tmp_path / "plain.cyberworld",
+                           {**_WET_SEED, "plugins": [plain]})
+    with open_world_at(str(tmp_path / "plain.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        assert world.scheduler._trigger_world_values(
+            [{"type": "travel", "who": "yu"}]) == {}, (
+            "没有一条触发器读 `world_*`,这一趟不该去查世界的量"
+        )
+        assert world.scheduler._trigger_world_values([]) == {}
+
+
+def test_触发器六个数各指一种修法(tmp_path):
+    """**一条 `when` 恒为假的触发器,和一条根本没被叫到的触发器,屏幕上长得一样。**
+
+    所以六个数要分得开 —— 这条钉 `no_bearer`(取不着当事人)那一格:
+    订 `location` 的触发器碰上一条没有 `loc` 的事件。
+    """
+    probe = {"id": "probe", "version": "1.0.0",
+             "facts": {"n": {"bearer": "location", "shape": "number",
+                             "default": 0.0}},
+             "triggers": [{"id": "记一笔", "on": {"event": "agent_join"},
+                           "for_each": {"node": "location"},
+                           "effects": [{"set": {"probe.n": "probe.n + 1"}}]}]}
+    path = write_seed_file(tmp_path / "probe.cyberworld",
+                           {**_WET_SEED, "plugins": [probe]})
+    with open_world_at(str(tmp_path / "probe.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.scheduler._record_event({"type": "agent_join", "who": "yu"})  # 没有 loc
+        world.tick(1)
+        stats = world.trigger_stats()["probe.记一笔"]
+        assert stats["matched"] == 1 and stats["no_bearer"] == 1, stats
+        assert stats["written"] == 0 and stats["when_false"] == 0, (
+            f"取不着人被记成了「条件不成立」—— 两种病两种修法:{stats}"
+        )
