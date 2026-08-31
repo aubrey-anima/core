@@ -841,16 +841,22 @@ EDGE_KEYS = ("label", "from", "to", "exclusive", "exclusive_to", "symmetric", "f
 #: `ontology.KIND_KEYS` 是**作者层**那张表,两者不是一回事。
 PLUGIN_KIND_KEYS = ("gloss", "budget", "prompt", "facts")
 
-#: 🔴 **`plugin` 记录里每一个"会查不认识的键"的层级,一层一格。**
+#: 🔴 **插件这一族里每一个"会查不认识的键"的层级,一层一格。**
 #:
 #: 它存在的理由是一条**反向闸**:创作台那侧有一条"盲区不许变多"的断言,
 #: 而这一格让它收得到底 —— **加一层却忘了报,盲区就多一个**,而那件事没有一处
 #: 会报错(作者写下的那一格根本不在,退出码 0、日志干净)。
 #: ⚠️ **加一层就往这儿加一行**,`tests/test_plugins.py` 那条用例逐格点名。
+#:
+#: ⚠️ **2026-08-31 起这句话不再是"`plugin` 记录里的层级"**:第十二格
+#: `authored_edge_keys` 住在**作者层的 `edge` 记录**上(收件箱 D44),不在 `plugin`
+#: 记录里。改口是有意的 —— 这张表答的是「插件这一族有哪几层会查不认识的键」,
+#: 而**按记录类型给它设边界,正是"一层一层收"那个 bug 的形状**:新开的那一层
+#: 恰好在边界外,于是它又一次不在名单上。
 STRICT_LEVELS = (
     "plugin_keys", "fact_keys", "edge_keys", "kind_keys", "verb_keys",
     "rule_keys", "emit_keys", "trigger_keys", "trigger_emit_keys",
-    "edge_effect_keys", "projected_source_keys",
+    "edge_effect_keys", "projected_source_keys", "authored_edge_keys",
 )
 
 
@@ -871,7 +877,7 @@ def unknown_keys(label: str, spec: Any, allowed: tuple[str, ...],
     if not odd:
         return []
     return [
-        f"{label}:不认识的键 {odd} —— 写下去它会被**静默丢掉**,"
+        f"{label}:不认识的键 {odd} —— 写下去它会被「静默丢掉」,"
         f"而你看到的只是「我写的那一格没生效」。这一层收的是 {list(allowed)}"
         f"(问 `contract --json` 的 `plugins.{grid}`,别照文档记一份清单)"
     ]
@@ -1062,7 +1068,7 @@ def _parse_verb(plugin_id: str, label: str, name: str, spec: Any,
     unknown = sorted(set(spec) - set(VERB_KEYS))
     if unknown:
         errors.append(
-            f"{label}:不认识的键 {unknown} —— 写下去它会被**静默丢掉**,"
+            f"{label}:不认识的键 {unknown} —— 写下去它会被「静默丢掉」,"
             f"而你看到的只是「我写的那一格没生效」。这一版收的是 {list(VERB_KEYS)}"
             "(问 `contract --json` 的 `plugins.verb_keys`,别照文档记一份清单)"
         )
@@ -1275,8 +1281,17 @@ def compile_kind_rows(plugins: Iterable[Plugin]) -> list[dict[str, Any]]:
     ]
 
 
-def uncreatable_edges(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
+def uncreatable_edges(
+    plugins: Iterable[Plugin], *, seeded: Iterable[str] = (),
+) -> dict[str, list[str]]:
     """声明了、而**没有任何动词或触发器造得出**的那几种边。
+
+    🆕 **`seeded` 是作者层里种下的那几种边**(3.8.0,收件箱 D44)。开了 `edge`
+    段之后,「造得出」多了第三条路 —— 而这一句要是不跟着改口,它会对一份
+    **写着初始成员**的世界报一句假警报,而作者会去加一个他并不需要的动词。
+    ⚠️ 种下的边和 `link` 不是一回事:种下的是**创世那一批**,`link` 管的是
+    **后来的人**。所以一个"只种不连"的门派仍然是正当的(创派三弟子写死,
+    此后不收徒),这一句对它闭嘴是对的。
 
     🔴 **它是警告不是错误**,理由和 `_authored_unreachable_requirements` 逐字相同:
     一个还没写完的世界是正当的,而**开机是权威** —— 引擎自己收得下这种声明,
@@ -1297,6 +1312,7 @@ def uncreatable_edges(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
     ⚠️ **出厂插件不进这一趟**(离线那一侧手上只有作者层):`invitation` 那条边是
     内核直接物化的,没有任何动词造它 —— 拿这条规矩去量它会得到一句假警报。
     """
+    planted = set(seeded)
     out: dict[str, list[str]] = {}
     for plugin in plugins:
         made = {
@@ -1305,11 +1321,158 @@ def uncreatable_edges(plugins: Iterable[Plugin]) -> dict[str, list[str]]:
             for spec in getattr(source, "links", ())
             if spec.get("op") == "link"      # ⚠️ transfer 只搬已有的行,见上
         }
+        made |= planted
         idle = sorted(edge.qualified for edge in plugin.edges.values()
                       if edge.qualified not in made)
         if idle:
             out[plugin.id] = idle
     return out
+
+
+#: 作者层一条 `edge` 记录写得到的键(3.8.0,收件箱 D44)。
+#:
+#: 🔴 **`facts` 有意不收,而这不是漏了。** 运行期 `link` 那条路上,声明里的事实
+#: **带命名空间落库**(`apply_edge_effect` 写的是 `f"{plugin}.{key}"`),而效果里
+#: 手写的 `facts` 是**原样**塞进去的 —— 同一个键两种写法两种下场,而那正是
+#: 「量表里并排住下两个量」那一族(§3.50)的第三个入口。收作者层这一格,等于把
+#: 一个已经在打架的语义再复制一份;不收,声明过的默认值照旧逐个落地
+#: (`apply_edge_effect` 替它填),而作者写了会**当场看到一句拒绝**,不是静默丢掉。
+#: ⚠️ 运行期那处不一致本身是一条独立的账,记在 FOR-STUDIO §3.60,别在这儿顺手改。
+AUTHORED_EDGE_KEYS = ("type", "from", "to")
+
+
+def authored_edge_errors(
+    entries: Any, plugins: Iterable[Plugin], *,
+    factory_ids: Iterable[str] = (),
+) -> tuple[list[str], list[str]]:
+    """作者层种下的那几条边立不立得住 —— **开机与离线两扇门共用这一份**。
+
+    返回 `(errors, warnings)`。3.8.0 收件箱 D44 开 `edge` 段时新增。
+
+    **这道闸分得清"查得动"和"查不动",而分界不是 `--edit`,是数据本身**:
+
+    - 边的 `type` 写成 `<插件>.<边名>` 的形状、两端不空、没有不认识的键、
+      同一条边没写两遍 —— **永远查得动**(在这份文件自己肚子里)。
+    - `<插件>` 是这份文件里某个插件 → 那它必须真的声明过这种边,而且两端的
+      节点 id 要配得上声明的那一端、`exclusive` 不许在同一份文件里自相矛盾。
+      **也查得动**(声明就在手上)。
+    - `<插件>` **不是**这份文件里的任何一个 → 它可能装在目标世界的库里
+      (一次编辑最常见的形状就是"只带几条边")。**查不动,所以说出来而不是
+      假装查过** —— 开机那一侧手上是三个来源合并后的名单,它答得出;
+      而这一格的假绿只有一种走法(一份完整世界文件把 `plugin` 段忘了),
+      那种文件开机当场会红。
+
+    🔴 **出厂插件的边一律拒**(`factory_ids`):`invitation.invites` 是内核**投影的
+    物化视图**(`rebuild_invitation_edges` 每次开机照日志重建一遍),手写一行进去
+    要么下一秒被抹掉、要么就是**伪造演化态** —— 而伪造演化态"没有任何地方会报错"
+    正是这个系统最怕的那一种。作者层种的是创世态,不是别人折出来的账。
+    """
+    rows = list(entries or ())
+    if not rows:
+        return [], []
+    declared: dict[str, EdgeType] = {}
+    owners: set[str] = set()
+    for plugin in plugins:
+        owners.add(plugin.id)
+        for edge in plugin.edges.values():
+            declared[edge.qualified] = edge
+    factory = set(factory_ids)
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    unchecked: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
+    # `exclusive` / `exclusive_to` 在**这一份文件之内**自相矛盾的那两格。
+    # 放行的样子是安静的:`apply_edge_effect` 只 `logger.warning` 一句然后
+    # 返回 False,于是"我明明写了三条,世界里只有一条"而屏幕上什么都没有。
+    by_src: dict[tuple[str, str], str] = {}
+    by_dst: dict[tuple[str, str], str] = {}
+
+    for index, row in enumerate(rows):
+        label = f"edges[{index}]"
+        if not isinstance(row, dict):
+            errors.append(
+                f"{label}:一条边必须是一个对象,收到 {type(row).__name__}")
+            continue
+        errors += unknown_keys(label, row, AUTHORED_EDGE_KEYS, "authored_edge_keys")
+        edge_type = str(row.get("type") or "").strip()
+        src = str(row.get("from") or "").strip()
+        dst = str(row.get("to") or "").strip()
+        missing = [k for k, v in (("type", edge_type), ("from", src), ("to", dst))
+                   if not v]
+        if missing:
+            errors.append(
+                f"{label}:少了 {missing} —— 一条边是"
+                f"`{{\"type\": \"<插件>.<边名>\", \"from\": …, \"to\": …}}`")
+            continue
+        namespace, _, local = edge_type.partition(".")
+        if not namespace or not local:
+            errors.append(
+                f"{label}:`type` 要写成 `<插件>.<边名>`(边类型名带命名空间,"
+                f"两个插件各声明一个 `owns` 才不会撞),收到 {edge_type!r}")
+            continue
+        if namespace in factory:
+            errors.append(
+                f"{label}:`{edge_type}` 是「出厂插件 `{namespace}` 的边」,"
+                "作者层里种不得 —— 那几条是内核「投影的物化视图」"
+                "(每次开机照事件日志重建一遍),手写一行进去要么下一秒被抹掉、"
+                "要么就是伪造这个世界的历史,而两种都不报错。"
+                "它该由发生的事情长出来,不是由文件写死")
+            continue
+        key = (edge_type, src, dst)
+        if key in seen:
+            errors.append(
+                f"{label}:这条边写了两遍(`{edge_type}` {src} → {dst})—— "
+                "边是幂等的,第二条什么也不多做;删掉一条,或者其中一条本来"
+                "想写的是别的两端")
+            continue
+        seen.add(key)
+        if namespace not in owners:
+            # **查不动的那一格,说出来。** 见 docstring。
+            unchecked.add(namespace)
+            continue
+        spec = declared.get(edge_type)
+        if spec is None:
+            mine = sorted(e.qualified for e in declared.values()
+                          if e.plugin == namespace)
+            errors.append(
+                f"{label}:插件 `{namespace}` 没声明过 `{edge_type}` 这种边;"
+                f"它声明过的是 {mine or '(一种都没有)'} —— "
+                "种一条没人声明过的边,那一行会安安静静地待在库里,"
+                "而规律读不到它、提示词里一个字都不会出现")
+            continue
+        for where, end, node in (("from", spec.src, src), ("to", spec.dst, dst)):
+            problem = edge_node_id_error(end, node, plugin_id=spec.plugin)
+            if problem is not None:
+                errors.append(f"{label}.{where}:{problem}")
+        if spec.exclusive:
+            first = by_src.get((edge_type, src))
+            if first is not None:
+                errors.append(
+                    f"{label}:`{edge_type}` 声明成 `exclusive`(起点那一端唯一),"
+                    f"而 {src} 在这份文件里已经有一条了({first})—— "
+                    "开机只会认第一条,第二条静静地不生效")
+            else:
+                by_src[(edge_type, src)] = f"{label} → {dst}"
+        if spec.exclusive_to:
+            first = by_dst.get((edge_type, dst))
+            if first is not None:
+                errors.append(
+                    f"{label}:`{edge_type}` 声明成 `exclusive_to`(终点那一端唯一),"
+                    f"而 {dst} 在这份文件里已经有一条了({first})—— "
+                    "开机只会认第一条,第二条静静地不生效")
+            else:
+                by_dst[(edge_type, dst)] = f"{label} ← {src}"
+
+    if unchecked:
+        warnings.append(
+            f"这份文件里种了 {sorted(unchecked)} 名下的边,而「没有哪个 `plugin` "
+            "记录声明过它们」 —— 如果那些插件已经装在目标世界里(一次编辑最常见的"
+            "形状就是只带几条边),这些边照旧连得上,而「离线这一格答不了」;"
+            "要在这里就查它,把那几条 `plugin` 记录也放进这份包。"
+            "⚠️ 一份「完整」的世界文件走到这儿八成是漏了 `plugin` 段 —— "
+            "那种文件真开机时会当场红")
+    return errors, warnings
 
 
 def borrowed_kind_errors(
@@ -1368,6 +1531,84 @@ EDGE_ENDS = ("agent", "player", "location", "world",
 #: **照契约判的 tool 会拒掉一个引擎跑得起来的世界**,而那是这一族最贵的错法
 #: (假红灯:作者去改一个没错的东西)。判的时候用这个前缀集,别拿裸词做等值比较。
 EDGE_END_PREFIXES = ("entity:", "group:")
+
+#: 边的两端写成节点 id 时长什么样。**一端一行,和 `EDGE_ENDS` 一一对应。**
+#:
+#: 🔴 **它从前只是 `__main__` 里一个手写的 dict**(契约那一格),而 2026-08-31 开
+#: 作者层 `edge` 段时要**照着它判**一条边写得对不对 —— 判的地方和印的地方各存一份,
+#: 就是这个仓库最贵的那种不一致:契约印 A、闸按 B 判,而两边都不报错。
+#: 收成一份常量之后,`contract --json` 的 `plugins.edge_node_id_forms` 与
+#: `authored_edge_errors` 读的是同一行。
+#:
+#: ⚠️ **`player` 那一行最容易写错**:玩家的节点 id 是 `agent:player:<id>`,不是
+#: `player:<id>` —— 玩家和角色**同一个量表命名空间**(`Scheduler.stock_owner_of`),
+#: 而边的两端用的就是那个 owner key。
+EDGE_NODE_ID_FORMS: dict[str, str] = {
+    "agent": "agent:<agent_id>",
+    "player": "agent:player:<player_id>",
+    "location": "location:<location_id>",
+    "world": "world",
+    "entity:<kind>": "<kind>:<实例名>(就是那条 entity 记录的 id)",
+    "group:<kind>": "<kind>:<实例名>(同上)",
+}
+
+#: 玩家节点 id 的前缀。写死在这儿而不是拼 `Scheduler.PLAYER_PREFIX`,理由是
+#: 这一层不认识 scheduler;闸钉着两边相等
+#: (`tests/test_plugins.py::test_契约说得出这两个答案_而且那几格是真的`)。
+_PLAYER_NODE_PREFIX = "agent:player:"
+
+
+def edge_node_id_error(end: str, node: str, *, plugin_id: str = "") -> str | None:
+    """一个节点 id 配不配得上它那一端的声明。**配得上就答 `None`。**
+
+    🔴 **`entity:` / `group:` 那两端写的是「局部名」,而实例 id 里是「全名」** ——
+    声明 `{"to": "group:sect"}` 的插件 `menpai`,它的实例 id 是
+    `menpai.sect:青云门`,不是 `sect:青云门`。所以这里补命名空间走的是
+    `verb_kind_id`(**动词挂哪个种类**问的是同一个问题、同一个函数)。
+    ⚠️ 自己再算一遍 `f"{plugin}.{end}"` 的话,`KIND_PREFIXES` 哪天多一个前缀,
+    动词那一边跟上了、这一边没有,而不一致的样子是一盏假红灯。
+
+    作者层 `edge` 段(3.8.0,收件箱 D44)那道闸的核心一句。它查的是**形状**,
+    不是"这个东西存不存在" —— 后者是跨引用(实例可能在目标世界的库里),
+    而形状在这份文件自己肚子里就判得动。
+
+    🔴 **为什么形状值得当硬错误拦**:一条 `{"from": "阿岚"}`(少了 `agent:` 前缀)
+    的边**建得出来**,`edge:` 那个 hash 里真有这一行 —— 而 `src.体力` 读的是
+    `stock_store.of("阿岚")`(空的)、`connected` 那一档比的是她的 owner key
+    (对不上),于是这条边**谁也读不到、谁也看不见**,零报错。
+    和「量名拼错当场开不了机」逐字同一种病,所以给它同一种下场。
+    """
+    node = str(node or "")
+    if end == "world":
+        return None if node == "world" else (
+            f"`world` 那一端只能写 `world` 本身,收到 {node!r}")
+    if end == "player":
+        return None if node.startswith(_PLAYER_NODE_PREFIX) and node[len(
+            _PLAYER_NODE_PREFIX):] else (
+            f"`player` 那一端要写 `{EDGE_NODE_ID_FORMS['player']}`,收到 {node!r} —— "
+            "⚠️ 玩家和角色是「同一个量表命名空间」,所以是 `agent:player:p1`,"
+            "不是 `player:p1`")
+    if end == "agent":
+        ok = (node.startswith("agent:") and not node.startswith(_PLAYER_NODE_PREFIX)
+              and node[len("agent:"):])
+        return None if ok else (
+            f"`agent` 那一端要写 `{EDGE_NODE_ID_FORMS['agent']}`,收到 {node!r}"
+            + ("(那是一个玩家 —— 这种边声明的是 `to: \"player\"` 那一端)"
+               if node.startswith(_PLAYER_NODE_PREFIX) else ""))
+    if end == "location":
+        return None if node.startswith("location:") and node[len("location:"):] else (
+            f"`location` 那一端要写 `{EDGE_NODE_ID_FORMS['location']}`,收到 {node!r}")
+    # `entity:<kind>` / `group:<kind>` —— 前缀即种类,和实例 id 的规矩逐字同一条。
+    if any(end.startswith(prefix) for prefix in EDGE_END_PREFIXES):
+        kind = verb_kind_id(plugin_id, end) if plugin_id else end.partition(":")[2]
+        head, _, tail = node.partition(":")
+        if head == kind and tail:
+            return None
+        return (
+            f"`{end}` 那一端要写 `{kind}:<实例名>`(就是那条 entity 记录的 id;"
+            f"⚠️ 种类名在实例 id 里是全名 `{kind}`,不是声明里那个局部名),"
+            f"收到 {node!r}")
+    return f"不认识的一端 `{end}` —— 这是插件声明里的问题,不是这条边的"
 
 
 def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:

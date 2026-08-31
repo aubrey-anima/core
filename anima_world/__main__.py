@@ -1053,6 +1053,81 @@ def world_beat_errors(authored: dict[str, Any] | None) -> list[str]:
     return []
 
 
+def _parsed_plugins_or_none(bodies: Any) -> list[Any] | None:
+    """这几条插件声明,解析好的。**坏插件在这儿一声不吭地掉头。**
+
+    它的错由 `world_plugin_errors`(离线)/ `_install_plugins`(开机)逐条报 ——
+    在这儿再报一遍就是同一件事两个说法,而两个说法迟早分岔
+    (`_authored_with_plugin_kinds` 那条逐字同款)。
+
+    ⚠️ **`subscribable=` 要和 `world_plugin_errors` 传的一模一样**:传窄了的话
+    一份那扇门收得下的声明会在这儿"解析失败",于是边那道闸**静静地整个跳过** ——
+    而跳过的样子和"查过了没问题"在屏幕上是同一个。
+    """
+    from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.plugins import PluginError, order_plugins, parse_plugins
+
+    try:
+        return list(order_plugins(parse_plugins(
+            list(bodies or []), subscribable=SUBSCRIBABLE_EVENTS)))
+    except PluginError:
+        return None
+
+
+def _edge_layer_verdict(
+    authored: dict[str, Any] | None, plugins: list[Any] | None,
+) -> tuple[list[str], list[str]]:
+    """作者层那几条边的判词 `(errors, warnings)` —— **开机与离线共用这一份**。
+
+    唯一的分岔是**手上那份插件名单是从哪儿来的**:离线只有这份文件里的
+    `plugin` 记录,开机是「出厂 + 库里 + 文件」三个来源合并之后的那一份
+    (`_plugin_bodies`)。⚠️ **名单和它要判的那份数据必须来自同一次合并** ——
+    2026-08-28 那条回归(「任何带 `kinds` 的增量编辑都开不了机」)就是喂了全集、
+    判了局部,所以这个函数**只收已经合并好的名单**,自己一次都不去合并。
+    """
+    edges = (authored or {}).get("edges")
+    if not edges:
+        return [], []
+    if plugins is None:      # 坏插件 —— 归 `world_plugin_errors` 报,这儿闭嘴
+        return [], []
+    from anima_world.plugins import authored_edge_errors
+
+    return authored_edge_errors(edges, plugins, factory_ids=FACTORY_PLUGINS)
+
+
+def world_edge_errors(authored: dict[str, Any] | None) -> list[str]:
+    """作者层种下的那几条边立不立得住 —— **和开机同一份判断**(3.8.0,收件箱 D44)。
+
+    边是作者层的**第十四个段**,于是它**多出一种开机失败**,而这个仓库的老规矩是:
+    *新增一种开机失败,就必须同一轮把它补进离线那两扇门。* 3.7.0 收节拍时第一版
+    只收了段没补门,`world check` 对一份开不了机的文件照答 `loadable: true` ——
+    这一行就是那条纪律的第 N 次落点。
+
+    ⚠️ **和 `complete` 无关,而分界由数据自己给**(理由写在
+    `plugins.authored_edge_errors` 的 docstring 里):写得对不对永远查得动;
+    「这种边这个世界有没有」在**这份文件声明过那个插件**时查得动、否则查不动,
+    而查不动的那一格由 `_authored_edge_warnings` **说出来**,不是假装查过了。
+
+    ⚠️ **没写 `edges` 的世界这一层整个缺席** —— 和 `beats` / `kinds` 逐字同构。
+    """
+    if not authored:
+        return []
+    return _edge_layer_verdict(
+        authored, _parsed_plugins_or_none(authored.get("plugins")))[0]
+
+
+def _authored_edge_warnings(authored: dict[str, Any] | None) -> list[str]:
+    """边那一段里**离线答不了**的那几格。三条路共用(两扇离线门 + 开机)。
+
+    只在真有那一格时才说 —— **误报够多次的警告等于没有警告**
+    (和 `_edit_ontology_gap_warnings` 同一条)。
+    """
+    if not authored:
+        return []
+    return _edge_layer_verdict(
+        authored, _parsed_plugins_or_none(authored.get("plugins")))[1]
+
+
 def _register_authored_layer_checks() -> None:
     """把那几个检查器填进 `AUTHORED_LAYER_CHECKS`。**加一个就往这儿加一行。**"""
     global AUTHORED_LAYER_CHECKS
@@ -1062,6 +1137,7 @@ def _register_authored_layer_checks() -> None:
         world_location_media_errors,
         world_beat_errors,
         world_plugin_errors,
+        world_edge_errors,
     )
 
 
@@ -1235,7 +1311,8 @@ def _load_world_file(
         # 和 errors 那一半是同一条纪律:只有 `validate world` 看得到的警告,
         # 在托管环境里等于没有(那儿没有人会去跑那条命令)。
         for problem in ((_authored_media_warnings(authored)
-                         + _authored_uncreatable_edges(authored))
+                         + _authored_uncreatable_edges(authored)
+                         + _authored_edge_warnings(authored))
                         if authored else []):
             logger.warning("%s: %s", path, problem)
         # **一个作者层为空的文件 = 没有种子,不是一个空种子。**
@@ -1819,10 +1896,11 @@ def build_serve_scheduler(
     # 报的是作者**没碰过**的那一行,还断言「装着的是(一个都没有)」,
     # 而那个插件明明就在库里。**两份东西必须来自同一次合并**,这正是
     # `_seed_ontology` 自己 docstring 反对的那件事(喂全集、判局部)。
+    boot_plugin_bodies = _plugin_bodies(
+        config_store, RedisPluginStore(redis, world_id), world_seed)
     boot_namespaces = tuple(
         str(body.get("id") or "")
-        for body in _plugin_bodies(config_store, RedisPluginStore(redis, world_id),
-                                   world_seed)
+        for body in boot_plugin_bodies
         if str(body.get("id") or "")
     )
 
@@ -1830,6 +1908,26 @@ def build_serve_scheduler(
         _precheck_ontology(world_seed, rules_store, location_store, economy_store,
                            ontology_store if merge_author else None,
                            namespaces=boot_namespaces)
+
+    # ── 边:作者层的第十四个段(3.8.0,收件箱 D44)────────────────────────────
+    #
+    # **先验,再写** —— 和上面那两条(本体、节拍)逐字同一条。真正种边要等插件
+    # 装完(`edge_types` 那张表是 `link` 查约束读的),而那时地图、规律、量表
+    # **已经写过好几张了**;一条坏边留下的就是"装了一半的世界"。所以判断提到
+    # 这里,验不过一个字都不写。
+    #
+    # 🔴 **这一趟的插件名单是三个来源合并后的那一份**(`boot_plugin_bodies`),
+    # 不是文件里那几行 —— 一次编辑最常见的形状就是"只带几条边",而它要连的那种边
+    # 声明在**库里**。名单和它要判的那份数据来自同一次合并,是 2026-08-28 那条
+    # 回归换来的规矩。离线两扇门手上只有文件那一份,所以它们对这种包**明说答不了**,
+    # 而不是猜一个答案(`_authored_edge_warnings`)。
+    if seed_author_layer and world_seed and world_seed.get("edges"):
+        edge_errors, edge_warnings = _edge_layer_verdict(
+            world_seed, _parsed_plugins_or_none(boot_plugin_bodies))
+        for problem in edge_warnings:
+            logger.warning("%s", problem)
+        if edge_errors:
+            raise WorldSeedError(edge_errors)
 
     # ── 节拍:作者层的第十二个段(3.7.0,看板 D1)──────────────────────────
     #
@@ -2085,6 +2183,10 @@ def build_serve_scheduler(
             )
         except PluginError as exc:
             raise WorldSeedError(list(exc.errors)) from None
+        # 边(3.8.0,收件箱 D44)。**排在插件之后**:`link` 那一刻查 `exclusive`、
+        # 填声明过的事实默认值,读的都是 `_install_plugins` 刚登记的 `edge_types`。
+        if seed_author_layer:
+            _seed_edges(scheduler, world_seed, merge=merge_author)
     # D3 restart-reversion fix: Scheduler.__init__ already replayed whatever
     # is persisted into scheduler._memory_projection (empty on a fresh DB) —
     # reuse it here for persona resolution BEFORE constructing agents,
@@ -3017,10 +3119,12 @@ def _authored_uncreatable_edges(authored: dict[str, Any] | None) -> list[str]:
     永远 0 条,提示词里一个字都不会出现,而作者分不出「它本来就造不出来」和
     「还没有人入门」—— 这正是这个仓库最怕的那种安静。
 
-    ⚠️ **这一句会不会响,取决于这一版引擎能不能在作者层里种边** —— 今天不能
-    (`contract --json` 的 `plugins.deferred_author_sections` 里那条 `edge` 就是这件事),
-    所以"造得出它"只有动词与触发器两条路。哪天种得下了,这一句要跟着改口,
-    否则它会对一份**写着初始成员**的世界报一句假警报。
+    ✅ **2026-08-31(收件箱 D44):这一句改口了,而上一版这儿写着它必须改。**
+    作者层从今天起种得下边(第十四个段 `edge`),于是「造得出」多了第三条路 ——
+    **这份文件里直接种下的那几种**。不跟着改口的下场是:一份写着"青云门的三位
+    创派弟子"的世界会收到一句假警报,而作者会去加一个他并不需要的动词。
+    ⚠️ 那个"三条路"的判断**不在这儿**,在 `plugins.uncreatable_edges(seeded=)` ——
+    这儿只负责把这份文件种了哪几种边交给它。
     """
     if not authored:
         return []
@@ -3035,16 +3139,32 @@ def _authored_uncreatable_edges(authored: dict[str, Any] | None) -> list[str]:
         plugins = order_plugins(parse_plugins(entries))
     except PluginError:      # 坏插件归 `world_plugin_errors` 逐条报,这儿闭嘴
         return []
-    idle = uncreatable_edges(plugins)
+    idle = uncreatable_edges(plugins, seeded=_authored_edge_types(authored))
     if not idle:
         return []
     return [
         f"插件 `{plugin_id}` 声明了这几种边,而这份文件里没有一个动词或触发器"
-        f"造得出它们:{'、'.join(names)} —— 那张表会永远是空的,而"
-        "「造不出来」和「还没有人连上」在屏幕上长得一模一样。"
-        "要么给它一个带 `link` 的动词/触发器,要么先别声明它"
+        f"造得出它们、也没有种下过一条:{'、'.join(names)} —— 那张表会永远是空的,"
+        "而「造不出来」和「还没有人连上」在屏幕上长得一模一样。"
+        "要么给它一个带 `link` 的动词/触发器,要么在作者层里种几条"
+        "(`{\"kind\": \"author\", \"type\": \"edge\"}`),要么先别声明它"
         for plugin_id, names in sorted(idle.items())
     ]
+
+
+def _authored_edge_types(authored: dict[str, Any] | None) -> tuple[str, ...]:
+    """这份作者层**种下**了哪几种边 —— 只取 type,不解析。
+
+    和 `_plugin_namespaces` 逐字同一个安排:这一格只回答"有没有人种过它",
+    而"种得对不对"归 `world_edge_errors` 逐条报。解析一遍再报第二遍错,
+    就是同一件事两个说法。
+    """
+    rows = (authored or {}).get("edges")
+    return tuple(
+        str(row.get("type") or "").strip()
+        for row in (rows or ())
+        if isinstance(row, dict) and str(row.get("type") or "").strip()
+    )
 
 
 def _authored_dropped_quantities(authored: dict[str, Any] | None) -> list[str]:
@@ -4098,6 +4218,94 @@ def _seed_relations(event_log: EventLog, registered_ids: set[str], world_seed: d
                         "r_type": fwd, "r_type_back": back,
                     },
                 })
+
+
+def _seed_edges(scheduler: Any, world_seed: dict[str, Any] | None, *,
+                merge: bool) -> None:
+    """作者层种下的那几条边(3.8.0,收件箱 D44)。
+
+    **走 `Scheduler.apply_edge_effect`,不自己 `store.link`。** 那一个函数里住着
+    三件这条路同样要的东西:`exclusive` / `exclusive_to` 的约束、声明过的事实
+    **带命名空间**落地(`f"{plugin}.{key}"`)、`symmetric` 建两条而不是一条。
+    自己写一遍 link 的下场是那三件**各漏一件都不报错** —— 一个 `symmetric` 的
+    "结拜"只连一个方向,而反着查的那一半永远是空的。
+
+    ## 只填缺,不覆盖 —— 而这一层的粒度是**每一种边**,不是每一条
+
+    - **创世**(`merge=False`):照单全种。
+    - **一次编辑**(`merge=True`,`--world-file` 装进一个跑过的世界):只种
+      **这个世界里还一条都没有的那几种**;已经有行的那一种**整种跳过**,并
+      **点名说出来**。
+
+    🔴 **粒度选每一种而不是每一条,是量出来的,不是推的。** 舰队上的世界容器
+      **每次开机都带着 `--world-file`**(2026-08-31 在真进程上看过:
+      `world_server.py … --world-file /data/world.cyberworld`),于是"这条边不在
+      就补上"会让**每一次重启都把运行期断掉的边接回来** —— 一个退了师门的人,
+      容器一重启又是青云门弟子,而屏幕上没有一处会说。边不进事件日志
+      (`apply_edge_effect` 一条事件都不发),所以引擎手上**没有"有人断过它"这份
+      记录**,分不出"还没连"和"连过又断了"。整种跳过分得出:那一种只要还有一行,
+      这个世界就已经在过自己的日子了。
+    ⚠️ **代价是"编辑一份文件加一个第四位创派弟子"这件事做不到**,而这一条
+      **不无声**(下面那句 warning 逐条报数并告诉你该走哪条路)—— 和节拍那一段
+      逐字同一个安排:一份不合并的东西,宁可大声不做,不要安静地做一半。
+    ⚠️ **剩下的那个角落,实测过,如实写在这儿**:一种边**每一行都被运行期断掉**
+      之后,再拿同一份文件开机,它会**整批重新种下** —— 因为"一行都没有"在这一层
+      读作"这个插件在这个世界里还没开张"。它不是漏了,是这个粒度必然带的那一格:
+      引擎手上没有"有人断过它"的记录(边不进事件日志),而在"一条都不剩"这一点上,
+      "还没连"和"全断了"**在库里是同一个样子**。要它别回来,就别在世界文件里
+      种它(走 `link` 动词),或者种完之后把那几条 `edge` 记录从文件里去掉。
+    """
+    # ⚠️ **`world_seed` 可以是 `None`** —— 一个跑过的世界导出来一条作者记录都没有,
+    # 而 `_load_world_file` 对那种包答的就是 `None`("没有种子,不是一个空种子")。
+    # 这一行是老闸逮出来的(`test_跑过的世界导出来_两条路都收`:离线说行、开机
+    # `'NoneType' object has no attribute 'get'`)—— 而它逮到的正是这一族最典型的
+    # 那种漏:**新写的那一段只想着"作者写了东西"的世界。**
+    if not world_seed:
+        return
+    rows = _seed_entry_dicts(world_seed, "edges")
+    if not rows:
+        return
+    store = getattr(scheduler, "edge_store", None)
+    if store is None:
+        return
+    have: dict[str, int] = {}
+    if merge:
+        for edge_type in {str(r.get("type") or "") for r in rows}:
+            have[edge_type] = len(store.all(edge_type)) if edge_type else 0
+    planted = 0
+    skipped: dict[str, int] = {}
+    for row in rows:
+        edge_type = str(row.get("type") or "")
+        if have.get(edge_type):
+            skipped[edge_type] = skipped.get(edge_type, 0) + 1
+            continue
+        ok = scheduler.apply_edge_effect(
+            {"op": "link", "type": edge_type,
+             "from": str(row.get("from") or ""), "to": str(row.get("to") or "")},
+            {},
+        )
+        if ok:
+            planted += 1
+        else:
+            # 走到这儿说明那道闸放行了、而内核仍然没连上 —— 唯一已知的走法是
+            # `edge_store` 缺席(上面已经挡了)。**不吞**:一条没连上的创世边
+            # 和一条连上了的,在屏幕上长得一模一样。
+            logger.warning(
+                "作者层这条边没连上:%s %s → %s —— 它过了校验却没落库,"
+                "请把这句话连同世界文件一起报给引擎",
+                edge_type, row.get("from"), row.get("to"))
+    if planted:
+        logger.info("种下 %d 条作者层的边", planted)
+    for edge_type, count in sorted(skipped.items()):
+        # **不无声。** 一句话不说的样子是"我把这几条种进去了" —— 而拿一份改过的
+        # 世界文件去编辑一个跑着的世界的人,会以为第四位弟子已经在里面了。
+        logger.warning(
+            "这个世界里 `%s` 已经有 %d 条边,文件里那 %d 条「没有种进去」 —— "
+            "边只在这一种还一条都没有时才整批种下(理由:边不进事件日志,"
+            "引擎分不出「还没连」和「连过又断了」,逐条补等于每次重启都把"
+            "运行期断掉的边接回来)。要再连人,走一个带 `link` 的动词/触发器;"
+            "要重来一遍,`world drop` 之后重建",
+            edge_type, have.get(edge_type, 0), count)
 
 
 def _seed_goals(event_log: EventLog, registered_ids: set[str], world_seed: dict[str, Any]) -> None:
@@ -7019,6 +7227,7 @@ def run_validate(args: argparse.Namespace) -> int:
                 + _authored_media_warnings(authored)
                 + _authored_dropped_quantities(authored)
                 + _authored_uncreatable_edges(authored)
+                + _authored_edge_warnings(authored)
             )
             errors += _authored_ontology_errors(authored, edit=edit)
             if edit:
@@ -7119,12 +7328,15 @@ def contract_payload() -> dict[str, Any]:
     from anima_world.events import SUBSCRIBABLE_EVENTS
     from anima_world.expressions import EDGE_PREFIXES
     from anima_world.rules import RULE_SELECTORS
+    from anima_world.world_file import AUTHOR_SECTIONS
     from anima_world.plugins import (
+        AUTHORED_EDGE_KEYS,
         BEARER_ALIASES,
         BEARER_FORMS,
         EDGE_ENDS,
         EDGE_END_PREFIXES,
         EDGE_FACT_SHAPES,
+        EDGE_NODE_ID_FORMS,
         EDGE_VERB_EFFECTS,
         EDGE_EFFECT_KEYS,
         EDGE_KEYS,
@@ -7681,32 +7893,42 @@ def contract_payload() -> dict[str, Any]:
             # 🔴 **`player` 那一行最容易写错**:玩家的节点 id 是 `agent:player:<id>`,
             # 不是 `player:<id>` —— 玩家和角色**同一个量表命名空间**
             # (`stock_owner_of`),而边的两端用的就是那个 owner key。
-            "edge_node_id_forms": {
-                "agent": "agent:<agent_id>",
-                "player": "agent:player:<player_id>",
-                "location": "location:<location_id>",
-                "world": "world",
-                "entity:<kind>": "<kind>:<实例名>(就是那条 entity 记录的 id)",
-                "group:<kind>": "<kind>:<实例名>(同上)",
-            },
+            # ⚠️ **这一格和 `authored_edge_errors` 读的是同一份常量**
+            # (`plugins.EDGE_NODE_ID_FORMS`)—— 印的地方和判的地方各存一份,
+            # 就是「契约说 A、闸按 B 判」那种漂移的来路,而两边都不报错。
+            "edge_node_id_forms": dict(EDGE_NODE_ID_FORMS),
+            # 🆕 **作者层种得下一条边了**(3.8.0,2026-08-31,收件箱 D44)。
+            # 探测位和 `beats.author_type` 逐字同构:**这一格缺席 = 这支引擎种不下**
+            # (老引擎上是整格缺席,不是 `null`),一律 `d.get("plugins", {}).get(…)`。
+            "edge_author_type": "edge",
+            "edge_author_section": AUTHOR_SECTIONS["edge"],
+            "authored_edge_keys": list(AUTHORED_EDGE_KEYS),
+            "edge_author_gloss": (
+                "一条边种成 `{\"kind\": \"author\", \"type\": \"edge\", \"body\": "
+                "{\"type\": \"menpai.member_of\", \"from\": \"agent:阿岚\", "
+                "\"to\": \"menpai.sect:青云门\"}}`。两端的形状问 "
+                "`edge_node_id_forms`,别照文档抄。"
+                "⚠️ **`facts` 这一格有意不收**:声明过的事实照默认值落地"
+                "(和运行期 `link` 同一条路),写它当场被拒 —— 理由是运行期那条路上"
+                "「声明的默认值带命名空间、手写的 `facts` 不带」今天就不一致,"
+                "收作者层这一格等于把一个已经在打架的语义再复制一份。"
+                "🔴 **出厂插件的边一律拒**(`invitation.*` 那一族):它们是内核"
+                "**投影的物化视图**,每次开机照事件日志重建,手写一行要么下一秒"
+                "被抹掉、要么就是伪造这个世界的历史。"
+                "⚠️ **只填缺不覆盖的粒度是「每一种边」,不是每一条**:装进一个"
+                "跑过的世界时,只种这个世界里还一条都没有的那几种,已经有行的"
+                "那一种整种跳过并点名。理由是边不进事件日志,引擎分不出"
+                "「还没连」和「连过又断了」——逐条补会让每次带 `--world-file` 的"
+                "重启都把运行期断掉的边接回来。"
+            ),
             # 🔴 **这一版收不下的作者层段,连理由一起报** —— 和
             # `deferred_fact_shapes` 逐字同构。一句光秃秃的「不支持」会让作者
-            # 以为自己写错了字;而**这一格在不在**就是消费方的探测位:
-            # 哪天 `edge` 从这儿消失、`AUTHOR_SECTIONS` 里多出它,就是种得下了。
-            "deferred_author_sections": {
-                "edge": (
-                    "作者层里**种不下一条边**(`{\"kind\": \"author\", "
-                    "\"type\": \"edge\"}` 当场开不了机,报错会列出认得的那几个 "
-                    "type)。边今天只有两条来路:动词的 `effects` 与触发器的 "
-                    "`effects`(`link` / `transfer`),两条都是**运行期**的。"
-                    "于是「门派的初始成员」这种**创世态**的东西写不出来 —— "
-                    "这是一个真缺口,不是一条设计判断,记在这儿等开单。"
-                    "⚠️ 别绕道去手写状态层的 `edge:<type>` 那个 hash:那是引擎的"
-                    "内部键形状(field 用 `\\x00` 分隔,还要顺带写 `edge_types` "
-                    "索引集合),让消费方各持一份对键形状的猜测正是 `world drop` "
-                    "当初归引擎的那条理由。"
-                ),
-            },
+            # 以为自己写错了字;而**这一格在不在**就是消费方的探测位。
+            # ✅ **2026-08-31:`edge` 从这一格里消失了**(收件箱 D44 已办),
+            # 于是今天它是空的 —— 而**空对象不等于缺席**:整格缺席 = 3.8.0 之前
+            # 的老引擎(它连这个问题都答不出),空对象 = 这一版作者层一个段都不欠。
+            # 别把这一格删掉:删了,消费方那句 `d.get(…, {})` 再也分不出这两件事。
+            "deferred_author_sections": {},
             # 🆕 动词。**按 tool-calling 的 JSON schema 声明**(设计 §12.3):
             # NPC 挑动词和玩家点按钮读的是同一份定义。
             "verb_declaration": "tool-calling",
@@ -8846,6 +9068,7 @@ def run_world_check(args: argparse.Namespace) -> int:
                 + _authored_media_warnings(authored)
                 + _authored_dropped_quantities(authored)
                 + _authored_uncreatable_edges(authored)
+                + _authored_edge_warnings(authored)
             )
             errors += _authored_ontology_errors(authored, edit=payload["edit"])
             if payload["edit"]:

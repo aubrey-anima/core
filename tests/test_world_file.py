@@ -387,6 +387,10 @@ def test_转换器往返不丢东西():
         "memories": [{"agent": "夏", "summary": "她记得"}],
         "stocks": [{"owner": "world", "values": {"季节": 2.0}}],
         "stock_visibility": [{"kind": "tree", "key": "树高", "visible": "here"}],
+        # 第十四个段(3.8.0,收件箱 D44)。加一个段却不往这条用例里加一行,
+        # 它就可以在转换器里悄悄丢掉而这条依旧绿 —— `world_setting` 正是这么缺的。
+        "edges": [{"type": "menpai.member_of", "from": "agent:夏",
+                   "to": "menpai.sect:青云门"}],
         "config": {"needs.enabled": True},
         # 三个非列表段全在这里。少一个,那一段就可以在转换器里悄悄丢掉而这条依旧绿
         # —— `world_setting` 缺席了整整一个大版本,正是这么缺的。
@@ -394,3 +398,45 @@ def test_转换器往返不丢东西():
         "mock_narration": {"sleep": "{agent} turned in for the night"},
     }
     assert author_records_to_seed(seed_to_author_records(seed)) == seed
+
+
+def test_没写edge段的老世界_多出这个段之后一个字节都没变(tmp_path):
+    """🔴 **加一个作者层的段,不许动到一份没写它的文件。**
+
+    这是 2026-08-31 开 `edge` 段(收件箱 D44)时那条硬要求的判据。两半:
+
+    - **往返不许凭空多一个段** —— `edges` 这个键在一份没写边的种子里必须**不存在**,
+      而不是一个空列表。空列表和缺席在下游是两个意思(「作者说这个世界没有边」
+      vs「这份文件没提过边」),而多造一个空段就是给两者第二种写法。
+    - **内置橱窗那份文件逐字节不变** —— 它是本包唯一的 package data、是分发物,
+      也是这个格式的说明书。
+
+    ⚠️ **这条用例存在,是因为"逐字节"这把尺子在别处量不出来**:拿一个跑过的世界
+    `export` 两趟,同一棵树上的两份产物就不相同(记录里带 `updated_at` 墙钟,
+    叙事还跑在线程池上,事件条数每趟都在动)。**改动前后各导一次再 diff,量到的
+    是那两样,不是这次改动** —— 所以判据落在文件格式这一层,它是确定的。
+    """
+    from pathlib import Path
+
+    import anima_world
+
+    plain = {
+        "agents": [{"id": "夏", "name": "苏晚夏", "location": "cafe",
+                    "personality": "静"}],
+        "locations": [{"id": "cafe", "name": "咖啡店", "description": "拐角"}],
+    }
+    assert "edges" not in author_records_to_seed(seed_to_author_records(plain)), (
+        "一份没写边的世界往返之后凭空多了一个 `edges` 段"
+    )
+
+    demo = Path(anima_world.__file__).parent / "demo.cyberworld"
+    raw = demo.read_bytes()
+    _manifest, stream = read_world_file(str(demo))
+    records = [r for r in stream if r.get("kind") == "author"]
+    seed = author_records_to_seed(records)
+    assert "edges" not in seed, "橱窗世界不该有边这一段"
+    # 那几条 `author` 记录读回来再写出去,和原文件里对应的那几行**逐字节相同**
+    # —— 橱窗是裸文本,所以真的比得了。
+    lines = raw.decode().splitlines()[1:]     # 第一行是 manifest
+    rebuilt = [json.dumps(r, ensure_ascii=False) for r in records]
+    assert rebuilt == lines, "橱窗那几条作者记录读一趟再写出去就变了"

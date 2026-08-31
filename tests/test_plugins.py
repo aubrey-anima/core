@@ -1907,14 +1907,20 @@ def test_契约把每一层的键名单都报出来_而且不许漂():
         ("trigger_emit_keys", P.TRIGGER_EMIT_KEYS),
         ("edge_effect_keys", P.EDGE_EFFECT_KEYS),
         ("rule_required_keys", P.RULE_REQUIRED_KEYS),
+        ("authored_edge_keys", P.AUTHORED_EDGE_KEYS),
+        ("edge_node_id_forms", P.EDGE_NODE_ID_FORMS),
     ):
-        assert c[grid] == list(const), f"{grid} 和引擎那份常量漂了"
+        assert c[grid] == (dict(const) if isinstance(const, dict) else list(const)), (
+            f"{grid} 和引擎那份常量漂了")
     # 🔴 **反向闸:每一层都得有一格。** 加一层却忘了报,创作台的盲区就多一个,
     # 而它那条"盲区不许变多"的闸只能靠人去发现。
+    # ⚠️ 第十二层 `authored_edge_keys` 住在**作者层的 `edge` 记录**上,不在
+    # `plugin` 记录里(2026-08-31,D44)—— 按记录类型给这张表设边界,正是
+    # "一层一层收"那个 bug 的形状:新开的那一层恰好在边界外,于是又一次不在名单上。
     assert set(P.STRICT_LEVELS) == {
         "plugin_keys", "fact_keys", "edge_keys", "kind_keys", "verb_keys",
         "rule_keys", "emit_keys", "trigger_keys", "trigger_emit_keys",
-        "edge_effect_keys", "projected_source_keys",
+        "edge_effect_keys", "projected_source_keys", "authored_edge_keys",
     }, sorted(P.STRICT_LEVELS)
     for grid in P.STRICT_LEVELS:
         assert c.get(grid), f"契约少报了一层:{grid}"
@@ -2088,21 +2094,49 @@ def test_插件没装上时_那句引用不到要说清是连带的(tmp_path):
     assert ok_payload["valid"] is True, ok_payload["errors"]
     assert not any("连带" in e for e in ok_payload["errors"])
 
-def test_一条边_作者层里种不下_而且报错会说它认得哪几个段(tmp_path):
-    """**(a) 不能。** 作者层十三个段里没有边 —— 写一条 `type: "edge"` 的记录是
-    **开不了机的硬失败**(和一个拼错的 type 逐字同一种)。
+def test_一条边_作者层里种得下了_而且真的落进那张表(tmp_path):
+    """**(a) 能了**(3.8.0,2026-08-31,收件箱 D44)。作者层第十四个段 `edge`。
 
-    ⚠️ **这条用例的方向是"钉住今天的答案"**:哪天 `edge` 成了第十四个段,它会红,
-    而那正是提醒 —— 契约里 `deferred_author_sections` 那一格、FOR-STUDIO §3.50、
-    以及 `_authored_uncreatable_edges` 那句警告,**三处都要跟着改口**。
+    ⚠️ **这条用例上一版的方向是相反的** —— 它钉着"种不下",并写明哪天种得下了
+    它会红、而那正是提醒。今天就是那一天,所以连它一起翻过来:契约里
+    `deferred_author_sections` 那一格空了、`edge_author_type` 那三格新加、
+    `_authored_uncreatable_edges` 改了口,三处都跟着动了。
+
+    🔴 **判据是"那张表里真有这一行",不是"开机没报错"** —— 一条种下去而没落库的
+    边和一条根本没写的边,在退出码和日志上长得一模一样。
+    """
+    path = write_seed_file(tmp_path / "seeded-edge.cyberworld", {
+        **BARE,
+        "plugins": [dict(MENPAI_SEED)],
+        "entities": [{"id": "menpai.sect:青云门", "name": "青云门",
+                      "location": "cafe"}],
+        "edges": [{"type": "menpai.member_of", "from": "agent:夏",
+                   "to": "menpai.sect:青云门"}],
+    })
+    payload = json.loads(
+        run_cli("validate", "world", str(path), "--json").stdout)
+    assert payload["valid"] is True, payload["errors"]
+    with open_world_at(str(tmp_path / "seeded-edge.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        rows = world.scheduler.edge_store.all("menpai.member_of")
+        assert rows == [("agent:夏", "menpai.sect:青云门", {"menpai.辈分": 0.0})], rows
+        # **声明过的事实照默认值落地** —— 走的是 `apply_edge_effect` 那条路,
+        # 所以带命名空间(`menpai.辈分`),和运行期 `link` 出来的一模一样。
+
+
+def test_不认识的作者层type_照旧当场开不了机_而且报错列出认得的那几个(tmp_path):
+    """`edge` 收进来了,**而"不认识的 type 当场报错"这条一个字没松**。
+
+    这两件事必须一起钉:只钉前一半的话,一个把 `edge` 写成 `edges` 的作者会得到
+    一份**开得起来而少了一整层**的世界 —— 那正是"安静地少装一半世界"。
     """
     import gzip
 
-    path = tmp_path / "edge.cyberworld"
+    path = tmp_path / "typo.cyberworld"
     rows = [
         {"kind": "manifest", "version": 3, "world_id": "t", "engine_min": "3.8.0"},
         {"kind": "author", "type": "plugin", "body": dict(MENPAI_SEED)},
-        {"kind": "author", "type": "edge",
+        {"kind": "author", "type": "edges",        # 多一个 s
          "body": {"type": "menpai.member_of", "from": "agent:阿岚",
                   "to": "menpai.sect:青云门"}},
     ]
@@ -2111,11 +2145,12 @@ def test_一条边_作者层里种不下_而且报错会说它认得哪几个段
                   + "\n").encode())
 
     check = json.loads(run_cli("world", "check", str(path), "--edit", "--json").stdout)
-    assert check["loadable"] is False, "作者层收下了一条边?那这一节整个要重写"
+    assert check["loadable"] is False, "不认识的 type 被收下了?"
     joined = "\n".join(check["errors"])
-    assert "'edge'" in joined and "只认" in joined, joined
-    # **报错里那张表就是答案本身** —— 作者不必去翻文档才知道能写哪几个段。
-    for section in ("agent", "kind", "entity", "plugin"):
+    assert "'edges'" in joined and "只认" in joined, joined
+    # **报错里那张表就是答案本身** —— 作者不必去翻文档才知道能写哪几个段,
+    # 而 `edge` 从今天起就在这张表上。
+    for section in ("agent", "kind", "entity", "plugin", "edge"):
         assert f"'{section}'" in joined, joined
 
 
@@ -2134,15 +2169,19 @@ def test_契约说得出这两个答案_而且那几格是真的(tmp_path):
     assert seg["kind_instance_section"] in AUTHOR_SECTIONS.values()
     assert seg["kind_instance_id_syntax"] == "<plugin>.<local>:<实例名>"
 
-    # 🔴 **`edge` 不在作者层的段表上,而契约必须把这件事说出来** ——
+    # 🔴 **`edge` 从 2026-08-31 起在作者层的段表上,而契约必须跟着改口** ——
     # 两句话对不上时,以 `AUTHOR_SECTIONS` 为准(它是开机真读的那一份)。
-    assert "edge" not in AUTHOR_SECTIONS, (
-        "作者层多了 `edge` 段而契约还在说它收不下 —— 去改 `deferred_author_sections`"
+    assert AUTHOR_SECTIONS.get("edge") == seg["edge_author_section"], (
+        "契约报的段名和开机真读的那份对不上 —— 抄第二遍就是这么烂的"
     )
+    assert seg["edge_author_type"] == "edge"
     deferred = seg["deferred_author_sections"]
-    assert "edge" in deferred and len(deferred["edge"].strip()) > 40, (
-        "一句光秃秃的「不支持」会让作者以为自己写错了字"
+    assert "edge" not in deferred, (
+        "作者层已经种得下边了,而契约还在说它收不下 —— 消费方读的就是这一格"
     )
+    # ⚠️ **空对象 ≠ 整格缺席**:缺席 = 3.8.0 之前的老引擎(连这个问题都答不出),
+    # 空 = 这一版作者层一个段都不欠。删掉这一格,消费方就再也分不出这两件事。
+    assert deferred == {} and isinstance(deferred, dict), deferred
 
     # 节点 id 那一格:**拿引擎自己的函数对一遍**,不是读文档抄的。
     forms = seg["edge_node_id_forms"]
@@ -2207,6 +2246,23 @@ def test_声明了一种边而没人造得出它_引擎会说话(tmp_path):
         "effects": [{"link": {"type": "menpai.member_of", "from": "self",
                               "to": "menpai.sect:青云门"}}]}]
     assert _authored_uncreatable_edges({"plugins": [by_trigger]}) == []
+
+    # 🆕 **第三条造法:作者层里直接种下**(3.8.0,2026-08-31,D44)。
+    # 这一句不跟着改口的话,它会对一份**写着初始成员**的世界报假警报,
+    # 而作者会去加一个他并不需要的动词 —— 上一版这条用例的 docstring
+    # 就写着"哪天种得下了这句话要改口"。
+    assert _authored_uncreatable_edges({
+        "plugins": [idle],
+        "edges": [{"type": "menpai.member_of", "from": "agent:夏",
+                   "to": "menpai.sect:青云门"}],
+    }) == [], "作者层里种了边,这句「没人造得出」就不该再响"
+    # **对照组:种的是别的一种边,它照旧要响** —— 一句"只要种过任何一条就闭嘴"
+    # 的实现同样通得过上面那条断言,而它会对真正空着的那一种保持沉默。
+    said = _authored_uncreatable_edges({
+        "plugins": [idle],
+        "edges": [{"type": "menpai.别的", "from": "agent:夏", "to": "x:y"}],
+    })
+    assert said and "menpai.member_of" in said[0], said
 
 
 # ── `travel` 那一条:`parties` 说的不是「落在谁头上」(2026-08-27 复核)───────

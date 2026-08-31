@@ -903,11 +903,21 @@ def _qi(**over) -> dict:
     return body
 
 
-def _plugin_file(tmp_path, *bodies, name="plug") -> str:
-    """一个写得完整的世界 + 这几条 `plugin` 记录。"""
+def _plugin_file(tmp_path, *bodies, name="plug", extra=()) -> str:
+    """一个写得完整的世界 + 这几条 `plugin` 记录(+ `extra` 里那几条别的作者记录)。
+
+    `extra` 是 2026-08-31 加的:`authored_edge_keys` 那一层住在**作者层的 `edge`
+    记录**上,不在 `plugin` 记录里,而十二层那份枚举必须覆盖得到它
+    (`STRICT_LEVELS` 加一层却没有对应用例,下场是安静的)。
+    """
     rows = [_MANIFEST, _YARD, _JIA]
     rows += [{"kind": "author", "type": "plugin", "body": body} for body in bodies]
+    rows += list(extra)
     return _write(tmp_path / f"{name}.cyberworld", rows)
+
+
+def _edge_row(**body) -> dict:
+    return {"kind": "author", "type": "edge", "body": body}
 
 
 def test_写对的插件_三条路都放行(tmp_path, fresh_redis):
@@ -1016,11 +1026,18 @@ _STRICT_LEVEL_CASES: dict[str, dict] = {
         "香火": {"bearer": "actor", "shape": "number", "mode": "projected",
                  "sources": [{"event": "payment", "credit": "amount",
                               _ODD: "朱红"}]}}),
+    # 🆕 第十二层住在**作者层的 `edge` 记录**上,不在 `plugin` 记录里
+    # (3.8.0,2026-08-31,收件箱 D44)。所以这一格是 `(插件体, 额外的作者记录)`。
+    "authored_edge_keys": (
+        _qi(edges={"同门": {"from": "agent", "to": "agent"}}),
+        [_edge_row(type="qi.同门", **{"from": "agent:甲", "to": "agent:甲",
+                                      _ODD: "朱红"})],
+    ),
 }
 
 
-def test_十一层键名单_每一层都有一条三扇门用例():
-    """🔴 **反向闸**:`STRICT_LEVELS` 是「这份记录里每一个会查不认识键的层级」,
+def test_十二层键名单_每一层都有一条三扇门用例():
+    """🔴 **反向闸**:`STRICT_LEVELS` 是「插件这一族每一个会查不认识键的层级」,
     加一层却没有对应的三扇门用例,下场是安静的 —— 那一层的拒绝可能只在开机那侧
     发生,而离线两扇门照答绿灯,**没有一处会红**。"""
     from anima_world.plugins import STRICT_LEVELS
@@ -1031,10 +1048,12 @@ def test_十一层键名单_每一层都有一条三扇门用例():
 
 
 @pytest.mark.parametrize("level", sorted(_STRICT_LEVEL_CASES))
-def test_十一层里多写一个键_三扇门都拦(tmp_path, fresh_redis, level):
+def test_十二层里多写一个键_三扇门都拦(tmp_path, fresh_redis, level):
     """不认识的键**照收然后丢掉**比"不支持"坏得多:作者写下的那一格根本不在,
     而退出码 0、日志干净。这一条钉的是"离线那两扇门也看得见这件事"。"""
-    path = _plugin_file(tmp_path, _STRICT_LEVEL_CASES[level], name=level)
+    case = _STRICT_LEVEL_CASES[level]
+    body, extra = case if isinstance(case, tuple) else (case, ())
+    path = _plugin_file(tmp_path, body, name=level, extra=extra)
     ok, _, errors = _both(path, fresh_redis)
     assert not ok, f"`{level}` 这一层多写一个键,开机是拦的,离线两扇门也得拦"
     assert any(_ODD in e for e in errors), (level, errors)
@@ -1142,6 +1161,189 @@ def test_边有人造得出时_那句话不许再响(tmp_path, fresh_redis):
     said_validate, said_check = _warnings(path)
     assert not any("造得出" in w for w in said_validate), said_validate
     assert said_validate == said_check
+
+
+# ── 八之三、边那一段:作者层第十四个段,每一种拒绝三扇门说同一句话 ──────────────
+#
+# 3.8.0 / 2026-08-31,收件箱 D44。**加一个作者层的段就是新开一族开机失败**,
+# 而这个仓库为同一件事栽过一次:3.7.0 收节拍时第一版只收了段没补门,`world check`
+# 对一份开不了机的文件照答 `loadable: true`。
+#
+# ⚠️ **第九节那条通用的对这一族一个字都不会说** —— 它只看得见
+# `world_edge_errors` 在不在 `AUTHORED_LAYER_CHECKS` 上,而**在表上不等于覆盖了
+# 开机会拒的每一种**。下面这份枚举是唯一能让那种漏出现在屏幕上的写法。
+
+_MENPAI = {
+    "id": "menpai", "version": "1.0.0",
+    "kinds": {"group:sect": {"gloss": "一个门派"}},
+    "edges": {"member_of": {"from": "agent", "to": "group:sect",
+                            "exclusive": True}},
+    "verbs": {"入门": {"target": "group:sect", "description": "拜入门派",
+                       "effects": [{"link": {"type": "menpai.member_of",
+                                             "from": "self", "to": "target"}}]}},
+}
+_SECT = {"kind": "author", "type": "entity",
+         "body": {"id": "menpai.sect:青云门", "name": "青云门", "location": "yard"}}
+_SECT2 = {"kind": "author", "type": "entity",
+          "body": {"id": "menpai.sect:天罡门", "name": "天罡门", "location": "yard"}}
+_GOOD_EDGE = _edge_row(type="menpai.member_of",
+                       **{"from": "agent:甲", "to": "menpai.sect:青云门"})
+
+#: 开机会拒的每一种,一行一条。`needle` 是报错里必须出现的那几个字 ——
+#: **只断"两边一致"的话,两扇门一起答错还是绿的**(这个文件开头那条纪律)。
+_EDGE_REJECTIONS: tuple[tuple[str, list, str], ...] = (
+    ("边名拼错",
+     [_edge_row(type="menpai.member_off",
+                **{"from": "agent:甲", "to": "menpai.sect:青云门"})],
+     "没声明过"),
+    ("type没带命名空间",
+     [_edge_row(type="member_of", **{"from": "agent:甲", "to": "menpai.sect:青云门"})],
+     "`<插件>.<边名>`"),
+    ("起点少了前缀",
+     [_edge_row(type="menpai.member_of",
+                **{"from": "甲", "to": "menpai.sect:青云门"})],
+     "`agent:<agent_id>`"),
+    ("终点写的是别的种类",
+     [_edge_row(type="menpai.member_of", **{"from": "agent:甲", "to": "tree:oak"})],
+     "menpai.sect:<实例名>"),
+    # 🔴 出厂插件的边是内核**投影的物化视图**,手写一行进去就是伪造演化态。
+    ("出厂插件的边",
+     [_edge_row(type="invitation.invites",
+                **{"from": "agent:甲", "to": "agent:player:p1"})],
+     "出厂插件"),
+    ("少了一端",
+     [_edge_row(type="menpai.member_of", **{"from": "agent:甲"})],
+     "少了 ['to']"),
+    ("同一条写了两遍",
+     [_GOOD_EDGE, dict(_GOOD_EDGE)],
+     "写了两遍"),
+    # `exclusive` 在**这一份文件之内**自相矛盾:放行的样子是安静的
+    # (`apply_edge_effect` 只 logger.warning 一句然后 return False)。
+    ("exclusive自相矛盾",
+     [_SECT2, _GOOD_EDGE,
+      _edge_row(type="menpai.member_of",
+                **{"from": "agent:甲", "to": "menpai.sect:天罡门"})],
+     "exclusive"),
+)
+
+
+@pytest.mark.parametrize(
+    "case, extra, needle", _EDGE_REJECTIONS,
+    ids=[case for case, _extra, _needle in _EDGE_REJECTIONS],
+)
+def test_边那一段的每一种拒绝_三扇门说同一句话(
+    tmp_path, fresh_redis, case, extra, needle,
+):
+    """**开机是权威**:比它松是假绿(作者信了绿灯再去撞开机),比它严是假红。"""
+    path = _plugin_file(tmp_path, _MENPAI, name="bad-edge",
+                        extra=[_SECT, *extra])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, f"「{case}」开机是拦的,离线那两扇门必须一起拦"
+    assert any(needle in e for e in errors), (case, errors)
+
+
+def test_写对的边_三条路都放行_而且那一行真的落进库里(tmp_path, fresh_redis):
+    """对照组。**没有它,上面那一摞对一个"有 `edges` 段就一律拦"的实现同样成立。**
+
+    🔴 顺带钉住"真的落库" —— 一条种下去而没连上的边和一条根本没写的边,
+    在退出码和日志上长得一模一样。
+    """
+    path = _plugin_file(tmp_path, _MENPAI, name="ok-edge",
+                        extra=[_SECT, _GOOD_EDGE])
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"一份写对的边被拦下来了:{errors}"
+
+    from anima_world.api import World
+
+    with World.open("planted", redis=fresh_redis, world_file=path,
+                    force_mock_llm=True) as world:
+        rows = world.scheduler.edge_store.all("menpai.member_of")
+    assert rows == [("agent:甲", "menpai.sect:青云门", {})], rows
+
+
+def test_一份只带边的编辑包_离线明说这一格答不了_而开机答得出(tmp_path, fresh_redis):
+    """🔴 **离线那两扇门手上只有这份文件,而边的 type 声明在目标世界的库里。**
+
+    这是 `--edit` 那条"查得动查不动"分界在边这一层的落法,两半都要钉:
+    离线**不许猜一个答案**(说出来那一格没查),而开机拿的是三个来源合并后的
+    名单,所以它**答得出** —— 一份拼错了边名的编辑包在开机那儿当场红。
+
+    ⚠️ 只钉前一半的话,一个"编辑包里的边一律不查"的实现照样全绿,而作者会拿着
+    一份开不了机的包出门。
+    """
+    from anima_world.api import World
+
+    base = _plugin_file(tmp_path, _MENPAI, name="edit-base", extra=[_SECT])
+    with World.open("edit", redis=fresh_redis, world_file=base,
+                    force_mock_llm=True) as world:
+        assert world.scheduler.edge_store.all("menpai.member_of") == []
+
+    good = _write(tmp_path / "edit-ok.cyberworld", [_MANIFEST, _GOOD_EDGE])
+    said_validate, said_check = _warnings(good, edit=True)
+    # ⚠️ **只比边那一句,不比整份**:两扇门在 `--edit` 那句**样板话**上本来就不
+    # 逐字相同(`validate world` 多一句"要连着世界查剩下的,用 `simulate …`"),
+    # 而那是它们各自的出口话术,不是判断。判断那一半才必须一模一样。
+    mine_v = [w for w in said_validate if "离线这一格答不了" in w]
+    mine_c = [w for w in said_check if "离线这一格答不了" in w]
+    assert mine_v == mine_c and mine_v, (
+        f"边那一格两扇门分叉了 —— validate:{mine_v};check:{mine_c}")
+    assert "menpai" in mine_v[0], (
+        f"离线猜了一个答案,而它手上根本没有那份声明:{mine_v}")
+    assert _validate_says(good, edit=True)[0], "一份合法的编辑包被拦下来了"
+    with World.open("edit", redis=fresh_redis, world_file=good,
+                    force_mock_llm=True) as world:
+        assert world.scheduler.edge_store.all("menpai.member_of") == [
+            ("agent:甲", "menpai.sect:青云门", {})]
+
+    # 后半截:**开机答得出,所以它拦得下** —— 而离线照旧只说"没查"。
+    bad = _write(tmp_path / "edit-bad.cyberworld", [
+        _MANIFEST,
+        _edge_row(type="menpai.member_off",
+                  **{"from": "agent:甲", "to": "menpai.sect:青云门"})])
+    assert _validate_says(bad, edit=True)[0], "离线手上没有声明,不许猜一个红灯"
+    with pytest.raises(Exception) as caught:
+        with World.open("edit", redis=fresh_redis, world_file=bad,
+                        force_mock_llm=True):
+            pass
+    said = "\n".join(getattr(caught.value, "errors", None) or [str(caught.value)])
+    assert "没声明过" in said, said
+
+
+def test_边只在这一种还空着时才种_而跳过要说出来(tmp_path, fresh_redis, caplog):
+    """**只填缺不覆盖,粒度是「每一种边」。**
+
+    舰队上的世界容器**每次开机都带着 `--world-file`**,所以"这条边不在就补上"
+    会让每一次重启都把运行期断掉的边接回来 —— 而边不进事件日志,引擎手上没有
+    "有人断过它"这份记录。整种跳过分得出:那一种只要还有一行,这个世界就已经在
+    过自己的日子了。
+
+    ⚠️ **跳过必须说出来**:一句话不说的样子是"我把这几条种进去了",而拿一份改过
+    的世界文件去编辑一个跑着的世界的人,会以为第二位弟子已经在里面了。
+    """
+    import logging
+
+    from anima_world.api import World
+
+    one = _plugin_file(tmp_path, _MENPAI, name="grain-1",
+                       extra=[_SECT, _SECT2, _GOOD_EDGE])
+    with World.open("grain", redis=fresh_redis, world_file=one,
+                    force_mock_llm=True) as world:
+        assert len(world.scheduler.edge_store.all("menpai.member_of")) == 1
+
+    two = _write(tmp_path / "grain-2.cyberworld", [
+        _MANIFEST, {"kind": "author", "type": "plugin", "body": _MENPAI},
+        _GOOD_EDGE,
+        _edge_row(type="menpai.member_of",
+                  **{"from": "agent:乙", "to": "menpai.sect:天罡门"})])
+    with caplog.at_level(logging.WARNING):
+        with World.open("grain", redis=fresh_redis, world_file=two,
+                        force_mock_llm=True) as world:
+            rows = world.scheduler.edge_store.all("menpai.member_of")
+    assert rows == [("agent:甲", "menpai.sect:青云门", {})], (
+        f"这一种已经有行了,文件里那两条一条都不该种进去:{rows}")
+    assert any("没有种进去" in r.getMessage() for r in caplog.records), (
+        "整种跳过了却一个字不说 —— 作者会以为第二位弟子已经在里面了"
+    )
 
 
 # ── 九、通用的那一条:**新开一种开机失败,三扇门必须一起认**(3.8.0 第 1 期)────
