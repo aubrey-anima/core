@@ -1344,6 +1344,7 @@ AUTHORED_EDGE_KEYS = ("type", "from", "to")
 def authored_edge_errors(
     entries: Any, plugins: Iterable[Plugin], *,
     factory_ids: Iterable[str] = (),
+    namespace_list_is_complete: bool = False,
 ) -> tuple[list[str], list[str]]:
     """作者层种下的那几条边立不立得住 —— **开机与离线两扇门共用这一份**。
 
@@ -1353,14 +1354,25 @@ def authored_edge_errors(
 
     - 边的 `type` 写成 `<插件>.<边名>` 的形状、两端不空、没有不认识的键、
       同一条边没写两遍 —— **永远查得动**(在这份文件自己肚子里)。
-    - `<插件>` 是这份文件里某个插件 → 那它必须真的声明过这种边,而且两端的
+    - `<插件>` 在手上这份名单里 → 那它必须真的声明过这种边,而且两端的
       节点 id 要配得上声明的那一端、`exclusive` 不许在同一份文件里自相矛盾。
       **也查得动**(声明就在手上)。
-    - `<插件>` **不是**这份文件里的任何一个 → 它可能装在目标世界的库里
-      (一次编辑最常见的形状就是"只带几条边")。**查不动,所以说出来而不是
-      假装查过** —— 开机那一侧手上是三个来源合并后的名单,它答得出;
-      而这一格的假绿只有一种走法(一份完整世界文件把 `plugin` 段忘了),
-      那种文件开机当场会红。
+    - `<插件>` 不在名单里 → **答案取决于这份名单全不全**,见下。
+
+    🔴 **`namespace_list_is_complete` 是这个函数最要紧的一格**(2026-08-31 验收 A
+    逮的 P1)。它说的是**调用方手上那份插件名单是不是这个世界的全集**:
+
+    - **开机 = 是**(`_plugin_bodies` 合了「出厂 + 库里 + 文件」三个来源)。
+      名单里没有,就是这个世界里**真的没有这个插件** → **当场报错**。
+    - **离线两扇门 = 否**(手上只有这份文件)。一次编辑最常见的形状就是"只带
+      几条边",而那种边的声明在**目标世界的库里** → **说出来这一格没查**,不猜。
+
+    ⚠️ **第一版把这两件事写成了同一句**(开机原样复用了离线那条 `continue`),
+    于是一个把 `menpai` 打成 `menpais` 的作者拿到的是:**开机成功、边真的落库、
+    幻影类型被 sadd 进 `edge_types`、节点 id 那道闸一次都没跑**,而屏幕上印着的
+    正是这个函数写的那句「一份完整的世界文件走到这儿八成是漏了 `plugin` 段 ——
+    那种文件真开机时会当场红」。**说那句话的就是开机,而它没红。**
+    一句自己证伪自己的诊断比没有诊断更坏:它让读的人相信这条路已经有人守着。
 
     🔴 **出厂插件的边一律拒**(`factory_ids`):`invitation.invites` 是内核**投影的
     物化视图**(`rebuild_invitation_edges` 每次开机照日志重建一遍),手写一行进去
@@ -1428,6 +1440,17 @@ def authored_edge_errors(
             continue
         seen.add(key)
         if namespace not in owners:
+            if namespace_list_is_complete:
+                # **开机手上是全集,所以这一格它答得出** —— 名单里没有,就是这个
+                # 世界里真的没有这个插件。放行的样子是安静的:边真的落库、
+                # 幻影类型进 `edge_types`、而节点 id 那道闸一次都不会跑。
+                errors.append(
+                    f"{label}:这个世界里没有名叫 `{namespace}` 的插件,"
+                    f"所以 `{edge_type}` 这种边不存在;装着的是 "
+                    f"{sorted(owners) or '(一个都没有)'} —— "
+                    "打错一个字的下场是那一行安安静静待在库里,"
+                    "规律读不到它、提示词里一个字都不会出现")
+                continue
             # **查不动的那一格,说出来。** 见 docstring。
             unchecked.add(namespace)
             continue
@@ -1593,7 +1616,8 @@ def edge_node_id_error(end: str, node: str, *, plugin_id: str = "") -> str | Non
               and node[len("agent:"):])
         return None if ok else (
             f"`agent` 那一端要写 `{EDGE_NODE_ID_FORMS['agent']}`,收到 {node!r}"
-            + ("(那是一个玩家 —— 这种边声明的是 `to: \"player\"` 那一端)"
+            + ("(那是一个玩家 —— 玩家只接得上声明成 `player` 的那一端,"
+               "而这一端声明的是 `agent`)"
                if node.startswith(_PLAYER_NODE_PREFIX) else ""))
     if end == "location":
         return None if node.startswith("location:") and node[len("location:"):] else (

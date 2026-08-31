@@ -1075,7 +1075,8 @@ def _parsed_plugins_or_none(bodies: Any) -> list[Any] | None:
 
 
 def _edge_layer_verdict(
-    authored: dict[str, Any] | None, plugins: list[Any] | None,
+    authored: dict[str, Any] | None, plugins: list[Any] | None, *,
+    complete_namespaces: bool = False,
 ) -> tuple[list[str], list[str]]:
     """作者层那几条边的判词 `(errors, warnings)` —— **开机与离线共用这一份**。
 
@@ -1084,6 +1085,13 @@ def _edge_layer_verdict(
     (`_plugin_bodies`)。⚠️ **名单和它要判的那份数据必须来自同一次合并** ——
     2026-08-28 那条回归(「任何带 `kinds` 的增量编辑都开不了机」)就是喂了全集、
     判了局部,所以这个函数**只收已经合并好的名单**,自己一次都不去合并。
+
+    🔴 **`complete_namespaces` 必须跟着那份名单一起传**(2026-08-31 验收 A 的 P1)。
+    名单从哪儿来,和"名单里没有算不算数",是**同一件事的两半** —— 第一版只传了
+    前一半,于是开机拿着全集却照着"我可能没查全"的规矩放行:一个插件名打错一个
+    字母的完整世界文件**开机成功、边真的落库**,而屏幕上印着的正是那句
+    「那种文件真开机时会当场红」。**两半分开传,就是给它们分岔的机会**;
+    这儿绑成一个调用点,是让下一个人没法只改一半。
     """
     edges = (authored or {}).get("edges")
     if not edges:
@@ -1092,7 +1100,9 @@ def _edge_layer_verdict(
         return [], []
     from anima_world.plugins import authored_edge_errors
 
-    return authored_edge_errors(edges, plugins, factory_ids=FACTORY_PLUGINS)
+    return authored_edge_errors(
+        edges, plugins, factory_ids=FACTORY_PLUGINS,
+        namespace_list_is_complete=complete_namespaces)
 
 
 def world_edge_errors(authored: dict[str, Any] | None) -> list[str]:
@@ -1923,7 +1933,9 @@ def build_serve_scheduler(
     # 而不是猜一个答案(`_authored_edge_warnings`)。
     if seed_author_layer and world_seed and world_seed.get("edges"):
         edge_errors, edge_warnings = _edge_layer_verdict(
-            world_seed, _parsed_plugins_or_none(boot_plugin_bodies))
+            world_seed, _parsed_plugins_or_none(boot_plugin_bodies),
+            # **开机手上是全集,所以它答得出「这个世界里有没有这个插件」。**
+            complete_namespaces=True)
         for problem in edge_warnings:
             logger.warning("%s", problem)
         if edge_errors:
@@ -4287,9 +4299,11 @@ def _seed_edges(scheduler: Any, world_seed: dict[str, Any] | None, *,
         if ok:
             planted += 1
         else:
-            # 走到这儿说明那道闸放行了、而内核仍然没连上 —— 唯一已知的走法是
-            # `edge_store` 缺席(上面已经挡了)。**不吞**:一条没连上的创世边
-            # 和一条连上了的,在屏幕上长得一模一样。
+            # 走到这儿说明那道闸放行了、而内核仍然没连上。**已知的走法不止一种**
+            # (上一版这儿写着"唯一已知",不准):`exclusive` / `exclusive_to` 在
+            # **库里已有的行**上撞了也会走到这儿 —— 那道闸只查得了这份文件自己
+            # 肚子里的冲突,查不了目标世界里已经躺着的那一条。**不吞**:
+            # 一条没连上的创世边和一条连上了的,在屏幕上长得一模一样。
             logger.warning(
                 "作者层这条边没连上:%s %s → %s —— 它过了校验却没落库,"
                 "请把这句话连同世界文件一起报给引擎",

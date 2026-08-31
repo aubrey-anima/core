@@ -1217,6 +1217,14 @@ _EDGE_REJECTIONS: tuple[tuple[str, list, str], ...] = (
     ("同一条写了两遍",
      [_GOOD_EDGE, dict(_GOOD_EDGE)],
      "写了两遍"),
+    # 🔴 **`facts` 那一格得钉具体的键,不能只靠通用的 `_ODD`**(2026-08-31 验收 A):
+    # 把 `facts` 加进 `AUTHORED_EDGE_KEYS` 做变异,全量照旧全绿 —— 而放行的后果
+    # 正是 `_seed_edges` 把作者写的那几格**静默丢掉**(它只读 type/from/to)。
+    # 通用那条用的是一个引擎根本不打算收的词,所以它对"收了一个真键"一个字都不说。
+    ("边上写了facts",
+     [_edge_row(type="menpai.member_of", facts={"辈分": "内门"},
+                **{"from": "agent:甲", "to": "menpai.sect:青云门"})],
+     "'facts'"),
     # `exclusive` 在**这一份文件之内**自相矛盾:放行的样子是安静的
     # (`apply_edge_effect` 只 logger.warning 一句然后 return False)。
     ("exclusive自相矛盾",
@@ -1307,6 +1315,49 @@ def test_一份只带边的编辑包_离线明说这一格答不了_而开机答
             pass
     said = "\n".join(getattr(caught.value, "errors", None) or [str(caught.value)])
     assert "没声明过" in said, said
+
+
+def test_开机遇到一个不存在的插件命名空间_当场拒_不许照种(tmp_path, fresh_redis):
+    """🔴 **2026-08-31 验收 A 的 P1,而它是这一族最贵的那种错法。**
+
+    离线那两扇门手上只有这份文件,所以「`ghosts` 这个插件到底在不在」它答不了 ——
+    **而开机手上是「出厂 + 库里 + 文件」合并后的全集,它答得出**。第一版把这两件事
+    写成了同一句(开机原样复用了离线那条 `continue`),下场是:
+
+    - 一份**完整**的世界文件,插件名打错一个字母 → **开机成功**;
+    - 边**真的落库**,幻影类型被 `sadd` 进 `edge_types`;
+    - 节点 id 那道闸**一次都没跑**(连 `agent:` 前缀都没有的 `甲` 照收);
+    - 而屏幕上印着的正是引擎自己那句「那种文件真开机时会当场红」——
+      **说那句话的就是开机,而它没红。**
+
+    一句自己证伪自己的诊断,比没有诊断更坏:它让读的人相信这条路已经有人守着。
+
+    ⚠️ 这一条**故意不走 `_both`**:离线绿 + 开机红在这里是**对的**(查得动查不动的
+    分界),`_both` 会把它判成分叉。两半分开断,并且**都断**。
+    """
+    from anima_world.api import World
+
+    path = _plugin_file(tmp_path, _MENPAI, name="ghost", extra=[
+        _SECT,
+        _edge_row(type="ghosts.member_of", **{"from": "甲", "to": "ghosts.sect:无门"}),
+    ])
+    # 离线:不猜,只说这一格没查(它手上确实没有 `ghosts` 的声明)。
+    assert _validate_says(path)[0], "离线手上没有那份声明,不许猜一个红灯"
+    said_validate, said_check = _warnings(path)
+    assert any("离线这一格答不了" in w for w in said_validate), said_validate
+    assert said_validate == said_check
+
+    # 开机:手上是全集 —— **答得出,所以必须拦**。
+    with pytest.raises(Exception) as caught:
+        with World.open("ghost", redis=fresh_redis, world_file=path,
+                        force_mock_llm=True):
+            pass
+    said = "\n".join(getattr(caught.value, "errors", None) or [str(caught.value)])
+    assert "没有名叫 `ghosts` 的插件" in said, said
+    # 🔴 **「先验再写」在这一层也得成立**:拒掉的那一趟不许留下半个世界。
+    assert [k for k in fresh_redis.scan_iter("anima:ghost:edge*")] == [], (
+        "开机拒了,可幻影边/幻影类型已经落库了 —— 那正是「装了一半的世界」"
+    )
 
 
 def test_边只在这一种还空着时才种_而跳过要说出来(tmp_path, fresh_redis, caplog):
