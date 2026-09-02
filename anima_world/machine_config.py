@@ -54,6 +54,10 @@ MACHINE_KEYS = (
     "llm.background.model",
     "llm.timeout",
     "llm.max_retries",
+    # 3.9.0(收件箱 D51):流式的两把尺。**属于这台机器**,判据和 `llm.timeout` 逐字
+    # 相同 —— 换一个世界,"这条网络多久算卡住"不跟着变。
+    "llm.stream.first_timeout",
+    "llm.stream.gap_timeout",
 )
 
 # 环境变量别名。给容器和 CI 用 —— 人走 `config set`,不手写这些。
@@ -64,6 +68,8 @@ ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "llm.background.model": ("ANIMA_LLM_BACKGROUND_MODEL",),
     "llm.timeout": ("ANIMA_LLM_TIMEOUT",),
     "llm.max_retries": ("ANIMA_LLM_MAX_RETRIES",),
+    "llm.stream.first_timeout": ("ANIMA_LLM_STREAM_FIRST_TIMEOUT",),
+    "llm.stream.gap_timeout": ("ANIMA_LLM_STREAM_GAP_TIMEOUT",),
 }
 
 _HOME_ENV = "ANIMA_WORLD_HOME"

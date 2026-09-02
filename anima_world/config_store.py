@@ -313,6 +313,8 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "llm.model": ("gpt-4o-mini", "str", "llm", False, "LLM model name"),
     "llm.timeout": (30.0, "float", "llm", False, "LLM request timeout (seconds)"),
     "llm.max_retries": (2, "int", "llm", False, "LLM SDK max retries"),
+    "llm.stream.first_timeout": (30.0, "float", "llm", False, "Streaming: seconds to wait for the FIRST chunk (prefill lives here; deliberately the same as llm.timeout was)"),
+    "llm.stream.gap_timeout": (15.0, "float", "llm", False, "Streaming: seconds allowed BETWEEN chunks once text started; a stall before any prose is retried once"),
     "scheduler.tick_rate": (1 / DEFAULT_SECONDS_PER_TICK, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),
     "scheduler.max_agents": (100, "int", "scheduler", False, "Roster cap, a performance guardrail; 0 = unlimited. The operator's number, not the authoring tool's"),
     "agent.idle_timeout": (30.0, "float", "scheduler", False, "BT idle watchdog threshold (seconds)"),
