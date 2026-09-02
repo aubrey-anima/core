@@ -4476,9 +4476,23 @@ class Scheduler:
         reader = _BeatWorldReader(self)
         for beat, subject in self.beat_director.due_beats(
             now, self._memory_projection, agent_locs, reader,
-            players=self._memory_projection.players_joined,
+            players=self._beat_player_roster(),
         ):
             self._fire_beat(beat, now, subject)
+
+    def _beat_player_roster(self) -> dict[str, int]:
+        """剧情拍**该为谁响**:`{player_id: 他这段停留的零点}` = 来过 − 走了。
+
+        🔴 **这是两份名单,不是一份**(3.9.0 验收 A 逮的)。`players_joined` 是**零点**
+        且有意不随告别清掉(那是历史);而"该为谁响"要减掉告别过的人 —— 从前它们是
+        同一份,于是一个 `forget_player` 之后三天,他的 per-player 拍照样响:
+        刚折掉的关系当场重建、钱照付,而世界照跑、日志干净。
+        """
+        proj = self._memory_projection
+        return {
+            pid: day for pid, day in proj.players_joined.items()
+            if pid not in proj.players_departed
+        }
 
     def _fire_beat(self, beat: dict[str, Any], now: WorldTime, subject: str = "") -> None:
         """Expand one beat's payload and record it, `beat_fired` first.

@@ -290,3 +290,75 @@ def test_升级那一刻正在线的玩家也补得上零点(tmp_path):
         assert "old-timer" in w.scheduler._memory_projection.players_joined, (
             "这一笔多半被挂进了 `fresh` 分支里"
         )
+
+
+# ── 告别之后:拍不该再指着他(3.9.0 验收 A 逮的)────────────────────────────
+
+GHOST = {
+    **SEED,
+    "beats": [
+        {"id": "第三天", "for_each": {"node": "player"},
+         "trigger": {"at": {"day": 3}},
+         "payload": [{"op": "sentiment_delta", "as": "芬格尔", "target": "player",
+                      "delta": 0.3, "reason": "他又想起你"}]},
+    ],
+}
+
+
+def _world(tmp_path, name, seed):
+    return open_world_at(tmp_path / f"{name}.db",
+                         world_file=write_seed_file(tmp_path / f"{name}.json", seed))
+
+
+def test_告别过的人_他的拍不再响(tmp_path):
+    """病灶是**一份名单兼两职**:`players_joined` 既是零点又是"该为谁响"。
+    于是 `forget_player` 刚把关系折掉,三天后那一拍照样响、关系当场重建、钱照付,
+    而世界照跑、日志干净。"""
+    with _world(tmp_path, "ghost", GHOST) as w:
+        w.player_move("p1", "宿舍")
+        w.tick(2)
+        w.forget_player("p1")
+        assert "p1" in w.scheduler._memory_projection.players_joined, "零点是历史,不该被清"
+        assert "p1" in w.scheduler._memory_projection.players_departed
+        assert w.scheduler._beat_player_roster() == {}, "该为谁响 = 来过 − 走了"
+
+        w.tick(288 * 4)                                   # 早过了他的第 3 天
+        fired = w.scheduler.beat_director.fired
+        assert ("第三天", "player:p1") not in fired, "他已经走了,这一拍不该找他"
+        assert not [k for k in w.scheduler._memory_projection.relations if "p1" in str(k)], (
+            "关系刚折掉又被那一拍重建了"
+        )
+
+
+def test_再回来算一段新的停留_零点跟着走(tmp_path):
+    """「第一次赢」管的是**一段停留之内**,不是一辈子:一个走了很久又回来的人,
+    他的第一周该从他回来那天算。"""
+    with _world(tmp_path, "back", GHOST) as w:
+        w.player_move("p2", "宿舍")
+        w.tick(2)
+        first = w.scheduler._memory_projection.players_joined["p2"]
+        w.forget_player("p2")
+        w.tick(288 * 10)
+        w.player_move("p2", "宿舍")                        # 他回来了
+        w.tick(2)
+        proj = w.scheduler._memory_projection
+        assert "p2" not in proj.players_departed, "回来了就不该还在告别名单上"
+        assert proj.players_joined["p2"] > first, "新的一段停留要有新的零点"
+        assert "p2" in w.scheduler._beat_player_roster()
+        joins = [e for e in w.scheduler.event_log.replay() if e.type == "player_join"]
+        assert len(joins) == 2, "一段停留一条"
+
+
+def test_没告别的人_一段停留之内零点不动(tmp_path):
+    """上面那条放开的是"告别之后",不许顺手把"第一次赢"也放开了。"""
+    with _world(tmp_path, "stay", GHOST) as w:
+        w.player_move("p3", "宿舍")
+        w.tick(2)
+        first = w.scheduler._memory_projection.players_joined["p3"]
+        w.presence_store.forget("p3")                      # TTL 到头,不是告别
+        w.tick(288 * 3)
+        w.player_move("p3", "宿舍")
+        w.tick(2)
+        assert w.scheduler._memory_projection.players_joined["p3"] == first
+        joins = [e for e in w.scheduler.event_log.replay() if e.type == "player_join"]
+        assert len(joins) == 1

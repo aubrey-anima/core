@@ -7321,7 +7321,11 @@ class World:
             return
         with self.scheduler._lock:
             self.scheduler.catch_up_projection()
-            if player_id in self.scheduler._memory_projection.players_joined:
+            proj = self.scheduler._memory_projection
+            # **告别过的人再回来算一段新的停留** —— 所以这里问的不是"他来过没有",
+            # 是"他这会儿还算不算在这个世界里"。
+            if (player_id in proj.players_joined
+                    and player_id not in proj.players_departed):
                 return
             day = self.scheduler.world_time().day
         self._record_and_fan({

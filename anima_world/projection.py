@@ -154,6 +154,11 @@ def _apply_player_departed(proj: Projection, e: Event) -> None:
     player_id = str(e.payload.get("player_id") or "").strip()
     if not player_id:
         return
+    # 🆕 3.9.0:朝前看的那一半还多一格 —— **剧情拍从此不再指着他**。
+    # `players_joined` 有意不动(那是零点,是历史);"该为谁响"是另一份名单,
+    # 而它们从前是同一份 —— 一个已经告别的人三天后照样被他的 per-player 拍击中,
+    # 关系刚折掉又重建、钱照付,零报错。
+    proj.players_departed.add(player_id)
     for key in [k for k in proj.relations if player_id in k]:
         proj.relations.pop(key, None)
     # 🆕 3.8.0 第 2 期 2b:他身上那些**投影式**插件事实也一起折掉。
@@ -272,8 +277,13 @@ def _apply_beat_fired(proj: Projection, e: Event) -> None:
 
 
 def _apply_player_join(proj: Projection, e: Event) -> None:
-    """他第一次走进这个世界是哪一天。**第一次赢**(`setdefault`):同一个人再来
-    一次不该把他的零点往后推,那正是"第一周每次登录重开一遍"那个错的形状。"""
+    """他走进这个世界是哪一天。**一段停留之内第一次赢**(`setdefault`)——
+    同一个人再露一次面不该把零点往后推,那正是"第一周每次登录重开一遍"那个错的形状。
+
+    **但告别之后再回来,是新的一段停留**:把他从 `players_departed` 划掉,并给他一个
+    **新的零点**。「第一次赢」管的是一段停留之内,不是一辈子 —— 一个走了三个月又回来
+    的人,他的"第一周"该从他回来那天算,而不是从三个月前那个已经作废的零点算。
+    """
     payload = e.payload or {}
     player_id = str(payload.get("player_id") or "")
     if not player_id:
@@ -282,6 +292,10 @@ def _apply_player_join(proj: Projection, e: Event) -> None:
         day = int(payload.get("day", 0))
     except (TypeError, ValueError):
         day = 0
+    if player_id in proj.players_departed:
+        proj.players_departed.discard(player_id)
+        proj.players_joined[player_id] = day        # 新的一段停留,新的零点
+        return
     proj.players_joined.setdefault(player_id, day)
 
 
