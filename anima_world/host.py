@@ -52,7 +52,10 @@ def free_option() -> dict[str, Any]:
     一个选项多的时刻就会把"我想说点别的"挤掉 —— 而那恰恰是这一层要保住的自由。
     """
     return {
-        "id": FREE_OPTION_ID, "kind": "free", "label": FREE_LABEL, "hook": "", "who": "",
+        # 键序照 `contract.host.option_keys` —— **JSON 键序不是契约,而"我自己声明了
+        # 一张有序表、自己的产出却不照它"是另一回事**:一个照表写解析器的人会先
+        # 怀疑自己。别的项都是同序的,就这一项从前把 `who` 排在 `hook` 后面。
+        "id": FREE_OPTION_ID, "kind": "free", "label": FREE_LABEL, "who": "", "hook": "",
         "tone": "social", "available": True, "reason": "", "refusal": "", "cost": "",
         "door": {"method": "free", "params": {}},
     }
