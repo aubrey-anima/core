@@ -1072,6 +1072,120 @@ _PACK_ID = re.compile(PACK_ID_PATTERN)
 PACK_KEYS = ("id", "version", "note")
 
 
+# ── `--world-file` 装进一个**已有**世界时,那几段各自会发生什么 ──────────────
+#
+# 🔴 **2026-09-02 实测出来的一整族**:一份内容全落在 `beat` / `config` /
+# 在册者 `personality` / `world_setting` / 在册者 `memory` 这五段上的第 2 周包,
+# 走 `--world-file` 装进一个跑着的世界,**世界一个字都不变**,而
+# `world check --edit` 答 `loadable: true, errors: []`、`simulate --world-file` 退 **0**
+# —— 屏幕上只有关于 `beat` 的那一句 warning。**同一个 `not persisted` 门后面站着
+# 五个人,而只有第一个会出声。**
+#
+# 这和收件箱 D32 治过的那条(`world import` 对纯作者层包 rc 0 → 2)是同一种病:
+# **一句写在日志上的真话,和一盏假绿灯是同一件事** —— 机器读的是退出码。
+#
+# 🔴 **句子写成常量,是为了让「离线那两扇门说同一句」这件事不靠人自觉。**
+# 抄第二遍的那天,两边会先给出不同的措辞,再由某个作者按其中一句去改一个没错的地方。
+# ⚠️ 强调用「」不用 `**`:这几句会**原样印在终端上**,而屏幕上 `**` 就是两个星号
+# (`test_屏幕上不许出现裸markdown星号` 看不见它们 —— 它只扫 `print()` 实参与 `help=`)。
+EDIT_PATH_NOTES: dict[str, str] = {
+    "beats": (
+        "`--world-file` 装不进一个「已经有剧情」的世界:节拍和 `beat_fired` 那份历史"
+        "配对,而一份写着 `day: 0..6` 的包装进一个跑了很久的世界,那几拍会在同一 tick"
+        "全部烧掉。要给一个「跑着的」世界加剧情,用 "
+        "`anima-world pack install <文件>` —— 那条路按内容包记账,拍的零点是"
+        "「这个包落地那天」"
+    ),
+    "config": (
+        "这份文件里作者动过的开关「装不进一个已有的世界」:`config` 只在创世那一刻"
+        "落地(它之后是运维台/作者调过的运行参数,拿文件里那份写回去等于每次重启"
+        "都把人的调整悄悄撤销一次)。改一个跑着的世界的开关有两条路:"
+        "`anima-world config set`,或者把它写进一份内容包走 `pack install`"
+    ),
+    "world_setting": (
+        "这份文件里的世界观「装不进一个已有的世界」:它只在首启那一刻落进 `:prompts`。"
+        "改一个跑着的世界的世界观用 `anima-world world setting --set`(3.8.0),"
+        "或者把它写进一份内容包走 `pack install`"
+    ),
+    "personality": (
+        "这份文件给「已经在册」的人写了 `personality`,而它一个字都装不进去:"
+        "名册的权威是事件日志,作者层只收名册「之外」的新人。改一个在册的人的人设"
+        "今天还没有出口(周更批 2a-② 会开)"
+    ),
+    "memories": (
+        "这份文件给「已经在册」的人写了 `memory`,而它一条都装不进去:"
+        "创世记忆只在创世那条路上折,合并那条只给新人。给一个在册的人补记忆"
+        "今天还没有出口(周更批 2a-② 会开)"
+    ),
+    "roster_state": (
+        "这份文件给「已经在册」的人写了关系 / 目标 / 随身物品 / 钱,而它们装不进去"
+        "——「这一格是有意的」:那几样是这个世界「跑出来的现在」,拿文件里的初值"
+        "写回去就是把三十天的交情倒带回创世那一刻"
+    ),
+}
+
+
+def edit_path_silent_notes(
+    authored: dict[str, Any] | None, *, on_roster: Any = None,
+) -> list[str]:
+    """一份包走 `--world-file` 装进一个**已有**世界时,哪几段会安静地什么都不做。
+
+    `on_roster` 是目标世界此刻的名册。**开机手上有它,离线那两扇门没有** ——
+    所以后者传 `None`,那两格的话就说成条件句(「如果他们已经在册」)。
+    这正是 `--edit` 那条「查得动查不动」的分界,和 `_edit_ontology_gap_warnings`
+    逐字同一个姿势:**答不出来就说答不出来,别猜一个答案**。
+
+    ⚠️ `beats` 那一格不在这儿 —— 它在 3.10.0 起是**当场拒绝**(退出码 2),
+    不是一句话;离线那两扇门照旧只说得出一句(目标世界有没有剧情,它们不知道)。
+    """
+    if not authored:
+        return []
+    notes: list[str] = []
+    config = authored.get("config")
+    if isinstance(config, dict) and config:
+        notes.append(f"{EDIT_PATH_NOTES['config']}(这份文件里有 {len(config)} 个)")
+    setting = authored.get("world_setting")
+    if isinstance(setting, str) and setting.strip():
+        notes.append(EDIT_PATH_NOTES["world_setting"])
+
+    def _named(section: str, field: str) -> list[str]:
+        out: list[str] = []
+        for entry in _seed_entry_dicts(authored, section):
+            aid = entry.get("agent_id") if section == "memories" else entry.get("id")
+            if not isinstance(aid, str) or not aid:
+                continue
+            if field is not None and section == "agents" and not str(
+                    entry.get(field) or "").strip():
+                continue
+            if on_roster is None or aid in on_roster:
+                out.append(aid)
+        return sorted(set(out))
+
+    who = _named("agents", "personality")
+    if who:
+        notes.append(_roster_note("personality", who, on_roster))
+    who = _named("memories", None)
+    if who:
+        notes.append(_roster_note("memories", who, on_roster))
+    state_sections = [s for s in ("relations", "items") if authored.get(s)]
+    if state_sections or any(
+        entry.get(k) is not None
+        for entry in _seed_entry_dicts(authored, "agents")
+        for k in ("money", "inventory", "goals")
+    ):
+        notes.append(EDIT_PATH_NOTES["roster_state"])
+    return notes
+
+
+def _roster_note(key: str, who: list[str], on_roster: Any) -> str:
+    """名册那两格的话。**开机点得出名字,离线只说得出条件句。**"""
+    names = "、".join(who[:8]) + ("…" if len(who) > 8 else "")
+    if on_roster is None:
+        return (f"{EDIT_PATH_NOTES[key]}(这份文件里有 {len(who)} 个人:{names};"
+                "他们在不在册,离线这一格答不出来)")
+    return f"{EDIT_PATH_NOTES[key]}(点得出名字:{names})"
+
+
 def world_pack_errors(authored: dict[str, Any] | None) -> list[str]:
     """作者写下的那个 `pack` 段立不立得住(3.10.0)。
 
@@ -2061,14 +2175,20 @@ def build_serve_scheduler(
         if planted:
             logger.info("装进 %d 拍作者写的节拍", planted)
         else:
-            # **不无声。** 库里已经有剧情时这一份不合并(理由见 `RedisBeatsStore.seed`),
-            # 而一句话不说的样子是"我把新剧情装进去了" —— 拿一份改过的世界文件去
-            # 编辑一个跑着的世界的人,会以为第三幕已经在里面了。
-            logger.warning(
-                "这个世界已经有 %d 拍剧情,文件里那 %d 拍**没有装进去** —— "
-                "节拍不逐条合并(它和 `beat_fired` 那份历史配对),要改剧情开一个新世界",
-                len(beats_store), len(authored_script.beats),
-            )
+            # 🆕 3.10.0(周更 2a-①):**当场拒绝,不再是一句 warning + 退 0。**
+            #
+            # 上一版这里是 `logger.warning`,而**机器读的是退出码**:一份带着第 2 周
+            # 剧情的包 `simulate --world-file` 退 **0**,而那几拍一条都没进去。
+            # 这和收件箱 D32 治过的那条(`world import` 对纯作者层包 rc 0 → 2)
+            # 是同一种病、同一种治法:**一句写在日志上的真话,和一盏假绿灯是同一件事。**
+            #
+            # ⚠️ **拒绝在这里,是因为这里还什么都没写**(`beats_store.seed` 刚刚
+            # 返回 0,而地图 / 规律 / 本体都排在它后面)—— 「坏声明一个字都不写」
+            # 那条纪律在这一格的落法。
+            raise WorldSeedError([
+                f"这个世界已经有 {len(beats_store)} 拍剧情,而这份文件带着 "
+                f"{len(authored_script.beats)} 拍。" + EDIT_PATH_NOTES["beats"]
+            ])
     if beat_script is None and len(beats_store):
         # **首启自动带** —— 这一条就是 D1 的另一半。没有它,节拍进得了世界文件
         # 却仍然要靠 `--beats` 才响,而舰队上没有任何一条路会去传那个参数:
@@ -2327,6 +2447,12 @@ def build_serve_scheduler(
                 "用 `anima-world pack install <文件>`(或宿主的 `install_pack`)。",
                 str((world_seed.get("pack") or {}).get("id") or "?"),
             )
+        # 🆕 3.10.0:**那四段安静地什么都不做,从今天起当场说出来。**
+        # 名册手上有,所以这几句点得出名字 —— 离线那两扇门只说得出条件句。
+        for note in edit_path_silent_notes(
+            world_seed, on_roster=set(scheduler._memory_projection.agents),
+        ):
+            logger.warning("%s", note)
         logger.info(
             "--world-file %s 装进了一个「已有」的世界 %r(%d 条事件)—— 这是一次编辑:"
             "同名的「声明」(kinds / rules)照文件里这份重写,"
@@ -7750,6 +7876,17 @@ def run_validate(args: argparse.Namespace) -> int:
                     "动词的 label、`spawn` 有没有代价、不认识的字段、继承成环。"
                     "要连着世界查剩下的,用 `simulate --ticks 0 --world-file …`"
                 )
+                # 🆕 3.10.0:那五段。**句子和开机那条路共用一份常量**
+                # (`EDIT_PATH_NOTES`)—— 抄第二遍的那天,两边会先给出不同的措辞,
+                # 再由某个作者按其中一句去改一个没错的地方。
+                if authored.get("beats"):
+                    warnings.append(
+                        f"这份文件带着 {len(authored['beats'])} 拍剧情。"
+                        + EDIT_PATH_NOTES["beats"]
+                        + "(目标世界有没有剧情,离线这一格答不出来 —— 有的话开机"
+                          "是「当场拒绝」,退出码 2)"
+                    )
+                warnings += edit_path_silent_notes(authored)
                 warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_stock_kind_gap_warnings(authored)
                 warnings += _edit_dropped_quantity_gap_warnings(authored)
@@ -9845,6 +9982,17 @@ def run_world_check(args: argparse.Namespace) -> int:
                     "量名两支都查(`set:`/`costs:` 里读写的,以及 `stocks:` 里"
                     "写初值的)、动词的 label、`spawn` 有没有代价、不认识的字段"
                 )
+                # 🆕 3.10.0:那五段。**句子和开机那条路共用一份常量**
+                # (`EDIT_PATH_NOTES`),`validate world` 那一侧也是同一份 ——
+                # 三扇门对同一份文件说同一句话,这条纪律在措辞上也成立。
+                if authored.get("beats"):
+                    warnings.append(
+                        f"这份文件带着 {len(authored['beats'])} 拍剧情。"
+                        + EDIT_PATH_NOTES["beats"]
+                        + "(目标世界有没有剧情,离线这一格答不出来 —— 有的话开机"
+                          "是「当场拒绝」,退出码 2)"
+                    )
+                warnings += edit_path_silent_notes(authored)
                 warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_stock_kind_gap_warnings(authored)
                 warnings += _edit_dropped_quantity_gap_warnings(authored)

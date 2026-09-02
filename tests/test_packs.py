@@ -316,3 +316,102 @@ def test_cli对着一个不存在的世界装包_拒绝而不是当场创世(tmp
     r = run_cli("pack", "install", path, "--world-id", "根本没有这个世界")
     assert r.returncode == 2
     assert "还没有" in r.stderr
+
+
+# ── 五、那五段从今天起「当场说」(2026-09-02 量出来的一整族)────────────────
+#
+# 一份内容全落在 `beat` / `config` / 在册者 `personality` / `world_setting` /
+# 在册者 `memory` 这五段上的第 2 周包,走 `--world-file` 装进一个跑着的世界:
+# **世界一个字都不变**,而 `world check --edit` 答 `loadable: true, errors: []`、
+# `simulate --world-file` 退 **0**,屏幕上只有关于 `beat` 的那一句 warning。
+
+_SILENT_PACK = {
+    "beats": [_beat("第三幕", 0)],
+    "config": {"narrative.player.enabled": True},
+    "agents": [{"id": "甲", "name": "甲", "location": "cafe",
+                "personality": "改过的性格"}],
+    "memories": [{"agent_id": "甲", "kind": "seed", "summary": "新剧情给她的记忆"}],
+    "world_setting": "第二周的世界观。",
+}
+
+
+def test_带剧情的包走world_file装进一个已经有剧情的世界_退出码2(tmp_path):
+    """🔴 **机器读的是退出码。** 上一版这里是一句 `logger.warning` + 退 **0** ——
+    一份带着第 2 周剧情的包"装"上去,那几拍一条都没进去,而脚本读到的是"成功"。
+    和收件箱 D32 治过的那条逐字同一种病、同一种治法。
+    """
+    redis_for(tmp_path / "rc.db")
+    base = write_seed_file(tmp_path / "rc-base.cyberworld",
+                           dict(BASE, beats=[_beat("第一幕", 0)]))
+    r = run_cli("simulate", "--world-id", "w", "--ticks", "1",
+                "--world-file", base, "--llm", "mock")
+    assert r.returncode == 0, r.stderr
+
+    later = write_seed_file(tmp_path / "rc-later.cyberworld",
+                            dict(BASE, beats=[_beat("第三幕", 0)]))
+    r = run_cli("simulate", "--world-id", "w", "--ticks", "0",
+                "--world-file", later, "--llm", "mock")
+    assert r.returncode == 2, f"退出码还是 {r.returncode} —— 机器读到的是「成功」"
+    assert "pack install" in r.stderr
+
+
+def test_另外四段_开机当场说而且点得出名字(tmp_path, caplog):
+    """开机手上有名册,所以这几句**点得出名字** —— 离线那两扇门只说得出条件句。"""
+    import logging
+
+    redis_for(tmp_path / "say.db")
+    base = write_seed_file(tmp_path / "say-base.cyberworld", BASE)
+    from anima_world.api import World
+
+    client = redis_for(tmp_path / "say.db")
+    World.open("w", redis=client, world_file=base, force_mock_llm=True).close()
+
+    silent = dict(_SILENT_PACK)
+    silent.pop("beats")     # 那一格是拒绝,不是一句话
+    later = write_seed_file(tmp_path / "say-later.cyberworld", silent)
+    with caplog.at_level(logging.WARNING):
+        World.open("w", redis=client, world_file=later, force_mock_llm=True).close()
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    for needle in ("开关", "世界观", "personality", "memory"):
+        assert needle in said, f"「{needle}」那一段还是静默的:{said[:400]}"
+    assert "甲" in said, "在册的那个人点不出名字"
+
+    # 而且它们确实没装进去 —— 说了一句和真的装了是两件事。
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        assert world.config_get("narrative.player.enabled") is False
+
+
+def test_离线两扇门对同一份包说同一句话(tmp_path):
+    """🔴 **句子是同一份常量**,不是两处各写一遍 —— 抄第二遍的那天,两边会先给出
+    不同的措辞,再由某个作者按其中一句去改一个没错的地方。
+
+    ⚠️ 离线**答不出**目标世界有没有剧情 / 谁在册,所以那两格是条件句。
+    这就是 `--edit` 那条「查得动查不动」的分界。
+    """
+    from anima_world.__main__ import EDIT_PATH_NOTES
+
+    path = write_seed_file(tmp_path / "off.cyberworld", _SILENT_PACK)
+    r = run_cli("world", "check", path, "--edit", "--json")
+    assert r.returncode == 0
+    payload = json.loads(r.stdout)
+    said = "\n".join(payload["warnings"])
+    for key in ("beats", "config", "world_setting", "personality", "memories"):
+        assert EDIT_PATH_NOTES[key] in said, f"离线没说 {key} 那一句"
+    assert "答不出来" in said, "离线得说清哪一格它答不出来,而不是猜一个答案"
+
+
+def test_那五句话里不许有裸markdown星号(tmp_path):
+    """它们会**原样印在人的终端上**(`_print_check_human` 逐条打 warnings),
+    而屏幕上 `**` 就是两个星号。
+
+    ⚠️ `test_屏幕上不许出现裸markdown星号` 看不见这一条 —— 它只扫 `print()` 实参
+    与 `help=`,而这几句是先攒进列表再由别处印的,那正是它自己写明的盲区。
+    """
+    from anima_world.__main__ import EDIT_PATH_NOTES
+
+    for key, sentence in EDIT_PATH_NOTES.items():
+        assert "**" not in sentence, (key, sentence)
+
+    path = write_seed_file(tmp_path / "stars.cyberworld", _SILENT_PACK)
+    r = run_cli("world", "check", path, "--edit")
+    assert "**" not in r.stdout, r.stdout

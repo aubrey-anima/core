@@ -297,26 +297,31 @@ def test_不是对象的那一拍_当场报错不许安静扔掉(tmp_path, fresh
     assert payload["loadable"] is False, payload
 
 
-def test_库里已经有剧情时_不合并要说出来(tmp_path, fresh_redis, open_world, caplog):
-    """**不无声。** 库里有剧情时文件里那份不合并(理由见 `RedisBeatsStore.seed`),
-    而一句话不说的样子是"我把新剧情装进去了" —— 拿一份改过的世界文件去编辑一个
-    跑着的世界的人,会以为第三幕已经在里面了。
+def test_库里已经有剧情时_当场拒绝而不是一句warning(tmp_path, fresh_redis, open_world):
+    """🆕 **3.10.0:从一句 `logger.warning` + 退 0 升成当场拒绝。**
+
+    上一版这里断的是"日志里有那句话",而那正是这条用例后来被推翻的地方:
+    **机器读的是退出码**。一份带着第 2 周剧情的包 `simulate --world-file` 退 **0**,
+    而那几拍一条都没进去 —— 和收件箱 D32 治过的那条(`world import` 对纯作者层包
+    rc 0 → 2)是同一种病。
+
+    要给一个跑着的世界加剧情,今天有正经的门了:`anima-world pack install`。
     """
-    import logging
+    from anima_world.world_seed import WorldSeedError
 
     path = write_seed_file(tmp_path / "w.cyberworld", _seed(beats=[_BEAT]))
     open_world("w9", redis=fresh_redis, world_file=path).close()
 
     later = write_seed_file(tmp_path / "later.cyberworld",
                             _seed(beats=[dict(_BEAT, id="第三幕")]))
-    with caplog.at_level(logging.WARNING):
-        open_world("w9", redis=fresh_redis, world_file=later).close()
-    assert any("没有装进去" in r.getMessage() for r in caplog.records), (
-        [r.getMessage() for r in caplog.records])
+    with pytest.raises(WorldSeedError) as raised:
+        open_world("w9", redis=fresh_redis, world_file=later)
+    assert "pack install" in str(raised.value), str(raised.value)
+
     from anima_world.redis_state import RedisBeatsStore
 
     assert [b["id"] for b in RedisBeatsStore(fresh_redis, "w9").definitions()] == [
-        "第一幕"], "库里那份才说了算"
+        "第一幕"], "拒了还写进去了 —— 拒绝时一个字节都不该写"
 
 
 def test_屏幕上也说得出哪几拍白写了(tmp_path, open_world):
