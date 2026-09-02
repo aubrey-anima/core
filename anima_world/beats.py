@@ -87,7 +87,14 @@ FOR_EACH_NODES = ("player",)
 # 一条拍认哪几个顶层键。⚠️ **3.8.0 一个都不查** —— 于是写了 `for_each` 的包在
 # 那一版上**开得了机**,拍按世界时响一次、`mark_fired`、烧掉。这个闭集救不了
 # 3.8.0(它已经发出去了),它救的是**下一个**不认识的键:让"我又漏了一层"有人喊。
-BEAT_KEYS = ("id", "for_each", "trigger", "payload", "once")
+# 🆕 3.10.0(批 1.1 ⑤):`narrate` —— **这一拍响的时候,给玩家看的那一句话。**
+#
+# 真站实测的那条:第一拍响了(录取通知 + 一部 N96 + 800 块),而屏幕上一个字没提。
+# 主持人那一屏的回顾(`host.recap_lines`)想说这件事,可它手上**只有 op 名**
+# (`memory` / `pay` / `grant_item`)—— 把「这一拍响了」翻译成一句剧情是**作者的活**,
+# 引擎编一句的下场是屏幕上出现一句世界里没有的话,而它读起来像真的。
+# 这一格就是作者写下那句话的地方。
+BEAT_KEYS = ("id", "for_each", "trigger", "payload", "once", "narrate")
 
 # ── 拍的**零点**:第三种(3.10.0,周更链路 2a-①)──────────────────────────────
 #
@@ -265,6 +272,7 @@ def _validate_script(data: Any) -> list[str]:
             )
         if beat.get("once") not in (None, True):
             errors.append(f"{label}: 'once' must be true — repeating beats are not supported (v1)")
+        errors.extend(_validate_narrate(beat, label))
         per_player = False
         if "for_each" in beat:
             for_each_errors, per_player = _validate_for_each(beat.get("for_each"), label)
@@ -285,6 +293,31 @@ def _validate_for_each(for_each: Any, label: str) -> tuple[list[str], bool]:
         return ([f"{label}: for_each.node {node!r} 不认识 —— "
                  f"这一层只收 {list(FOR_EACH_NODES)}"], False)
     return ([], node == PLAYER_TOKEN)
+
+
+def _validate_narrate(beat: dict[str, Any], label: str) -> list[str]:
+    """`narrate` 那一格(3.10.0)。**非空文本,而且只写得在指着玩家的拍上。**
+
+    🔴 **世界级的拍写它是当场拒绝,不是静默无效。** 这一句走的是「玩家的叙事流」
+    那条路(`narrative`,`speaker = player:<id>`),而一条世界级的拍没有"那个人" ——
+    写下去它谁也到不了。**写下去、开得了机、什么都不发生**正是这一层最贵的那种错
+    (`for_each` 这一格 3.8.0 上就是那么烂掉的:照收然后丢掉,拍烧了、零报错)。
+    """
+    if "narrate" not in beat:
+        return []
+    said = beat.get("narrate")
+    if not isinstance(said, str) or not said.strip():
+        return [f"{label}: 'narrate' 要是一段非空文本 —— 它是这一拍响的时候"
+                "给玩家看的那句话"]
+    for_each = beat.get("for_each")
+    node = for_each.get("node") if isinstance(for_each, dict) else None
+    if node != PLAYER_TOKEN:
+        return [
+            f"{label}: 只有写了 `\"for_each\": {{\"node\": \"{PLAYER_TOKEN}\"}}` 的拍"
+            "才写得下 'narrate' —— 这一句走的是「那个玩家的叙事流」,"
+            "而一条世界级的拍没有「那个人」,写下去它谁也到不了"
+        ]
+    return []
 
 
 def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False) -> list[str]:

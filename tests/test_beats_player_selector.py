@@ -66,7 +66,10 @@ def test_一条拍的顶层键是闭集_不认识的当场报():
     with pytest.raises(BeatScriptError) as err:
         _load({**LETTER, "fro_each": {"node": "player"}})
     assert "fro_each" in str(err.value)
-    assert set(BEAT_KEYS) == {"id", "for_each", "trigger", "payload", "once"}
+    assert set(BEAT_KEYS) == {"id", "for_each", "trigger", "payload", "once",
+                             "narrate"}, (
+        "闭集变了 —— 加一格就要同轮改这里、改 `contract.beats`、改 REFERENCE §9"
+    )
 
 
 @pytest.mark.parametrize("op,field", [
@@ -396,3 +399,52 @@ def test_simulate_看得见在场玩家_per_player拍照样响(tmp_path, monkeyp
         assert ("见面", "player:p1") in fired, (
             "simulate 快进完这一拍还没响 —— 那根「看得见在场玩家」的线多半又断了"
         )
+
+
+# ── 批 1.1 ⑤:`narrate` —— 这一拍响的时候给玩家看的那一句话(3.10.0)──────────
+
+def test_narrate_进事件载荷_也进那个玩家的叙事流(tmp_path):
+    """两条路都要走:回顾只在主持人开口的那一刻说,而叙事流是他随时翻得到的。"""
+    from _worldfile import open_world_at, write_seed_file
+
+    said = "一封烫金的录取通知躺在你桌上。"
+    seed = {
+        "locations": [{"id": "yard", "name": "院子", "description": "d"}],
+        "agents": [{"id": "甲", "name": "甲", "location": "yard", "personality": "p"}],
+        "beats": [{"id": "报到", "for_each": {"node": "player"},
+                   "trigger": {"at": {"day": 0}}, "narrate": said,
+                   "payload": [{"op": "pay", "from": "__world__",
+                                "to": "player", "amount": 800}]}],
+    }
+    path = write_seed_file(tmp_path / "n.cyberworld", seed)
+    with open_world_at(str(tmp_path / "n.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "yard")
+        # **先要有一屏**(arrive),这一拍才有"上一屏之后"可回顾 —— 拍在第一屏
+        # 之前就响完的话,主持人那一屏本来就该只描景。
+        world.host_turn("p1")
+        world.tick(3)
+        fired = [e.payload for e in world.scheduler.event_log.replay()
+                 if e.type == "beat_fired"]
+        assert fired and fired[0]["narrate"] == said, fired
+        lines = [e.payload for e in world.scheduler.event_log.replay()
+                 if e.type == "narrative" and e.payload.get("speaker") == "player:p1"]
+        assert [r["text"] for r in lines] == [said], lines
+        assert lines[0]["source"] == "template"
+        # 🔴 **主持人那一屏也说得出来** —— 它读的就是 `beat_fired.narrate`,
+        # 而这正是"真站第一拍响了、屏幕上一个字没提"那条被修掉的地方。
+        after = world.host_turn("p1")
+        assert after["trigger"] == "beat", after["trigger"]
+        assert said in after["scene"]["text"], after["scene"]["text"]
+        assert "800" in after["scene"]["text"], after["scene"]["text"]
+
+
+def test_世界级的拍写narrate_当场拒(tmp_path):
+    """**写下去、开得了机、什么都不发生**正是这一层最贵的那种错。"""
+    from anima_world.beats import BeatScript, BeatScriptError
+
+    with pytest.raises(BeatScriptError) as err:
+        BeatScript.from_data({"beats": [{
+            "id": "世界级", "trigger": {"at": {"day": 0}}, "narrate": "哈",
+            "payload": [{"op": "memory", "agent_id": "甲", "summary": "s"}]}]})
+    assert "没有「那个人」" in str(err.value), str(err.value)

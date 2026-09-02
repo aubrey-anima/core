@@ -8804,6 +8804,12 @@ def contract_payload() -> dict[str, Any]:
                 "day_is_offset_from_join": True,
                 "once_scope": "per_player",
                 "fired_event_key": "for",
+                # 🆕 3.10.0(批 1.1 ⑤):**这一拍响的时候给玩家看的那一句话。**
+                # 只写得在指着玩家的拍上(世界级的拍没有「那个人」,写下去谁也到不了
+                # —— 当场拒绝,不是静默无效)。它进 `beat_fired.narrate`,
+                # 也进那个玩家的叙事流(`narrative`,`source: "template"`)。
+                "narrate_key": "narrate",
+                "narrate_event_key": "narrate",
                 # 🔴 **逐格的收拒表,而不是一句"支持玩家了"。** 一句话的能力声明
                 # 挡不住"写下去、开得了机、什么都不发生"那一族 —— 而拒绝正是这一层
                 # 唯一便宜的东西。镜像端照这两张表写自己的提醒。

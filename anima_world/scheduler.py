@@ -4543,6 +4543,10 @@ class Scheduler:
                 continue
             events.extend(expanded)
             ops_applied.append(kind)
+        # 🆕 3.10.0(批 1.1 ⑤):作者写给玩家的那一句。
+        # **进事件载荷**(主持人那一屏的回顾读它),**也进那个玩家的叙事流**
+        # —— 两条路都要走:回顾只在主持人开口的那一刻说,而叙事流是他随时翻得到的。
+        said = str(beat.get("narrate") or "").strip() if subject else ""
         self._record_event({
             "type": "beat_fired",
             "payload": {
@@ -4553,8 +4557,11 @@ class Scheduler:
                 # 为谁响的。**世界级的拍这一格不写** —— 老事件里没有它,写一个空串
                 # 进去只会让"这条是老的"和"这条是世界级的"变成两种写法。
                 **({"for": subject} if subject else {}),
+                **({"narrate": said} if said else {}),
             },
         })
+        if said:
+            self._record_beat_narration(subject, said)
         for ev in events:
             self._record_and_deliver(ev)
         logger.info("beat %r fired (day %d, %02d:%02d): %s",
@@ -6090,6 +6097,25 @@ class Scheduler:
             # 给一份空的 `raw`,位置那一格是真的。
             {"location": here, "raw": {}},
         )
+
+    def _record_beat_narration(self, subject: str, said: str) -> None:
+        """一拍响了,作者那句话进**这个玩家的**叙事流(3.10.0,批 1.1 ⑤)。
+
+        形状和 `_record_player_action_line` 逐字相同(`source: "template"`)——
+        两处都是"引擎替他记了一笔",而不是"世界替他写了一段"。
+        ⚠️ **一次模型都不调**,所以它跑得起在 tick 线程上(这条拍就是在 tick 上响的)。
+        """
+        if self.narrative_history is None:
+            return
+        self.narrative_history.append(said)
+        event = {
+            "target_agent_id": subject, "who": subject, "type": "narrative",
+            "payload": {"text": said, "speaker": subject,
+                        "speaker_name": self.agent_display_name(subject),
+                        "source": "template"},
+        }
+        self._deliver(event)
+        self._record_event(event)
 
     def _record_player_action_line(
         self, who: str, target: str, verb: str, affordance: Any, here: str,
