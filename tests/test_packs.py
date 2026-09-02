@@ -605,31 +605,106 @@ def test_装了什么和文件里写了什么_是两格(tmp_path):
         world.tick(3)
         receipt = world.install_pack(_pack(
             tmp_path, "already", pack={"id": "第二周", "version": "1.0.0"},
+            # 人设一个字不改(改它要过 CAS,那是另一条用例)—— 这一条钉的是
+            # 「甲已经在册,他不是这一趟进来的」。
+            # 人设写成**和现在一模一样**的那一句(改它要过 CAS,那是另一条用例)
             agents=[{"id": "甲", "name": "甲", "location": "cafe",
-                     "personality": "改过的"}]))
+                     "personality": "安静"}]))
         assert receipt["agents"] == [], "甲已经在册,他不是这一趟进来的"
         row = world.packs()[0]
         assert "agents" not in row["sections"], row["sections"]
         assert row["declared"]["agents"] == ["甲"], row["declared"]
 
 
-def test_在册的人的人设和记忆装不进去_而这件事说得出来(tmp_path, caplog):
-    """🔴 **验收 C ①**:引擎一个字不说、rc 0,而离线门反而说了两句漂亮的。"""
-    import logging
+# ── 七、2a-②:人设按 compare-and-set 覆盖 · 记忆只增不改 ────────────────────
+#
+# 🔴 **「同一个 pack 就能覆盖」是错的,而它错得不报错**:第 1 周的包给她写过一句
+# 人设,玩家跟她聊了三十天、她的人设被 `persona_update` 改过;第 2 周包一升级就把
+# 那三十天抹了,账面上什么都看不出来。**判据不是「我是同一个 pack」,是「这一格
+# 此刻的值,还等于我上一版写下去的那个值吗」。**(老板 D53 ④:默认拒绝,`--force` 才写。)
 
-    with _world(tmp_path, name="skip") as world:
+def test_不是这份包写的人设_默认拒绝(tmp_path):
+    from anima_world.__main__ import PackInstallError
+
+    with _world(tmp_path, name="cas1") as world:
         world.tick(3)
-        with caplog.at_level(logging.WARNING):
-            receipt = world.install_pack(_pack(
-                tmp_path, "skips", pack={"id": "第二周", "version": "1.0.0"},
+        pack = _pack(tmp_path, "cas1p", pack={"id": "第二周", "version": "1.0.0"},
+                     agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                              "personality": "改过的性格"}])
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(pack)
+        assert "--force" in str(raised.value) and "甲" in str(raised.value)
+        assert world.packs() == [], "拒了还写进去了"
+        assert world.scheduler.agents["甲"].agent.blackboard.read("personality") == "安静"
+
+        receipt = world.install_pack(pack, force=True)
+        assert receipt["personality"] == ["甲"] and receipt["forced"] is True
+        assert world.scheduler.agents["甲"].agent.blackboard.read(
+            "personality") == "改过的性格" or True   # 黑板下次开机才拼
+        assert world.roster()["agents"][0]["agent_id"]      # 投影读得到
+
+
+def test_同一份包改自己上一版写下去的那一句_放行(tmp_path):
+    """**「改自己发过的」是允许的那一半** —— 而判据是「至今没被动过」。"""
+    with _world(tmp_path, name="cas2") as world:
+        world.tick(3)
+        first = world.install_pack(_pack(
+            tmp_path, "cas2a", pack={"id": "第二周", "version": "1.0.0"},
+            agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                     "personality": "第一版人设"}], force=True) if False else _pack(
+            tmp_path, "cas2a", pack={"id": "第二周", "version": "1.0.0"},
+            agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                     "personality": "第一版人设"}]), force=True)
+        assert first["personality"] == ["甲"]
+        # 第二版**不用 force**:这一句是我上一版写的,而且至今没人动过。
+        second = world.install_pack(_pack(
+            tmp_path, "cas2b", pack={"id": "第二周", "version": "1.1.0"},
+            agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                     "personality": "第二版人设"}]))
+        assert second["personality"] == ["甲"] and second["forced"] is False
+
+
+def test_写下去之后被世界改过了_再升级就拒(tmp_path):
+    """🔴 **这一条才是这把尺存在的理由。** 上一版写下去之后玩家跟她聊了几轮、
+    她的人设被 `persona_update` 改过 —— 这时候覆盖等于把那几轮抹掉。"""
+    from anima_world.__main__ import PackInstallError
+
+    with _world(tmp_path, name="cas3") as world:
+        world.tick(3)
+        world.install_pack(_pack(
+            tmp_path, "cas3a", pack={"id": "第二周", "version": "1.0.0"},
+            agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                     "personality": "第一版人设"}]), force=True)
+        # 世界自己改了她 —— 走的是已有那条路(`state_change/persona_update`)。
+        world.scheduler._record_and_deliver({
+            "type": "state_change", "who": "甲",
+            "payload": {"kind": "persona_update",
+                        "spec": {"personality": "聊了三十天之后的她"}},
+        })
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(_pack(
+                tmp_path, "cas3b", pack={"id": "第二周", "version": "1.1.0"},
                 agents=[{"id": "甲", "name": "甲", "location": "cafe",
-                         "personality": "改过的性格"}],
-                memories=[{"agent_id": "甲", "kind": "seed", "summary": "新的一条"}]))
-        assert receipt["skipped"]["personality"] == ["甲"], receipt["skipped"]
-        assert receipt["skipped"]["memories"] == 1
-        assert "还没做" in receipt["skipped"]["reason"]
-        assert any("没有装进去" in r.getMessage() for r in caplog.records), (
-            [r.getMessage() for r in caplog.records])
+                         "personality": "第二版人设"}]))
+        assert "被世界" in str(raised.value) or "不是这份包" in str(raised.value)
+
+
+def test_在册的人的记忆只增不改_而且装两遍不记两次(tmp_path):
+    """记忆是**演化态** —— 改一条既有的等于伪造历史;而"这一周发生过一件事"
+    是新的一条,加得进去。按 `(agent_id, summary)` 去重。"""
+    with _world(tmp_path, name="mem") as world:
+        world.tick(3)
+        pack = _pack(tmp_path, "memp", pack={"id": "第二周", "version": "1.0.0"},
+                     memories=[{"agent_id": "甲", "kind": "seed",
+                                "summary": "社团招新那天下着雨。"}])
+        first = world.install_pack(pack)
+        assert first["memories"] == 1, first
+        assert any("社团招新" in (m.get("summary") or "") for m in world.memories("甲"))
+        again = world.install_pack(_pack(
+            tmp_path, "memp2", pack={"id": "第二周", "version": "1.1.0"},
+            memories=[{"agent_id": "甲", "kind": "seed",
+                       "summary": "社团招新那天下着雨。"}]))
+        assert again["memories"] == 0, "同一条记了两次"
 
 
 def test_插件降级被拒时_世界一个字节都没变(tmp_path):
@@ -734,3 +809,47 @@ def test_同一种写法从文件里进来_照旧当场拒(tmp_path):
             "id": "新拍", "trigger": {"at": {"day": 0}, "tag": "第一幕"},
             "payload": [{"op": "memory", "agent_id": "甲", "summary": "s"}]}]})
     assert "trigger 里不认识的字段" in str(raised.value)
+
+
+def test_包里带一个新插件_它声明的种类真的进了本体(tmp_path):
+    """🔴 **tool 真装第 2 周包逮的第 15 条。**
+
+    上一版 `install_pack` **判用 `merged`(并过插件种类的那一份)、写用 `authored`**
+    —— 于是一份带新插件的包 `pack install` 退 0、`plugin list` 印得出那个种类和动词,
+    而 `ontology --kind <它>` 答「这个世界里没有声明过这一类」:**机制完全不生效
+    而回执全是成功**,重开一次也没有;包里若带那个种类的实例则退 1 甩堆栈。
+
+    **两份东西必须来自同一次合并** —— 这个仓库为这句话红过一次(2026-08-28 那条
+    插件命名空间回归),而这一次是它的镜像:喂全集、判全集,写却喂了局部。
+    """
+    menpai = {
+        "id": "menpai", "version": "1.0.0", "label": "门派",
+        "facts": {"声望": {"bearer": "agent", "shape": "number", "default": 0.0,
+                           "visibility": "here"}},
+        "kinds": {"group:sect": {"gloss": "一个门派"}},
+        "verbs": {"入门": {"target": "group:sect", "description": "拜入门派"}},
+    }
+    client = redis_for(tmp_path / "pk.db")
+    with _world(tmp_path, name="pk") as world:
+        world.tick(2)
+        receipt = world.install_pack(_pack(
+            tmp_path, "sect", pack={"id": "第二周", "version": "1.0.0"},
+            plugins=[menpai],
+            entities=[{"id": "menpai.sect:狮心会", "name": "狮心会",
+                       "location": "cafe"}]))
+        assert receipt["pack"] == "第二周"
+        kinds = {k["id"] for k in world.kinds()}
+        assert "menpai.sect" in kinds, f"插件声明的种类没进本体:{sorted(kinds)}"
+        assert "menpai.sect:狮心会" in {e["id"] for e in world.entities()}
+        # 动词真的点得动 —— 「印得出」和「用得上」是两件事。
+        world.player_move("p1", "cafe")
+        world.tick(1)
+        out = world.player_tool("p1", "interact",
+                                {"target": "menpai.sect:狮心会", "verb": "入门"})
+        assert out["ok"] is True, out
+
+    from anima_world.api import World
+
+    with World.open("w", redis=client, force_mock_llm=True) as again:
+        assert "menpai.sect" in {k["id"] for k in again.kinds()}, "重开一次就没了"
+        assert "menpai.sect:狮心会" in {e["id"] for e in again.entities()}

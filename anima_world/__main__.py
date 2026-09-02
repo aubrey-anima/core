@@ -4226,6 +4226,7 @@ def _pack_sections(world_seed: dict[str, Any] | None) -> dict[str, list[str]]:
 def _record_pack_installed(
     event_log: EventLog, world_seed: dict[str, Any] | None, *, day: int, tick: int,
     landed: dict[str, list[str]] | None = None,
+    wrote: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """一份内容包落地了 —— 记一条 `pack_installed`,**没有第二张表**。
 
@@ -4257,6 +4258,11 @@ def _record_pack_installed(
             # 两者之差正是「这份包里有几样没装进去」,而那是作者最该看见的一件事。
             "sections": dict(landed if landed is not None else _pack_sections(world_seed)),
             "declared": _pack_sections(world_seed),
+            # 🔴 **「我这一版往那几格里写了什么」** —— 下一次升级那把
+            # compare-and-set 的尺读的就是它(2a-②)。判据不是"我是同一个 pack",
+            # 是"这一格此刻的值还等于我上次写下去的那个值吗"。
+            **({"wrote": {k: dict(v) for k, v in wrote.items() if v}}
+               if wrote and any(wrote.values()) else {}),
         },
     })
     return pack_id
@@ -4272,6 +4278,23 @@ class PackInstallError(ValueError):
     def __init__(self, errors: list[str]):
         self.errors = list(errors)
         super().__init__("这份内容包装不进去:\n" + "\n".join(f"- {e}" for e in errors))
+
+
+def _current_personality(scheduler: Any, agent_id: str) -> str:
+    """她此刻的人设是哪一句 —— **问投影,不问黑板**(2a-②)。
+
+    黑板上那份是开机时从投影拼出来的快照,而 `persona_update` 是**事件**:
+    投影才是"这一格现在是什么"的权威。问黑板的下场是 CAS 拿一份可能陈的值去比,
+    而比错了的样子是安静的:该拒的放行了(把玩家聊出来的三十天抹掉),
+    或者该放行的被拒了(作者改不动自己上周写的那一句)。
+    """
+    projected = scheduler._memory_projection.agents.get(agent_id)
+    if projected is not None and "personality" in (getattr(projected, "spec", None) or {}):
+        return str(projected.spec["personality"] or "")
+    brain = scheduler.agents.get(agent_id)
+    if brain is None:
+        return ""
+    return str(brain.agent.blackboard.read("personality") or "")
 
 
 def install_authored_pack(scheduler: Any, path: Path | str, *,
@@ -4454,16 +4477,53 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             "真要让它们立刻全响,加 `--force`"
         ])
 
-    # 🔴 **在册的人的 `personality` / `memory` 装不进去,而这件事要说出来**
-    # (2a-① 验收 C 逮的:引擎一个字不说、rc 0,而离线门反而说了两句漂亮的)。
-    # 覆盖它们各要一把 compare-and-set 的尺,那是 2a-② 的事;**今天先说清楚**。
+    # 🔴 **在册的人的 `personality`:一把 compare-and-set 的尺**(2a-②)。
+    #
+    # 「同一个 pack 就能覆盖」是错的,而它错得不报错:第 1 周的包给她写过一句人设,
+    # 玩家跟她聊了三十天、她的人设被 `persona_update` 改过;第 2 周包一升级就把那
+    # 三十天抹了,账面上什么都看不出来。**判据不是「我是同一个 pack」,是
+    # 「这一格此刻的值,还等于我上一版写下去的那个值吗」。**
+    #
+    # 三种情形,三种下场:
+    #   · 这个包上一版写的,而且**至今没被动过** → 覆盖(那就是"改自己发过的")
+    #   · 被动过了 / 根本不是这个包写的(创世写的、别的包写的)→ **拒绝并报告**
+    #   · `--force` → 覆盖,并在回执上留一格 `forced`(老板 D53 ④ 批的就是这一条)
     on_roster = set(scheduler.agents) | set(scheduler._memory_projection.agents)
-    skipped_persona = sorted({
-        str(e.get("id")) for e in _seed_entry_dicts(authored, "agents")
-        if isinstance(e.get("id"), str) and e["id"] in on_roster
-        and str(e.get("personality") or "").strip()
-    })
-    skipped_memories = [
+    was_written = dict(
+        ((scheduler._memory_projection.packs.get(pack_id) or {}).get("wrote") or {}
+         ).get("personality") or {}
+    )
+    persona_wanted: dict[str, str] = {}
+    persona_conflict: list[str] = []
+    for entry in _seed_entry_dicts(authored, "agents"):
+        aid = entry.get("id")
+        said = str(entry.get("personality") or "").strip()
+        if not isinstance(aid, str) or aid not in on_roster or not said:
+            continue
+        now = _current_personality(scheduler, aid)
+        if said == now:
+            continue                       # 一个字都没变,不必写一条事件
+        mine = was_written.get(aid)
+        if mine is not None and mine == now:
+            persona_wanted[aid] = said     # 我上一版写的,至今没被动过
+        else:
+            # **冲突照记,即使这一趟带着 `--force`** —— 回执上那一格 `forced`
+            # 说的是"这一趟强行覆盖了几件",而它得数得出来。
+            persona_conflict.append(aid)
+            if force:
+                persona_wanted[aid] = said
+    if persona_conflict and not force:
+        raise PackInstallError([
+            f"这几个人的人设**不是这份包上一版写下去的那一句**(或者写下去之后被世界"
+            f"改过了):{'、'.join(sorted(persona_conflict))}。"
+            "覆盖它等于把这中间发生的事抹掉,而账面上什么都看不出来 —— "
+            "确实要覆盖就加 `--force`"
+        ])
+    skipped_persona = sorted(persona_conflict)
+    # 🔴 **在册的人的记忆:只增不改**(2a-②)。记忆是**演化态** —— 改一条既有的
+    # 等于伪造历史;而"这一周发生过一件事"是新的一条,加得进去。
+    # 按 `(agent_id, summary)` 去重:同一份包装两遍不该让她记得两次。
+    memories_wanted = [
         e for e in _seed_entry_dicts(authored, "memories")
         if str(e.get("agent_id") or "") in on_roster
     ]
@@ -4481,22 +4541,18 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         "locations": [],
         # **装不进去的那几段也要有一格。** 一张只列"装了什么"的回执,读起来像
         # "别的都装进去了" —— 而那正是这一族最贵的错法。
+        "personality": [],
+        "memories": 0,
         "skipped": {
             "personality": skipped_persona,
-            "memories": len(skipped_memories),
-            "reason": ("在册的人的人设与记忆这一版装不进去 —— 覆盖它们各要一把"
-                       "compare-and-set 的尺(「这一格还等于我上次写的值吗」),"
-                       "那是另一件事(还没做)。新人的照旧带得进来")
-            if (skipped_persona or skipped_memories) else "",
+            "memories": 0,
+            "reason": ("这几个人的人设不是这份包上一版写下去的那一句(或者写下去"
+                       "之后被世界改过了)—— 覆盖它等于把这中间发生的事抹掉。"
+                       "`--force` 才写")
+            if skipped_persona else "",
         },
-        "forced": bool(force and expired),
+        "forced": bool(force and (expired or persona_conflict)),
     }
-    if skipped_persona or skipped_memories:
-        logger.warning(
-            "内容包 %r:在册的 %d 个人的人设、%d 条记忆**没有装进去** —— %s",
-            pack_id, len(skipped_persona), len(skipped_memories),
-            receipt["skipped"]["reason"],
-        )
 
     with scheduler._lock:
         # ── ③ 其余段:开机那条路上**同一批**播种函数,`merge=True`(只填缺)。
@@ -4506,7 +4562,16 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         _seed_world_rules(rules_store, authored, merge=True)
         _seed_stock_visibility(authored, visibility_store, merge=True)
         _seed_stock_places(authored, visibility_store, merge=True)
-        redeclared = _seed_ontology(ontology_store, authored, fresh_world=True,
+        # 🔴 **喂的是 `merged`,不是 `authored`**(2a-① 验收:tool 真装第 2 周包
+        # 逮的第 15 条)。`merged` 是"作者写的 kinds + 插件声明的那几行"合并之后
+        # 的那一份 —— 创世那条路正是把 `world_seed` 整个换成它再往下走。
+        # 上一版这里**判用 `merged`、写用 `authored`**:于是一份带新插件的包
+        # `pack install` 退 0、`plugin list` 印得出那个种类和动词,而
+        # `ontology --kind <它>` 答「这个世界里没有声明过这一类」—— **机制完全不
+        # 生效而回执全是成功**,重开一次也没有;包里若带那个种类的实例则退 1 甩堆栈。
+        # **两份东西必须来自同一次合并** —— 这个仓库为这句话红过一次(2026-08-28
+        # 那条插件命名空间回归),而这一次是它的镜像:喂全集、判全集,写却喂了局部。
+        redeclared = _seed_ontology(ontology_store, merged, fresh_world=True,
                                     merge=True, namespaces=namespaces)
         scheduler.world_rules = _load_world_rules(
             rules_store, warn=True,
@@ -4514,7 +4579,7 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         scheduler.ontology = _load_ontology(
             ontology_store, scheduler.world_rules, location_store, economy_store,
             namespaces=namespaces)
-        _seed_stocks(authored, stock_store, ontology=scheduler.ontology,
+        _seed_stocks(merged, stock_store, ontology=scheduler.ontology,
                      tick=scheduler.clock, merge=True)
         if scheduler.ontology is not None:
             _apply_ontology(scheduler.ontology, stock_store, visibility_store,
@@ -4522,10 +4587,10 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
                             rules=scheduler.world_rules)
         try:
             _install_plugins(scheduler, plugin_store, stock_store, visibility_store,
-                             location_store, authored)
+                             location_store, merged)
         except PluginError as exc:
             raise PackInstallError(list(exc.errors)) from None
-        _seed_edges(scheduler, authored, merge=True)
+        _seed_edges(scheduler, merged, merge=True)
 
         # ── ④ 新角色:走**中途入场那唯一的窄口**(`Scheduler.register`),
         # 和一条剧情拍的 `agent_join` 逐字同一条路。
@@ -4567,6 +4632,45 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             prompt_store.set("world.setting", setting.strip())
             receipt["world_setting"] = True
 
+        # ── ⑤b 在册的人:人设(CAS 过了的那几个)与记忆(只增不改)。2a-②
+        #
+        # **走 `state_change/persona_update` 这条已有的路**,不新造:名册与人设是
+        # `agent_join` / `persona_update` 折出来的投影,直接改黑板的话重开一次就
+        # 回去了,而"她今天说话不一样了"这件事在日志里没有任何来路。
+        for aid, said in sorted(persona_wanted.items()):
+            event_log.append({
+                "ts": tick, "who": aid, "type": "state_change",
+                "payload": {"kind": "persona_update", "spec": {"personality": said},
+                            "pack": pack_id},
+            })
+            receipt["personality"].append(aid)
+        # 记忆**只增不改**,按 `(agent_id, summary)` 去重 —— 同一份包装两遍不该
+        # 让她记得两次。已有的一条一个字不动:记忆是演化态,改它就是伪造历史。
+        have_summaries = {
+            (str(e.payload.get("agent_id") or ""), str(e.payload.get("summary") or ""))
+            for e in event_log.replay() if e.type == "memory_seed"
+        }
+        fresh_memories: list[str] = []
+        for mem in memories_wanted:
+            aid = str(mem.get("agent_id") or "")
+            summary = str(mem.get("summary") or "")
+            if not summary or (aid, summary) in have_summaries:
+                continue
+            have_summaries.add((aid, summary))
+            try:
+                importance = float(mem.get("importance", 0.5))
+            except (TypeError, ValueError):
+                importance = 0.5
+            event_log.append({
+                "ts": tick, "who": aid, "type": "memory_seed",
+                "payload": {"agent_id": aid, "kind": str(mem.get("kind", "seed")),
+                            "summary": summary, "importance": importance,
+                            "anchor": _coerce_bool(mem.get("anchor", False)),
+                            "pack": pack_id},
+            })
+            fresh_memories.append(aid)
+        receipt["memories"] = len(fresh_memories)
+
         # ⚠️ **回执要在落账之前填好** —— `pack_installed` 的 `sections` 记的就是它。
         receipt["agents"] = [e["id"] for e in newcomers]
         receipt["locations"] = list(new_points)
@@ -4577,7 +4681,8 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         ) if (newcomers or new_points) else set()
         # **落账写的是回执**(真的落地了什么),文件里那份另起 `declared` ——
         # 两份真相那一格就是这么来的(2a-① 验收 C)。
-        _record_pack_installed(event_log, authored, day=day, tick=tick, landed={
+        _record_pack_installed(event_log, authored, day=day, tick=tick,
+                               wrote={"personality": dict(persona_wanted)}, landed={
             k: v for k, v in (
                 ("beats", receipt["beats"]),
                 ("agents", receipt["agents"]),
@@ -4589,8 +4694,17 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         persisted = event_log.replay()
         scheduler.reset_projection(persisted)   # 水位跟着挪
         scheduler.load_persisted_events(persisted)
-        if joined and scheduler.memory_store is not None and scheduler.memory_store.count() > 0:
-            _fold_seeded_memories(scheduler.memory_store, persisted, joined)
+        # **刚追加的那几条 `memory_seed` 自己折一次。** `_rebuild_memories` 见了
+        # 非空表就掉头(记忆是持久状态,重放一遍等于把她的一生按今天的触发器重新
+        # 裁一遍),所以这条路上得自己折 —— 和新人那一半逐字同一个理由。
+        fold_for = set(joined) | {aid for aid in fresh_memories}
+        # ⚠️ **这里没有 `count() > 0` 那道条件,而开机那条路上有** —— 那条的理由是
+        # `_rebuild_memories` 紧接着会把空表整份折一遍(折两次就是每人两份)。
+        # 装包这条路**根本不调 `_rebuild_memories`**,所以不折就是没人折:
+        # 日志里有、库里没有,她开口时对刚发生的事一无所知,而回执写着装进去了。
+        # 幂等靠 `event_seq`,重复调用是安全的。
+        if fold_for and scheduler.memory_store is not None:
+            _fold_seeded_memories(scheduler.memory_store, persisted, fold_for)
 
         # ── ⑦ 剧情:**重建导演,而"响过哪几拍"从日志重放** —— 两份真相里存一份。
         if new_beats:
@@ -9141,10 +9255,17 @@ def contract_payload() -> dict[str, Any]:
             "subscribable": False,
             "method": "install_pack",
             "cli": "anima-world pack install <file> / anima-world pack list",
-            "installs_sections": ["beat", "config", "world_setting"],
+            # ⚠️ **两张表都用「编译段名」,不混作者层 `type`**(2a-① 验收:
+            # 上一版 `installs_sections` 报的是 `beat`/`config`/`world_setting`
+            # (作者层的 `type`),而 `merge_sections` 报的是 `beats`/`kinds`/…
+            # (编译管线的段名)—— **同一份契约里两套名字**,而读的人要自己猜
+            # 哪一格用哪一套。段名是 `AUTHOR_SECTIONS.values()` 那一套,
+            # 作者层 `type` 另有 `author_type` 那一格报。
+            "installs_sections": ["beats", "config", "world_setting"],
             "merge_sections": sorted(
                 set(world_file.AUTHOR_SECTIONS.values()) - {"beats"}
             ),
+            "section_names_are": "编译段名(`AUTHOR_SECTIONS` 的值),不是作者层 `type`",
             "storage": "事件日志(`pack_installed`)—— 没有第二张表",
             "gloss": (
                 "一份内容包的身份:`{\"kind\": \"author\", \"type\": \"pack\", "

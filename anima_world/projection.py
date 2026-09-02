@@ -301,6 +301,18 @@ def _apply_player_join(proj: Projection, e: Event) -> None:
     proj.players_joined.setdefault(player_id, day)
 
 
+def _merge_wrote(have: Any, incoming: Any) -> dict[str, dict[str, str]]:
+    """`{格: {谁: 我写下去的那个值}}` —— 按格并入,新的赢。"""
+    out: dict[str, dict[str, str]] = {
+        str(k): dict(v) for k, v in (have or {}).items() if isinstance(v, dict)
+    }
+    for field, rows in (incoming or {}).items():
+        if not isinstance(rows, dict):
+            continue
+        out.setdefault(str(field), {}).update({str(k): str(v) for k, v in rows.items()})
+    return out
+
+
 def _apply_pack_installed(proj: Projection, e: Event) -> None:
     """一份内容包落地了(3.10.0)。
 
@@ -343,6 +355,10 @@ def _apply_pack_installed(proj: Projection, e: Event) -> None:
         "tick": int(have["tick"]) if have else int(payload.get("tick", 0) or 0),
         "sections": sections,
         "beat_days": beat_days,
+        # 「我这一版往那几格里写了什么」——  **按格并入**,和 `sections` 同一条:
+        # 这一版没碰的那几个人,上一版写的那句还得记着,否则下一次 CAS 会把
+        # 「我写过而且没人动过」错判成「不是我写的」,于是作者改不动自己上周那一句。
+        "wrote": _merge_wrote((have or {}).get("wrote"), payload.get("wrote")),
         "declared": dict(payload.get("declared") or {}),
         "seq": int(e.seq or 0),
     }

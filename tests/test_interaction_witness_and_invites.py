@@ -199,18 +199,41 @@ def _drain(world):
 
 
 def _player_narratives(world):
+    """玩家那一侧的旁白里,**模型写的那些**。
+
+    🆕 **3.10.0(批 1.1 ④)起这一层有两种旁白,而这个帮手只数第二种**:
+    · 模板那一句(`source == "template"`)是**地板** —— 做成了的 `interact` 一定有,
+      一次 LLM 都不调(真站实测:玩家点「报到狮心会」,那条能力一个量都不改,
+      于是他读到的和什么都没按一样);
+    · 模型写的那一句是**升级**,由作者的 `importance` 与 `narrative.player.enabled`
+      两道闸管着 —— 下面这几条用例验的一直是它。
+    """
     return [e for e in _events(world, "narrative")
-            if str(e.get("who") or "").startswith("player:")]
+            if str(e.get("who") or "").startswith("player:")
+            and (e.get("payload") or {}).get("source") != "template"]
+
+
+def _player_template_lines(world):
+    """那一句模板回执。**做成了就一定有**,和开关无关。"""
+    return [e for e in _events(world, "narrative")
+            if str(e.get("who") or "").startswith("player:")
+            and (e.get("payload") or {}).get("source") == "template"]
 
 
 def test_玩家动作的旁白默认不生成(world):
     """路铺好、开关留着,默认 **0** —— 旁白是一次 LLM 调用,而它按玩家的每一次
-    动作触发。默认开等于替每个已有世界多开一笔账。"""
+    动作触发。默认开等于替每个已有世界多开一笔账。
+
+    🆕 **3.10.0(批 1.1 ④):模板那一句不受这道闸管**,而这一条同轮钉住两半 ——
+    那三道闸的理由是「旁白是一次 LLM 调用」,而模板一次都不调;它是地板,
+    闸管的是升级。少了下半句,这条用例会被读成「他按下去屏幕上什么都没有」,
+    而那正是被修掉的那个 bug。"""
     world.player_move("p1", "cafe")
     assert world.player_tool(
         "p1", "interact", {"target": "bench:oak", "verb": "上发条"})["ok"] is True
     _drain(world)
     assert _player_narratives(world) == []
+    assert len(_player_template_lines(world)) == 1, "模板那一句是地板,它得在"
 
 
 def test_开了开关_玩家做的事进旁白_而且印的是他的名字(world):
