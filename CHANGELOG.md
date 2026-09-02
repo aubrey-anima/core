@@ -122,9 +122,20 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
   线上那两次挂掉时流已经吐过三片,而那三片是玩家看不到的控制标记。
 - 已经吐出正文之后**绝不重来** —— 重复的正文比一句"她没能接上话"更难解释。
 
+### 欠账(记在这儿,不在这一版修)
+
+- 🟡 **`players_joined` 只增不减**,而 `has_pending()` 对含 per-player 拍的脚本恒 `True`
+  —— 于是每 tick 都要遍历"进来过的每一个玩家"。一个公开世界上这是**永久增长的一格**
+  (告别过的人已经不进 `_beat_player_roster()`,但那份零点账还留着,那是有意的:
+  零点是历史)。今天不改,因为改它要么给零点加过期(那就不是历史了),要么让
+  `has_pending` 去猜"以后还会不会有新玩家"(引擎无从知道)。真到了要改那天,
+  形状多半是**按玩家分片的 fired 索引**,而不是砍这份名单。
+- 🟡 `anima-world config` 没有 `unset` —— 作者写错一个键只能改值,回不到"没说过"。
+
 ### 契约
 
-- **纯增量**:`contract` 新顶层段 `host` · `beats.player_selector` · `config` 多四键。
+- **纯增量**:`contract` 新顶层段 `host`(含 `option_keys` 的 `who` 一格)·
+  `beats.player_selector` · `config` 多四键。
 - 🔴 **`storage` 段一个字没动**(host 走事件 + 投影,零新键)—— 运维台那条只比
   `.storage` 的 deepEqual **不会红**。
 - **破坏性只有一条**:写了 `for_each` 的包 `engine_min` 必须写 `3.9.0`。

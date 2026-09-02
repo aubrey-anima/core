@@ -669,6 +669,11 @@ anima-world validate world my.cyberworld              # 不建世界就查作者
 `beats.player_selector` 在不在,不是版本号**(`anima-world:3.8.0` 这个名字下已经有过
 两支能力不同的引擎)。
 ⚠️ **3.9.0 还没打 tag、没发 PyPI** —— 索引上最新仍是 `3.7.0`。
+🟡 **这一版留下一格会长的账**:`Projection.players_joined` 只增不减,而
+`BeatDirector.has_pending()` 对含 per-player 拍的脚本恒 `True` —— 每 tick 遍历
+"进来过的每一个玩家"。公开世界上它只增不减(告别过的人不再进 `_beat_player_roster()`,
+但零点那一格留着,**那是有意的:零点是历史**)。**别用"给零点加过期"去修它** ——
+那就不是历史了;真要改,形状是按玩家分片的 fired 索引。
 
 ⚠️ **3.8.0 抬版号的理由,和 3.4.0 那次逐字相同,而这一次更硬**:`3.7.0` **今天真的
 上了 PyPI**,而插件系统第 0 期往 `contract --json` 里加了两段(`config` / `plugins`)、
