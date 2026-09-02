@@ -372,3 +372,74 @@ def test_每一项都带一格who_而契约报着它(world):
         assert "who" in option
         if option["kind"] in ("verb", "travel", "free"):
             assert option["who"] == "", "这几类没有「人」这一格"
+
+
+# ── 批 1.1 ①②:先说刚发生了什么 · 人称与时辰(3.10.0)──────────────────────
+#
+# 🔴 **验收 C 2026-09-02 在真站上量的两条**:
+# ① 第一拍响了(录取通知 + 一部 N96 + 800 块),而屏幕上一个字没提 —— 钱包突然
+#    多了 800,没有一处说为什么。主持人这一屏是玩家**唯一**读得到的地方。
+# ② day 0 **00:25** 的场景里写着「黄昏」「暮色」;`mock_scene` 用「你」而给模型的
+#    那份提示整份用「他」—— 同一个世界,配了 key 和没配 key 是两种人称。
+
+def test_上一屏之后发生的事_排在景的前面(tmp_path):
+    from anima_world import host as host_mod
+
+    with open_world_at(tmp_path / "h11.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        first = world.host_turn("p1")
+        assert first["scene"]["source"] == "mock"
+        # 世界给他 800 块、一件东西 —— 走的是账本已有的那两条事件。
+        world.scheduler._record_and_deliver({
+            "type": "payment", "who": "player:p1",
+            "payload": {"from": "__town__", "to": "player:p1",
+                        "amount": 800, "reason": "beat"},
+        })
+        world.scheduler._record_and_deliver({
+            "type": "item_transfer", "who": "player:p1",
+            "payload": {"from": "__world__", "to": "player:p1",
+                        "item_id": "n96", "item_name": "一部诺基亚 N96", "qty": 1},
+        })
+        world.player_walk("p1", "workshop")   # 换地方 → arrive,这一屏会重说
+        world.tick(2)
+        again = world.host_turn("p1")
+        text = again["scene"]["text"]
+        assert "800" in text, f"钱包多了 800,屏幕上一个字没提:{text!r}"
+        assert "N96" in text, f"他手上多了东西,屏幕上一个字没提:{text!r}"
+        # 🔴 **顺序是承重的**:先说刚发生的事,再说景。
+        assert text.index("800") < text.index("你在"), text
+
+
+def test_第一屏没有回顾_而不是把整个创世倒给他(tmp_path):
+    """⚠️ 一个刚进门的人身后没有「上一屏之后」。拿 0 当窗口起点会把创世那一摞
+    (每个人的 `agent_join`、安家费、货架)全倒进他的第一屏。"""
+    with open_world_at(tmp_path / "h12.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        first = world.host_turn("p1")
+        assert first["scene"]["text"].startswith("第 "), first["scene"]["text"]
+
+
+def test_时辰按世界钟分档_深夜不是清晨():
+    from anima_world.host import daypart, free_option, mock_scene
+
+    assert [daypart(h) for h in (0, 6, 10, 14, 18, 22)] == [
+        "深夜", "清晨", "上午", "午后", "黄昏", "夜里"]
+    said = mock_scene(place_name="你家", day=0, hour=0, options=[free_option()])
+    assert "深夜" in said and "清晨" not in said, said
+
+
+def test_给模型那份提示_人称是你_而且时辰是喂进去的():
+    """🔴 **两条路的人称必须一样**,而差别只在一个环境变量上(有没有 key)。"""
+    from anima_world.host import free_option, scene_messages
+
+    msgs = scene_messages(place_name="你家", place_desc="", day=0, hour=0, minute=25,
+                          world_setting="", options=[free_option()],
+                          recap=["一封录取通知躺在你桌上。"])
+    whole = msgs[0]["content"] + msgs[1]["content"]
+    assert "第二人称" in msgs[0]["content"]
+    assert "他在" not in whole and "他还没落脚" not in whole, whole
+    assert "(深夜)" in whole and "「深夜」" in whole, whole
+    # 刚发生的事排在最前,并且明说先说它。
+    assert whole.index("一封录取通知") < whole.index("地点:"), whole

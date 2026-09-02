@@ -37,12 +37,165 @@ DOOR_METHODS = ("answer_invitation", "chat", "player_walk", "player_tool", "free
 # 引擎里没有难度这个东西,给它一个数字等于凭空发明一份世界不认识的真相。
 TONES = ("safe", "risky", "social")
 
+# ── 时段的分档词(3.10.0,批 1.1 ②)────────────────────────────────────────
+#
+# 🔴 **实测:day 0 00:25 的场景里写着「黄昏」「暮色」**(2026-09-02 验收 C 在真站量的)。
+# 病根有两处,而它们互相盖住了:① 这一层从前只有四档,而且 `hour < 9` 一律读作
+# 「清晨」—— 半夜十二点二十五分于是是「清晨」;② 给 LLM 的那份提示里**根本没有
+# 时段词**,只有 `第 0 天 00:25` 这一行数字,模型自己挑了一个。
+#
+# 所以两件一起做:分档表放在这里(**一份,两条路共用** —— mock 那句和给模型的
+# 提示各挑一次的话,同一时刻的世界会对同一个人说两种时辰),并且**把词喂进提示、
+# 在模板里硬写**,不指望模型从 `00:25` 自己推。
+#
+# ⚠️ 边界写成"从几点起",不写成区间:区间要维护两个数,而两个数迟早对不上。
+_DAYPARTS: tuple[tuple[int, str], ...] = (
+    (0, "深夜"), (5, "清晨"), (9, "上午"), (12, "午后"), (17, "黄昏"), (20, "夜里"),
+)
+
+
+def daypart(hour: int) -> str:
+    """这个钟点是一天里的哪一档。**世界钟说了算,不由模型猜。**"""
+    word = _DAYPARTS[0][1]
+    for start, name in _DAYPARTS:
+        if int(hour) >= start:
+            word = name
+    return word
+
+
+# ── 上一屏之后跟这个玩家有关的事(3.10.0,批 1.1 ①)──────────────────────────
+#
+# 🔴 **真站实测:第一拍响了(录取通知 + 一部 N96 + 800 块),而屏幕上一个字没提** ——
+# 玩家的钱包突然多了 800,没有一处说为什么。主持人这一屏是他**唯一**读得到的地方,
+# 而它从前只描景:「你在哪、这儿有谁、你要做什么」。
+#
+# **"世界永远先开口"的另一半是"先说刚发生了什么"** —— 跑团桌上 GM 不会在你抽完
+# 一张牌之后跳过它直接问"你要做什么"。
+#
+# 一条纪律:**这一段是从事件日志折出来的,不是另攒一份**。它和余额折自 `payment`
+# 逐字同一种 —— 攒一份"给玩家看的消息队列"就多出一种和日志对不上的坏法,而这一层
+# 对不上的样子是"屏幕上说他拿到了,而库存里没有"。
+#
+# ⚠️ **白名单是策展的,和 `SUBSCRIBABLE_EVENTS` 同一个理由**:世界每 tick 都在发
+# 事件,而其中绝大多数与他无关(别人走路、别人吃饭)。把全部倒给他等于没有这一段。
+RECAP_EVENT_TYPES = (
+    "beat_fired", "payment", "item_transfer", "agent_invites", "entity_interaction",
+)
+#: 一屏最多回顾几条。**截断了必须吭声**(和 perception 的 `overflow` 同一条):
+#: 不说的话他在一个"只发生过三件事"的世界里做决定,而他永远不会知道自己被瞒了。
+RECAP_LIMIT = 6
+
 FREE_OPTION_ID = "opt:free"
 FREE_LABEL = "自己说点什么……"
 
 # 候选排序里各类的先后。**故事线在前,杂事在后**:一个玩家点进来最该看到的是
 # 「有人在等你答话」和「你这条线走到哪儿了」,不是「你可以端详布告栏」。
 _KIND_RANK = {kind: i for i, kind in enumerate(OPTION_KINDS)}
+
+
+def recap_lines(
+    events: Iterable[dict[str, Any]], *, player_key: str,
+    item_names: dict[str, str] | None = None,
+    agent_names: dict[str, str] | None = None,
+) -> list[str]:
+    """上一屏之后**跟这个玩家有关**的那几件事,一件一行人话(3.10.0,批 1.1 ①)。
+
+    `player_key` 是 `player:<id>` —— 账本、库存、事件顶层的 `who`、在场位置一律是
+    这个形状(`beats.bind_player` 的 docstring 逐字写着这条)。
+
+    **纯函数**:进来的是事件字典,出去的是几句中文。它不认识 Redis、不认识 `World`,
+    所以"哪几件算数、怎么说"可以被单独测,而且 mock 那条路和给模型的提示**共用它** ——
+    各拼一份的话,没 key 的世界和有 key 的世界会对同一段历史说两套话。
+
+    ⚠️ **一律第二人称**:这一段是说给他听的(批 1.1 ②)。
+    ⚠️ **超出 `RECAP_LIMIT` 要吭声** —— 最后一行会说还有几件没列。
+    """
+    lines: list[str] = []
+    items = item_names or {}
+    people = agent_names or {}
+
+    def who(holder: str) -> str:
+        holder = str(holder or "")
+        if holder == player_key:
+            return "你"
+        if holder in ("__town__", "__world__"):
+            return ""
+        return people.get(holder, holder.split(":")[-1] or holder)
+
+    for event in events:
+        kind = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        if kind == "beat_fired":
+            # 🔴 **只有作者写了 `narrate` 的拍才进这一段。** 别的拍这一层
+            # 一个字都不编 —— 它手上只有 op 名(`memory` / `pay`),而把
+            # 「这一拍响了」翻译成一句剧情是**作者的活**(批 1.1 ⑤ 开的正是这扇门)。
+            # 编一句的下场是屏幕上出现一句世界里没有的话,而它读起来像真的。
+            if str(payload.get("for") or "") != player_key:
+                continue
+            said = str(payload.get("narrate") or "").strip()
+            if said:
+                lines.append(said)
+            continue
+        if kind == "payment":
+            src, dst = str(payload.get("from") or ""), str(payload.get("to") or "")
+            if player_key not in (src, dst):
+                continue
+            try:
+                amount = float(payload.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+            money = f"{amount:g}"
+            if dst == player_key:
+                giver = who(src)
+                lines.append(f"{giver}给了你 {money} 块。" if giver
+                             else f"你多了 {money} 块。")
+            else:
+                taker = who(dst)
+                lines.append(f"你付出去 {money} 块" + (f",给了{taker}。" if taker else "。"))
+            continue
+        if kind == "item_transfer":
+            src, dst = str(payload.get("from") or ""), str(payload.get("to") or "")
+            if player_key not in (src, dst):
+                continue
+            item_id = str(payload.get("item_id") or "")
+            # 事件里那格**当时的人话**优先(老事件缺它,读的一方要回落 —— 契约里
+            # `item_transfer` 那一条逐字写着这句)。
+            name = str(payload.get("item_name") or "") or items.get(item_id, item_id)
+            try:
+                qty = int(payload.get("qty") or 1)
+            except (TypeError, ValueError):
+                qty = 1
+            tail = f"(×{qty})" if qty > 1 else ""
+            if dst == player_key:
+                giver = who(src)
+                lines.append(f"{giver}给了你{name}{tail}。" if giver
+                             else f"你手上多了{name}{tail}。")
+            else:
+                taker = who(dst)
+                lines.append(f"你把{name}{tail}给了{taker}。" if taker
+                             else f"你的{name}{tail}没了。")
+            continue
+        if kind == "agent_invites":
+            if str(payload.get("player_id") or "") != player_key.split(":", 1)[-1]:
+                continue
+            asker = str(payload.get("agent_name") or payload.get("agent_id") or "有人")
+            verb = str(payload.get("verb_label") or payload.get("verb") or "")
+            target = str(payload.get("target_name") or payload.get("target") or "")
+            what = f"一起{verb}{target}" if verb else "一起做件事"
+            lines.append(f"{asker}问你要不要{what}。")
+            continue
+        if kind == "entity_interaction":
+            if str(event.get("who") or "") != player_key:
+                continue
+            verb = str(payload.get("verb_label") or payload.get("verb") or "")
+            target = str(payload.get("target_name") or payload.get("target") or "")
+            if verb and target:
+                lines.append(f"你{verb}了{target}。")
+            continue
+    if len(lines) > RECAP_LIMIT:
+        extra = len(lines) - RECAP_LIMIT
+        lines = lines[:RECAP_LIMIT] + [f"还有 {extra} 件事没细说。"]
+    return lines
 
 
 def free_option() -> dict[str, Any]:
@@ -94,23 +247,30 @@ def select_options(candidates: Iterable[dict[str, Any]], *, limit: int) -> list[
 
 
 def mock_scene(*, place_name: str, day: int, hour: int,
-               options: list[dict[str, Any]], going_to: str = "") -> str:
+               options: list[dict[str, Any]], going_to: str = "",
+               recap: list[str] | None = None) -> str:
     """没有 key / LLM 挂了 / 超时时那一段话。
 
     **没配 key 是这个引擎的默认状态**,所以这不是降级路径上的边角料,而是很多人看到
     的第一屏(#15 那一课)。它只用**已经筛过**的那几项拼,和真提示词同一个来源 ——
     两边各拼一份的话,mock 迟早会说出一个藏起来的人的名字。
     """
-    when = "清晨" if hour < 9 else "上午" if hour < 12 else "下午" if hour < 18 else "夜里"
+    # **分档表只有一份**(`daypart`),给模型的那条路读的是同一份 —— 各挑一次的话,
+    # 同一时刻的世界会对同一个人说两种时辰。
+    when = daypart(hour)
+    # 🔴 **先说刚发生了什么,再说景**(批 1.1 ①)。顺序是承重的:玩家读到的第一句
+    # 该是「一封录取通知躺在你桌上」,不是「你在你家」—— 真站那一趟,第一拍响了
+    # (信 + 手机 + 800 块),而屏幕上一个字没提。
+    said = "".join(recap or ())
     # ⚠️ **他可能还没落脚**(刚进来、还没走过一步)。拿一个空的地名去拼,出来的是
     # 「你在。」—— 一句念不通的话,而这个仓库的口径是**一句念不通的拒绝语,和一句
     # 错的一样贵**。这一格是拿真 CLI 敲出来的,不是想出来的。
     if going_to:
         # 在路上的人不该被告知"你在出发地" —— 那正是两扇门说两句话的那一格。
-        return f"第 {day} 天{when},你在去{going_to}的路上。到了地方再说。"
+        return said + f"第 {day} 天{when},你在去{going_to}的路上。到了地方再说。"
     if not place_name:
-        return f"第 {day} 天{when}。你还没落个脚 —— 先挑个地方站过去。"
-    head = f"第 {day} 天{when},你在{place_name}。"
+        return said + f"第 {day} 天{when}。你还没落个脚 —— 先挑个地方站过去。"
+    head = said + f"第 {day} 天{when},你在{place_name}。"
     # ⚠️ **拿 `who` 那一格,不是 `label`**:label 是一句祈使("和苏晚夏说说话"),
     # 拼进"这儿有人:…"就成了「这儿有人:和苏晚夏说说话。」—— **一句念不通的话**。
     # 候选自己带着人名,这里就不该再从按钮上的字里去抠。
@@ -125,7 +285,8 @@ def mock_scene(*, place_name: str, day: int, hour: int,
 
 def scene_messages(*, place_name: str, place_desc: str, day: int, hour: int,
                    minute: int, world_setting: str,
-                   options: list[dict[str, Any]], going_to: str = "") -> list[dict[str, str]]:
+                   options: list[dict[str, Any]], going_to: str = "",
+                   recap: list[str] | None = None) -> list[dict[str, str]]:
     """交给背景槽的那一次调用。**一次调用同时写场景那段话和每一项的钩子。**
 
     🔴 **这份提示里没有第二个名字来源。** 它只由 `options` 拼出来,而 `options` 已经
@@ -136,21 +297,37 @@ def scene_messages(*, place_name: str, place_desc: str, day: int, hour: int,
     listed = "\n".join(
         f"{i}. {o['label']}" for i, o in enumerate(options, 1) if o["kind"] != "free"
     )
+    # 🔴 **人称统一「你」**(批 1.1 ②)。上一版这份提示整份用「他」,而 `mock_scene`
+    # 用「你」—— 于是同一个世界,配了 key 和没配 key 的两屏是两种人称,而**差别只在
+    # 一个环境变量上**(`contact.py` 那句纪律的另一面)。模型多半会跟着提示里的人称
+    # 写,所以这不是一句叮嘱,是把提示本身改成第二人称。
     system = (
-        "你是一个文字冒险游戏的主持人。用中文写,口吻克制、具体、有画面,"
-        "**不要**替玩家做决定,**不要**替任何角色说出成段的台词。"
+        "你是一个文字冒险游戏的主持人,对着**玩家本人**说话。用中文写,"
+        "**一律用第二人称「你」**,不许用「他」指玩家。口吻克制、具体、有画面,"
+        "「不要」替玩家做决定,「不要」替任何角色说出成段的台词。"
     )
+    # 🔴 **刚发生的事排在最前,并且明说"先说这个"**(批 1.1 ①)。
+    # 它是这一屏唯一会讲"钱包为什么多了 800"的地方。
+    happened = "".join(f"- {line}\n" for line in (recap or ()))
     user = (
         (f"世界:{world_setting}\n" if world_setting else "")
-        + (f"地点:他在去{going_to}的路上,还没到。\n" if going_to
+        + (f"上一屏之后刚发生的事(**必须先说这几件,再写景**):\n{happened}"
+           if happened else "")
+        + (f"地点:你在去{going_to}的路上,还没到。\n" if going_to
            else f"地点:{place_name}。{place_desc}\n" if place_name
-           else "地点:他还没落脚,不在任何地方。\n")
-        + f"时间:第 {day} 天 {hour:02d}:{minute:02d}\n"
-        + (f"此刻他可以做的事:\n{listed}\n" if listed else "此刻他没有什么特别能做的。\n")
+           else "地点:你还没落脚,不在任何地方。\n")
+        # ⚠️ **时段词喂进去,不让模型从 `00:25` 自己推** —— 真站实测它把
+        # 第 0 天 00:25 写成了「黄昏」「暮色」。
+        + f"时间:第 {day} 天 {hour:02d}:{minute:02d}({daypart(hour)})\n"
+        + (f"此刻你可以做的事:\n{listed}\n" if listed else "此刻你没有什么特别能做的。\n")
         + "\n请按下面的格式输出,不要有别的字:\n"
-        + "第一行:一段 30–80 字的开场,说清他在哪、看得见什么、气氛怎样。\n"
+        + ("第一行:先用一两句说清上面那几件刚发生的事,再接一段开场,"
+           "说清你在哪、看得见什么、气氛怎样;整段 40–100 字。\n"
+           if happened else
+           "第一行:一段 30–80 字的开场,说清你在哪、看得见什么、气氛怎样。\n")
         + "之后每行一句不超过 20 字的钩子,顺序对应上面那几件事,"
-        + "写它此刻**看上去**是什么样,不要写结果。\n"
+        + "写它此刻「看上去」是什么样,不要写结果。\n"
+        + f"⚠️ 时辰按上面给的「{daypart(hour)}」写,别自己另挑一个。\n"
         + "⚠️ 只许提到上面出现过的人和地方,不许写出别的名字。"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]

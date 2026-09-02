@@ -8465,11 +8465,13 @@ class World:
                      "seq": int(last.get("seq") or 0)}
         else:
             going = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
+            recap = self._host_recap(pid, since_seq=int(last.get("seq") or 0)) if last else []
             text, source = self._host_scene_text(
                 place_name=place_name,
                 place_desc=str((places.get(place) or {}).get("description") or ""),
                 day=day, hour=hour, minute=minute, options=options,
                 going_to=str((places.get(going) or {}).get("name") or going),
+                recap=recap,
             )
             self._record_and_fan({
                 "type": "host_scene", "who": f"player:{pid}",
@@ -8683,9 +8685,54 @@ class World:
                 return "ask"
         return None
 
+    def _host_recap(self, pid: str, *, since_seq: int) -> list[str]:
+        """上一屏之后**跟这个玩家有关**的那几件事(3.10.0,批 1.1 ①)。
+
+        🔴 **真站实测的那条**:第一拍响了(录取通知 + 一部 N96 + 800 块),而屏幕上
+        一个字没提 —— 玩家的钱包突然多了 800,没有一处说为什么。主持人这一屏是他
+        **唯一**读得到的地方,而它从前只描景。
+
+        **从日志折出来,不另攒一份**:和余额折自 `payment` 逐字同一种。攒一份
+        「给玩家看的消息队列」就多出一种和日志对不上的坏法,而这一层对不上的样子是
+        「屏幕上说他拿到了,而库存里没有」。
+
+        ⚠️ **第一屏没有这一段**(`since_seq` 只在有上一屏时才有意义):一个刚进门的人
+        身后没有"上一屏之后",拿 0 当窗口起点会把整个创世倒给他。
+        """
+        from anima_world import host as host_mod
+
+        log = self.scheduler.event_log
+        if log is None or since_seq <= 0:
+            return []
+        player_key = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        rows = [
+            {"type": e.type, "who": e.who, "payload": e.payload}
+            for e in log.replay(since_seq)
+            if e.type in host_mod.RECAP_EVENT_TYPES
+        ]
+        if not rows:
+            return []
+        proj = self.scheduler._memory_projection
+        agent_names = {
+            aid: str((getattr(a, "spec", None) or {}).get("name") or aid)
+            for aid, a in proj.agents.items()
+        }
+        items = {}
+        store = getattr(self.scheduler, "economy_store", None)
+        if store is not None:
+            try:
+                items = {str(row.get("id")): str(row.get("name") or row.get("id"))
+                         for row in store.items()}
+            except Exception:  # noqa: BLE001 - 少一个人话名字不该掀翻这一屏
+                items = {}
+        return host_mod.recap_lines(
+            rows, player_key=player_key, item_names=items, agent_names=agent_names,
+        )
+
     def _host_scene_text(self, *, place_name: str, place_desc: str, day: int,
                          hour: int, minute: int, options: list[dict[str, Any]],
-                         going_to: str = "") -> tuple[str, str]:
+                         going_to: str = "", recap: list[str] | None = None
+                         ) -> tuple[str, str]:
         """场景那段话 + 顺手把钩子填进 `options`(就地改)。返回 `(正文, 来源)`。
 
         **一次调用,失败即模板,不重试、不合批** —— 和判定那一层同一条纪律。
@@ -8695,7 +8742,7 @@ class World:
         from anima_world import host as host_mod
 
         fallback = host_mod.mock_scene(place_name=place_name, day=day, hour=hour,
-                                       options=options, going_to=going_to)
+                                       options=options, going_to=going_to, recap=recap)
         service = getattr(self, "chat_service", None)
         client = getattr(service, "_background_llm", None) if service else None
         if client is None or not str(self.config_get("llm.api_key", default="") or ""):
@@ -8703,7 +8750,7 @@ class World:
         messages = host_mod.scene_messages(
             place_name=place_name, place_desc=place_desc, day=day, hour=hour,
             minute=minute, world_setting=str(self.world_setting().get("text") or ""),
-            options=options, going_to=going_to,
+            options=options, going_to=going_to, recap=recap,
         )
         try:
             reply = self._bridge.run(client.complete(messages))
