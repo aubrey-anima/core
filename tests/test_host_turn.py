@@ -352,3 +352,23 @@ def test_到了地方就恢复(world):
     assert turn["place"] == "home"
     assert any(o["available"] and o["kind"] not in ("travel", "free")
                for o in turn["options"]) or turn["place_name"]
+
+
+def test_模板句里那几个人名是人名_不是按钮上的字(world):
+    """从前拼的是 `label`,于是出来「这儿有人:和苏晚夏说说话。」——
+    **一句念不通的话和一句错的一样贵**。候选自己带着 `who`,别从按钮上抠。"""
+    turn = world.host_turn("p1")
+    text = host_mod.mock_scene(place_name="咖啡店", day=0, hour=14,
+                               options=turn["options"])
+    assert "和苏晚夏说说话" not in text
+    if "这儿有人" in text:
+        assert "苏晚夏。" in text or "苏晚夏、" in text
+
+
+def test_每一项都带一格who_而契约报着它(world):
+    from anima_world.__main__ import contract_payload
+    assert "who" in contract_payload()["host"]["option_keys"]
+    for option in world.host_turn("p1")["options"]:
+        assert "who" in option
+        if option["kind"] in ("verb", "travel", "free"):
+            assert option["who"] == "", "这几类没有「人」这一格"

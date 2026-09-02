@@ -8470,7 +8470,7 @@ class World:
             seq = int(invite.get("seq") or 0)
             out.append({
                 "id": f"opt:invite:{seq}", "kind": "invitation",
-                "label": f"答应{name}", "hook": "", "tone": "social",
+                "label": f"答应{name}", "who": name, "hook": "", "tone": "social",
                 "available": True, "reason": "", "refusal": "", "cost": "",
                 "door": {"method": "answer_invitation",
                          "params": {"invite_seq": seq, "accept": True}},
@@ -8492,7 +8492,7 @@ class World:
             out.append({
                 "id": f"opt:talk:{agent_id}", "kind": "talk",
                 "label": f"和{row.get('name') or agent_id}说说话",
-                "hook": "", "tone": "social",
+                "who": str(row.get("name") or agent_id), "hook": "", "tone": "social",
                 "available": True, "reason": "", "refusal": "", "cost": "",
                 "door": {"method": "chat", "params": {"agent_id": agent_id}},
             })
@@ -8503,7 +8503,7 @@ class World:
                 out.append({
                     "id": f"opt:verb:{target['id']}:{verb['verb']}", "kind": "verb",
                     "label": f"{verb.get('label') or verb['verb']}{target.get('name') or target['id']}",
-                    "hook": "", "tone": "risky" if verb.get("cost") else "safe",
+                    "who": "", "hook": "", "tone": "risky" if verb.get("cost") else "safe",
                     "available": bool(verb.get("available")),
                     "reason": str(verb.get("reason") or ""),
                     "refusal": str(verb.get("refusal") or ""),
@@ -8524,7 +8524,7 @@ class World:
                 continue
             out.append({
                 "id": f"opt:go:{loc_id}", "kind": "travel",
-                "label": f"去{loc.get('name') or loc_id}", "hook": "", "tone": "safe",
+                "label": f"去{loc.get('name') or loc_id}", "who": "", "hook": "", "tone": "safe",
                 "available": True, "reason": "", "refusal": "", "cost": "",
                 "door": {"method": "player_walk", "params": {"location": loc_id}},
             })
@@ -8574,7 +8574,7 @@ class World:
                 out.append({
                     "id": f"opt:beat:{beat['id']}", "kind": "beat",
                     "label": f"去找{row.get('name') or others[0]}",
-                    "hook": "", "tone": "risky",
+                    "who": str(row.get("name") or others[0]), "hook": "", "tone": "risky",
                     "available": True, "reason": "", "refusal": "", "cost": "",
                     "door": {"method": "player_walk", "params": {"location": where}},
                 })

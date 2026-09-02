@@ -52,7 +52,7 @@ def free_option() -> dict[str, Any]:
     一个选项多的时刻就会把"我想说点别的"挤掉 —— 而那恰恰是这一层要保住的自由。
     """
     return {
-        "id": FREE_OPTION_ID, "kind": "free", "label": FREE_LABEL, "hook": "",
+        "id": FREE_OPTION_ID, "kind": "free", "label": FREE_LABEL, "hook": "", "who": "",
         "tone": "social", "available": True, "reason": "", "refusal": "", "cost": "",
         "door": {"method": "free", "params": {}},
     }
@@ -108,7 +108,11 @@ def mock_scene(*, place_name: str, day: int, hour: int,
     if not place_name:
         return f"第 {day} 天{when}。你还没落个脚 —— 先挑个地方站过去。"
     head = f"第 {day} 天{when},你在{place_name}。"
-    people = [o["label"] for o in options if o["kind"] in ("talk", "invitation")]
+    # ⚠️ **拿 `who` 那一格,不是 `label`**:label 是一句祈使("和苏晚夏说说话"),
+    # 拼进"这儿有人:…"就成了「这儿有人:和苏晚夏说说话。」—— **一句念不通的话**。
+    # 候选自己带着人名,这里就不该再从按钮上的字里去抠。
+    people = [o["who"] for o in options
+              if o["kind"] in ("talk", "invitation") and o.get("who")]
     if people:
         head += "这儿有人:" + "、".join(people[:3]) + "。"
     elif len(options) > 1:

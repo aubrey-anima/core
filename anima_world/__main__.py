@@ -8130,7 +8130,7 @@ def contract_payload() -> dict[str, Any]:
             "turn_keys": ["player_id", "tick", "day", "place", "place_name", "trigger",
                           "scene", "options", "ask_ready_tick", "ask_ready",
                           "blocked", "blocked_text"],
-            "option_keys": ["id", "kind", "label", "hook", "tone", "available",
+            "option_keys": ["id", "kind", "label", "who", "hook", "tone", "available",
                             "reason", "refusal", "cost", "door"],
             "gloss": (
                 "一次调用交出一屏:一段场景 + 3–5 个选项 + **永远在最后**的自由输入"
