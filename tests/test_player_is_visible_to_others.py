@@ -175,3 +175,68 @@ def test_在路上的时候own也还在(tmp_path):
         menu = w.player_options("p8")
         assert menu["blocked"] == "in_transit"
         assert {r["key"] for r in menu["own"]["readouts"]} >= {"role.评级"}
+
+
+# ── 批 1.1 ④:一条不改任何量的能力,他按下去也得有一行回应(3.10.0)──────────
+#
+# 🔴 **真站实测**:玩家点「报到狮心会」,屏幕**纹丝不动**。那条能力 `changed` 是空的
+# (报到不改任何量),而回执里只有一堆空 dict、`ToolResult.text` 空着 ——
+# 世界里真的发生了一件事,而他读到的和什么都没按一样。
+
+_QUIET = {
+    "locations": [{"id": "yard", "name": "院子", "description": "有块牌子"}],
+    "agents": [{"id": "甲", "name": "甲", "location": "yard", "personality": "安静"}],
+    "kinds": [{"id": "group", "gloss": "一个社团",
+               "quantities": {"人数": {"default": 1.0, "visibility": "here"}},
+               # 一个量都不改 —— 正是真站那条。
+               "affordances": {"报到": {"label": "报到"}}}],
+    "entities": [{"id": "group:狮心会", "name": "狮心会", "location": "yard"}],
+}
+
+
+def _quiet_world(tmp_path, name):
+    from _worldfile import open_world_at, write_seed_file
+
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", _QUIET)
+    world = open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                          force_mock_llm=True)
+    world.player_move("p1", "yard")
+    world.tick(2)
+    return world
+
+
+def test_changed是空的_玩家也拿得到一行人话(tmp_path):
+    with _quiet_world(tmp_path, "q1") as world:
+        result = world.player_tool("p1", "interact",
+                                   {"target": "group:狮心会", "verb": "报到"})
+        assert result["ok"] is True
+        assert result["detail"]["changed"] == {}, "夹具前提:这条能力一个量都不改"
+        assert result["text"] == "你报到了狮心会。", result
+        assert result["detail"]["said"] == result["text"], "两格必须是同一句话"
+
+
+def test_那一句也进叙事日志_而且说得出它是模板不是模型写的(tmp_path):
+    """🔴 那三道闸(作者写没写 `importance` / 有没有旁白池 / `narrative.player.enabled`)
+    的理由是**旁白是一次 LLM 调用** —— 而这一句是模板,一次调用都不用。
+    所以它是**地板**,那三道闸管的是**升级**。
+    """
+    with _quiet_world(tmp_path, "q2") as world:
+        assert world.config_get("narrative.player.enabled") is False, "夹具前提:闸是关的"
+        world.player_tool("p1", "interact", {"target": "group:狮心会", "verb": "报到"})
+        # ⚠️ **按发言人筛。** 屋里那个角色自己也会有旁白(线程池什么时候落地由这台
+        # 机器此刻忙不忙决定)—— 不筛的话这条用例会随机红,而红出来的话在指控
+        # 一个没错的地方(「试牙也要试对地方」的邻居:**断言也要断对地方**)。
+        rows = [e.payload for e in world.scheduler.event_log.replay()
+                if e.type == "narrative" and e.payload.get("speaker") == "player:p1"]
+        assert [r["text"] for r in rows] == ["你报到了狮心会。"], rows
+        assert rows[0]["source"] == "template", rows[0]
+
+
+def test_角色那条路一个字都没多_回执里没有said(tmp_path):
+    """⚠️ **只给玩家。** 角色那条路的回执进的是她的对话流,多一句「你…了…」
+    会变成她自己念出来的一句旁白。"""
+    with _quiet_world(tmp_path, "q3") as world:
+        out = world.act("甲", "interact",
+                        {"target": "group:狮心会", "verb": "报到"}, surface="body")
+        assert out.get("ok") is True, out
+        assert "said" not in out, out

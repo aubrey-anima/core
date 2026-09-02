@@ -274,7 +274,12 @@ def interact(ctx: ToolContext, params: dict) -> ToolResult:
     if not outcome.get("ok"):
         # 世界说"这会儿不行"(果子还没熟)。不是失败,是没成 —— 照实报。
         return ToolResult(ok=False, error=str(outcome.get("refusal") or "这会儿不行"), detail=outcome)
-    return ToolResult(detail=outcome)
+    # 🆕 3.10.0(批 1.1 ④):**做成了就得有一句话。**
+    # 上一版这里是 `ToolResult(detail=outcome)` —— `text` 空着。真站实测:玩家点
+    # 「报到狮心会」,那条能力不改任何量,回执里只有一堆空 dict,而 `text` 是
+    # 给玩家看的那一格 —— 于是屏幕纹丝不动,和什么都没按一样。
+    # 引擎那一侧算好了这句话(`said`,纯模板、零 LLM),这里只是把它放到该在的格子里。
+    return ToolResult(text=str(outcome.get("said") or ""), detail=outcome)
 
 
 def _party(raw: Any) -> list[str]:

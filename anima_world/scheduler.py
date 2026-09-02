@@ -31,6 +31,7 @@ from anima_world.beats import (
 from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.chat_service import DEFAULT_ADDRESS
 from anima_world.events import EventLog
+from anima_world.host import interaction_line
 from anima_world.expressions import ExpressionError
 from anima_world import memory_store as memory_store_mod
 from anima_world.narrative import NarrativeProvider
@@ -2905,6 +2906,12 @@ class Scheduler:
                 "ok": True, "target": target, "verb": verb,
                 "changed": dict(outcome.updates), **self._spent(outcome),
                 "consumed": dict(outcome.consumed),
+                # 🆕 3.10.0(批 1.1 ④):**一句人话,即使 `changed` 是空的。**
+                # ⚠️ **这条路才是玩家点一下走的那条**(一个人、一样东西、一个瞬间);
+                # 下面那条是「一起做的事」。第一版只加在那一条上,真敲一遍才发现
+                # `said` 是 `None` —— **两个 return 都要加,而"看上去只有一处"是
+                # 这个仓库最贵的一种错**(同一条死胡同在两处各修一次那条)。
+                **self._player_said(agent_id, verb, target, affordance),
                 **({"spawned": born} if born else {}),
                 **({"destroyed": target} if affordance.destroys_target else {}),
                 # 边那几条到底做成没有 —— **只在真有边效果时出现**,
@@ -3083,6 +3090,12 @@ class Scheduler:
             "ok": True, "target": target, "verb": verb, "party": list(party),
             "changed": dict(head.updates), **self._spent(head),
             "consumed": dict(head.consumed),
+            # 🆕 3.10.0(批 1.1 ④):**一句人话,即使 `changed` 是空的。**
+            # 真站实测:玩家点「报到狮心会」,那条能力不改任何量,于是回执里
+            # 只有一堆空 dict,屏幕上**纹丝不动** —— 而世界里真的发生了一件事。
+            # ⚠️ **只给玩家**:角色那条路的回执进的是她的对话流,多一句"你…了…"
+            # 会变成她自己念出来的一句旁白。
+            **self._player_said(agent_id, verb, target, affordance),
             **({"spawned": born} if born else {}),
             **({"destroyed": target} if affordance.destroys_target else {}),
         }
@@ -6043,6 +6056,18 @@ class Scheduler:
         """
         if not who.startswith(self.PLAYER_PREFIX):
             return
+        # 🆕 3.10.0(批 1.1 ④):**先落一句模板回执,再谈升级。**
+        #
+        # 真站实测:玩家点「报到狮心会」,屏幕**纹丝不动** —— 那条能力 `changed` 是
+        # 空的(报到不改任何量),而这一层从前的三道闸(作者写没写 `importance` /
+        # 有没有旁白池 / `narrative.player.enabled`)只要有一道不过,他这一下就
+        # **一个字都没有**:世界里真的发生了一件事,而他读到的和什么都没按一样。
+        #
+        # 🔴 **那三道闸的理由是"旁白是一次 LLM 调用"** —— 而这一句是**模板**,
+        # 一次调用都不用。所以它是**地板**,那三道闸管的是**升级**:
+        # 闸开着就照旧丢进池子写一句像样的,闸关着也至少有这一句。
+        # 和这个仓库到处那条「失败即模板」逐字同一个姿势。
+        self._record_player_action_line(who, target, verb, affordance, here)
         if getattr(affordance, "importance", None) is None:
             return
         if self._narrative_pool is None or self.narrative_history is None:
@@ -6065,6 +6090,61 @@ class Scheduler:
             # 给一份空的 `raw`,位置那一格是真的。
             {"location": here, "raw": {}},
         )
+
+    def _record_player_action_line(
+        self, who: str, target: str, verb: str, affordance: Any, here: str,
+    ) -> None:
+        """他刚做的那一下,一句**模板**人话,进叙事日志(3.10.0,批 1.1 ④)。
+
+        **纯算术,一次模型都不调** —— 所以它跑得起在 tick 线程上,而且同一次交互
+        永远给出同一句话。写法和 `host.recap_lines` 里那一格逐字相同(「你报到了
+        狮心会。」),两处各写一套的话,同一件事在主持人那一屏和叙事流里会是两种说法。
+        """
+        said = interaction_line(
+            self.player_action_label(verb, affordance), self.entity_display_name(target),
+        )
+        if not said or self.narrative_history is None:
+            return
+        self.narrative_history.append(said)
+        event = {
+            "target_agent_id": who, "who": who, "type": "narrative",
+            "payload": {"text": said, "speaker": who,
+                        "speaker_name": self.agent_display_name(who),
+                        # **说清这一句是模板不是模型写的** —— 一个读叙事流的人
+                        # 分得出「引擎替我记了一笔」和「世界替我写了一段」。
+                        "source": "template"},
+        }
+        self._deliver(event)
+        self._record_event(event)
+
+    def _player_said(self, agent_id: str, verb: str, target: str,
+                     affordance: Any) -> dict[str, str]:
+        """回执里那一格 `said` —— **只给玩家,而且只有一处算法**(3.10.0,批 1.1 ④)。
+
+        ⚠️ **只给玩家**:角色那条路的回执进的是她的对话流,多一句「你…了…」
+        会变成她自己念出来的一句旁白。
+        ⚠️ **两个成功出口都要挂上它。** 第一版只挂了「一起做的事」那一条,而玩家
+        点一下走的是「一个人、一样东西、一个瞬间」那一条 —— 拿真 CLI 敲一遍
+        才发现 `said` 是 `None`。写成一个方法,是为了让下一个人没法只改一半。
+        """
+        if not agent_id.startswith(self.PLAYER_PREFIX):
+            return {}
+        said = interaction_line(
+            self.player_action_label(verb, affordance), self.entity_display_name(target),
+        )
+        return {"said": said} if said else {}
+
+    @staticmethod
+    def player_action_label(verb: str, affordance: Any) -> str:
+        """这个动词给人读的那几个字。作者写了 `label` 就用它 —— 她提示词里读到的
+        也是这几个字,两处同源。"""
+        return str(getattr(affordance, "label", "") or verb or "")
+
+    def entity_display_name(self, entity_id: str) -> str:
+        """一样东西给人读的名字。查不到就退回 id —— **照实说比编一个好**。"""
+        ontology = getattr(self, "ontology", None)
+        entity = (getattr(ontology, "entities", None) or {}).get(entity_id) if ontology else None
+        return str(getattr(entity, "name", "") or entity_id)
 
     def _player_narrative_enabled(self) -> bool:
         """默认 **关**。见 `_narrate_interaction` 第三条。"""

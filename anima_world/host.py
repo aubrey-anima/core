@@ -93,6 +93,19 @@ FREE_LABEL = "自己说点什么……"
 _KIND_RANK = {kind: i for i, kind in enumerate(OPTION_KINDS)}
 
 
+def interaction_line(verb_label: str, target_name: str) -> str:
+    """「你<动词>了<东西>。」—— **一次交互给玩家的那一句模板人话**(3.10.0)。
+
+    🔴 **一处写法,两个读者**:主持人那一屏的回顾(`recap_lines`)和叙事流里
+    那一句(`Scheduler._record_player_action_line`)共用它。各写一套的话,
+    同一件事在两个地方是两种说法,而**没有一处会报错**。
+    """
+    verb, target = str(verb_label or "").strip(), str(target_name or "").strip()
+    if not verb or not target:
+        return ""
+    return f"你{verb}了{target}。"
+
+
 def recap_lines(
     events: Iterable[dict[str, Any]], *, player_key: str,
     item_names: dict[str, str] | None = None,
@@ -189,8 +202,9 @@ def recap_lines(
                 continue
             verb = str(payload.get("verb_label") or payload.get("verb") or "")
             target = str(payload.get("target_name") or payload.get("target") or "")
-            if verb and target:
-                lines.append(f"你{verb}了{target}。")
+            said = interaction_line(verb, target)
+            if said:
+                lines.append(said)
             continue
     if len(lines) > RECAP_LIMIT:
         extra = len(lines) - RECAP_LIMIT
