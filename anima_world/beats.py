@@ -68,6 +68,74 @@ PREDICATE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 }
 _AGENT_BUNDLE_KEYS = {"id", "name", "location", "personality"}  # world_seed agent entry shape
 
+# ── `player` 选择器(3.9.0,2026-09-02 裁决 §2.2)──────────────────────────────
+#
+# 世界文件写在玩家出现之前,所以一条剧情拍**写不出**玩家的 id。从前的下场不是
+# "少一个特性",是一个**静默作废**的洞:写 `agent_id: "player"` 时离线两扇门答
+# `loadable: true`、开机不报错、运行期一句 warning 跳过,而 `_fire_beat` 照样
+# `mark_fired` 并写下 `beat_fired` —— **这一拍永久失效,且重启不重放**。
+#
+# 修法是**两半一起,而它们是同一个概念**:
+#   ① 一条拍顶层写 `"for_each": {"node": "player"}` —— 用 `for_each` 这个词是为了
+#      和 `rules.py` / 插件触发器同名同义(那两处都是"对每一个……各跑一遍");
+#   ② 声明之后,`payload` / `trigger.when` 里的保留字 `"player"` 指**这一趟展开的
+#      那个人**。没声明 `for_each` 时 `"player"` 就只是一个普通 agent id。
+# **声明本身就是开关** —— 和 perception、本体层逐字同构,老世界一个字不用改。
+PLAYER_TOKEN = "player"
+FOR_EACH_NODES = ("player",)
+
+# 一条拍认哪几个顶层键。⚠️ **3.8.0 一个都不查** —— 于是写了 `for_each` 的包在
+# 那一版上**开得了机**,拍按世界时响一次、`mark_fired`、烧掉。这个闭集救不了
+# 3.8.0(它已经发出去了),它救的是**下一个**不认识的键:让"我又漏了一层"有人喊。
+BEAT_KEYS = ("id", "for_each", "trigger", "payload", "once")
+
+# 🔴 **逐个 op、逐个谓词裁「玩家能不能出现在这一格」,而拒绝在加载期当场说。**
+# 从前这一层的形状是"不认识就 warning 一句跳过",而那正是上面那个洞的形状。
+# 「坏声明一个字都不写」在这一层的落法:**每一格都有结论,没有第三种"静默跳过"**。
+#
+# 收下的那几格,共同点是**玩家那一头真的有这样东西**:关系表用 `player:<id>` 做
+# target、账本和库存按 holder 记账、位置有 `_present_players` 那条路。
+# 拒掉的那几格,共同点是**玩家那一头根本没有那样东西**,而写下去只会安静地什么
+# 都不发生:玩家没有记忆表(`memory_triggers` 自己写着这句)、没有 persona、
+# 没有需求黑板、不走 `agent_join`(唯一窄口是 `World._touch_player`)。
+# 关系的**主语**只能是角色:`as: "player"` 拒、`target: "player"` 收 —— 引擎里
+# "他对她的看法"是角色那一侧的四轴,不是玩家的。
+PLAYER_ALLOWED_OP_FIELDS: dict[str, tuple[str, ...]] = {
+    "sentiment_delta": ("target",),
+    "r_type": ("target",),
+    "pay": ("from", "to"),
+    "grant_item": ("agent_id",),
+}
+PLAYER_ALLOWED_PREDICATE_FIELDS: dict[str, tuple[str, ...]] = {
+    "co_located": ("agents",),
+    "money": ("agent",),
+    "has_item": ("agent",),
+    "sentiment": ("target",),
+    "r_type": ("target",),
+}
+# 拒绝语要说得出**为什么**:一句"不支持"会让作者去试第二种写法,而这几格没有第二种。
+PLAYER_REFUSALS: dict[str, str] = {
+    "memory": "玩家那一头没有记忆表 —— 记忆是角色的",
+    "broadcast_memory": "它写的是在场角色的记忆,玩家不是记忆的主人",
+    "persona_update": "玩家没有 persona(他的称呼写在 `player.*` 那一侧)",
+    "agent_join": "玩家不走 agent_join —— 唯一窄口是 `World._touch_player`",
+    "agent_leave": "玩家的来去是在场,不是世界事件",
+    "agent_return": "玩家的来去是在场,不是世界事件",
+    "need": "需求住在角色的黑板上,玩家身上没有",
+    "as": "关系的主语只能是角色 —— 「他对你的看法」写 `target: \"player\"`",
+}
+
+
+def player_field_error(kind: str, field: str, *, is_op: bool) -> str | None:
+    """这一格写 `player` 收不收?收 → `None`;不收 → 一句说得出理由的拒绝语。"""
+    table = PLAYER_ALLOWED_OP_FIELDS if is_op else PLAYER_ALLOWED_PREDICATE_FIELDS
+    if field in table.get(kind, ()):
+        return None
+    why = PLAYER_REFUSALS.get(kind) or PLAYER_REFUSALS.get(field) or (
+        f"{kind!r} 这一层还没有玩家那一侧的东西"
+    )
+    return f"{kind!r} 的 {field!r} 写不了 {PLAYER_TOKEN!r}:{why}"
+
 
 class BeatScriptError(ValueError):
     """A beat script failed validation; carries every error found."""
@@ -123,15 +191,36 @@ def _validate_script(data: Any) -> list[str]:
         else:
             ids.add(beat_id)
             label = f"beat {beat_id!r}"
+        unknown = sorted(set(beat) - set(BEAT_KEYS))
+        if unknown:
+            errors.append(
+                f"{label}: 不认识的字段 {unknown} —— 一条拍只有 {list(BEAT_KEYS)}"
+            )
         if beat.get("once") not in (None, True):
             errors.append(f"{label}: 'once' must be true — repeating beats are not supported (v1)")
-        errors.extend(_validate_trigger(beat.get("trigger"), label))
-        errors.extend(_validate_payload(beat.get("payload"), label))
+        per_player = False
+        if "for_each" in beat:
+            for_each_errors, per_player = _validate_for_each(beat.get("for_each"), label)
+            errors.extend(for_each_errors)
+        errors.extend(_validate_trigger(beat.get("trigger"), label, per_player=per_player))
+        errors.extend(_validate_payload(beat.get("payload"), label, per_player=per_player))
     errors.extend(_validate_after_graph(beats, ids))
     return errors
 
 
-def _validate_trigger(trigger: Any, label: str) -> list[str]:
+def _validate_for_each(for_each: Any, label: str) -> tuple[list[str], bool]:
+    """`for_each` 只有一种写法,而它是**闭集**:猜错了不报错才是这一层最贵的错。"""
+    if not isinstance(for_each, dict) or set(for_each) != {"node"}:
+        return ([f"{label}: 'for_each' 只写得下一格 'node'(例:"
+                 '{"node": "player"})'], False)
+    node = for_each.get("node")
+    if node not in FOR_EACH_NODES:
+        return ([f"{label}: for_each.node {node!r} 不认识 —— "
+                 f"这一层只收 {list(FOR_EACH_NODES)}"], False)
+    return ([], node == PLAYER_TOKEN)
+
+
+def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False) -> list[str]:
     if not isinstance(trigger, dict) or not any(k in trigger for k in ("at", "after", "when")):
         return [f"{label}: 'trigger' must contain at least one of at/after/when"]
     errors: list[str] = []
@@ -152,7 +241,7 @@ def _validate_trigger(trigger: Any, label: str) -> list[str]:
             errors.append(f"{label}: trigger.when must be a list of predicates")
         else:
             for pred in when:
-                errors.extend(_validate_predicate(pred, label))
+                errors.extend(_validate_predicate(pred, label, per_player=per_player))
     return errors
 
 
@@ -161,7 +250,7 @@ def _needs_fields(kind: str) -> tuple[str, ...]:
     return PREDICATE_REQUIRED_FIELDS.get(kind, ())
 
 
-def _validate_predicate(pred: Any, label: str) -> list[str]:
+def _validate_predicate(pred: Any, label: str, *, per_player: bool = False) -> list[str]:
     if not isinstance(pred, dict):
         return [f"{label}: predicate is not an object"]
     kind = pred.get("pred")
@@ -193,6 +282,34 @@ def _validate_predicate(pred: Any, label: str) -> list[str]:
             errors.append(f"{label}: co_located predicate needs a list of >= 2 agent ids")
     if kind in ("r_type", "memory") and not isinstance(pred.get("contains"), str):
         errors.append(f"{label}: {kind} predicate needs a string 'contains'")
+    errors.extend(_player_token_errors(pred, kind, label, is_op=False, per_player=per_player))
+    return errors
+
+
+def _player_token_errors(row: dict[str, Any], kind: str, label: str, *,
+                         is_op: bool, per_player: bool) -> list[str]:
+    """这一条里写了 `player` 的那几格,逐格判 —— **加载期,不是运行期**。
+
+    没声明 `for_each` 的拍里写 `player` 不在这儿判:那时它只是一个普通 agent id,
+    而"这个 id 不在世界里"归 `beat_script_warnings`(只警告不拒绝,因为一条拍
+    完全可以先 `agent_join` 一个人再用他)。
+    """
+    if not per_player:
+        return []
+    errors: list[str] = []
+    fields = ("agent_id", "as", "target", "from", "to", "agent", "location")
+    for field in fields:
+        if str(row.get(field) or "") != PLAYER_TOKEN:
+            continue
+        problem = player_field_error(kind, field, is_op=is_op)
+        if problem:
+            errors.append(f"{label}: {problem}")
+    for who in row.get("agents") or []:
+        if str(who or "") != PLAYER_TOKEN:
+            continue
+        problem = player_field_error(kind, "agents", is_op=is_op)
+        if problem:
+            errors.append(f"{label}: {problem}")
     return errors
 
 
@@ -220,7 +337,7 @@ OP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _validate_payload(payload: Any, label: str) -> list[str]:
+def _validate_payload(payload: Any, label: str, *, per_player: bool = False) -> list[str]:
     if not isinstance(payload, list) or not payload:
         return [f"{label}: 'payload' must be a non-empty list of ops"]
     errors: list[str] = []
@@ -246,6 +363,8 @@ def _validate_payload(payload: Any, label: str) -> list[str]:
             errors.extend(_validate_memory_fields(op, op_label))
         if kind == "agent_join":
             errors.extend(_validate_agent_bundle(op.get("agent"), op_label))
+        errors.extend(_player_token_errors(op, kind, op_label, is_op=True,
+                                           per_player=per_player))
     return errors
 
 
@@ -351,22 +470,61 @@ def beat_script_warnings(
         if not isinstance(beat, dict):
             continue
         label = f"beats[{index}] ({beat.get('id', '?')})"
+        # `for_each` 的拍里,`player` 是**保留字**不是 id —— 报它"不在这个世界里"
+        # 是一句假警告,而假警告的代价是作者去改一行没错的东西(那条教训这个仓库
+        # 记过:「拒绝语指错病灶,和没有拒绝语一样贵」)。收不收这一格由加载期那张
+        # 表判,这里一个字都不该说。
+        # ⚠️ **每条拍一份**,不是就地改那个共享的集合:一条 per-player 拍之后,
+        # 后面那些普通拍会跟着一起不报 —— 一次放行悄悄放行了它后面的所有人。
+        pool = (agents | {PLAYER_TOKEN}) if is_per_player(beat) else agents
         for pred in (beat.get("trigger") or {}).get("when") or []:
             if not isinstance(pred, dict):
                 continue
             for key in ("as", "target"):
-                _check("角色", pred.get(key), agents, f"{label}.trigger")
+                _check("角色", pred.get(key), pool, f"{label}.trigger")
             for who in pred.get("agents") or []:
-                _check("角色", who, agents, f"{label}.trigger")
+                _check("角色", who, pool, f"{label}.trigger")
         for j, op in enumerate(beat.get("payload") or []):
             if not isinstance(op, dict):
                 continue
             op_label = f"{label}.payload[{j}] {op.get('op', '?')}"
             if op.get("op") != "agent_join":
                 for key in _OP_AGENT_FIELDS:
-                    _check("角色", op.get(key), agents, op_label)
+                    _check("角色", op.get(key), pool, op_label)
             _check("地点", op.get("location"), locations, op_label)
     return warnings
+
+
+def is_per_player(beat: dict[str, Any]) -> bool:
+    """这一条拍是不是"对每个玩家各跑一遍"的。"""
+    for_each = beat.get("for_each")
+    return isinstance(for_each, dict) and for_each.get("node") == PLAYER_TOKEN
+
+
+_PLAYER_BINDABLE_FIELDS = ("agent_id", "as", "target", "from", "to", "agent")
+
+
+def bind_player(row: dict[str, Any], subject: str) -> dict[str, Any]:
+    """把保留字 `player` 换成**这一趟的那个人**(`player:<id>`)。
+
+    ⚠️ **换的是 `player:<id>` 这个形状,不是 `agent:player:<id>`。** 两个形状在这个
+    引擎里都真实存在,而它们各管一头:量表按 `agent:player:<id>` 存(`me_*` 读的
+    是"一个人身上的量",这件事对两种人是同一件),而**关系、账本、库存、事件顶层
+    的 `who`、在场位置一律是 `player:<id>`** —— 节拍的谓词和 op 读的全是后面这些。
+    挑错一个,每一条都安静地不成立。
+
+    `subject` 是空串(世界级的拍)时原样返回,一个字都不碰。
+    """
+    if not subject:
+        return row
+    out = dict(row)
+    for field in _PLAYER_BINDABLE_FIELDS:
+        if str(out.get(field) or "") == PLAYER_TOKEN:
+            out[field] = subject
+    agents = out.get("agents")
+    if isinstance(agents, list):
+        out["agents"] = [subject if str(a or "") == PLAYER_TOKEN else a for a in agents]
+    return out
 
 
 def _validate_after_graph(beats: list[Any], ids: set[str]) -> list[str]:
@@ -420,27 +578,41 @@ def _warn_unpaired_leaves(beats: list[dict[str, Any]]) -> None:
 def trigger_ready(
     beat: dict[str, Any],
     now: WorldTime,
-    fired: set[str],
+    fired: set[tuple[str, str]],
     projection: Projection,
     agent_locs: dict[str, str],
     reader: Any | None = None,
+    *,
+    subject: str = "",
+    day_zero: int = 0,
 ) -> bool:
     """All trigger conditions ANDed. `at` means "no earlier than" — the tick
     granularity (5 world minutes by default) would miss an equality match.
     A predicate that errors reads as not-met: firing wrongly is worse than
-    firing late, and the beat retries every tick anyway."""
+    firing late, and the beat retries every tick anyway.
+
+    🔴 **`day_zero` 是"这一趟从哪一天算起"**(3.9.0)。世界级的拍是 0,也就是从前
+    那个样子;而 `for_each: {"node": "player"}` 的拍从**这个玩家第一次进这个世界
+    那一天**算起。理由是老板会在世界第 40 天点进来,而他要拿到的是**他的**第 1 天
+    那封信,不是一条 39 天前就烧掉的拍 —— 一份"新手第一周"按世界时写,只对第一个
+    玩家成立,对之后每一个人都是空的。
+    """
     trigger = beat.get("trigger") or {}
     at = trigger.get("at")
     if at is not None:
-        due = (int(at.get("day", 0)), int(at.get("minute_of_day", 0)))
+        due = (int(at.get("day", 0)) + int(day_zero), int(at.get("minute_of_day", 0)))
         if (now.day, now.minute_of_day) < due:
             return False
     after = trigger.get("after")
-    if after is not None and after not in fired:
-        return False
+    if after is not None:
+        # 要等的那一拍:**要么是为我响的,要么是世界级的**。只认前者的话,
+        # 一条挂在世界级开场后面的玩家拍永远等不到;只认后者的话,
+        # 两个玩家的第二拍会被第一个人的第一拍解锁。
+        if (after, subject) not in fired and (after, "") not in fired:
+            return False
     for pred in trigger.get("when") or []:
         try:
-            if not _eval_predicate(pred, projection, agent_locs, reader):
+            if not _eval_predicate(bind_player(pred, subject), projection, agent_locs, reader):
                 return False
         except Exception:  # noqa: BLE001 - a broken predicate must not stop the world
             logger.warning(
@@ -745,34 +917,67 @@ class BeatDirector:
     a newly added id participates normally (D1).
     """
 
-    def __init__(self, script: BeatScript, fired: set[str] | None = None):
+    def __init__(self, script: BeatScript, fired: set[tuple[str, str]] | None = None):
         self.script = script
-        self.fired: set[str] = set(fired or ())
+        # 🔴 **键是 `(拍 id, 主语)`,不再只是拍 id**(3.9.0)。主语是空串 = 世界级
+        # (从前那个样子,逐字不变);`player:<id>` = 这一拍为这个人响过了。
+        # 一份"新手第一周"要对**每一个**玩家各响一次,而按拍 id 记账的话,
+        # 第一个玩家的到来就把整份剧情烧光了 —— 而且 `beat_fired` 是历史,
+        # 重启不重放,烧光了就再也回不来。
+        self.fired: set[tuple[str, str]] = {
+            item if isinstance(item, tuple) else (item, "") for item in (fired or ())
+        }
         # Membership, not arithmetic: the replayed fired-set may contain ids
         # from an earlier script version that this script no longer has —
         # counting them made has_pending() short-circuit a script whose own
         # beats had never fired (caught by agent-leave-return's restart test).
-        self._pending: set[str] = {b["id"] for b in script.beats} - self.fired
+        self._per_player_ids = {b["id"] for b in script.beats if is_per_player(b)}
+        self._pending: set[str] = (
+            {b["id"] for b in script.beats if not is_per_player(b)}
+            - {bid for bid, subject in self.fired if not subject}
+        )
 
     def due_beats(
         self, now: WorldTime, projection: Projection, agent_locs: dict[str, str],
-        reader: Any | None = None,
-    ) -> list[dict[str, Any]]:
-        """Beats whose trigger is satisfied this tick. Computed against the
-        fired-set as of NOW: a beat whose `after` prerequisite fires this same
-        tick becomes due on the next one."""
-        return [
-            beat
-            for beat in self.script.beats
-            if beat["id"] not in self.fired
-            and trigger_ready(beat, now, self.fired, projection, agent_locs, reader)
-        ]
+        reader: Any | None = None, players: dict[str, int] | None = None,
+    ) -> list[tuple[dict[str, Any], str]]:
+        """这一 tick 该响的 `(拍, 主语)`。世界级的主语是空串。
 
-    def mark_fired(self, beat_id: str) -> None:
-        self.fired.add(beat_id)
-        self._pending.discard(beat_id)
+        `players` 是 `{player_id: 他进这个世界那一天}`,由调度器给
+        (`Projection.players_joined`)。**空的话每一条 per-player 拍都不响** ——
+        而"不响"不等于"作废":它没被 `mark_fired`,人来了再说。
+
+        Computed against the fired-set as of NOW: a beat whose `after`
+        prerequisite fires this same tick becomes due on the next one.
+        """
+        due: list[tuple[dict[str, Any], str]] = []
+        for beat in self.script.beats:
+            if is_per_player(beat):
+                for player_id, join_day in sorted((players or {}).items()):
+                    subject = f"player:{player_id}"
+                    if (beat["id"], subject) in self.fired:
+                        continue
+                    if trigger_ready(beat, now, self.fired, projection, agent_locs,
+                                     reader, subject=subject, day_zero=int(join_day)):
+                        due.append((beat, subject))
+                continue
+            if (beat["id"], "") in self.fired:
+                continue
+            if trigger_ready(beat, now, self.fired, projection, agent_locs, reader):
+                due.append((beat, ""))
+        return due
+
+    def mark_fired(self, beat_id: str, subject: str = "") -> None:
+        self.fired.add((beat_id, subject))
+        if not subject:
+            self._pending.discard(beat_id)
 
     def has_pending(self) -> bool:
         """False once every beat OF THIS SCRIPT has fired — the scheduler's
-        short-circuit so an exhausted script costs nothing per tick."""
-        return bool(self._pending)
+        short-circuit so an exhausted script costs nothing per tick.
+
+        ⚠️ **有 per-player 拍的脚本永远 pending**,而这不是漏了短路:那种拍等的是
+        **还没来的人**,而"这个世界以后不会再有新玩家"是引擎无从知道的一件事。
+        真正的省钱在上面 —— 名册空的时候那一层一条都不算。
+        """
+        return bool(self._pending or self._per_player_ids)

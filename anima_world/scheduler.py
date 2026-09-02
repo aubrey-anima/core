@@ -23,6 +23,7 @@ from anima_world.beats import (
     BeatDirector,
     BeatScript,
     coerce_goals,
+    bind_player,
     expand_event_op,
     expand_relations,
     memory_seed_event,
@@ -254,8 +255,10 @@ class Scheduler:
         self._beat_agent_factory = beat_agent_factory
         self.beat_director: BeatDirector | None = None
         if beat_script is not None:
+            # `(拍 id, 主语)`。老事件没有 `for` 那一格,读成空串 = 世界级 ——
+            # 向后兼容,而且那正是它们当初的语义。
             fired = {
-                e.payload.get("beat_id")
+                (e.payload.get("beat_id"), str(e.payload.get("for") or ""))
                 for e in boot_events
                 if e.type == "beat_fired" and e.payload.get("beat_id")
             }
@@ -4432,20 +4435,52 @@ class Scheduler:
                 locs[agent_id] = loc
         return locs
 
+    def _beat_predicate_locations(self) -> dict[str, str]:
+        """`co_located` 这类**谓词**问"谁在哪儿"时读的那张表 —— 角色 **加上**在场玩家。
+
+        🔴 **和 `_agent_locations()` 分成两张,而这不是洁癖。** 第一版我直接把玩家
+        并进了那一张,四条用例当场红:`_agent_locations()` 还有别的调用方,而它们
+        拿到 id 之后**直接 `self.agents[aid]`** —— 玩家没有 brain,`KeyError`。
+        「放行是有半径的,而半径要自己去量」,这一次半径就是这四条。
+
+        ⚠️ **`broadcast_memory` 取见证人有意留在窄的那张上**:它写的是见证者的记忆,
+        而玩家那一头没有记忆表 —— 把人并进去,那条 op 会试着给一个没有记忆表的人
+        写记忆。同一条理由让 `broadcast_memory` 在加载期就拒绝 `player`。
+
+        人没有 brain,所以走名册那条路;规矩和角色逐字相同:**在途 = 不在任何地方**。
+        """
+        locs = self._agent_locations()
+        if self._present_players is None:
+            return locs
+        try:
+            roster = self._present_players() or {}
+        except Exception:  # noqa: BLE001 - 读不到名册不该掀翻 tick
+            logger.warning("读在场玩家名册失败(节拍取位置)", exc_info=True)
+            return locs
+        for pid, info in roster.items():
+            row = info or {}
+            if row.get("in_transit"):
+                continue
+            loc = str(row.get("location") or "")
+            if loc:
+                locs[f"{self.PLAYER_PREFIX}{pid}"] = loc
+        return locs
+
     def _check_beats(self, now: WorldTime) -> None:
         """Fire every due beat. Called from tick() with self._lock held.
         Short-circuits once the whole script has fired, so an exhausted
         script costs nothing on the tick path."""
         if self.beat_director is None or not self.beat_director.has_pending():
             return
-        agent_locs = self._agent_locations()
+        agent_locs = self._beat_predicate_locations()
         reader = _BeatWorldReader(self)
-        for beat in self.beat_director.due_beats(
-            now, self._memory_projection, agent_locs, reader
+        for beat, subject in self.beat_director.due_beats(
+            now, self._memory_projection, agent_locs, reader,
+            players=self._memory_projection.players_joined,
         ):
-            self._fire_beat(beat, now)
+            self._fire_beat(beat, now, subject)
 
-    def _fire_beat(self, beat: dict[str, Any], now: WorldTime) -> None:
+    def _fire_beat(self, beat: dict[str, Any], now: WorldTime, subject: str = "") -> None:
         """Expand one beat's payload and record it, `beat_fired` first.
 
         Pure data expansion — no LLM call ever happens here (the text is
@@ -4454,13 +4489,15 @@ class Scheduler:
         can never wedge the script (D4).
         """
         beat_id = beat["id"]
-        self.beat_director.mark_fired(beat_id)
+        self.beat_director.mark_fired(beat_id, subject)
         events: list[dict[str, Any]] = []
         ops_applied: list[str] = []
         for op in beat.get("payload", []):
             kind = op.get("op")
             try:
-                expanded = self._expand_beat_op(op)
+                # 保留字 `player` → 这一趟的那个人。**在这里换,不在展开里换** ——
+                # 展开那一层要认的是真 id,而"这一趟是谁"只有这儿知道。
+                expanded = self._expand_beat_op(bind_player(op, subject))
             except Exception:  # noqa: BLE001 - one bad op must not stop the world
                 logger.warning("beat %r op %r failed — skipping the op", beat_id, kind, exc_info=True)
                 continue
@@ -4475,6 +4512,9 @@ class Scheduler:
                 "day": now.day,
                 "minute_of_day": now.minute_of_day,
                 "ops_applied": ops_applied,
+                # 为谁响的。**世界级的拍这一格不写** —— 老事件里没有它,写一个空串
+                # 进去只会让"这条是老的"和"这条是世界级的"变成两种写法。
+                **({"for": subject} if subject else {}),
             },
         })
         for ev in events:
@@ -4581,7 +4621,8 @@ class Scheduler:
         # World-known, not merely registered: an away agent (agent_leave) still
         # forms memories and its relations still shift — the guard exists to
         # catch authoring typos, and the projection knows every real agent.
-        known = set(self.agents) | set(self._memory_projection.agents)
+        known = (set(self.agents) | set(self._memory_projection.agents)
+                 | {f"player:{pid}" for pid in self._memory_projection.players_joined})
         events = expand_event_op(op, agent_locs=self._agent_locations(), known_agents=known)
         if not events and kind != "broadcast_memory":
             return None  # skipped (unknown agent) — broadcast may legitimately be empty

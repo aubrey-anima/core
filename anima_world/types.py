@@ -113,6 +113,20 @@ class Projection:
     为什么必须有它:折叠端只认 `.delta` 后缀,而 `payment` 是**内核**事件 ——
     改名破坏消费方,两条都发是同一笔钱记两遍账。**只有"多一格声明"这条不破坏任何人。**
     """
+    players_joined: dict[str, int] = field(default_factory=dict)
+    """每个玩家**第一次**走进这个世界那一天(世界日),折自 `player_join` 事件。
+
+    它是 `for_each: {"node": "player"}` 那种剧情拍的**零点**:一份"新手第一周"
+    按世界时写只对第一个玩家成立,之后每一个人点进来看到的都是一条 39 天前就烧掉
+    的拍。按这一格算,他的第 1 天就是他自己的第 1 天。
+
+    🔴 **和 `allowances` 逐字同一条理由:这个"第一次"必须记在账本上,不记在在场上。**
+    在场(`RedisPlayerPresence`)带 TTL —— 挂在那里的话,一个下线再上线的人就是又一次
+    "第一次",他的第一周**每次登录重开一遍**。线上晚潮的 `dogfood-2e7fbb4` 因为同一个
+    错**领了四次见面礼**,那笔账是这一格的病历。
+
+    **第一次赢**:`player_departed` 不清它 —— 他确实来过,而告别不该让整份剧情重来。
+    """
     allowances: set[str] = field(default_factory=set)
     """领过见面礼的 holder。**这是"只给一次"那个一次的家。**
 

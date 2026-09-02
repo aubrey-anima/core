@@ -62,6 +62,8 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_item_transfer(proj, e)
     elif e.type == "item_consume":
         _apply_item_consume(proj, e)
+    elif e.type == "player_join":
+        _apply_player_join(proj, e)
     elif e.type == "player_departed":
         _apply_player_departed(proj, e)
     elif e.type == "agent_invites":
@@ -241,6 +243,20 @@ def _doing(state: Any) -> dict[str, Any]:
     # 拷贝之后再删 —— 事件那个 dict 是**已经发生过的事实**,就地改它等于改写历史
     # 的显示(见 `_apply_agent_join` 里 spec 那段的教训)。
     return {k: v for k, v in state.items() if k != "location"}
+
+
+def _apply_player_join(proj: Projection, e: Event) -> None:
+    """他第一次走进这个世界是哪一天。**第一次赢**(`setdefault`):同一个人再来
+    一次不该把他的零点往后推,那正是"第一周每次登录重开一遍"那个错的形状。"""
+    payload = e.payload or {}
+    player_id = str(payload.get("player_id") or "")
+    if not player_id:
+        return
+    try:
+        day = int(payload.get("day", 0))
+    except (TypeError, ValueError):
+        day = 0
+    proj.players_joined.setdefault(player_id, day)
 
 
 def _apply_agent_join(proj: Projection, e: Event) -> None:

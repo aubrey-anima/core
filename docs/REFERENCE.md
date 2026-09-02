@@ -4538,8 +4538,24 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 | `llm.base_url` | str | 空 | OpenAI 兼容端点 |
 | `llm.model` | str | `gpt-4o-mini` | 模型名 |
 | `llm.timeout` | float | 30.0 | 单次调用超时(秒) |
-| `llm.max_retries` | int | 2 | SDK 重试次数 |
+| `llm.max_retries` | int | 2 | SDK 重试次数。⚠️ **只在流开始之前管用** —— 流吐出第一片之后断掉,它一个字都帮不上,那是下面两格的活 |
+| `llm.stream.first_timeout` | float | 30.0 | 流式:等**第一片**多久(prefill 在这一段里,慢是正常的)。**和从前的 `llm.timeout` 逐字相同,有意不收紧** |
+| `llm.stream.gap_timeout` | float | 15.0 | 流式:第一片之后**片与片之间**能空多久。比从前紧一半 —— 敢收紧是因为落在"还没吐正文"那一段的超时**会自动重来一次**(见下) |
 | `llm.background.model` | str | 空 | **背景槽**的模型:意图分类器与连续输出的每一步走它(便宜快模型)。空 = 用 `llm.model`。key 与端点共用主槽的 |
+
+🔴 **流式的两把尺,以及一次重来(3.9.0,收件箱 D51)。** 从前只有一把:`llm.timeout`
+同时管"第一片什么时候到"和"片与片之间能空多久"(httpx 的 read timeout 每次读都重新
+计时)。2026-09-02 线上量到它的代价:两次聊天都在吐出开头的 `〔stance:neutral〕`
+三个分片之后**停住 30 秒**,`ReadTimeout`,整轮作废,玩家看到的是站点那句
+「她没能接上话」;拿同一份提示词、同样 30 秒超时原样重放 4 次,**4/4 成功**。
+
+- 现在是两把,而**两个默认值的理由不一样,别一起调**:首片那把不收紧(首片慢的世界
+  今天跑得好好的,收紧一个超时是只在别人机器上发作的破坏);空档那把紧一半
+  (首片之后的空档在任何一家兼容端点上都不该超过几秒,它不是慢,是卡住了)。
+- **还没吐出正文时断掉会自动重来一次**(只一次)。⚠️ **"还没吐正文"不等于
+  "还没 yield 过"**:线上挂掉时流已经吐过三片,而那三片是玩家根本看不到的控制标记。
+  按"吐过就不重来"判,恰恰是最该重来的那一类永远不重来。
+- **已经吐出正文之后绝不重来** —— 重复的正文比一句"她没能接上话"更难解释。
 | `scheduler.tick_rate` | float | 1/300 | 每现实秒的 tick 数;1/300 = 与现实 1:1,1.0 = 演示速度 |
 | `scheduler.max_agents` | int | 100 | 名册人数上限,**性能护栏**;`0` = 不限。撞上时 `Scheduler.register()` 抛 `RuntimeError`,而报错里带着解法(`config set scheduler.max_agents N`)—— 那一刻看报错的人正是需要这句话的人。⚠️ 它撞在**世界第一次开机**那一刻,离创作现场最远的一环:一个 120 人的世界可以管线全绿、体检全过、打包成功,然后开不了机。**这个数是运营的判断,不是引擎替他做的** —— 引擎只给一个默认值 |
 | `agent.idle_timeout` | float | 30.0 | 行为树 idle 看门狗阈值(秒) |
@@ -5054,6 +5070,61 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 **校验语义**:加载期一次列出**全部**错误(id 重复、未知 op/谓词、缺字段、类型错、after
 成环…),坏脚本拒绝启动;运行期单个谓词求值失败读作"未满足"(下 tick 重试),坏 op
 跳过并警告,beat 无论如何标记已触发 —— 坏 op 不能楔死剧本。
+
+### 9.1 指向「任何玩家」的拍(`for_each`,3.9.0)
+
+世界文件写在玩家出现之前,所以一条拍**写不出**玩家的 id。3.8.0 上写
+`agent_id: "player"` 的下场不是"少一个特性",是一个**静默作废**的洞:离线两扇门答
+`loadable: true`、开机不报错、运行期一句 warning 跳过,而 `_fire_beat` 照样
+`mark_fired` 并写下 `beat_fired` —— **这一拍永久失效,而且重启不重放**。
+
+```jsonc
+{"id": "day1-letter",
+ "for_each": {"node": "player"},          // ← 对每个玩家各跑一遍
+ "trigger": {"at": {"day": 1},            // ← 他自己的第 1 天,不是世界的第 1 天
+             "when": [{"pred": "co_located", "agents": ["芬格尔", "player"]}]},
+ "payload": [{"op": "grant_item", "agent_id": "player", "item_id": "letter"}]}
+```
+
+- **声明本身就是开关。** 不写 `for_each` 的老拍逐字不变 —— 那里的 `"player"` 照旧只是
+  一个普通 agent id(不在世界里 → 归 `beat_script_warnings`,只提醒不拒绝)。
+- **保留字 `"player"` 绑成 `player:{player_id}`** —— 关系、账本、库存、事件顶层的
+  `who`、在场位置用的都是这个形状。⚠️ **不是 `agent:player:<id>`**:那个是量表的形状
+  (`me_*` 读的那一头)。挑错一个,每一条都安静地不成立。
+- **零点是 `player_join`** —— 他第一次走进这个世界那一天。老板在世界第 40 天点进来,
+  拿到的仍然是**他的**第 1 天那封信。⚠️ 这个"第一次"记在**账本**上,不记在在场上
+  (在场带 TTL,挂在那儿的话他的第一周每次登录重开一遍)。
+- **`once` 按玩家各算一次**:`beat_fired` 多一格 `for`(= `player:<id>`);老事件没有
+  这一格 = 世界级,那正是它们当初的语义。
+- **`after` 要么是为我响的那一拍,要么是世界级的那一拍。** 只认前者,挂在世界级开场
+  后面的玩家拍永远等不到;只认后者,两个玩家的第二拍会被第一个人的第一拍解锁。
+- **名册空的时候一条都不响,但也一条都不烧** —— 没人来 ≠ 这一拍作废。
+  连带一条:**有 per-player 拍的脚本永远 `has_pending()`**,因为它等的是还没来的人。
+
+**哪一格写得下 `player`,是加载期判的**(下面这两张表就是 `contract --json` 的
+`beats.player_selector`;拒了当场说,**没有第三种"静默跳过"**):
+
+| op | 写得下 `player` 的格 | 写不下的那些为什么 |
+|---|---|---|
+| `sentiment_delta` / `r_type` | `target` | `as` 写不下 —— 关系的主语只能是角色 |
+| `pay` | `from` / `to` | |
+| `grant_item` | `agent_id` | |
+| `memory` | **一格都没有** | 玩家那一头没有记忆表 |
+| `broadcast_memory` | **一格都没有** | 它写的是在场角色的记忆 |
+| `persona_update` | **一格都没有** | 玩家没有 persona |
+| `agent_join` / `agent_leave` / `agent_return` | **一格都没有** | 玩家的来去是在场,不是世界事件;唯一窄口是 `World._touch_player` |
+
+| 谓词 | 写得下 `player` 的格 |
+|---|---|
+| `co_located` | `agents` |
+| `money` / `has_item` | `agent` |
+| `sentiment` / `r_type` | `target`(`as` 写不下,同上) |
+| `need` / `memory` | **一格都没有**(需求住角色的黑板,记忆是角色的) |
+
+⚠️ **一条拍的顶层键从 3.9.0 起是闭集**(`id` / `for_each` / `trigger` / `payload` /
+`once`)。3.8.0 一个都不查 —— 所以**写了 `for_each` 的包在 3.8.0 上开得了机**,
+拍按世界时响一次、烧掉。这个闭集救不了 3.8.0,它救的是下一个不认识的键;
+**发包前的判据是 `contract --json` 里 `beats.player_selector` 在不在,不是版本号。**
 
 ## 10. 插件(3.8.0,第 1 期)
 

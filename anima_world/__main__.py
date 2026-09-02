@@ -7333,7 +7333,12 @@ def contract_payload() -> dict[str, Any]:
         _PLAYER_TTL_SECONDS,
     )
     from anima_world.beats import (
+        BEAT_KEYS,
+        FOR_EACH_NODES,
         OP_REQUIRED_FIELDS,
+        PLAYER_ALLOWED_OP_FIELDS,
+        PLAYER_ALLOWED_PREDICATE_FIELDS,
+        PLAYER_TOKEN,
         PREDICATE_REQUIRED_FIELDS,
         VALID_OPS,
         _VALID_PREDICATES,
@@ -8078,6 +8083,42 @@ def contract_payload() -> dict[str, Any]:
             "predicate_required_fields": {
                 pred: sorted(fields)
                 for pred, fields in sorted(PREDICATE_REQUIRED_FIELDS.items())
+            },
+            # 🆕 3.9.0:剧情拍指得到「任何玩家」了。
+            # **这一格缺席 = 这支引擎没有它**,而"没有它"的样子是这个仓库最怕的那种:
+            # 写了 `for_each` 的包在 3.8.0 上**开得了机**(那一版一条拍的顶层键一个
+            # 都不查)、拍按世界时响一次、`mark_fired`、烧掉 —— 静默作废,重启不重放。
+            # **发舰队前按这一格探测,不比版本号**(`anima-world:3.8.0` 这个名字下
+            # 已经有过两支能力不同的引擎)。
+            "player_selector": {
+                "for_each": {"node": sorted(FOR_EACH_NODES)},
+                "token": PLAYER_TOKEN,
+                "binds_to": "player:{player_id}",
+                "beat_keys": sorted(BEAT_KEYS),
+                "day_zero": "player_join",
+                "once_scope": "per_player",
+                "fired_event_key": "for",
+                # 🔴 **逐格的收拒表,而不是一句"支持玩家了"。** 一句话的能力声明
+                # 挡不住"写下去、开得了机、什么都不发生"那一族 —— 而拒绝正是这一层
+                # 唯一便宜的东西。镜像端照这两张表写自己的提醒。
+                "op_player_fields": {
+                    op: sorted(fields)
+                    for op, fields in sorted(PLAYER_ALLOWED_OP_FIELDS.items())
+                },
+                "predicate_player_fields": {
+                    pred: sorted(fields)
+                    for pred, fields in sorted(PLAYER_ALLOWED_PREDICATE_FIELDS.items())
+                },
+                "gloss": (
+                    "一条拍顶层写 `\"for_each\": {\"node\": \"player\"}`,之后 "
+                    "`payload` / `trigger.when` 里的保留字 `player` 指**这一趟展开的"
+                    "那个人**。三件配套语义:`trigger.at.day` 从**他第一次进这个世界"
+                    "那一天**算起(零点是 `player_join` 事件,记在账本上不记在带 TTL "
+                    "的在场上);`once` 按玩家**各算一次**(`beat_fired` 多一格 "
+                    "`for`,老事件没有它 = 世界级);**每一格写不写得下 `player` 是"
+                    "加载期判的**,拒了就当场说,没有第三种「静默跳过」。"
+                    "不写 `for_each` 的老拍逐字不变 —— 声明本身就是开关。"
+                ),
             },
         },
     }

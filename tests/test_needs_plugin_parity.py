@@ -64,6 +64,16 @@ GOLDEN = json.loads(
 
 #: `state()` 里由**线程池**喂的那三格。见模块 docstring 那张表 —— 它们对未改动的
 #: 引擎也不可复现,所以不进这道闸。
+# 🔴 **`player_join` 也滤掉,而这不是"金线红了就把它加进白名单"。**
+# 这两条金线量的是一件很具体的事:**把 needs / economy 从内核搬成出厂插件,行为
+# 一个字节都没变**。基线是从**旧路那棵树**采的,而 3.9.0 给引擎加了一条全新的事件
+# (`player_join`:他第一次走进这个世界那一天,`for_each: {"node":"player"}` 的剧情拍
+# 拿它当零点)—— 那是一次**独立的、有意的**行为变更,不是搬家搬出来的偏差。
+# ⚠️ **不能靠"重采基线"化解**:基线记的是旧路的行为,而旧路的代码已经删了 ——
+# 拿 HEAD 重采一遍,这道闸就变成 HEAD 和 HEAD 比,永远绿而且什么都不测。
+# 所以滤,而且**只滤这一种**:多一条别的、少一条、payload 差一个字节,照旧当场红。
+_PARITY_IGNORED_EVENTS = ("narrative", "player_join")
+
 ASYNC_KEYS = ("narrative_log", "recent_events", "runtime")
 
 
@@ -179,7 +189,7 @@ def _run(tmp_path):
             "events": sorted(
                 [e.type, json.dumps(e.payload, ensure_ascii=False, sort_keys=True)]
                 for e in world.scheduler.event_log.replay()
-                if e.type != "narrative"
+                if e.type not in _PARITY_IGNORED_EVENTS
             ),
             "state_sha": hashlib.sha256(json.dumps(
                 state, ensure_ascii=False, sort_keys=True,

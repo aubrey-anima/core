@@ -7280,6 +7280,17 @@ class World:
         fresh = self.presence_store.create(
             player_id, {"role": "", "location": None}
         )
+        # 🔴 **「他第一次走进这个世界」记在账本上,不记在 `fresh` 上,而且不在
+        # `fresh` 分支里叫。** 两个理由,各自成立:
+        # ① 判据本身:`fresh` 是在场那张**带 TTL** 的行报的,一个下线再上线的人
+        #    照样是 `True` —— 拿它当"第一次",他的第一周会每次登录重开一遍。
+        #    同一个错让线上晚潮的 `dogfood-2e7fbb4` 领了四次见面礼
+        #    (见 `_grant_player_allowance`,那笔账是这一格的病历)。
+        # ② 叫的位置:一个**升级那一刻正在线**的玩家,他的在场行还在,`fresh` 是
+        #    `False` —— 挂在分支里面的话,他要等 TTL 过期、再回来一次才补得上零点,
+        #    而在那之前他每一条 per-player 拍都没有零点可算。
+        # 重复由投影挡(这个函数自己查),所以在外面叫是安全的。
+        self._record_player_join(player_id)
         if fresh:
             # 他身上声明过的量在这儿落地 —— 和角色走同一份(`register` 那条路),
             # 只填缺不覆盖。这里是玩家侧唯一的窄口,和 `register` 的地位一样。
@@ -7291,6 +7302,32 @@ class World:
             player_id, {**fields, "last_seen": time.time()}
         )
         return self.players[player_id]
+
+    def _record_player_join(self, player_id: str) -> None:
+        """他第一次走进这个世界 —— 一辈子一条 `player_join`(3.9.0)。
+
+        为什么要有这条事件:`for_each: {"node": "player"}` 的剧情拍要按**他自己的
+        第几天**算,而"他哪天来的"今天在这个世界里**没有任何持久的答案** ——
+        在场带 TTL、导出不带走在场、`agent_join` 只发给角色。日志是唯一不会过期的
+        那一份,所以这件事就该是一条事件。
+
+        判据("他来过没有")读的是投影,**和 `_grant_player_allowance` 逐字同一个
+        形状**:锁内先补课再问,理由也逐字相同 —— 别的进程刚发过的那一条不折过来
+        就看不见,而这一层正是多进程共用一个世界的地方。
+
+        发不出去不该掀翻一次露面(没有事件日志的世界):这是一条记录,不是一道闸。
+        """
+        if self.scheduler.event_log is None:
+            return
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            if player_id in self.scheduler._memory_projection.players_joined:
+                return
+            day = self.scheduler.world_time().day
+        self._record_and_fan({
+            "type": "player_join", "who": f"player:{player_id}",
+            "payload": {"player_id": player_id, "day": int(day)},
+        })
 
     def _grant_player_allowance(self, player_id: str) -> None:
         """他兜里的第一笔钱 —— 一辈子一次。
