@@ -794,11 +794,21 @@ class RedisPromptStore:
 class RedisVisibilityStore:
     """可见性声明 + 量在哪儿。**没声明 = 感知不到**,那条默认值必须原样保住。"""
 
-    __slots__ = ("_rules", "_places")
+    __slots__ = ("_rules", "_places", "on_change")
 
     def __init__(self, redis: Any, world_id: str) -> None:
         self._rules = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:visibility")
         self._places = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:stock_places")
+        # 声明变过之后要通知谁(`Scheduler` 挂上来的一个回调,可以没有)。
+        # **挂在这儿而不是挂在每个调用方身上**,理由和 `loc` 那五处写点逐字相同:
+        # 这里是"声明改了"的**唯一窄口**(装插件、卸插件、裁剪、`World.
+        # declare_visibility` 全走 `declare`/`undeclare`),挨个去加等于给未来的
+        # 第 N 个入口留一个静默的洞。
+        self.on_change: Any = None
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     def declare(self, owner_kind: str, key: str, visibility: str,
                 label: str | None = None, bands: Any = None,
@@ -834,6 +844,7 @@ class RedisVisibilityStore:
         if notes and any(str(n or "").strip() for n in notes):
             row["band_notes"] = [str(n or "") for n in notes]
         self._rules.put(f"{owner_kind}\x00{key}", row)
+        self._changed()
 
     def undeclare(self, owner_kind: str, key: str) -> int:
         """撤掉一行可见性声明 —— **插件裁剪与卸载唯一的出口**(3.8.0)。
@@ -842,7 +853,9 @@ class RedisVisibilityStore:
         (收严会让写过额外键的已发布世界开不了机)。插件不同 —— 它在**自己的
         命名空间**里裁自己的,一个字都碰不到别人。
         """
-        return self._rules.drop(f"{owner_kind}\x00{key}")
+        dropped = self._rules.drop(f"{owner_kind}\x00{key}")
+        self._changed()
+        return dropped
 
     def declarations(self) -> list[dict[str, Any]]:
         return sorted(

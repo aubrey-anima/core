@@ -324,7 +324,7 @@ class Scheduler:
         self.contact_store: Any | None = None
         # world-rules:世界的规律(数据)与它们作用的存量。规律是纯算术,跑在 tick 上。
         self.stock_store: Any | None = None
-        self.visibility_store: Any | None = None   # 可见性声明 + 东西在哪(perception)
+        self._visibility_store: Any | None = None  # 见下面那个 property
         self.world_rules: list[Any] = []
         # 插件(3.8.0)。`plugins` 是**这一次开机装着的那几个**(声明的权威是世界
         # 文件,库里那份 `:plugins` 只记"装的是哪一版、有哪几个事实名")。
@@ -2306,16 +2306,58 @@ class Scheduler:
         """她身上有没有**别人看得见**的量。没有的话下面那步整个不必做。
 
         `self` 档不算:那种量只有她自己知道,谁站在哪儿都不改变这件事。
+
+        🔴 **判据是可见性表,不是本体层**(3.9.0 改;2026-09-02 裁决 §2.4)。
+        从前这里读的是 `ontology.kinds["agent"].quantities`,而**插件声明的事实只落进
+        可见性表,根本不进 `ontology.kinds`**。下场:一个用插件给玩家挂 `public` 事实、
+        而本体层的 `agent` 一个 here/public 量都没有的世界,这里判假 →
+        `_settle_player_places()` 整个不跑 → 玩家永远不进 `stock_places` →
+        **任何 NPC 的 `perception` 里都没有他**。作者写下"别人看得出你的评级",
+        世界照跑、日志干净、屏幕上一个字都没有。线上《龙族》此刻就是那样的世界
+        (`ontology --kind agent --json` 现敲,`quantities` 是 `[]`)。
+        可见性表是这件事**唯一的全集**:本体层写的和插件写的都落在它上面。
+
+        ⚠️ **两个来源都要认**:可见性表按 `(种类, 量名)` 存,而玩家和角色共用
+        `agent` 这一行(`Fact.owner_kind` 把 actor/player 都折进 `agent`)。
         """
         cached = self._actor_visible_cache
         if cached is None:
-            ontology = self.ontology
-            kind = ontology.kinds.get("agent") if ontology is not None else None
-            cached = bool(kind) and any(
-                q.visibility not in ("hidden", "self") for q in kind.quantities.values()
-            )
+            cached = False
+            store = self.visibility_store
+            rules = store.rules_map() if store is not None else {}
+            for (kind, _key), level in rules.items():
+                if kind == "agent" and level not in ("hidden", "self"):
+                    cached = True
+                    break
             self._actor_visible_cache = cached
         return cached
+
+    @property
+    def visibility_store(self) -> Any | None:
+        """可见性声明 + 东西在哪(perception)。"""
+        return self._visibility_store
+
+    @visibility_store.setter
+    def visibility_store(self, store: Any | None) -> None:
+        """**接上来的时候顺手接一根线**:声明变了就把那个缓存打掉。
+
+        写成 property 而不是在唯一那个赋值点上加一行,理由和 `loc` 那五处写点
+        逐字相同 —— 今天只有一个赋值点,而"今天只有一个"从来不是明天的保证。
+        """
+        self._visibility_store = store
+        self._actor_visible_cache = None
+        if store is not None and hasattr(store, "on_change"):
+            store.on_change = self.invalidate_actor_visibility
+
+    def invalidate_actor_visibility(self) -> None:
+        """忘掉上面那个答案 —— **声明变过之后必须叫一次**。
+
+        它今天有三个叫法:装/卸插件(热的,`config_set` 改出厂开关就会走)、
+        作者层重新编译、以及运行期改可见性声明。不叫的话,开了一个出厂插件之后
+        「别人看得出你的评级」要**重启才生效** —— 而一个要重启才生效的东西,
+        在一个跑着的线上世界里就等于不生效。
+        """
+        self._actor_visible_cache = None
 
     def _settle_actor_place(self, brain: BrainLike) -> None:
         """把"她此刻在哪"写进可见性表(锁内)。
