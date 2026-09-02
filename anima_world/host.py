@@ -90,7 +90,8 @@ def select_options(candidates: Iterable[dict[str, Any]], *, limit: int) -> list[
     return chosen
 
 
-def mock_scene(*, place_name: str, day: int, hour: int, options: list[dict[str, Any]]) -> str:
+def mock_scene(*, place_name: str, day: int, hour: int,
+               options: list[dict[str, Any]], going_to: str = "") -> str:
     """没有 key / LLM 挂了 / 超时时那一段话。
 
     **没配 key 是这个引擎的默认状态**,所以这不是降级路径上的边角料,而是很多人看到
@@ -101,6 +102,9 @@ def mock_scene(*, place_name: str, day: int, hour: int, options: list[dict[str, 
     # ⚠️ **他可能还没落脚**(刚进来、还没走过一步)。拿一个空的地名去拼,出来的是
     # 「你在。」—— 一句念不通的话,而这个仓库的口径是**一句念不通的拒绝语,和一句
     # 错的一样贵**。这一格是拿真 CLI 敲出来的,不是想出来的。
+    if going_to:
+        # 在路上的人不该被告知"你在出发地" —— 那正是两扇门说两句话的那一格。
+        return f"第 {day} 天{when},你在去{going_to}的路上。到了地方再说。"
     if not place_name:
         return f"第 {day} 天{when}。你还没落个脚 —— 先挑个地方站过去。"
     head = f"第 {day} 天{when},你在{place_name}。"
@@ -114,7 +118,7 @@ def mock_scene(*, place_name: str, day: int, hour: int, options: list[dict[str, 
 
 def scene_messages(*, place_name: str, place_desc: str, day: int, hour: int,
                    minute: int, world_setting: str,
-                   options: list[dict[str, Any]]) -> list[dict[str, str]]:
+                   options: list[dict[str, Any]], going_to: str = "") -> list[dict[str, str]]:
     """交给背景槽的那一次调用。**一次调用同时写场景那段话和每一项的钩子。**
 
     🔴 **这份提示里没有第二个名字来源。** 它只由 `options` 拼出来,而 `options` 已经
@@ -131,7 +135,8 @@ def scene_messages(*, place_name: str, place_desc: str, day: int, hour: int,
     )
     user = (
         (f"世界:{world_setting}\n" if world_setting else "")
-        + (f"地点:{place_name}。{place_desc}\n" if place_name
+        + (f"地点:他在去{going_to}的路上,还没到。\n" if going_to
+           else f"地点:{place_name}。{place_desc}\n" if place_name
            else "地点:他还没落脚,不在任何地方。\n")
         + f"时间:第 {day} 天 {hour:02d}:{minute:02d}\n"
         + (f"此刻他可以做的事:\n{listed}\n" if listed else "此刻他没有什么特别能做的。\n")

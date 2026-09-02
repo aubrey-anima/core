@@ -318,3 +318,37 @@ def test_还没落脚的人_那句话也要念得通(tmp_path):
         assert turn["scene"]["text"].strip()
         assert turn["blocked"] == "unknown_player_location"
         assert [o for o in turn["options"] if o["kind"] == "travel"], "至少得给他几个去处"
+
+
+def test_在路上的人_两扇门说同一句话(world):
+    """🔴 从前 host 读在场那一行的原始 `location`,而 `player_options` 读它自己那条路
+    —— 一个正在赶路的人被两扇门各说了一句:那扇门答 `blocked:in_transit`,
+    而主持人照样报"你在咖啡店"、递上"和苏晚夏说说话(点得动)"。
+    **两扇门对同一时刻说两句话,比其中任何一句错更难查。**"""
+    world.player_walk("p1", "home")
+    menu = world.player_options("p1")
+    turn = world.host_turn("p1")
+    assert menu["blocked"] == "in_transit"
+    assert turn["blocked"] == menu["blocked"]
+    assert (turn["place"], turn["place_name"]) == (menu["location"], menu["location_name"])
+    assert "路上" in turn["scene"]["text"], "场景不该说他在出发地"
+
+    for option in turn["options"]:
+        if option["kind"] in ("travel", "free"):
+            # 实测:在途再 walk 一次是**改主意重新起程**,不是被拒 ——
+            # 把它一起灰掉等于凭空发明一条世界不认识的规矩。
+            assert option["available"] is True, option["label"]
+        else:
+            assert option["available"] is False, option["label"]
+            assert option["refusal"] == menu["blocked_text"], "那句人话该原样借,不另写"
+
+
+def test_到了地方就恢复(world):
+    world.player_walk("p1", "home")
+    world.host_turn("p1")
+    world.tick(200)
+    turn = world.host_turn("p1")
+    assert turn["blocked"] == ""
+    assert turn["place"] == "home"
+    assert any(o["available"] and o["kind"] not in ("travel", "free")
+               for o in turn["options"]) or turn["place_name"]

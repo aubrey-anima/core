@@ -8358,14 +8358,19 @@ class World:
         tick = int(clock.get("tick") or 0)
         day, hour = int(clock.get("day") or 0), int(clock.get("hour") or 0)
         minute = int(clock.get("minute") or 0)
-        row = self.players.get(pid) or {}
-        place = str(row.get("location") or "")
         places = {loc["id"]: loc for loc in state.get("locations") or []}
-        place_name = str((places.get(place) or {}).get("name") or place)
-
         menu = self.player_options(pid)
+        # 🔴 **"他在哪"只问一处**(3.9.0 验收 A 逮的)。从前这儿读的是在场那一行的
+        # 原始 `location`,而 `player_options` 读的是它自己那条路 —— 一个正在赶路的人
+        # 于是被两扇门各说了一句:`player-options` 答 `blocked:in_transit`,而主持人
+        # 照样报"你在咖啡店"并递上"和苏晚夏说说话(点得动)"。**两扇门对同一时刻
+        # 说两句话,比其中任何一句错更难查。**
+        place = str(menu.get("location") or "")
+        place_name = str(menu.get("location_name") or place)
+        transit = (state.get("players") or {}).get(pid) or {}
+        in_transit = bool(transit.get("in_transit"))
         options = host_mod.select_options(
-            self._host_candidates(pid, place, places, menu),
+            self._host_candidates(pid, place, places, menu, in_transit=in_transit),
             limit=int(self.config_get("host.max_options", default=5) or 5),
         )
 
@@ -8379,10 +8384,12 @@ class World:
             scene = {"text": str(last.get("text") or ""), "source": "cached",
                      "seq": int(last.get("seq") or 0)}
         else:
+            going = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
             text, source = self._host_scene_text(
                 place_name=place_name,
                 place_desc=str((places.get(place) or {}).get("description") or ""),
                 day=day, hour=hour, minute=minute, options=options,
+                going_to=str((places.get(going) or {}).get("name") or going),
             )
             self._record_and_fan({
                 "type": "host_scene", "who": f"player:{pid}",
@@ -8435,11 +8442,17 @@ class World:
         return hidden
 
     def _host_candidates(self, pid: str, place: str, places: dict[str, Any],
-                         menu: dict[str, Any]) -> list[dict[str, Any]]:
+                         menu: dict[str, Any], *,
+                         in_transit: bool = False) -> list[dict[str, Any]]:
         """候选池。**每一项都指向今天已经存在的那扇门**(`door.method` 是闭集)。
 
         `door.params` 的键集写在 `contract --json` 的 `host.door_params` 里 ——
         消费方**按段对表,别按这份代码猜**。
+
+        ⚠️ **在路上的人,`available` 要跟着 `player-options` 走**:他这会儿说不上话、
+        也碰不着东西(那扇门答 `blocked: in_transit`)。**唯独"去哪儿"照旧点得动** ——
+        实测在途再 `player_walk` 一次是**改主意重新起程**,不是被拒;把它一起灰掉
+        等于凭空发明一条世界不认识的规矩。自由输入同理,永远在。
         """
         hidden = self._host_hidden_agents()
         out: list[dict[str, Any]] = []
@@ -8515,6 +8528,17 @@ class World:
                 "available": True, "reason": "", "refusal": "", "cost": "",
                 "door": {"method": "player_walk", "params": {"location": loc_id}},
             })
+
+        if in_transit:
+            # **原样借 `player-options` 那句人话**,不另写一句:同一件事两处措辞,
+            # 迟早有一处跟不上(而跟不上的那一处不报错)。
+            why = str(menu.get("blocked_text") or "")
+            for option in out:
+                if option["kind"] == "travel":
+                    continue          # 改主意重新起程,实测是通的
+                option["available"] = False
+                option["reason"] = str(menu.get("blocked") or "in_transit")
+                option["refusal"] = why
         return out
 
     def _host_beat_options(self, pid: str, place: str, places: dict[str, Any],
@@ -8580,8 +8604,8 @@ class World:
         return None
 
     def _host_scene_text(self, *, place_name: str, place_desc: str, day: int,
-                         hour: int, minute: int,
-                         options: list[dict[str, Any]]) -> tuple[str, str]:
+                         hour: int, minute: int, options: list[dict[str, Any]],
+                         going_to: str = "") -> tuple[str, str]:
         """场景那段话 + 顺手把钩子填进 `options`(就地改)。返回 `(正文, 来源)`。
 
         **一次调用,失败即模板,不重试、不合批** —— 和判定那一层同一条纪律。
@@ -8591,7 +8615,7 @@ class World:
         from anima_world import host as host_mod
 
         fallback = host_mod.mock_scene(place_name=place_name, day=day, hour=hour,
-                                       options=options)
+                                       options=options, going_to=going_to)
         service = getattr(self, "chat_service", None)
         client = getattr(service, "_background_llm", None) if service else None
         if client is None or not str(self.config_get("llm.api_key", default="") or ""):
@@ -8599,7 +8623,7 @@ class World:
         messages = host_mod.scene_messages(
             place_name=place_name, place_desc=place_desc, day=day, hour=hour,
             minute=minute, world_setting=str(self.world_setting().get("text") or ""),
-            options=options,
+            options=options, going_to=going_to,
         )
         try:
             reply = self._bridge.run(client.complete(messages))
