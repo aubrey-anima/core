@@ -419,7 +419,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     player_host = player_commands.add_parser(
         "host",
-        help="主持人的那一屏:一段场景 + 3–5 个选项 + 自由输入(世界永远先开口)",
+        help="主持人的那一屏:一段场景 + 几个选项 + 自由输入(世界永远先开口)",
     )
     _add_world_args(player_host)
     player_host.add_argument("--player", required=True, help="他的 player_id")
@@ -6596,9 +6596,19 @@ def _print_host_turn(args: argparse.Namespace, turn: dict[str, Any]) -> int:
     if getattr(args, "as_json", False):
         print(json.dumps(turn, ensure_ascii=False, indent=2))
         return 0
+    # 抬头上的字**全是人话**(3.9.0 验收 C 逮的):从前直出 `〔arrive · cached〕`,
+    # 两个英文枚举印在一屏中文上;`place_name` 空时还留一个吊着的 `·`。
+    # 枚举是**给机器的**,它的家在 `--json`(那份才是契约)。
+    moments = {"arrive": "你到了", "new_day": "新的一天", "beat": "有事发生",
+               "ask": "你问了一句"}
+    sources = {"llm": "现写的", "mock": "模板", "cached": "还是刚才那一屏"}
+    head = f"  第 {turn['day']} 天"
+    if turn.get("place_name"):
+        head += f" · {turn['place_name']}"
+    head += (f"  〔{moments.get(turn['trigger'], turn['trigger'])}"
+             f" · {sources.get(turn['scene']['source'], turn['scene']['source'])}〕")
     print()
-    print(f"  第 {turn['day']} 天 · {turn['place_name']}"
-          f"  〔{turn['trigger']} · {turn['scene']['source']}〕")
+    print(head)
     print("  " + "─" * 56)
     print(f"  {turn['scene']['text']}")
     print()
@@ -8133,7 +8143,9 @@ def contract_payload() -> dict[str, Any]:
             "option_keys": ["id", "kind", "label", "who", "hook", "tone", "available",
                             "reason", "refusal", "cost", "door"],
             "gloss": (
-                "一次调用交出一屏:一段场景 + 3–5 个选项 + **永远在最后**的自由输入"
+                "一次调用交出一屏:一段场景 + 至多 `host.max_options` 个选项"
+                "(**世界里有多少就递多少**,少的时候就少 —— 这不是一句"
+                "「保证有 3–5 个」的承诺)+ **永远在最后**的自由输入"
                 "(`kind:\"free\"`,不占 `host.max_options` 的名额)。"
                 "🔴 **主持人是荐者不是执行者** —— 每一项的 `door` 都指向今天已经存在"
                 "的那扇门,引擎这一层一条新的「写世界」的路都不开。"
