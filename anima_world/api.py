@@ -8401,7 +8401,13 @@ class World:
         # ⚠️ 它是**给人置灰用的读数,不是闸**:闸在 `_host_trigger` 里,宿主照着它
         # 画不画,都不改变这个函数的行为。
         cooldown = int(self.config_get("host.ask_cooldown_ticks", default=12) or 0)
-        ask_ready = int(last.get("tick") or 0) + cooldown if last else tick
+        # ⚠️ **按"屏上这一份"算,不是按刚才读到的上一份**(3.9.0 验收 A 逮的)。
+        # 这一趟要是真开了口,冷却就从**这一刻**起算;拿写之前那份 `last` 算,
+        # 返回里会写着 `ask_ready: true`,而紧接着的 `ask=True` 却答 `cached` ——
+        # 站点照着它把按钮点亮,玩家点下去没反应。**一个读数和它旁边那扇门说两句话,
+        # 比没有这个读数更坏。**
+        scene_tick = tick if trigger is not None else int(last.get("tick") or 0)
+        ask_ready = scene_tick + cooldown
         return {
             "player_id": pid, "tick": tick, "day": day,
             "place": place, "place_name": place_name,

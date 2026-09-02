@@ -149,6 +149,38 @@ def test_他点我该干嘛_受冷却管而且冷却值带在返回里(world):
     assert world.host_turn("p1", ask=True)["scene"]["source"] != "cached"
 
 
+def test_刚开口那一次_那个读数说的是这一屏不是上一屏(world):
+    """🔴 **一个读数和它旁边那扇门说两句话,比没有这个读数更坏。**
+
+    上一版拿"写之前读到的那一份"算冷却:换个地方(引擎当场写了一屏新的)之后,
+    返回里写着 `ask_ready: true`,而紧接着的 `ask=True` 却答 `cached` ——
+    站点照着它把按钮点亮,玩家点下去没反应。
+
+    ⚠️ 上面那条用例咬不住它:那儿的冷却是 999999,`last` 是几 tick 前的,
+    两种算法都答 `false`。**咬得住它的是"上一屏早就过了冷却、而这一屏刚写下"** ——
+    这也是"试牙也要试对地方"在这一族里的第二次。
+    """
+    world.config_set("host.ask_cooldown_ticks", 12)
+    world.host_turn("p1")
+    world.tick(60)                                    # 上一屏早就过了冷却
+    world.player_move("p1", "workshop")               # → arrive,当场写一屏新的
+    turn = world.host_turn("p1")
+    assert turn["scene"]["source"] != "cached", "这一趟确实开了口"
+    assert turn["ask_ready_tick"] == turn["tick"] + 12, "冷却该从这一刻起算"
+    assert turn["ask_ready"] is False
+
+    # 读数说按不动 —— 那么它就真的按不动,两边说同一句话。
+    asked = world.host_turn("p1", ask=True)
+    assert asked["scene"]["source"] == "cached"
+
+    world.tick(12)
+    later = world.host_turn("p1")
+    assert later["ask_ready"] is True
+    assert world.host_turn("p1", ask=True)["scene"]["source"] != "cached", (
+        "读数说按得动,那扇门就得真的开"
+    )
+
+
 def test_刷新之后开场还在_不靠调用方记住(tmp_path):
     """场景是生成出来的、不可复现 —— 所以它落成一条事件,那一屏是它的投影。"""
     with open_world_at(tmp_path / "r.db") as w:
