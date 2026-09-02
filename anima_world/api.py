@@ -2890,7 +2890,7 @@ class World:
         subject = agent_id if agent_id.startswith("agent:") else f"agent:{agent_id}"
         return self.scheduler.knowledge_graph.query(subject=subject)
 
-    def install_pack(self, path: str) -> dict[str, Any]:
+    def install_pack(self, path: str, *, force: bool = False) -> dict[str, Any]:
         """把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。
 
         `path` 是一份 `.cyberworld`,里头必须有 `pack` 段(身份:`{id, version, note}`)。
@@ -2915,7 +2915,7 @@ class World:
         """
         from anima_world.__main__ import install_authored_pack
 
-        return install_authored_pack(self.scheduler, path)
+        return install_authored_pack(self.scheduler, path, force=force)
 
     def packs(self) -> list[dict[str, Any]]:
         """这个世界装了哪几份内容包 —— **按落地先后**(3.10.0)。

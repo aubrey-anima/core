@@ -30,10 +30,21 @@ BASE = {
 }
 
 
-def _pack(tmp_path, name, *, pack, **sections) -> str:
+def _pack(tmp_path, name, *, pack, engine_min="3.10.0", **sections) -> str:
+    """一份内容包。**封皮带 `engine_min: 3.10.0`** —— 那是它真实的形状:
+    老引擎见到 `pack` 段是开不了机的硬失败,所以这一格是承重的(2a-① 验收 C)。"""
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
     seed = {"pack": pack}
     seed.update(sections)
-    return write_seed_file(tmp_path / f"{name}.cyberworld", seed)
+    path = tmp_path / f"{name}.cyberworld"
+    write_world_file(
+        path, WorldFileManifest(world_id="fixture", engine_min=engine_min),
+        seed_to_author_records(seed), compress=False, checksum=False,
+    )
+    return str(path)
 
 
 def _beat(bid, day, *, since=None, for_each=None, summary="剧情"):
@@ -107,11 +118,23 @@ def test_写since_world的那一拍_零点还是世界第0天(tmp_path):
     ⚠️ 这一条同时是上面那条的**反向闸**:上面那三拍要是靠"装包就把 day 加上今天"
     实现的,这一条会红。
     """
+    from anima_world.__main__ import PackInstallError
+
     with _world(tmp_path, name="esc") as world:
         world.tick(288 * 40)
         path = _pack(tmp_path, "abs", pack={"id": "绝对", "version": "1.0.0"},
                      beats=[_beat("世界第三天", 3, since="world")])
-        world.install_pack(path)
+        # 🔴 **默认拒绝**(2a-① 验收 C):`since: "world"` 的零点是世界第 0 天,
+        # 而今天已经第 40 天 —— 这一拍装进去下一 tick 就烧,而 `beat_fired` 是历史。
+        # 装的时候手上有拍表 + `since` + 今天,**算得出来就不许让它安静地发生**。
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(path)
+        assert "一起响掉" in str(raised.value) and "世界第三天" in str(raised.value)
+        assert world.packs() == [], "拒了还写进去了"
+
+        # `--force` = 我就是要它们立刻全响。
+        receipt = world.install_pack(path, force=True)
+        assert receipt["forced"] is True
         world.tick(1)
         assert [b for b, _ in _fired(world)] == ["世界第三天"], (
             "`since: \"world\"` 那一拍的零点是世界第 0 天,而世界已经第 40 天了 —— 该响"
@@ -493,3 +516,221 @@ def test_验收标准第一条原样_四十天两个老玩家_三拍per_player_�
         world.tick(day * 2)
         mine = sorted(b for b, who in _fired(world) if who == "player:新丙")
         assert mine == ["夜宵", "实习课", "社团"], mine
+
+
+# ── 六、2a-① 验收退回那一轮的判据(3.10.0,验收 A/C 真敲出来的)──────────────
+
+def test_只带一拍的包_不许把引擎内置的地图和名册灌进来(tmp_path):
+    """🔴 **验收 A ⑪。** `_seed_world_defs` 的「没写 = 回落内置那份」对**创世**是对的
+    (一个没写 `locations` 的世界总得站得住脚),对 `install_pack` 是**错的,而且
+    错得很安静**:一份只带一拍的第 2 周包装进一个跑着的卡塞尔世界,地图上凭空多出
+    `cafe`/`home`/`workshop` 三个地点,还跟着三条 `location_join` 进日志 ——
+    **事件是只追加的,撤不回来**。全程零报错。
+    """
+    base = {
+        "locations": [{"id": "卡塞尔", "name": "卡塞尔学院", "description": "d"}],
+        "agents": [{"id": "路明非", "name": "路明非", "location": "卡塞尔",
+                    "personality": "p"}],
+    }
+    path = write_seed_file(tmp_path / "kassel.cyberworld", base)
+    with open_world_at(str(tmp_path / "k.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.tick(2)
+        before_actions = set(world.scheduler.bt_store.shared_action_ids())
+        world.install_pack(_pack(
+            tmp_path, "onebeat", pack={"id": "第二周", "version": "1.0.0"},
+            beats=[_beat("社团", 0, summary="社团招新")]))
+        assert sorted(l["id"] for l in world.scheduler.location_store.all()) == ["卡塞尔"]
+        assert set(world.scheduler.bt_store.shared_action_ids()) == before_actions, (
+            "`:bt_actions` 多出了指向不存在的人的行"
+        )
+        joined = [e.payload["id"] for e in world.scheduler.event_log.replay()
+                  if e.type == "location_join"]
+        assert joined == ["卡塞尔"], joined
+
+
+def test_带地点不带角色的包_也不许灌名册(tmp_path):
+    """⚠️ 这是**龙族第 2 周包的形状**(加地点、不加人),而它比上一条更阴:
+    地图看着没问题,而 `:bt_actions` 里多出 `chat_with_夏/柔/遥` 指着三个不存在的人。"""
+    base = {
+        "locations": [{"id": "卡塞尔", "name": "卡塞尔学院", "description": "d"}],
+        "agents": [{"id": "路明非", "name": "路明非", "location": "卡塞尔",
+                    "personality": "p"}],
+    }
+    path = write_seed_file(tmp_path / "k2.cyberworld", base)
+    with open_world_at(str(tmp_path / "k2.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.tick(2)
+        before = set(world.scheduler.bt_store.shared_action_ids())
+        world.install_pack(_pack(
+            tmp_path, "locsonly", pack={"id": "第二周", "version": "1.0.0"},
+            locations=[{"id": "训练场", "name": "训练场", "description": "d"}]))
+        extra = set(world.scheduler.bt_store.shared_action_ids()) - before
+        assert not any(a.startswith("chat_with_") for a in extra), extra
+        assert sorted(l["id"] for l in world.scheduler.location_store.all()) == [
+            "卡塞尔", "训练场"]
+
+
+def test_同一个包升级_上一版那几拍的零点不动(tmp_path):
+    """🔴 **验收 A ⑩。** `sections` 从前是整片替换 —— 第 40 天装 v1.0.0(两拍),
+    第 41 天装 v1.1.0 带**别的**拍,那两拍就从 `pack_days_from` 上消失,零点读作 0,
+    下一 tick 一起烧掉。而那条升级用例装的两份**都不带 beats**,所以它看不见。
+    """
+    day = 288
+    with _world(tmp_path, name="up2") as world:
+        world.tick(day * 40)
+        world.install_pack(_pack(
+            tmp_path, "w2v1", pack={"id": "第二周", "version": "1.0.0"},
+            beats=[_beat("社团", 5), _beat("夜宵", 6)]))
+        world.tick(day)                                   # 第 41 天
+        world.install_pack(_pack(
+            tmp_path, "w2v2", pack={"id": "第二周", "version": "1.1.0"},
+            beats=[_beat("实习课", 1)]))
+        assert _fired(world) == [], "升级那一刻把上一版两拍烧了"
+        world.tick(1)
+        assert _fired(world) == [], "零点被打回世界第 0 天了"
+        row = world.packs()[0]
+        assert sorted(row["sections"]["beats"]) == ["夜宵", "实习课", "社团"], row
+        assert row["beat_days"]["社团"] == 40 and row["beat_days"]["实习课"] == 41, row
+        # 社团 day5 从第 40 天起算 → 第 45 天响;实习课 day1 从第 41 天起 → 第 42 天。
+        world.tick(day)                                   # 第 42 天
+        assert [b for b, _ in _fired(world)] == ["实习课"], _fired(world)
+
+
+def test_装了什么和文件里写了什么_是两格(tmp_path):
+    """🔴 **验收 C ②:两份真相。** 同一份包回执 `agents: []`(对),而
+    `pack list` 却报 `sections.agents: ["夏"]`(抄的是文件)—— 读的人分不出哪份对。
+    """
+    with _world(tmp_path, name="two") as world:
+        world.tick(3)
+        receipt = world.install_pack(_pack(
+            tmp_path, "already", pack={"id": "第二周", "version": "1.0.0"},
+            agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                     "personality": "改过的"}]))
+        assert receipt["agents"] == [], "甲已经在册,他不是这一趟进来的"
+        row = world.packs()[0]
+        assert "agents" not in row["sections"], row["sections"]
+        assert row["declared"]["agents"] == ["甲"], row["declared"]
+
+
+def test_在册的人的人设和记忆装不进去_而这件事说得出来(tmp_path, caplog):
+    """🔴 **验收 C ①**:引擎一个字不说、rc 0,而离线门反而说了两句漂亮的。"""
+    import logging
+
+    with _world(tmp_path, name="skip") as world:
+        world.tick(3)
+        with caplog.at_level(logging.WARNING):
+            receipt = world.install_pack(_pack(
+                tmp_path, "skips", pack={"id": "第二周", "version": "1.0.0"},
+                agents=[{"id": "甲", "name": "甲", "location": "cafe",
+                         "personality": "改过的性格"}],
+                memories=[{"agent_id": "甲", "kind": "seed", "summary": "新的一条"}]))
+        assert receipt["skipped"]["personality"] == ["甲"], receipt["skipped"]
+        assert receipt["skipped"]["memories"] == 1
+        assert "还没做" in receipt["skipped"]["reason"]
+        assert any("没有装进去" in r.getMessage() for r in caplog.records), (
+            [r.getMessage() for r in caplog.records])
+
+
+def test_插件降级被拒时_世界一个字节都没变(tmp_path):
+    """🟡 **验收 A ⑫**:`except PluginError` 排在锁里六次写之后 —— 一份带新地点 +
+    插件降级的包被拒,而地点已经进了地图、`packs()` 却是空的。
+    **半装进去一份包比装不进去坏得多。**"""
+    from anima_world.__main__ import PackInstallError
+
+    qi = {"id": "qi", "version": "2.0.0", "label": "灵力",
+          "facts": {"灵力": {"bearer": "agent", "shape": "number", "default": 10.0,
+                             "visibility": "self"}}}
+    base = dict(BASE, plugins=[qi])
+    path = write_seed_file(tmp_path / "pl.cyberworld", base)
+    with open_world_at(str(tmp_path / "pl.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.tick(2)
+        bad = _pack(tmp_path, "downgrade", pack={"id": "第二周", "version": "1.0.0"},
+                    plugins=[{**qi, "version": "1.0.0"}],
+                    locations=[{"id": "院子", "name": "院子", "description": "d"}])
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(bad)
+        assert "不降级" in str(raised.value)
+        assert sorted(l["id"] for l in world.scheduler.location_store.all()) == ["cafe"]
+        assert world.packs() == []
+
+
+def test_封皮说3_9_0而包里有pack段_三扇门同一句拒(tmp_path):
+    """🟡 **验收 C ⑥**:`engine_min: "3.9.0"` 而带 `pack` 段的包,从前
+    `world check --edit` 说可用、`pack install` 退 0 —— 它在 3.9.0 上开不了机。"""
+    from anima_world.__main__ import PackInstallError
+
+    old = _pack(tmp_path, "old-engine", engine_min="3.9.0",
+                pack={"id": "第二周", "version": "1.0.0"})
+    r = run_cli("world", "check", old, "--edit", "--json")
+    payload = json.loads(r.stdout)
+    assert payload["loadable"] is False, payload
+    assert any("engine_min" in e for e in payload["errors"]), payload["errors"]
+
+    r = run_cli("validate", "world", old, "--edit")
+    assert r.returncode == 2, r.stdout
+
+    with _world(tmp_path, name="eng") as world:
+        world.tick(2)
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(old)
+        assert "engine_min" in str(raised.value)
+
+
+def test_封皮没写engine_min_是一句警告不是一条错(tmp_path):
+    """⚠️ **「没写」和「写了一个更低的数」是两件事。** 后者是一句可以被证伪的假话,
+    前者只是没说 —— 把没说也判成错,每一份手写的世界文件都会在这扇门上变红。"""
+    silent = _pack(tmp_path, "no-engine", engine_min="",
+                   pack={"id": "第二周", "version": "1.0.0"})
+    r = run_cli("world", "check", silent, "--edit", "--json")
+    payload = json.loads(r.stdout)
+    assert payload["loadable"] is True, payload["errors"]
+    assert any("没写 `engine_min`" in w for w in payload["warnings"]), payload["warnings"]
+
+
+def test_库里一条3_9_0留下的拍_3_10_0开得了机而且说一句(tmp_path, caplog):
+    """🔴 **验收 B ③:一次收紧不许把已经发出去的世界锁在门外。**
+
+    3.10.0 给 `trigger` / `trigger.at` 加了闭集,而开机会把库里存量的拍**重验一遍**
+    —— 一个 3.9.0 上跑得好好的世界(那一版这两层一个键都不查,写错一个字母是照收
+    然后丢掉)换上 3.10.0 就 `BOOT FAILED`。
+
+    ⚠️ 判据是**直接往库里塞**,不是走文件:文件那条路照旧严格,而这一条要验的
+    正是"它已经在库里了"这件事。
+    """
+    import logging
+
+    from anima_world.redis_state import RedisBeatsStore
+
+    client = redis_for(tmp_path / "legacy.db")
+    with _world(tmp_path, name="legacy") as world:
+        world.tick(2)
+    # 3.9.0 收得下、3.10.0 的闭集不认的那种拍(`tag` 是它照收然后丢掉的一格)。
+    RedisBeatsStore(client, "w").append([{
+        "id": "老拍", "trigger": {"at": {"day": 0}, "tag": "第一幕"},
+        "payload": [{"op": "memory", "agent_id": "甲", "summary": "老世界的剧情"}],
+    }])
+
+    from anima_world.api import World
+
+    with caplog.at_level(logging.WARNING):
+        with World.open("w", redis=client, force_mock_llm=True) as again:
+            assert again.scheduler.beat_director is not None, "世界开不了机了"
+            again.tick(2)
+            assert [e.payload["beat_id"] for e in again.scheduler.event_log.replay()
+                    if e.type == "beat_fired"] == ["老拍"], "存量那一拍不响了"
+    assert any("只警告不拦" in r.getMessage() for r in caplog.records), (
+        [r.getMessage() for r in caplog.records])
+
+
+def test_同一种写法从文件里进来_照旧当场拒(tmp_path):
+    """**分界是「这几拍是从哪儿来的」** —— 宽容只给库里那份,新文件照旧严格。
+    不然这条收紧等于没做。"""
+    from anima_world.beats import BeatScript, BeatScriptError
+
+    with pytest.raises(BeatScriptError) as raised:
+        BeatScript.from_data({"beats": [{
+            "id": "新拍", "trigger": {"at": {"day": 0}, "tag": "第一幕"},
+            "payload": [{"op": "memory", "agent_id": "甲", "summary": "s"}]}]})
+    assert "trigger 里不认识的字段" in str(raised.value)

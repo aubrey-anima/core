@@ -2356,6 +2356,33 @@ def order_plugins(plugins: Iterable[Plugin]) -> list[Plugin]:
     return ordered
 
 
+def plugin_version_errors(plugins: Any, store: Any) -> list[str]:
+    """这几个插件能不能装进这个库 —— **只判,不写一个字节**(3.10.0)。
+
+    从 `install_plugins` 里摘出来,因为它有**第二个调用方**:`install_pack` 要在
+    第一次写之前问一句。2a-① 验收 A 逮的:一份带新地点 + 插件降级的包被拒,
+    而地点已经进了地图、`packs()` 是空的 —— **半装进去一份包比装不进去坏得多**
+    (作者看到红灯,而世界里已经多了三个地点,事件还撤不回来)。
+
+    ⚠️ **摘出来而不是抄一遍**:两份判断迟早给出不同答案,而那种不一致会表现成
+    「预检说没问题,装的时候还是失败」。这是本仓 `_precheck_ontology` 那条纪律
+    在插件这一层的落法。
+    """
+    errors: list[str] = []
+    for plugin in plugins:
+        row = store.get(plugin.id) or None
+        if row is None:
+            continue
+        was = str(row.get("version") or "")
+        if version_tuple(was) > version_tuple(plugin.version):
+            errors.append(
+                f"插件 `{plugin.id}`:这个世界里装的是 {was},而文件里是 "
+                f"{plugin.version} —— **不降级**。降级不是回退,是拿旧声明去盖"
+                "新数据(上一版新加的事实会被当成「声明里没了」裁掉),而那不可逆"
+            )
+    return errors
+
+
 def version_tuple(version: str) -> tuple[int, ...]:
     """`"1.2.3"` → `(1, 2, 3)`;读不懂的段按 0 算(比较得出来就行)。"""
     out: list[int] = []
@@ -2410,18 +2437,7 @@ def install_plugins(
     是拿旧声明去覆盖新数据,而那不可逆。
     """
     report = InstallReport()
-    errors: list[str] = []
-    for plugin in plugins:
-        row = store.get(plugin.id) or None
-        if row is not None:
-            was = str(row.get("version") or "")
-            if version_tuple(was) > version_tuple(plugin.version):
-                errors.append(
-                    f"插件 `{plugin.id}`:这个世界里装的是 {was},而文件里是 "
-                    f"{plugin.version} —— **不降级**。降级不是回退,是拿旧声明去盖"
-                    "新数据(上一版新加的事实会被当成「声明里没了」裁掉),而那不可逆"
-                )
-                continue
+    errors = plugin_version_errors(plugins, store)
     if errors:
         raise PluginError(errors)
 

@@ -1565,3 +1565,81 @@ def test_一份没写pack的老包_这一层整个缺席(tmp_path, fresh_redis):
     with World.open("nopack", redis=fresh_redis, world_file=path,
                     force_mock_llm=True) as world:
         assert world.packs() == []
+
+
+# ── 拍的 `trigger` / `trigger.at` 两层闭集,与 `since`(3.10.0)────────────────
+#
+# 🔴 **验收 B ⑦**:这三种新拒绝**零测试**,而通用那条「每个检查器都在表上」
+# 对它们一个字都不会说 —— **在表上 ≠ 覆盖了开机会拒的每一种**,这正是逐条枚举
+# 存在的全部理由。
+
+def _beat_row(**body) -> dict:
+    return {"kind": "author", "type": "beat", "body": body}
+
+
+_OK_PAYLOAD = [{"op": "memory", "agent_id": "甲", "summary": "一句话"}]
+
+_BEAT_TRIGGER_REJECTIONS: tuple[tuple[str, dict, str], ...] = (
+    ("trigger 多一个键",
+     _beat_row(id="b1", trigger={"at": {"day": 0}, "tag": "第一幕"},
+               payload=_OK_PAYLOAD),
+     "trigger 里不认识的字段"),
+    ("trigger.at 多一个键",
+     _beat_row(id="b2", trigger={"at": {"day": 0, "hour": 9}}, payload=_OK_PAYLOAD),
+     "trigger.at 里不认识的字段"),
+    ("since 写了个不认识的值",
+     _beat_row(id="b3", trigger={"at": {"day": 0, "since": "player"}},
+               payload=_OK_PAYLOAD),
+     "trigger.at.since"),
+    ("世界级的拍写了 narrate",
+     _beat_row(id="b4", trigger={"at": {"day": 0}}, payload=_OK_PAYLOAD,
+               narrate="一封信躺在你桌上。"),
+     "没有「那个人」"),
+    ("narrate 是空白",
+     _beat_row(id="b5", for_each={"node": "player"}, trigger={"at": {"day": 0}},
+               payload=_OK_PAYLOAD, narrate="   "),
+     "'narrate' 要是一段非空文本"),
+)
+
+
+@pytest.mark.parametrize(
+    "case, row, needle", _BEAT_TRIGGER_REJECTIONS,
+    ids=[case for case, _row, _needle in _BEAT_TRIGGER_REJECTIONS],
+)
+def test_拍的新闭集_每一种拒绝三扇门说同一句话(tmp_path, fresh_redis, case, row, needle):
+    """**开机是权威**:比它松是假绿,比它严是假红。"""
+    path = _write(tmp_path / "bad-beat.cyberworld", [_MANIFEST, _YARD, _JIA, row])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, f"「{case}」开机是拦的,离线那两扇门必须一起拦"
+    assert any(needle in e for e in errors), (case, errors)
+
+
+def test_写对的since和narrate_三条路都放行(tmp_path, fresh_redis):
+    """对照组。**没有它,上面那一摞对一个「有 `since` 就一律拦」的实现同样成立。**"""
+    path = _write(tmp_path / "ok-beat.cyberworld", [
+        _MANIFEST, _YARD, _JIA,
+        _beat_row(id="b6", trigger={"at": {"day": 0, "since": "world"}},
+                  payload=_OK_PAYLOAD),
+        _beat_row(id="b7", for_each={"node": "player"}, trigger={"at": {"day": 1}},
+                  payload=_OK_PAYLOAD, narrate="一封信躺在你桌上。"),
+    ])
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"写对的拍被拦下来了:{errors}"
+
+
+def test_封皮说3_9_0而包里有pack段_两扇离线门一起拒(tmp_path, fresh_redis):
+    """🟡 **验收 C ⑥**:`engine_min` 一个字不查 —— 而这一格是**下游照它做判断**的。
+
+    ⚠️ 开机那条路不比封皮(它就是那一版引擎,比它没有意义),所以这一条只钉
+    离线那两扇门 —— 而这正是「三扇门」在这一格上的真实形状,写清楚比含糊着好。
+    """
+    old = {"kind": "manifest", "version": 3, "world_id": "t", "engine_min": "3.9.0"}
+    path = _write(tmp_path / "old-engine.cyberworld",
+                  [old, _YARD, _JIA,
+                   {"kind": "author", "type": "pack",
+                    "body": {"id": "第二周", "version": "1.0.0"}}])
+    ok_validate, errors = _validate_says(path, edit=True)
+    ok_check, check_errors = _check_says(path, edit=True)
+    assert ok_validate is False and ok_check is False, (errors, check_errors)
+    assert errors == check_errors, "两扇门说了不同的话"
+    assert any("engine_min" in e for e in errors), errors

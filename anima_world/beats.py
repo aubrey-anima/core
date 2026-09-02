@@ -159,8 +159,16 @@ def pack_days_from(projection: Any) -> dict[str, int]:
             day = int(row.get("day") or 0)
         except (TypeError, ValueError):
             day = 0
+        # 🔴 **每一拍记自己的落地日**(`beat_days`),整包那个 `day` 只是回落。
+        # 一个包升级时带的是**新的**几拍,而上一版那几拍的零点不该跟着动 ——
+        # 从前它们共用整包一个 `day`,而 `sections` 又被整片替换,于是升级那一刻
+        # 上一版的拍**从这张表上消失**,零点读作 0,下一 tick 全烧掉。
+        per_beat = row.get("beat_days") or {}
         for bid in ((row.get("sections") or {}).get("beats") or ()):
-            out[str(bid)] = day
+            try:
+                out[str(bid)] = int(per_beat.get(str(bid), day))
+            except (TypeError, ValueError):
+                out[str(bid)] = day
     return out
 
 # 🔴 **逐个 op、逐个谓词裁「玩家能不能出现在这一格」,而拒绝在加载期当场说。**
@@ -224,6 +232,9 @@ class BeatScript:
 
     def __init__(self, beats: list[dict[str, Any]]):
         self.beats = beats
+        #: 库里存量的拍上那几处 3.10.0 才开始拒的写法。**`doctor` 数它** ——
+        #: 一句只写在开机日志里的话,托管环境里没有人读得到。
+        self.lenient_warnings: list[str] = []
 
     @classmethod
     def load(cls, path: str | Path) -> "BeatScript":
@@ -234,22 +245,46 @@ class BeatScript:
         return cls.from_data(data)
 
     @classmethod
-    def from_data(cls, data: Any) -> "BeatScript":
-        errors = _validate_script(data)
+    def from_data(cls, data: Any, *, stored: bool = False) -> "BeatScript":
+        """把一份脚本读成一个校验过的 `BeatScript`。
+
+        🔴 **`stored=True` = 这几拍已经在这个世界的库里了**(3.10.0,2a-① 验收 B)。
+
+        3.10.0 给 `trigger` / `trigger.at` 加了闭集,而**开机会把库里存量的拍
+        重验一遍** —— 于是一个 3.9.0 上跑得好好的世界(它那一版这两层一个键都不查,
+        写错一个字母是照收然后丢掉),换上 3.10.0 就 `BOOT FAILED`。
+        **一次收紧不许把已经发出去的世界锁在门外。**
+
+        分界是**这几拍是从哪儿来的**:
+        - 库里那份(`stored=True`)—— 新加的那几条只**警告**,世界照开;
+        - 一份文件 / 一份内容包 —— 照旧**严格**,当场拒。
+
+        ⚠️ **只放宽 3.10.0 新加的那几条**。3.9.0 就会拒的(坏 op、id 重复、
+        `for_each` 写错)照旧拒 —— 一个带着那种拍的世界本来就开不了机,
+        放宽它等于假装它曾经好过。
+        """
+        errors, lenient = _validate_script(data, stored=stored)
         if errors:
             raise BeatScriptError(errors)
+        for problem in lenient:
+            logger.warning(
+                "库里这一拍写着 3.10.0 不再认的东西,这一版只警告不拦:%s", problem)
         beats = [dict(b) for b in data["beats"]]
         _warn_unpaired_leaves(beats)
-        return cls(beats)
+        script = cls(beats)
+        script.lenient_warnings = list(lenient)
+        return script
 
 
 # ── validation (strict, load-time) ───────────────────────────────────────────
 
 
-def _validate_script(data: Any) -> list[str]:
+def _validate_script(data: Any, *, stored: bool = False) -> tuple[list[str], list[str]]:
+    """`(拦下来的, 只警告的)`。第二格只在 `stored=True` 时非空(见 `from_data`)。"""
     if not isinstance(data, dict) or not isinstance(data.get("beats"), list):
-        return ["script must be an object with a 'beats' list"]
+        return (["script must be an object with a 'beats' list"], [])
     errors: list[str] = []
+    lenient: list[str] = []
     ids: set[str] = set()
     beats = data["beats"]
     for i, beat in enumerate(beats):
@@ -277,10 +312,13 @@ def _validate_script(data: Any) -> list[str]:
         if "for_each" in beat:
             for_each_errors, per_player = _validate_for_each(beat.get("for_each"), label)
             errors.extend(for_each_errors)
-        errors.extend(_validate_trigger(beat.get("trigger"), label, per_player=per_player))
+        hard, soft = _validate_trigger(beat.get("trigger"), label,
+                                       per_player=per_player, stored=stored)
+        errors.extend(hard)
+        lenient.extend(soft)
         errors.extend(_validate_payload(beat.get("payload"), label, per_player=per_player))
     errors.extend(_validate_after_graph(beats, ids))
-    return errors
+    return (errors, lenient)
 
 
 def _validate_for_each(for_each: Any, label: str) -> tuple[list[str], bool]:
@@ -320,17 +358,22 @@ def _validate_narrate(beat: dict[str, Any], label: str) -> list[str]:
     return []
 
 
-def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False) -> list[str]:
+def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False,
+                     stored: bool = False) -> tuple[list[str], list[str]]:
+    """`(拦下来的, 只警告的)`。`stored=True` 时 **3.10.0 新加的那三条**只警告。"""
     if not isinstance(trigger, dict) or not any(k in trigger for k in BEAT_TRIGGER_KEYS):
-        return [f"{label}: 'trigger' must contain at least one of at/after/when"]
+        return ([f"{label}: 'trigger' must contain at least one of at/after/when"], [])
     errors: list[str] = []
+    lenient: list[str] = []
+    # 3.10.0 新加的那几条进这里;`stored=True` 时它们只是警告。
+    new_in_3_10 = lenient if stored else errors
     # 🔴 **闭集,两层都是**(3.10.0)。这两层从前**一个键都不查**,于是 `since`
     # 写下去会被照收然后丢掉 —— 而"不认识的键照收然后丢掉"这一族,这个仓库
     # 一层一层收过五轮,**一层一层收本身就是这个 bug 的形状**。加 `since` 这一格
     # 的同一轮就把它所在的那两层一起收掉。
     unknown = sorted(set(trigger) - set(BEAT_TRIGGER_KEYS))
     if unknown:
-        errors.append(
+        new_in_3_10.append(
             f"{label}: trigger 里不认识的字段 {unknown} —— 只有 {list(BEAT_TRIGGER_KEYS)}"
         )
     at = trigger.get("at")
@@ -338,13 +381,13 @@ def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False) -> 
         if isinstance(at, dict):
             unknown_at = sorted(set(at) - set(AT_KEYS))
             if unknown_at:
-                errors.append(
+                new_in_3_10.append(
                     f"{label}: trigger.at 里不认识的字段 {unknown_at} —— "
                     f"只有 {list(AT_KEYS)}"
                 )
             since = at.get("since")
             if since is not None and since not in AT_SINCE:
-                errors.append(
+                new_in_3_10.append(
                     f"{label}: trigger.at.since {since!r} 不认识 —— 只收 "
                     f"{list(AT_SINCE)}(`pack` = 从这份内容包落地那天算起,也是缺省;"
                     "`world` = 从世界第 0 天算起)"
@@ -365,7 +408,7 @@ def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False) -> 
         else:
             for pred in when:
                 errors.extend(_validate_predicate(pred, label, per_player=per_player))
-    return errors
+    return (errors, lenient)
 
 
 def _needs_fields(kind: str) -> tuple[str, ...]:

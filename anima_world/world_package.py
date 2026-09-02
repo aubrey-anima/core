@@ -340,10 +340,16 @@ def _is_volatile_key(short: str) -> bool:
       那些名字**。把它打进包发出去,比不抹还糟;而装进另一个世界则会让那边的
       下一趟抹除从一个跟它毫无关系的水位接着做(见 `RedisErasureProgress`)。
 
+    - `config_rev`(3.10.0)—— **配置表改过几次**,`ConfigStore` 拿它判断
+      "我手里那份还新不新"。它是一个纯粹的协调计数器:装进另一个世界毫无意义,
+      而每一份发出去的包都会带着一个没人读得懂的数(总图那张三态表:
+      **进程态不进 `.cyberworld`**)。
+
     **导出与导入两侧都用它。** 老包里没有这些键,但手改过的包有 —— 而"装回一份
     永不过期的假东西"这个坏法从哪个入口进来都一样坏。
     """
-    return short == "lock" or _is_presence_key(short) or short.startswith("erasure:")
+    return (short in ("lock", "config_rev")
+            or _is_presence_key(short) or short.startswith("erasure:"))
 
 
 def _is_growing_key(short: str) -> bool:

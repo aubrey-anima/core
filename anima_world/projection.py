@@ -318,13 +318,32 @@ def _apply_pack_installed(proj: Projection, e: Event) -> None:
     except (TypeError, ValueError):
         day = 0
     have = proj.packs.get(pack_id)
+    # 🔴 **按段并入,不是整片替换**(2a-① 验收 A 逮的)。
+    #
+    # 从前这里是 `dict(payload["sections"])` —— 于是第 40 天装 v1.0.0(社团 day5 /
+    # 夜宵 day6)、第 41 天装 v1.1.0 带**别的**拍,`sections["beats"]` 整片换成新的
+    # 那几条,`beats.pack_days_from` 里就**再也没有社团和夜宵** ——
+    # `day_zero_for(社团)` 于是读作 0,下一 tick 两拍一起烧掉。
+    # 而这一族最阴的是:那条升级用例装的两份都不带 `beats`,所以它看不见。
+    sections: dict[str, Any] = dict((have or {}).get("sections") or {})
+    for name, ids in (payload.get("sections") or {}).items():
+        merged = list(sections.get(name) or [])
+        merged += [i for i in (ids or ()) if i not in merged]
+        sections[name] = merged
+    # **每一拍记自己的落地日** —— 升级不改已装那几拍的零点。整包一个 `day`
+    # 只在"这个包从头到尾一次装完"时才对,而升级正是它不对的那一次。
+    beat_days: dict[str, int] = dict((have or {}).get("beat_days") or {})
+    for bid in ((payload.get("sections") or {}).get("beats") or ()):
+        beat_days.setdefault(str(bid), day)
     row = {
         "version": str(payload.get("version") or ""),
         "note": str(payload.get("note") or ""),
-        # 第一次落地那天赢 —— 升级只换版本号与清单,不换零点。
+        # 第一次落地那天赢 —— 升级只换版本号与清单,不换这个包的零点。
         "day": int(have["day"]) if have else day,
         "tick": int(have["tick"]) if have else int(payload.get("tick", 0) or 0),
-        "sections": dict(payload.get("sections") or {}),
+        "sections": sections,
+        "beat_days": beat_days,
+        "declared": dict(payload.get("declared") or {}),
         "seq": int(e.seq or 0),
     }
     proj.packs[pack_id] = row

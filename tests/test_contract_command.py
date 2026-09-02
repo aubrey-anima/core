@@ -52,8 +52,13 @@ def test_contract_reports_every_wire_format_version():
         # 别人的玩家此刻在哪儿,装回去还成了一份永不过期的假在场(JSON 存不了 TTL)。
         # 3.5.0 多了 `erasure:{player_id}`:一趟没做完的法务抹除的进度,而它记着的
         # 正是**要被抹掉的那些名字**。它进包比不抹还糟,所以和 lock / 在场同一类。
+        # 🆕 3.10.0:`config_rev` —— 配置表改过几次,`ConfigStore` 拿它判断
+        # "我手里那份还新不新"。**进程态,不是世界内容**(总图那张三态表),
+        # 和 lock 同一类。⚠️ **这一格动了 `storage`,运维台那条 deepStrictEqual
+        # 会当场红** —— 那是它该有的样子,同轮认账。
         "volatile_keys": [
             "lock", "players", "player:{player_id}", "erasure:{player_id}",
+            "config_rev",
         ],
         "presence": {
             "index_key": "anima:{world_id}:players",

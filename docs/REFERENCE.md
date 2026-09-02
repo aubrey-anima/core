@@ -3529,8 +3529,8 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
 | 🆕 `world.world_setting()` | 这个世界的**世界观**此刻是什么:`{text, source, length}`。`source` 用 `prompt_list()` 那一套词(`默认值` / `世界文件`),不另造一套 |
 | 🆕 `world.set_world_setting(text=None, *, clear=False, dry_run=False)` | 改**一个已经跑着的世界**的世界观(3.8.0,收件箱 D4)。覆盖;`clear=True` 回落到引擎内置那份(**不是变成空的**);`None` / 空白 **拒绝**(`ValueError`);逐字相同 `changed: false`;`dry_run=True` 一个字节都不写。回执 `{before, after, source, changed, cleared, dry_run, length}`。CLI 出口是 `anima-world world setting`(§4.7.1) |
-| 🆕 `world.install_pack(path)` | 把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。`path` 是一份带 `pack` 段的 `.cyberworld`。**一个文件就是一个 pack**。这条路新开的三段:剧情拍(按 id 合并,**零点是这个包落地那天**)/ 作者动过的开关 / 世界观;其余段照旧只填缺不覆盖,走开机那条路上同一批播种函数。回执 `{pack, version, note, day, tick, beats, config, world_setting, agents, locations}`;装不进抛 `PackInstallError`,而且**一个字节都没写**(判断全在写之前)。⚠️ 2a-① 明确不做:改在册的人的人设、给在册的人补记忆、停用一个包。CLI 出口是 `anima-world pack install`(§4.11) |
-| 🆕 `world.packs()` | 这个世界装了哪几份**内容包**,按落地先后(3.10.0)。每行 `id` / `version` / `note` / `day`(**第一次**落地那天,也是这份包里那些拍的零点)/ `tick` / `sections`(每个段各带了哪几个 id)。🔴 **折自 `pack_installed` 事件,没有第二张表** —— 和余额折自 `payment` 逐字同一种;存一份直接写的清单就多出一种和日志对不上的坏法,而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。只读门自己补课(`catch_up_projection`)。CLI 出口是 `anima-world pack list`(§4.11) |
+| 🆕 `world.install_pack(path, *, force=False)` | 把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。`path` 是一份带 `pack` 段的 `.cyberworld`。**一个文件就是一个 pack**。这条路新开的三段:剧情拍(按 id 合并,**零点是这个包落地那天**)/ 作者动过的开关 / 世界观;其余段照旧只填缺不覆盖,走开机那条路上同一批播种函数,而**缺席的段 = 不动**(不是回落引擎内置那份 —— 那个回落只对创世成立)。回执 `{pack, version, note, day, tick, beats, config, world_setting, agents, locations, skipped, forced}`;`skipped` 点名说哪几个在册的人的 `personality` / `memory` **没装进去**。装不进抛 `PackInstallError`,而且**一个字节都没写**(判断全在写之前,插件降级那一道也在)。`force=True` 只放行一件事:写了 `since: "world"` 而 `day` 已经过期、装上去会在下一 tick 一起烧掉的那几拍。⚠️ 2a-① 明确不做:改在册的人的人设、给在册的人补记忆、停用一个包。CLI 出口是 `anima-world pack install`(§4.11) |
+| 🆕 `world.packs()` | 这个世界装了哪几份**内容包**,按落地先后(3.10.0)。每行 `id` / `version` / `note` / `day`(**第一次**落地那天)/ `tick` / **`sections`(真的落地了什么)** / **`declared`(文件里写了什么)** / **`beat_days`(每一拍各自的落地日,零点按它算)**。🔴 `sections` 与 `declared` 是**两格**:抄文件当落地是「两份真相」,而读的人分不出哪一份是对的(2a-① 验收 C)。`beat_days` 同理 —— 一个包升级时带的是新的几拍,而上一版那几拍的零点不该跟着动。🔴 **折自 `pack_installed` 事件,没有第二张表** —— 和余额折自 `payment` 逐字同一种;存一份直接写的清单就多出一种和日志对不上的坏法,而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。只读门自己补课(`catch_up_projection`)。CLI 出口是 `anima-world pack list`(§4.11) |
 
 ### 持久化与底层
 
@@ -4575,9 +4575,14 @@ anima-world pack list --world-id w [--json]
 | 这条拍怎么进来的 | 零点 |
 |---|---|
 | 创世那批(没有 pack) | 世界第 0 天 —— **逐字如旧** |
-| 一份 pack 装进来的 | 那个 pack **第一次**落地那天 |
+| 一份 pack 装进来的 | **那一拍自己**落地那天(`beat_days`;同一个包升级时,上一版那几拍的零点不动) |
 | 写了 `for_each: {"node": "player"}` | 他入场那天 |
 | **两者都有** | **`max`(两者)** |
+
+⚠️ **`since: "world"` 对 per-player 的拍不生效**:那种拍的零点永远是
+`max(包落地那天, 他入场那天)`,而"他"是谁在装包这一刻还不知道 —— 逃生舱只对
+世界级的拍成立。⚠️ 而一条**世界级**的 `since: "world"` 拍,`day` 小于今天就会在
+**下一 tick 烧掉**;`install_pack` 因此**默认拒绝**并逐条列出,`force=True` 才装。
 
 🔴 **`max` 是唯一能同时让两句话成立的写法**:老玩家从包落地起算(否则第 2 周的剧情
 对他永远不响),而包落地三天后才进来的新玩家从他自己那天起算(否则他一进门就被

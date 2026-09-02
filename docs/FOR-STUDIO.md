@@ -5893,7 +5893,7 @@ anima-world simulate --world-id w --ticks 0 --world-file <pack>
 
 ```bash
 # 探测:按段在不在,别比版本号(`anima-world:3.8.0` 这个名字下已经有过三支不同的引擎)
-anima-world contract --json | jq '.packs, .beats.trigger_at_since, .host.moments'
+anima-world contract --json | jq '.packs, .beats.since'
 ```
 
 - **出包**:带 `{"kind":"author","type":"pack","body":{"id":"第2周","version":"1.0.0","note":"社团活动"}}`
@@ -5941,7 +5941,9 @@ anima-world contract --json | jq '.packs, .beats.since'
 {"kind": "author", "type": "beat",
  "body": {"id": "第二周-夜宵", "for_each": {"node": "player"},
           "trigger": {"at": {"day": 2}},
-          "payload": [{"op": "r_type", "as": "路明非", "target": "player", "value": "…"}]}}
+          "narrate": "宿舍门被敲响,芬格尔探进半个身子:「师弟,夜宵局?」",
+          "payload": [{"op": "r_type", "as": "路明非", "target": "player",
+                       "r_type": "还没摸清底细的室友"}]}}
 {"kind": "author", "type": "agent",
  "body": {"id": "新人物", "name": "…", "location": "…", "personality": "…"}}
 {"kind": "author", "type": "config", "body": {"narrative.player.enabled": true}}
@@ -5989,3 +5991,28 @@ anima-world pack list --world-id <世界> --json
 **这一轮明确没做的**(周更 2a-②,别照着写):改**在册的人**的人设 · 给**在册的人**
 补记忆 · **停用**一个包 · 主持人的「回来」时刻。前两件走 `--world-file` 或 `pack install`
 今天都**当场说一句"装不进去"**,不再静默。
+
+### (m) 🔴 2a-① 验收退回那一轮改了什么(2026-09-02,**照这一节写包**)
+
+三视角验收把 (l) 那一节里两处**照着抄会抄错**的地方逮出来了(上面已就地改掉:
+探测命令的键名是 `.beats.since` 不是 `.beats.trigger_at_since`;`r_type` 那条 op
+的字段是 `r_type` 不是 `value`)。除此之外这一轮改了七件,**每一件都改你们出包的写法**:
+
+| 改了什么 | 你们那侧要跟的 |
+|---|---|
+| 封皮 `engine_min` **真的被查了** | 带 `pack` 段 / `trigger.at.since` / `narrate` 的包,`engine_min` 写 **`3.10.0`**。写一个更低的数是**当场拒**(三扇门同一句);**没写**是一句警告 —— 「没说」和「说错」是两件事 |
+| `pack list` 的 `sections` 记的是**真的落地了什么** | 文件里写了什么另起一格 **`declared`**。两者之差 = 这份包里有几样没装进去,那是你们最该看的一格 |
+| 在册的人的 `personality` / `memory` **回执里点名说了** | 回执多一格 `skipped: {personality: […], memories: N, reason}`,并印一句 warning。**别再靠"没报错"当装进去了** |
+| 只带一部分段的包**不再灌内置默认值** | 从前一份只带一拍的包会往世界里塞 `cafe`/`home`/`workshop` 三个地点 + 三条撤不回的事件;不带 `agents` 会塞 `chat_with_夏/柔/遥`。现在**缺席 = 不动** |
+| `since: "world"` 的过期拍**默认拒绝** | 一份 `day: 0..6` 且写了 `since: "world"` 的包装进第 40 天的世界,那几拍会在下一 tick 一起烧掉 —— 现在当场拒并逐条列出,`--force` 才装。**去掉 `since` 就好**(缺省 `pack` = 从这份包落地那天算起) |
+| 同一个 pack 升级**不再打回上一版那几拍的零点** | 你们可以放心发 v1.1.0 补一拍:上一版那几拍照旧从它们各自落地那天算 |
+| 插件降级在**写第一个字节之前**就被拒 | 从前那种包会留下半个装进去的世界(地点已进地图、`packs()` 是空的) |
+
+⚠️ **`day` 那张表补一句 per-player 的注意**:`since: "world"` 对写了
+`for_each: {"node": "player"}` 的拍**不生效** —— 那种拍的零点永远是
+`max(包落地那天, 他入场那天)`,而"他"是谁在装包这一刻还不知道。
+所以「世界第 N 天」这个逃生舱只对世界级的拍成立。
+
+⚠️ **`:config_rev` 是新的易失键**(`contract --json` 的 `storage.volatile_keys` 多一格)
+—— 它是进程态,不进 `.cyberworld`。你们出包这一侧不用动;**运维台那条
+`deepStrictEqual` 会当场红,那是它该有的样子**。

@@ -504,6 +504,11 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_world_args(pack_install)
     pack_install.add_argument("file", help="那份 `.cyberworld`(必须有 `pack` 段)")
     pack_install.add_argument(
+        "--force", action="store_true",
+        help="明知有几拍会在下一 tick 一起响掉,也照装。"
+             "不带它时那种包「当场拒绝并逐条列出」—— `beat_fired` 是历史,烧掉回不来",
+    )
+    pack_install.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
     )
     pack_list = pack_commands.add_parser(
@@ -1189,6 +1194,127 @@ def _roster_note(key: str, who: list[str], on_roster: Any) -> str:
     return f"{EDIT_PATH_NOTES[key]}(在册而被丢掉的是:{names})"
 
 
+#: 哪几样东西一出现,这份包就只有 3.10.0 以上装得进去。
+#: **按"文件里写了什么"判,不按版本号猜** —— 和消费方那条"按段探测"逐字同构。
+PACK_ENGINE_MIN = "3.10.0"
+
+
+def pack_engine_min_errors(authored: dict[str, Any] | None, manifest: Any) -> list[str]:
+    """封皮上的 `engine_min` 和这份包**真的需要**的那一版对不对得上(3.10.0)。
+
+    🔴 **2a-① 验收 C 逮的**:一份 `engine_min: "3.9.0"` 而带着 `pack` 段的包,
+    `world check --edit` 说可用、`pack install` 退 0 —— 而它在 3.9.0 上是
+    **开不了机的硬失败**(不认识的作者层 `type`)。封皮是**下游照它做判断**的那一格,
+    而"作者声称要哪个引擎"和"这份包真的要哪个引擎"从前没有一处对过账。
+
+    ⚠️ **只往上查,不往下查**:写 `4.0.0` 的包这一版装不装得进由别处答
+    (`world inspect` 的 `runnable`),那是另一个问题。这里答的是
+    **"你声称的那一版根本跑不了你自己写的东西"**。
+    """
+    if not authored:
+        return []
+    needs: list[str] = []
+    if isinstance(authored.get("pack"), dict):
+        needs.append("`pack` 段(作者层第十五个段)")
+    for beat in _seed_entry_dicts(authored, "beats"):
+        at = (beat.get("trigger") or {}).get("at")
+        if isinstance(at, dict) and at.get("since") is not None:
+            needs.append("`trigger.at.since`")
+            break
+    for beat in _seed_entry_dicts(authored, "beats"):
+        if beat.get("narrate") is not None:
+            needs.append("一条拍上的 `narrate`")
+            break
+    if not needs:
+        return []
+    from anima_world.plugins import version_tuple
+
+    declared = str(getattr(manifest, "engine_min", "") or "")
+    # ⚠️ **「没写」和「写了一个更低的数」是两件事。**
+    # 写了更低的数是一句**可以被证伪的假话** —— 作者声称 3.9.0 跑得了,而它跑不了;
+    # 没写只是**没说**(`world inspect` 那一格的语义就是"作者声称要哪个引擎"),
+    # 而这份格式从一开始就允许不说。所以前者是错误,后者是警告 ——
+    # 把没说也判成错,每一份手写的世界文件都会在这扇门上变红。
+    if not declared:
+        return []
+    if version_tuple(declared) >= version_tuple(PACK_ENGINE_MIN):
+        return []
+    return [
+        f"封皮上写着 `engine_min: {declared}`,而这份包里有 "
+        f"{'、'.join(sorted(set(needs)))} —— 那几样 {PACK_ENGINE_MIN} 才有,"
+        f"更老的引擎见到它们是「开不了机的硬失败」。把 `engine_min` 写成 "
+        f"`{PACK_ENGINE_MIN}`"
+    ]
+
+
+def pack_engine_min_warnings(authored: dict[str, Any] | None, manifest: Any) -> list[str]:
+    """封皮上**没写** `engine_min`,而这份包里有只有新引擎才有的东西(3.10.0)。
+
+    没说不是说错,所以这是一句警告 —— 但它照旧要说:一份发出去的包,
+    下游拿 `engine_min` 决定给它哪一版引擎,而**空着等于「谁都行」**。
+    """
+    if not authored or not isinstance(getattr(manifest, "engine_min", None), (str, type(None))):
+        return []
+    if str(getattr(manifest, "engine_min", "") or ""):
+        return []
+    if pack_engine_min_errors(authored, _AnyEngineMin(PACK_ENGINE_MIN)) != []:
+        return []       # 逻辑上到不了,留着让下一个人改坏时当场看见
+    needs_new = bool(
+        isinstance(authored.get("pack"), dict)
+        or any((b.get("trigger") or {}).get("at", {}).get("since") is not None
+               or b.get("narrate") is not None
+               for b in _seed_entry_dicts(authored, "beats")
+               if isinstance((b.get("trigger") or {}).get("at"), dict)
+               or b.get("narrate") is not None)
+    )
+    if not needs_new:
+        return []
+    return [
+        f"封皮上没写 `engine_min`,而这份包里有只有 {PACK_ENGINE_MIN} 才认的东西 —— "
+        f"空着等于「谁都行」,而更老的引擎见到它们是「开不了机的硬失败」。"
+        f"写上 `engine_min: {PACK_ENGINE_MIN}`"
+    ]
+
+
+class _AnyEngineMin:
+    """给 `pack_engine_min_errors` 当"封皮"用的最小替身。"""
+
+    def __init__(self, engine_min: str) -> None:
+        self.engine_min = engine_min
+
+
+def expired_beats(beats: Any, *, day: int, pack_day: int) -> list[str]:
+    """这几拍装进今天这个世界,哪几条会在**下一 tick 一起响掉**(3.10.0)。
+
+    只有写了 `since: "world"` 的拍会撞上这件事:它的零点是世界第 0 天,
+    而 `trigger.at` 是「不早于」—— 一份 `day: 0..6` 的包装进第 40 天的世界,
+    七拍同一 tick 全响,`beat_fired` 是历史、烧掉就再也回不来。
+
+    ⚠️ **`for_each: player` 的拍算不出来,所以不算**:它的零点是
+    `max(包落地那天, 他入场那天)`,而"他"是谁在装包这一刻还不知道 ——
+    **算不出来就别猜一个答案**(和离线两扇门那条「查得动查不动」逐字同一条);
+    这一格由文档那两张 `day` 表说清楚。
+    """
+    from anima_world.beats import AT_SINCE, is_per_player
+
+    out: list[str] = []
+    for beat in (beats or ()):
+        if not isinstance(beat, dict) or is_per_player(beat):
+            continue
+        at = (beat.get("trigger") or {}).get("at")
+        if not isinstance(at, dict):
+            continue
+        if (at.get("since") or AT_SINCE[0]) != "world":
+            continue
+        try:
+            due = int(at.get("day", 0))
+        except (TypeError, ValueError):
+            continue
+        if due <= int(day):
+            out.append(str(beat.get("id")))
+    return out
+
+
 def world_pack_errors(authored: dict[str, Any] | None) -> list[str]:
     """作者写下的那个 `pack` 段立不立得住(3.10.0)。
 
@@ -1213,8 +1339,10 @@ def world_pack_errors(authored: dict[str, Any] | None) -> list[str]:
     errors: list[str] = []
     unknown = sorted(set(body) - set(PACK_KEYS))
     if unknown:
+        # ⚠️ **屏幕上不印 Python 的 list repr**(那串引号和方括号是给机器看的)。
         errors.append(
-            f"pack:不认识的键 {unknown} —— 一个内容包只有 {list(PACK_KEYS)}"
+            f"pack:不认识的键 {'、'.join(unknown)} —— 一个内容包只有 "
+            f"{'、'.join(PACK_KEYS)}"
             "(问 `contract --json` 的 `packs.pack_keys`,别照文档记一份清单)"
         )
     pack_id = body.get("id")
@@ -1226,8 +1354,11 @@ def world_pack_errors(authored: dict[str, Any] | None) -> list[str]:
         )
     version = body.get("version")
     if not isinstance(version, str) or not version.strip():
+        # ⚠️ **「没写」印成「没写」,不是印一个 `None`** —— 屏幕上的字是给人读的,
+        # 而 `pack.version None` 会让人去找一个叫 None 的东西。
+        shown = "(没写)" if version is None else repr(version)
         errors.append(
-            f"pack.version {version!r} 要是一段非空文本(例 `\"1.0.0\"`)—— "
+            f"pack.version {shown} 要是一段非空文本(例 `\"1.0.0\"`)—— "
             "没有版本号就说不出「这一周装的是第几版」,而那是升级唯一的判据"
         )
     note = body.get("note")
@@ -1398,7 +1529,8 @@ def _edit_ontology_gap_warnings(authored: dict[str, Any] | None) -> list[str]:
     return [
         f"这份包没重声明 `agent` 种类,而能力里读了 {['me_' + n for n in names]} ——"
         "「她身上声明过这个量吗」离线答不了(她的量表在目标世界里),这一格跳过了。"
-        "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问"
+        "要查它,用 `world check <文件> --edit` 连着这份包问;要真装进一个跑着的"
+        "世界,用 `pack install`(`--world-file` 是创世 / 离线编辑那条路)"
     ]
 
 
@@ -1439,7 +1571,8 @@ def _edit_stock_kind_gap_warnings(authored: dict[str, Any] | None) -> list[str]:
         f"这是一次编辑(--edit),而 `stocks` 里有 {len(shown)} 个 owner 的种类"
         f"这份包没声明({'、'.join(shown[:5])}{'…' if len(shown) > 5 else ''})——"
         "「这几个量名它所属的种类声明过吗」离线答不了(那份声明在目标世界里),"
-        "这几行的量名跳过了。要查它,用 `simulate --ticks 0 --world-file …` 连着世界问"
+        "这几行的量名跳过了。要查它,用 `world check <文件> --edit`;要真装进一个"
+        "跑着的世界,用 `pack install`"
     ]
 
 
@@ -2196,7 +2329,14 @@ def build_serve_scheduler(
         # **首启自动带** —— 这一条就是 D1 的另一半。没有它,节拍进得了世界文件
         # 却仍然要靠 `--beats` 才响,而舰队上没有任何一条路会去传那个参数:
         # 一拍都不响,零报错。
-        beat_script = BeatScript.from_data({"beats": beats_store.definitions()})
+        #
+        # 🔴 **`stored=True`:库里那几拍按宽容判**(3.10.0,2a-① 验收 B)。
+        # 3.10.0 给 `trigger` / `trigger.at` 加了闭集,而这一行会把库里存量的拍
+        # **重验一遍** —— 于是一个 3.9.0 上跑得好好的世界(那一版这两层一个键都
+        # 不查)换上 3.10.0 就 `BOOT FAILED`。**一次收紧不许把已经发出去的世界
+        # 锁在门外**;新文件 / 新内容包照旧严格。
+        beat_script = BeatScript.from_data(
+            {"beats": beats_store.definitions()}, stored=True)
     if fresh_world:
         _store_genesis_seed(meta, world_seed)  # 出生证明随世界走
         # 种子自己带的开关 —— 现在它是 `:config` 里唯一的来源:
@@ -3491,7 +3631,8 @@ def _edit_dropped_quantity_gap_warnings(authored: dict[str, Any] | None) -> list
         "所以目标世界里那些「这份声明没写」的量会被撤掉;而引擎今天「不裁剪」它们:"
         "值留在 `:stocks` 里、行留在 `:stock_visibility` 里,「顶着旧 label 继续进提示词」。"
         "「具体撤掉了哪几个」离线答不了(要比的是目标世界库里留着什么)。"
-        "要查它,用 `simulate --ticks 0 --world-file …` 连着世界问,开机会印一行 "
+        "要查它,用 `world check <文件> --edit`(要真装进一个跑着的世界用 "
+        "`pack install`),开机会印一行 "
         "`dropped_quantities:`"
     ]
 
@@ -3973,7 +4114,7 @@ def _seed_stock_visibility(world_seed: dict[str, Any] | None, store: Any,
 
 def _seed_world_defs(
     location_store: LocationStore, bt_store: BTStore, world_seed: dict[str, Any] | None,
-    *, merge: bool = False
+    *, merge: bool = False, builtin_fallback: bool = True
 ) -> list[str]:
     """Seed the definition tables once (empty-table no-op afterwards).
 
@@ -3986,21 +4127,36 @@ def _seed_world_defs(
     交回给调用方 —— 它要拿这个去补 `location_join` 事件,不然新地点只存在于
     地图表里,而投影(以及任何一次重放)里没有它。
     """
+    # 🔴 **`builtin_fallback=False` 的意思是"缺席的段 = 不动",不是"回落内置那份"**
+    # (3.10.0,2a-① 验收 A 逮的)。
+    #
+    # 那个回落对**创世**是对的:一个没写 `locations` 的世界总得站得住脚,给它
+    # 一份默认地图比开不了机好。对 `install_pack` 它是**错的,而且错得很安静**:
+    # 一份只带一拍的第 2 周包装进一个跑着的卡塞尔世界,地图上会凭空多出
+    # `cafe` / `home` / `workshop` 三个地点,还跟着三条 `location_join` 进日志
+    # —— **事件是只追加的,撤不回来**。带 `locations` 不带 `agents`(第 2 周包
+    # 最常见的形状)更阴:`:bt_actions` 会多出 `chat_with_夏/柔/遥`,
+    # 指着三个这个世界里根本不存在的人。全程零报错,`world check --edit` 也不说。
+    #
+    # 这一格和 `merge=` 是两件事:`merge` 说"同名的怎么办",这一格说"没写的怎么办"。
     if world_seed is not None:
         # **只改了一部分的文件不该被当成"作者删掉了其余段"。**
         # 没写 `locations` = 这次不动地图,不是"这个世界没有地点"。
         seed_locs = world_seed.get("locations")
         seed_agents = world_seed.get("agents")
+        fallback_locs = [dict(p) for p in DEFAULT_POINTS] if builtin_fallback else []
+        fallback_agents = [a["id"] for a in CHARACTER_ROSTER] if builtin_fallback else []
         loc_entries = (
             [_normalize_location_entry(loc, i, len(seed_locs)) for i, loc in enumerate(seed_locs)]
-            if seed_locs is not None else [dict(p) for p in DEFAULT_POINTS]
+            if seed_locs is not None else fallback_locs
         )
-        agent_ids = [a["id"] for a in seed_agents] if seed_agents is not None else [
-            a["id"] for a in CHARACTER_ROSTER
-        ]
-    else:
+        agent_ids = ([a["id"] for a in seed_agents] if seed_agents is not None
+                     else fallback_agents)
+    elif builtin_fallback:
         loc_entries = [dict(p) for p in DEFAULT_POINTS]
         agent_ids = [e["id"] for e in CHARACTER_ROSTER]
+    else:
+        loc_entries, agent_ids = [], []
     written = location_store.seed_defaults(loc_entries, merge=merge) or []
     point_ids = [e["id"] for e in loc_entries if e.get("kind", "point") == "point"]
     bt_store.seed_defaults(agent_ids=agent_ids, location_ids=point_ids, merge=merge)
@@ -4069,6 +4225,7 @@ def _pack_sections(world_seed: dict[str, Any] | None) -> dict[str, list[str]]:
 
 def _record_pack_installed(
     event_log: EventLog, world_seed: dict[str, Any] | None, *, day: int, tick: int,
+    landed: dict[str, list[str]] | None = None,
 ) -> str:
     """一份内容包落地了 —— 记一条 `pack_installed`,**没有第二张表**。
 
@@ -4093,7 +4250,13 @@ def _record_pack_installed(
             "note": str(body.get("note") or ""),
             "day": int(day),
             "tick": int(tick),
-            "sections": _pack_sections(world_seed),
+            # 🔴 **`sections` 记的是「真的落地了什么」,不是「文件里写了什么」**
+            # (2a-① 验收 C 逮的:同一份包 `pack install --json` 回执 `agents: []`,
+            # 而 `pack list --json` 却报 `sections.agents: ["夏"]` —— **两份真相**,
+            # 而读的人分不出哪一份是对的)。文件里那份另起一格 `declared`:
+            # 两者之差正是「这份包里有几样没装进去」,而那是作者最该看见的一件事。
+            "sections": dict(landed if landed is not None else _pack_sections(world_seed)),
+            "declared": _pack_sections(world_seed),
         },
     })
     return pack_id
@@ -4111,7 +4274,8 @@ class PackInstallError(ValueError):
         super().__init__("这份内容包装不进去:\n" + "\n".join(f"- {e}" for e in errors))
 
 
-def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
+def install_authored_pack(scheduler: Any, path: Path | str, *,
+                          force: bool = False) -> dict[str, Any]:
     """把一份**内容包**装进一个正在跑的世界(3.10.0,周更链路 2a-①)。
 
     这是**运行期**那条路;`--world-file` 是创世 / 离线编辑那条。两条路的区别不是
@@ -4152,7 +4316,7 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
     from anima_world.world_file import author_records_to_seed, read_world_file
     from anima_world.beats import BeatDirector
     from anima_world.ontology import OntologyError
-    from anima_world.plugins import PluginError
+    from anima_world.plugins import PluginError, plugin_version_errors
     from anima_world.world_seed import WorldSeedError
 
     redis = scheduler.redis
@@ -4168,7 +4332,7 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
     # 一切)。`--world-file` 那条路对这种文件是滤掉 + 说一句,而这一条**当场拒绝**:
     # 那儿滤掉是因为托管环境每次开机都指着同一份文件,而这儿是人按下的一次动作。
     try:
-        _, records = read_world_file(path)
+        manifest, records = read_world_file(path)
         rows = list(records)
     except Exception as exc:  # noqa: BLE001 - 读不动就说读不动,别甩堆栈
         raise PackInstallError([f"{path} 读不了:{exc}"]) from None
@@ -4181,7 +4345,11 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
     try:
         authored = author_records_to_seed(rows)
     except Exception as exc:  # noqa: BLE001
-        raise PackInstallError([str(exc)]) from None
+        # ⚠️ **`WorldFileError` 自己带着一摞中文行,别把它 `str()` 成一句
+        # `invalid world file:` 打头的英文**(2a-① 验收 C ⑨)——
+        # 作者该看到的是那几行中文,不是一句他改不动的英文抬头。
+        raise PackInstallError(
+            list(getattr(exc, "errors", None) or [str(exc)])) from None
 
     body = authored.get("pack")
     if not isinstance(body, dict) or not body.get("id"):
@@ -4194,8 +4362,11 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
 
     # ── ② 装不装得进:**和开机、和离线那两扇门同一份判断。**
     errors = list(authored_layer_errors(authored, complete=False))
+    errors += pack_engine_min_errors(authored, manifest)
     if errors:
         raise PackInstallError(errors)
+    for problem in pack_engine_min_warnings(authored, manifest):
+        logger.warning("%s", problem)
 
     rules_store = RedisRulesStore(redis, world_id)
     plugin_store = RedisPluginStore(redis, world_id)
@@ -4231,6 +4402,19 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
     except (WorldSeedError, OntologyError) as exc:
         raise PackInstallError(list(getattr(exc, "errors", None) or [str(exc)])) from None
 
+    # 🔴 **插件那一道也要在第一次写之前问**(2a-① 验收 A 逮的)。
+    # 从前它靠 `_install_plugins` 抛,而那一句排在锁里**六次写之后** —— 一份带
+    # 新地点 + 插件降级的包被拒,而地点已经进了地图、事件也追加了,`packs()` 却是空的。
+    # **半装进去一份包比装不进去坏得多**:作者看到红灯,而世界里已经多了三个地点。
+    # 判断**摘出来共用**(`plugins.plugin_version_errors`),不抄第二遍 ——
+    # 两份判断迟早给出不同答案,而那种不一致会表现成"预检说没问题,装的时候还是失败"。
+    if authored.get("plugins"):
+        parsed = _parsed_plugins_or_none(_seed_entry_dicts(authored, "plugins"))
+        if parsed is not None:
+            problems = plugin_version_errors(parsed, plugin_store)
+            if problems:
+                raise PackInstallError(problems)
+
     # 剧情:**先验,再写**,而且 id 撞车当场拒。
     #
     # 🔴 `:beats` 里已经有的 id 不许再来一条:`beat_fired` 那份历史按 id 配对,
@@ -4243,7 +4427,7 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
                        & {str(b.get("id")) for b in have_beats})
         if clash:
             raise PackInstallError([
-                f"这几拍的 id 这个世界里已经有了:{clash} —— 一份新包不许重用旧 id"
+                f"这几拍的 id 这个世界里已经有了:{'、'.join(clash)} —— 一份新包不许重用旧 id"
                 "(`beat_fired` 那份历史按 id 配对,重了就再也分不出是谁响过)。"
                 "改一个名字;要改已经发出去的那一拍,那是另一件事(还没做)"
             ])
@@ -4254,6 +4438,35 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
 
     tick = int(scheduler.clock)
     day = int(scheduler.world_time(tick).day)
+
+    # 🔴 **写了 `since: "world"` 的拍,装进一个跑了很久的世界会在下一 tick 一起烧掉**
+    # (2a-① 验收 C 逮的)。`trigger.at` 是「不早于」,而 `world` 那个逃生舱的零点
+    # 就是世界第 0 天 —— 一份 `day: 0..6` 的包装进第 40 天的世界,七拍同一 tick 全响,
+    # rc 0,而屏幕上还印着"`day: 0` 的那一拍下一 tick 就响"。
+    # **装的时候手上有这三样(拍表、`since`、今天),所以算得出来** —— 算得出来
+    # 就不许让它安静地发生。默认拒绝并逐条列出;`--force` 是"我就是要它们全响"。
+    expired = expired_beats(new_beats, day=day, pack_day=day)
+    if expired and not force:
+        raise PackInstallError([
+            f"这几拍装进去会在「下一 tick 一起响掉」(它们写着 `since: \"world\"`,"
+            f"零点是世界第 0 天,而今天已经是第 {day} 天):{'、'.join(expired)}。"
+            "要按「这份包落地那天」起算就把 `since` 去掉(那是缺省);"
+            "真要让它们立刻全响,加 `--force`"
+        ])
+
+    # 🔴 **在册的人的 `personality` / `memory` 装不进去,而这件事要说出来**
+    # (2a-① 验收 C 逮的:引擎一个字不说、rc 0,而离线门反而说了两句漂亮的)。
+    # 覆盖它们各要一把 compare-and-set 的尺,那是 2a-② 的事;**今天先说清楚**。
+    on_roster = set(scheduler.agents) | set(scheduler._memory_projection.agents)
+    skipped_persona = sorted({
+        str(e.get("id")) for e in _seed_entry_dicts(authored, "agents")
+        if isinstance(e.get("id"), str) and e["id"] in on_roster
+        and str(e.get("personality") or "").strip()
+    })
+    skipped_memories = [
+        e for e in _seed_entry_dicts(authored, "memories")
+        if str(e.get("agent_id") or "") in on_roster
+    ]
 
     receipt: dict[str, Any] = {
         "pack": pack_id,
@@ -4266,11 +4479,29 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
         "world_setting": False,
         "agents": [],
         "locations": [],
+        # **装不进去的那几段也要有一格。** 一张只列"装了什么"的回执,读起来像
+        # "别的都装进去了" —— 而那正是这一族最贵的错法。
+        "skipped": {
+            "personality": skipped_persona,
+            "memories": len(skipped_memories),
+            "reason": ("在册的人的人设与记忆这一版装不进去 —— 覆盖它们各要一把"
+                       "compare-and-set 的尺(「这一格还等于我上次写的值吗」),"
+                       "那是另一件事(还没做)。新人的照旧带得进来")
+            if (skipped_persona or skipped_memories) else "",
+        },
+        "forced": bool(force and expired),
     }
+    if skipped_persona or skipped_memories:
+        logger.warning(
+            "内容包 %r:在册的 %d 个人的人设、%d 条记忆**没有装进去** —— %s",
+            pack_id, len(skipped_persona), len(skipped_memories),
+            receipt["skipped"]["reason"],
+        )
 
     with scheduler._lock:
         # ── ③ 其余段:开机那条路上**同一批**播种函数,`merge=True`(只填缺)。
-        new_points = _seed_world_defs(location_store, bt_store, authored, merge=True)
+        new_points = _seed_world_defs(location_store, bt_store, authored, merge=True,
+                                      builtin_fallback=False)
         _seed_material_layer(economy_store, authored, merge=True)
         _seed_world_rules(rules_store, authored, merge=True)
         _seed_stock_visibility(authored, visibility_store, merge=True)
@@ -4336,11 +4567,25 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
             prompt_store.set("world.setting", setting.strip())
             receipt["world_setting"] = True
 
+        # ⚠️ **回执要在落账之前填好** —— `pack_installed` 的 `sections` 记的就是它。
+        receipt["agents"] = [e["id"] for e in newcomers]
+        receipt["locations"] = list(new_points)
+
         # ── ⑥ 落账:**事件先记,再折。**
         joined = _join_authored_additions(
             event_log, scheduler, authored, location_store, newcomers, new_points,
         ) if (newcomers or new_points) else set()
-        _record_pack_installed(event_log, authored, day=day, tick=tick)
+        # **落账写的是回执**(真的落地了什么),文件里那份另起 `declared` ——
+        # 两份真相那一格就是这么来的(2a-① 验收 C)。
+        _record_pack_installed(event_log, authored, day=day, tick=tick, landed={
+            k: v for k, v in (
+                ("beats", receipt["beats"]),
+                ("agents", receipt["agents"]),
+                ("locations", receipt["locations"]),
+                ("config", receipt["config"]),
+                ("world_setting", ["world.setting"] if receipt["world_setting"] else []),
+            ) if v
+        })
         persisted = event_log.replay()
         scheduler.reset_projection(persisted)   # 水位跟着挪
         scheduler.load_persisted_events(persisted)
@@ -4358,8 +4603,6 @@ def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
             }
             scheduler.beat_director = BeatDirector(script, fired=fired)
 
-    receipt["agents"] = [e["id"] for e in newcomers]
-    receipt["locations"] = list(new_points)
     logger.info(
         "内容包 %r(%s)装进了世界 %r:第 %d 天 · %d 拍 · %d 个开关 · %d 个新角色 · %d 个新地点",
         pack_id, receipt["version"], world_id, day, len(receipt["beats"]),
@@ -6339,8 +6582,11 @@ def _live_owner(redis: Any, world_id: str) -> tuple[str, str] | None:
 # (`chat_service.py` 的 `self._prompt_store.get("world.setting", …)`),所以热改
 # **当场就生效**。一句写死的后半句,换一扇门就可能反过来。
 _LIVE_EFFECTS = {
-    # ConfigStore 有内存缓存,所以这句对配置是真的。
-    "config": "写进去的配置那个进程不会重读,要下次重启才生效。",
+    # ⚠️ **这句 3.10.0 翻面了,留着当记号**:上一版写的是「写进去的配置那个进程
+    # 不会重读,要下次重启才生效」—— 那是 `ConfigStore` 只在开机 hydrate 一次的
+    # 实况,而 3.10.0 给它加了 `:config_rev`。**一句没跟着代码改的提示,
+    # 比没有这句提示更坏**:它会让人去重启一个本来不用重启的世界。
+    "config": "跑着的那个进程会在下一 tick 上读到新的(3.10.0 起),不用重启。",
     # 提示词是现读的,所以这句对世界观也是真的 —— 只是方向相反。
     "world setting": "世界观是现读的,那个进程下一次拼提示词就会用上新的。",
 }
@@ -7529,7 +7775,8 @@ def _package_only_ontology_errors(authored: dict[str, Any]) -> list[str]:
     `agent` —— 她的量表在目标世界里。所以这里在包没声明 `agent` 时**补一个只含
     "这份包提到过的那些 `me_*`"的 agent 声明**:名字对得上,这一条就查不出东西来,
     而别的检查一条不少。**这不是放水,是承认这一格离线答不了** —— 答不了的那一格
-    由调用方去 `simulate --ticks 0 --world-file` 连着世界问,那句话仍然印在 warning 里。
+    由调用方去 `pack install`(它在写第一个字节之前把这几件也问一遍)连着世界问,
+    那句话仍然印在 warning 里。
     """
     from anima_world.ontology import Ontology, OntologyError, parse_kinds
 
@@ -7780,7 +8027,7 @@ def _cannot_even_look(path: str) -> str | None:
 
 
 def _load_authored_layer(
-    path: str, *, scan: Any = None, state: Any = None
+    path: str, *, scan: Any = None, state: Any = None, manifest_out: list | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """读一个世界文件的**作者层**,聚合成 section 字典。读不了就把话说清楚。
 
@@ -7803,7 +8050,12 @@ def _load_authored_layer(
     )
 
     try:
-        _, records = read_world_file(path)
+        manifest, records = read_world_file(path)
+        # 🆕 3.10.0:**封皮跟着同一趟回来。** 「作者声称要哪个引擎」和「这份包真的
+        # 要哪个引擎」从前没有一处对过账 —— 而为了对这一笔账再读一遍文件,
+        # 等于把这个函数开头那条"流式喂进去、别读第二遍"的纪律作废。
+        if manifest_out is not None:
+            manifest_out.append(manifest)
         if scan is not None:
             records = tee_media(records, scan)
         if state is not None:
@@ -7833,7 +8085,9 @@ def run_validate(args: argparse.Namespace) -> int:
 
         edit = bool(getattr(args, "edit", False))
         state = StateScan()
-        authored, read_error = _load_authored_layer(args.path, state=state)
+        manifest_box: list = []
+        authored, read_error = _load_authored_layer(
+            args.path, state=state, manifest_out=manifest_box)
         if read_error is not None:
             return _report_validation("world", args.path, [read_error], [], args.json)
         errors = authored_layer_errors(authored, complete=not edit)
@@ -7877,7 +8131,8 @@ def run_validate(args: argparse.Namespace) -> int:
                     "包自己肚子里那几件「已经查过了」:量名两支都查"
                     "(`set:`/`costs:` 里读写的,以及 `stocks:` 里写初值的)、"
                     "动词的 label、`spawn` 有没有代价、不认识的字段、继承成环。"
-                    "要连着世界查剩下的,用 `simulate --ticks 0 --world-file …`"
+                    "要连着世界查剩下的:一份内容包用 `pack install`(它在写第一个字节之前"
+                    "把这几件也问一遍),别拿 `simulate --world-file` 当编辑用"
                 )
                 # 🆕 3.10.0:那五段。**句子和开机那条路共用一份常量**
                 # (`EDIT_PATH_NOTES`)—— 抄第二遍的那天,两边会先给出不同的措辞,
@@ -7890,6 +8145,12 @@ def run_validate(args: argparse.Namespace) -> int:
                           "是「当场拒绝」,退出码 2)"
                     )
                 warnings += edit_path_silent_notes(authored)
+                # 🆕 3.10.0(2a-① 验收 C):封皮和内容对不对得上 —— **三扇门同一句**。
+                # 一份 `engine_min: "3.9.0"` 而带着 `pack` 段的包,从前这两扇门
+                # 说"可用"、`pack install` 退 0 —— 而它在 3.9.0 上是开不了机的硬失败。
+                _mf = manifest_box[0] if manifest_box else None
+                errors += pack_engine_min_errors(authored, _mf)
+                warnings += pack_engine_min_warnings(authored, _mf)
                 warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_stock_kind_gap_warnings(authored)
                 warnings += _edit_dropped_quantity_gap_warnings(authored)
@@ -8069,8 +8330,16 @@ def contract_payload() -> dict[str, Any]:
             # 3.5.0 多了 `erasure:{player_id}`:一趟没做完的法务抹除的进度,
             # 而它记着的正是**要被抹掉的那些名字**(见 `RedisErasureProgress`)。
             # 打进包发出去比不抹还糟,所以它和 lock / 在场同一类:带 TTL、不进包。
+            # 🆕 3.10.0:`config_rev` —— **配置表改过几次**,`ConfigStore` 拿它
+            # 判断"我手里那份还新不新"(见 `RedisConfigBackend`)。
+            # 🔴 **它是「进程态」,不是世界内容**(总图那张三态表的定义:协调用的,
+            # 不是世界内容 → 不进 `.cyberworld`),和 `lock` 同一类:装回去毫无意义,
+            # 而每一份发出去的包都会带着一个没人读得懂的计数器。
+            # ⚠️ **这一格动了 `storage`,所以运维台那条 `deepStrictEqual` 会当场红** ——
+            # 那是它该有的样子(镜像本该在这种时候喊),同轮认账。
             "volatile_keys": [
                 "lock", "players", "player:{player_id}", "erasure:{player_id}",
+                "config_rev",
             ],
             "presence": {
                 "index_key": "anima:{world_id}:players",
@@ -8944,7 +9213,7 @@ def run_pack(args: argparse.Namespace) -> int:
             return 0
 
         try:
-            receipt = world.install_pack(args.file)
+            receipt = world.install_pack(args.file, force=bool(getattr(args, "force", False)))
         except PackInstallError as exc:
             # **作者看到的该是那几行中文,不是一段 Python 堆栈**
             # (2026-08-26 验收 C 那条:一次被拒的降级,屏幕先甩 Traceback)。
@@ -9925,9 +10194,11 @@ def run_world_check(args: argparse.Namespace) -> int:
     }
     unopenable = _cannot_even_look(args.package)
     state = StateScan()
+    manifest_box: list = []
     authored, read_error = (
         ({}, None) if unopenable
-        else _load_authored_layer(args.package, scan=scan, state=state)
+        else _load_authored_layer(args.package, scan=scan, state=state,
+                                  manifest_out=manifest_box)
     )
     if unopenable is None and read_error is None:
         # **只有整份读完了才报这两段。** 半途抛错的那趟扫描手里是一份残缺的账
@@ -10010,6 +10281,12 @@ def run_world_check(args: argparse.Namespace) -> int:
                           "是「当场拒绝」,退出码 2)"
                     )
                 warnings += edit_path_silent_notes(authored)
+                # 🆕 3.10.0(2a-① 验收 C):封皮和内容对不对得上 —— **三扇门同一句**。
+                # 一份 `engine_min: "3.9.0"` 而带着 `pack` 段的包,从前这两扇门
+                # 说"可用"、`pack install` 退 0 —— 而它在 3.9.0 上是开不了机的硬失败。
+                _mf = manifest_box[0] if manifest_box else None
+                errors += pack_engine_min_errors(authored, _mf)
+                warnings += pack_engine_min_warnings(authored, _mf)
                 warnings += _edit_ontology_gap_warnings(authored)
                 warnings += _edit_stock_kind_gap_warnings(authored)
                 warnings += _edit_dropped_quantity_gap_warnings(authored)
