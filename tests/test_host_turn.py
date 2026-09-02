@@ -141,10 +141,14 @@ def test_他点我该干嘛_受冷却管而且冷却值带在返回里(world):
     一个到不了消费方的冷却值等于没有这个冷却值。"""
     world.config_set("host.ask_cooldown_ticks", 999999)
     world.host_turn("p1")
+    # 🆕 3.10.0(批 1.1 ③):**进门那一屏之后的第一次问不起冷却** —— 见下面
+    # 那条用例。所以要验冷却,得先把那一次免费的用掉。
+    assert world.host_turn("p1", ask=True)["scene"]["source"] != "cached"
     turn = world.host_turn("p1", ask=True)
     assert turn["scene"]["source"] == "cached", "冷却里连点十下不该是十次 LLM"
     assert turn["ask_ready"] is False
     assert turn["ask_ready_tick"] > turn["tick"]
+    assert turn["ask_ready_text"], "按不动的时候要说一句还要等多久"
     world.config_set("host.ask_cooldown_ticks", 0)
     assert world.host_turn("p1", ask=True)["scene"]["source"] != "cached"
 
@@ -162,9 +166,10 @@ def test_刚开口那一次_那个读数说的是这一屏不是上一屏(world)
     """
     world.config_set("host.ask_cooldown_ticks", 12)
     world.host_turn("p1")
-    world.tick(60)                                    # 上一屏早就过了冷却
-    world.player_move("p1", "workshop")               # → arrive,当场写一屏新的
-    turn = world.host_turn("p1")
+    world.host_turn("p1", ask=True)                   # 用掉进门那一次免费的(③)
+    world.tick(288)                                   # 上一屏早就过了冷却,而且换了一天
+    turn = world.host_turn("p1")                      # → new_day,当场写一屏新的
+    assert turn["trigger"] == "new_day"
     assert turn["scene"]["source"] != "cached", "这一趟确实开了口"
     assert turn["ask_ready_tick"] == turn["tick"] + 12, "冷却该从这一刻起算"
     assert turn["ask_ready"] is False
@@ -443,3 +448,59 @@ def test_给模型那份提示_人称是你_而且时辰是喂进去的():
     assert "(深夜)" in whole and "「深夜」" in whole, whole
     # 刚发生的事排在最前,并且明说先说它。
     assert whole.index("一封录取通知") < whole.index("地点:"), whole
+
+
+# ── 批 1.1 ③:进门那一屏之后的第一次问,不起冷却 ────────────────────────────
+
+def test_进门那一屏之后第一次问_不起冷却(world):
+    """🔴 **真站实测的那条**:龙族 `ask_cooldown_ticks=12`,而一 tick 是 5 真实分钟
+    —— 一个刚进门的新玩家,「我该干嘛」那颗按钮**整整 60 真实分钟按不动**,
+    而那正是他最需要按它的一个小时。
+
+    冷却防的是「连点十下 = 十次 LLM 调用」,而**进门第一次问根本不是那件事**。
+    """
+    world.config_set("host.ask_cooldown_ticks", 999999)
+    first = world.host_turn("p1")
+    assert first["trigger"] == "arrive"
+    assert first["ask_ready"] is True, "进门那一屏上,那颗按钮就该是亮的"
+    assert first["ask_ready_text"] == "", "按得动的时候不该还挂着一句「还要等」"
+
+    asked = world.host_turn("p1", ask=True)
+    assert asked["scene"]["source"] != "cached", "进门第一次问被冷却挡了"
+    # 用掉之后照常起冷却 —— 这一格没有被拆掉。
+    assert world.host_turn("p1", ask=True)["scene"]["source"] == "cached"
+
+
+def test_还要等多久是一句人话_而且按这个世界自己的时钟折算(world):
+    """🔴 **别让宿主做 tick 数学。** 「还有几 tick」要变成「还要等几分钟」得知道
+    `scheduler.tick_rate`,而站点对世界只有 `/internal/v1/*`、够不着配置 ——
+    让每个宿主各算一遍,就是让它们各持一份对时钟的猜测,而猜错了不报错
+    (按钮早亮或晚亮)。
+
+    ⚠️ 同一个冷却值在演示速度的世界(1 tick/秒)上是十几秒、在线上是一小时 ——
+    **同一个数字在两个世界里是两件事**,这正是它不该由宿主换算的理由。
+    """
+    world.config_set("host.ask_cooldown_ticks", 12)
+    world.host_turn("p1")
+    world.host_turn("p1", ask=True)          # 用掉进门那一次免费的
+
+    world.config_set("scheduler.tick_rate", 1.0)          # 演示速度:1 tick/秒
+    fast = world.host_turn("p1")["ask_ready_text"]
+    assert "秒" in fast, fast
+
+    world.config_set("scheduler.tick_rate", 1 / 300)      # 线上:5 真实分钟一个 tick
+    slow = world.host_turn("p1")["ask_ready_text"]
+    assert "分钟" in slow or "小时" in slow, slow
+    assert fast != slow, "两个世界的时钟不一样,这句话不该一样"
+
+
+def test_turn_keys_契约与真门逐格相等(world):
+    """`ask_ready_text` 是 3.10.0 加的,而这张表是下游照着写解析器的那一行。
+
+    ⚠️ 3.9.0 那一轮 `who` 那一格漏在 REFERENCE 上,站点三处同缺一格而**没有一处
+    会红** —— 一份没人验的键表,和一句没人验的话是同一种东西。
+    """
+    from anima_world.__main__ import contract_payload
+
+    turn = world.host_turn("p1")
+    assert sorted(contract_payload()["host"]["turn_keys"]) == sorted(turn)

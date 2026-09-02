@@ -8497,16 +8497,46 @@ class World:
         # 比没有这个读数更坏。**
         scene_tick = tick if trigger is not None else int(last.get("tick") or 0)
         ask_ready = scene_tick + cooldown
+        # `arrive` 那一屏之后那一次问不起冷却(见 `_host_trigger`),所以这个读数
+        # 也得跟着说真话 —— **一个读数和它旁边那扇门说两句话,比没有这个读数更坏。**
+        shown_trigger = trigger or str(last.get("trigger") or "arrive")
+        ready = tick >= ask_ready or shown_trigger == "arrive"
         return {
             "player_id": pid, "tick": tick, "day": day,
             "place": place, "place_name": place_name,
-            "trigger": trigger or str(last.get("trigger") or "arrive"),
+            "trigger": shown_trigger,
             "scene": scene, "options": options,
             "ask_ready_tick": ask_ready,
-            "ask_ready": tick >= ask_ready,
+            "ask_ready": ready,
+            # 🔴 **一句人话,而不是让宿主自己做 tick 数学**(批 1.1 ③)。
+            # 「还有几 tick」要变成「还要等几分钟」得知道 `scheduler.tick_rate`,
+            # 而站点对世界只有 `/internal/v1/*`、够不着配置 —— 让每个宿主各算一遍,
+            # 就是让它们各持一份对时钟的猜测,而猜错了不报错(按钮早亮或晚亮)。
+            "ask_ready_text": self._ask_ready_text(ask_ready - tick, ready=ready),
             "blocked": menu.get("blocked", ""),
             "blocked_text": menu.get("blocked_text", ""),
         }
+
+    def _ask_ready_text(self, ticks_left: int, *, ready: bool) -> str:
+        """「我该干嘛」还要等多久 —— **按这个世界自己的 tick 节奏折成真实分钟**。
+
+        `scheduler.tick_rate` 是**每秒几个 tick**(默认 1/300 = 五真实分钟一个 tick),
+        所以剩下的真实秒数是 `ticks_left / tick_rate`。演示速度的世界(1 tick/秒)
+        上同一个冷却是十几秒,而线上是一小时 —— **同一个数字在两个世界里是两件事**,
+        这正是它不该由宿主去换算的理由。
+        """
+        if ready or ticks_left <= 0:
+            return ""
+        rate = float(_resolve_tick_rate(1.0, self.scheduler.config_store) or 1.0)
+        if rate <= 0:
+            return "等世界再走几步"
+        seconds = int(ticks_left) / rate
+        if seconds < 90:
+            return f"还要约 {max(1, round(seconds))} 秒"
+        minutes = round(seconds / 60)
+        if minutes < 60:
+            return f"还要约 {minutes} 分钟"
+        return f"还要约 {round(minutes / 60, 1):g} 小时"
 
     def _host_hidden_agents(self) -> set[str]:
         """`card.billing == "hidden"` 的那些人 —— 主持人一个字都不许提到他们。
@@ -8680,6 +8710,14 @@ class World:
         if int(last.get("day") or 0) != day:
             return "new_day"
         if ask:
+            # 🔴 **`arrive` 那一屏不起冷却**(3.10.0,批 1.1 ③)。真站实测:龙族的
+            # `ask_cooldown_ticks=12`,而一 tick 是 5 真实分钟 —— 于是一个刚进门的
+            # 新玩家,「我该干嘛」那颗按钮**整整 60 真实分钟按不动**,而那正是他最
+            # 需要按它的一个小时。冷却防的是「连点十下 = 十次 LLM 调用」,
+            # 而**进门第一次问**根本不是那件事。
+            # 问过一次之后这一屏的 trigger 就是 `ask` 了,冷却照常起作用。
+            if str(last.get("trigger") or "") == "arrive":
+                return "ask"
             cooldown = int(self.config_get("host.ask_cooldown_ticks", default=12) or 0)
             if tick - int(last.get("tick") or 0) >= cooldown:
                 return "ask"

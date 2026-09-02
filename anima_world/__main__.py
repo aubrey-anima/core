@@ -8713,12 +8713,20 @@ def contract_payload() -> dict[str, Any]:
             "event": "host_scene",
             "max_options_key": "host.max_options",
             "ask_cooldown_key": "host.ask_cooldown_ticks",
+            # 🆕 3.10.0(批 1.1 ③):**`arrive` 那一屏之后那一次问不起冷却。**
+            # 龙族 `ask_cooldown_ticks=12` × 5 真实分钟 = 一个刚进门的新玩家
+            # 「我该干嘛」整整 60 真实分钟按不动,而那正是他最需要按它的一个小时。
+            # 冷却防的是"连点十下 = 十次 LLM 调用",而进门第一次问不是那件事。
+            "ask_free_after": "arrive",
             # 冷却那个数**也带在 `host_turn` 的返回里**(`ask_ready_tick` /
             # `ask_ready`):站点对世界只有 `/internal/v1/*`,够不着这扇门 ——
             # 一个到不了消费方的契约格,等于没有这一格。
+            # ⚠️ **这张表是下游照着写解析器的那一行,加一格就要同轮跟上** ——
+            # 3.9.0 那一轮 `who` 那一格漏在 REFERENCE 上,站点三处同缺一格而没有
+            # 一处会红。`ask_ready_text` 是 3.10.0(批 1.1 ③)加的。
             "turn_keys": ["player_id", "tick", "day", "place", "place_name", "trigger",
                           "scene", "options", "ask_ready_tick", "ask_ready",
-                          "blocked", "blocked_text"],
+                          "ask_ready_text", "blocked", "blocked_text"],
             "option_keys": ["id", "kind", "label", "who", "hook", "tone", "available",
                             "reason", "refusal", "cost", "door"],
             "gloss": (
