@@ -3470,6 +3470,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.trigger_stats()` | **每条插件触发器**跑得怎么样,一条一行**七个数**:`{matched, no_bearer, no_facts, when_false, written, emitted, errors}`(3.8.0)。🔴 七个数分开记是因为它们指向不同的修法 —— 一条 `when` 恒为假的触发器和一条**根本没被叫到**的触发器,在屏幕上长得一模一样。⚠️ 本次运行内的计数,不是历史;**一次都没被叫到的触发器根本不在这张表里**,那本身就是一个读数 |
 | `world.perception(agent_id)` | 她此刻**感知到**什么(不是世界有什么),分 `own`/`here`/`public` 三档(§2.9.4),外加 `overflow`(截断了几样,§2.9.7)。2.9.4.1/2 之后**多两段,只加不改**:`words` 是分档过的量她读到的那个词,`labels` 是量的人话名字 —— 两段的结构与前三档逐字相同(`{"own": {…}, "here": {owner: {…}}, "public": {…}}`),里面**只有真声明过 `bands` / 真写过 `label` 的量**,都没写的世界那六个字典全是空的。⚠️ **键与数字是契约,人话是赠品**:`own`/`here`/`public` 里的**量名和数原样不动**(把键换成 label 会让宿主的代码在作者改一个字的那天读到 KeyError;把 6.5 换成"上了江岸街"会让那根水位曲线画不出来)。3.2.0 又多四段,同样只加不改:`verbs`(每样东西**能被怎么做**)、`names`(东西的名字)、`glosses`(那一行说明)、`units`(量的单位)。⚠️ **`units` 按 owner 排(和 `here` 一个键),而 `own` / `public` 那两档是扁平的**,所以它们的单位另有两格:`own_units` / `public_units`。这不是重复 —— 此前 `units` 只填了 `here` 那一档,于是同一个 `unit: "点"` 在树身上念得出「树高 3.2米」、在她自己身上念成「体力 100」。合成一张嵌套表读起来更整齐,但那是**改形状**,镜像端会当场读到 KeyError。⚠️ **`verbs` 是唯一推不出来的那一栏** —— 数字不告诉你「擦一擦」这个词存不存在,而它**按实例查**,认得出作者只给这一扇窗开的口子。3.6.0 再多一段(只加不改):`activities` 是 `here` 这一档里**每个人此刻在做什么**(`{"agent:齐": "在陪一次夜播"}`,只收 `here` 里真有的 owner,闲着的人不出现)。之前这一档只报得出别人身上的**量**,报不出他的**动作** —— 于是一个正擦着窗的人在她眼里只是「手上的活儿 1.92」,她照着说出「我没见你动过手」,而那句话在数据上完全成立 |
 | `world.player_perception(player_id)` | 同上,但问的是**人**看到什么(`agent:player:{id}` 那份量 + 他站的地方)。走的是同一个 `perceive()`、同一份可见性声明 ——玩家不是第二套可见性,是同一套里的另一个人。存在的理由是 `player_tool("interact", …)` 要一个 `target` 和一个 `verb`,而两样都只有这里问得到(§2.9.6) |
+| `world.host_turn(player_id, *, ask=False)` | **主持人的那一屏**(3.9.0,§9.2):一段场景 + 3–5 个选项 + **永远在最后**的自由输入。`{"player_id","tick","day","place","place_name","trigger","scene":{"text","source","seq"},"options":[…],"ask_ready_tick","ask_ready","blocked","blocked_text"}`;一项 = `{"id","kind","label","hook","tone","available","reason","refusal","cost","door":{"method","params"}}`。**一个方法不是四个** —— 说场景与递选项必须同一次取,分开就是对一个动着的世界取两次快照(场景说「他在门口」,选项里他已经走了,而这种不一致一处都不报错)。🔴 **主持人是荐者不是执行者**:每一项的 `door.method` 是闭集(`answer_invitation`/`chat`/`player_walk`/`player_tool`/`free`),点下去走的全是今天已经存在的那扇门 —— 这一层一条新的「写世界」的路都不开。每种门的 params 键集在 `contract --json` 的 `host.door_params` 里,**消费方按段对表,别按名字猜**。`available`/`reason`/`refusal`/`cost` 是 `player_options` 那四格**原样透传**。**只在四个时刻开口**(`arrive`/`new_day`/`beat`/`ask`),闸在这个函数里:时刻钥匙 `(place, day, 指着他的最后一条 beat_fired 的 seq)` 对上就原样返回上一屏(`scene.source == "cached"`);`ask=True` 另受 `host.ask_cooldown_ticks` 管,而那个冷却**也带在返回里**(`ask_ready_tick`/`ask_ready`)—— 宿主够不着 `contract` 时照样置得了灰。🔴 **`card.billing == "hidden"` 的角色不进候选,也不进给模型的那份提示**(不是"给了再叮嘱它别说":这一屏交出去的是散文,宿主筛不了,筛一半比不筛更坏)。场景走**背景槽**,一次调用、失败即模板(`host.mock_scene`)、**不重试不合批**;**挑哪几项是纯算术**,同一个世界同一时刻挑两次逐项相同。开口那一下落成一条 `host_scene` 事件,那一屏是它的投影(所以刷新之后开场还在)。CLI 出口 `anima-world player host` |
 | `world.player_options(player_id)` | **这个人此时此地点得动什么** —— 可以直接渲染成按钮的那一份(§2.9.6)。`{"player_id","location","location_name","blocked","blocked_text","overflow","own":{"quantities","readouts"},"targets":[{"id","name","gloss","kind","quantities","readouts","verbs":[{"verb","label","available","reason","refusal","cost","participants","candidates"}]}]}`。`player_perception` 答"这儿有什么、能被怎么做",这一条再往前一步答"**这会儿点得动吗、点不动是为什么**"。`readouts` 每行 `{"key","label","value","word","unit","text"}` 是**量该怎么印**:`quantities` 那份键与数字仍是契约(拿去判断、画曲线),`readouts` 是加上去的人话 —— 措辞走 `perception.readout_text`,**和她提示词里那一行是同一个函数**(各写一遍的下场是她读到「雨势 瓢泼大雨」而玩家读到 `雨势 0.82`)。`label` 永远印得出来(作者没写就是量名本身),`word` 是分档的量落在哪一档(没分档是空串)。`own` 是**他自己身上的量** —— 没有它,`incapable` 那句"你还差点什么"是句哑谜。`cost` 是**按下去之前**那句话(「要花 1 小时,这期间做不了别的」;一下子完的事是空串)—— 四类拒绝管的是点不动的按钮,而**一个把人锁住一小时的按钮是点得动的**,不说的话玩家点完才知道。**只说时间**:量和材料不够时 `incapable` 会当场点名,而时间总是够,于是永远没人拦他。⚠️ **不新造第二套真相**:成不成走 `perform_affordance(dry_run=True)`,和真点下去那一次是同一个函数;四类拒绝(`conditions`/`incapable`/`busy`/讲不通的那摞)一个都不合并。⚠️ **一个字节都不写** —— 它每一帧都要被渲染一次。`blocked` 是空菜单的**原因**(`unknown_player_location` / `in_transit` / `no_ontology`),不是一句沉默;`blocked_text` 是同一个原因的**人话**(3.3.0 起就在返回值里),照着印就行 —— ⚠️ **`own` 空不等于"玩家身上没有量"**:被挡住时它本来就是空的,而那两格已经把为什么写在旁边了(一次真实的误诊:读 `own` 为空,报成"玩家看不到自己身上任何一个量",真相是 `blocked=unknown_player_location`,人话就摆在下一格) |
 | `world.debug_prompt(agent_id, *, player_id="p1", message="在吗", display_name=None, role="player", history=None)` | 她这一刻**会收到的提示词**,逐块带来源标签(§2.9.5)。`blocks` / `order` / `absent`(哪块没出现**以及为什么**)/ `system`(并起来的整段,和真聊天逐字相同)/ `asker`(这一份是**拿谁**算的,`known` 说世界认不认得他 —— 幽灵身上身份/在场/关系三块整个换一套算法)。**看,但不碰**:不推时钟、不进 LLM、不写玩家状态,静音中的角色也照样交出来 |
 | `world.declare_visibility(owner_kind, key, visibility, label=None, bands=None)` | 声明某类量的可见档:`self`/`here`/`public`/`hidden`。`label` 是**这个量**的人话名字(不是东西的名字,§2.9.4.1);`bands` 是可选的一份 `[[阈值, 词], …]`(阈值**严格升序**,取最后一个 `<=` 当前值的那一档,两头封口,§2.9.4.2)。`bands=None` / `[]` = 不分档,行为逐位不变;写错(不升序 / 空词 / 形状不对)当场 `ValueError` 且**一个字都不写** —— 库里留一份坏声明,下场是她一直报数字而日志干净 |
@@ -3696,6 +3697,18 @@ anima-world contact --world-id w --json                # 契约
 `--inbox` 补的是同一个洞的另一半:`World.inbox()` 一直是对的,而 CLI 上一个出口都没有,
 于是运维只能 `redis-cli` 去翻 `anima:{world}:contact`。三道闸里"有 CLI 出口"这一条,
 这一层本来是不合格的。
+
+### 4.2.3.0 anima-world player host —— 主持人的那一屏(3.9.0)
+
+```bash
+anima-world player host --world-id w --player p1            # 人看的
+anima-world player host --world-id w --player p1 --json     # 契约(渲染是赠品)
+anima-world player host --world-id w --player p1 --ask      # 他点了「我该干嘛」
+```
+
+`--json` 的形状见 §3 的 `world.host_turn`,以及 `contract --json` 的 `host` 段。
+**没配 key 时整条路照样跑**(场景是模板句)—— 一个"没 key 就不成立"的机制等于在
+默认状态下缺席。
 
 ### 4.2.3.1 anima-world player forget —— 一个人离开了这个世界
 
@@ -4539,6 +4552,8 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 | `llm.model` | str | `gpt-4o-mini` | 模型名 |
 | `llm.timeout` | float | 30.0 | 单次调用超时(秒) |
 | `llm.max_retries` | int | 2 | SDK 重试次数。⚠️ **只在流开始之前管用** —— 流吐出第一片之后断掉,它一个字都帮不上,那是下面两格的活 |
+| `host.max_options` | int | 5 | 主持人一屏递几个选项。**自由输入那一项不占名额**(把它算进去,选项一多"我想说点别的"就被挤掉,而那正是这一层要保住的自由) |
+| `host.ask_cooldown_ticks` | int | 12 | 他点「我该干嘛」之后,隔多少 tick 才会**重新生成**一段场景。没到就原样返回上一屏(`scene.source == "cached"`)—— 不然连点十下就是十次 LLM 调用。这个数**也带在 `host_turn` 的返回里**(`ask_ready_tick`),因为宿主未必够得着 `contract --json` |
 | `llm.stream.first_timeout` | float | 30.0 | 流式:等**第一片**多久(prefill 在这一段里,慢是正常的)。**和从前的 `llm.timeout` 逐字相同,有意不收紧** |
 | `llm.stream.gap_timeout` | float | 15.0 | 流式:第一片之后**片与片之间**能空多久。比从前紧一半 —— 敢收紧是因为落在"还没吐正文"那一段的超时**会自动重来一次**(见下) |
 | `llm.background.model` | str | 空 | **背景槽**的模型:意图分类器与连续输出的每一步走它(便宜快模型)。空 = 用 `llm.model`。key 与端点共用主槽的 |
@@ -5125,6 +5140,51 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 `once`)。3.8.0 一个都不查 —— 所以**写了 `for_each` 的包在 3.8.0 上开得了机**,
 拍按世界时响一次、烧掉。这个闭集救不了 3.8.0,它救的是下一个不认识的键;
 **发包前的判据是 `contract --json` 里 `beats.player_selector` 在不在,不是版本号。**
+
+### 9.2 主持人:世界永远先开口(3.9.0)
+
+玩家点进一个世界,从前看到的是名册、地图,和**一个空白的聊天框** —— 他不知道自己是谁、
+该找谁、说什么、说了会怎样。跑团桌上没有这个问题,因为 GM 永远先开口:
+**场景 → 选项 → 后果**。
+
+一次调用交出一屏:`World.host_turn(player_id, *, ask=False)`(§3)/
+`anima-world player host`(§4.2.3.0);形状与每种门的 params 键集在 `contract --json`
+的 `host` 段里 —— **消费方按段对表,别按名字猜**。
+
+**六条这一层的纪律**:
+
+1. **一个方法,不是四个。** 说场景和递选项必须同一次取:分开就是对一个动着的世界取
+   两次快照,而"场景说他在门口、选项里他已经走了"这种不一致**一处都不报错**。
+   「回应」不新造(动词的 `emit.text` / `ToolResult` / `narrative` 事件已经是三条路);
+   「导演」不在这一版里。
+2. 🔴 **主持人是荐者,不是执行者。** 每一项的 `door` 指向今天**已经存在**的那扇门,
+   这一层一条新的"写世界"的路都不开。这一条买到三样:壳只加一扇门、宿主不必在前端拼
+   第二套「能做什么」、引擎侧零新增写路径。
+3. **自由输入永远在,永远最后,而且不占 `host.max_options` 的名额。** 跑团的规矩正是
+   这样:GM 给选项,玩家可以不选,但 GM 先说话。
+4. **只在四个时刻开口** —— 进地点 / 新的一天 / 指着他的剧情拍响了 / 他点了「我该干嘛」。
+   闸在 `host_turn` 里(时刻钥匙 vs 上一条 `host_scene` 事件),**引擎里没有第二条生成
+   场景的路**,所以这条纪律是结构性的,不是提示词里的一句话。三样同时变时报最强的那个
+   (`arrive` > `beat` > `new_day`)。
+5. **挑哪几项是纯算术,LLM 只写字。** 照 `contact` 那一层已经写下的:「LLM 在这一层没有
+   否决权……给它否决权还有第二个坏处:有 key 的世界和没 key 的世界会有两套行为,而差别
+   只在一个环境变量上。」可验的说法:**同一个世界同一时刻挑两次,逐项相同**。
+   挑法是「一个安全的、一个有风险的、一个社交的」,再按 (类别, id) 补满 —— 排序按 id
+   而不是"最有意思的那几个",和 perception 的截断同一条理由:要的是**确定**。
+6. 🔴 **`card.billing == "hidden"` 的角色不进候选,也不进给模型的那份提示。**
+   不是"给了再叮嘱它别说"。roster / perception / player-options 那三扇门交出去的是**行**,
+   宿主能逐行筛;这一屏交出去的是**散文**,名字是模型写进去的 —— 宿主筛不了,而
+   **筛一半比不筛更坏**。落法是让那份提示没有第二个名字来源:它只由已经筛过的候选拼出来。
+
+**场景那段话怎么来**:走背景槽(`llm.background.model`),一次调用同时写场景和每一项的
+钩子;没 key / 失败 / 超时 → 模板句,**不重试、不合批**。开口那一下落成一条 `host_scene`
+事件,"此刻他那一屏"是它的**投影**(每人只留最后一条)—— 所以**刷新之后开场还在**,
+不靠宿主自己记。⚠️ `host_scene` 与 `player_join` 都**不在** `SUBSCRIBABLE_EVENTS` 上
+(宁少勿多:进了那张表就是一句拿不掉的公开契约)。
+
+⚠️ **`blocked` 不吞掉主持人**:一个没写 `kinds` 的世界 `player_options` 直接
+`blocked: "no_ontology"`,而人、地点、邀请这三类选项一个都不依赖本体层 ——
+那两格原样透传给宿主,选项该有多少还是多少。
 
 ## 10. 插件(3.8.0,第 1 期)
 

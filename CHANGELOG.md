@@ -67,6 +67,69 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.9.0] —— 玩法层批 1:点进一个世界,就有的玩 (2026-09-02)
+
+任务单 `docs/任务单/2026-09-02-玩法层批1-点进去有的玩.md`(§2 是裁决全文),
+设计稿 `docs/设计-玩法形态-引擎层.md`。一句话诊断:**空白的聊天框是游戏设计里最贵的
+错误** —— 跑团桌上从来没有这个问题,因为 GM 永远先开口。
+
+### 主持人(K1):世界永远先开口
+
+- `World.host_turn(player_id, *, ask=False)` + `anima-world player host` +
+  `contract --json` 的新顶层段 `host`。一次调用交出一屏:一段场景 + 3–5 个选项 +
+  **永远在最后、而且不占名额**的自由输入。
+- **一个方法,不是设计稿里的四个。** 说场景与递选项必须同一次取(分开就是对一个动着的
+  世界取两次快照);「回应」用已有的三条路,「导演」不在这一版。
+- 🔴 **主持人是荐者不是执行者**:每一项的 `door` 指向今天已经存在的那扇门,闭集
+  (`answer_invitation` / `chat` / `player_walk` / `player_tool` / `free`),每种门的
+  params 键集在 `contract.host.door_params` 里。引擎这一层**零新增写路径**。
+- **只在四个时刻开口**,闸在引擎里(时刻钥匙 vs 上一条 `host_scene` 事件),
+  `ask` 另受 `host.ask_cooldown_ticks` 管 —— 而那个冷却**也带在返回里**
+  (`ask_ready_tick` / `ask_ready`),因为宿主未必够得着 `contract --json`。
+- **挑哪几项是纯算术,LLM 只写字**(同一个世界同一时刻挑两次逐项相同);场景走背景槽,
+  一次调用、失败即模板、不重试不合批。开口落成一条 `host_scene` 事件,那一屏是它的投影
+  —— 所以刷新之后开场还在。
+- 🔴 **`card.billing == "hidden"` 的角色不进候选,也不进给模型的那份提示。**
+  那三扇结构化的门宿主能按行筛,而这一屏是**散文**,宿主筛不了,**筛一半比不筛更坏**。
+- 新配置两键:`host.max_options`(5)、`host.ask_cooldown_ticks`(12)。
+
+### 剧情拍指得到「任何玩家」(K2)
+
+- 一条拍顶层写 `"for_each": {"node": "player"}`,之后保留字 `player` 指这一趟展开的
+  那个人。**声明本身就是开关**,老拍逐字不变。
+- `trigger.at.day` 从**他第一次进这个世界那一天**算起(新事件 `player_join`;
+  那个"第一次"记在**账本**上,不记在带 TTL 的在场上);`once` 按玩家各一次
+  (`beat_fired` 多一格 `for`,老事件没有它 = 世界级)。
+- **每一格写不写得下 `player` 是加载期判的,拒了当场说** —— 没有第三种"静默跳过"。
+  两张收拒表进 `contract.beats.player_selector`。
+- 顺手收一层:**一条拍的顶层键从今天起是闭集**。
+- ⚠️ 3.8.0 上写 `for_each` 的包**开得了机**、拍按世界时响一次、烧掉 ——
+  **发包前的判据是 `contract.beats.player_selector` 在不在,不是版本号。**
+
+### 修:玩家在别人眼里根本不存在
+
+- `Scheduler._actor_is_visible_to_others()` 读的是本体层 `kinds["agent"].quantities`,
+  而**插件声明的事实只落进可见性表**。判假之后玩家永远不进 `stock_places`,
+  **任何 NPC 的 perception 里都没有他** —— 世界照跑、日志干净。线上《龙族》此刻就是
+  那样的世界(`ontology --kind agent --json` 现敲,`quantities` 是 `[]`)。
+  判据改读**可见性表**;`_actor_visible_cache` 接上失效那根线(装/卸插件是热的)。
+
+### 修:流式没有兜底(收件箱 D51)
+
+- 流式的两把尺分开:`llm.stream.first_timeout`(30.0,和从前逐字相同,**有意不收紧**)
+  与 `llm.stream.gap_timeout`(15.0,比从前紧一半)。
+- **还没吐出正文时断掉自动重来一次**。🔴 "还没吐正文"**不等于**"还没 yield 过":
+  线上那两次挂掉时流已经吐过三片,而那三片是玩家看不到的控制标记。
+- 已经吐出正文之后**绝不重来** —— 重复的正文比一句"她没能接上话"更难解释。
+
+### 契约
+
+- **纯增量**:`contract` 新顶层段 `host` · `beats.player_selector` · `config` 多四键。
+- 🔴 **`storage` 段一个字没动**(host 走事件 + 投影,零新键)—— 运维台那条只比
+  `.storage` 的 deepEqual **不会红**。
+- **破坏性只有一条**:写了 `for_each` 的包 `engine_min` 必须写 `3.9.0`。
+- `World` 门面只加不改:`host_turn`。
+
 ## [3.8.0] —— 插件系统第 0 期:先把今天就错着的那几件补上 (2026-08-26)
 
 任务单 `docs/任务单/2026-08-26-插件系统-第0期.md`,设计稿 `docs/设计-插件系统.md` §10 第 0 期。

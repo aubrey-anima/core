@@ -64,6 +64,10 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_item_consume(proj, e)
     elif e.type == "player_join":
         _apply_player_join(proj, e)
+    elif e.type == "host_scene":
+        _apply_host_scene(proj, e)
+    elif e.type == "beat_fired":
+        _apply_beat_fired(proj, e)
     elif e.type == "player_departed":
         _apply_player_departed(proj, e)
     elif e.type == "agent_invites":
@@ -243,6 +247,28 @@ def _doing(state: Any) -> dict[str, Any]:
     # 拷贝之后再删 —— 事件那个 dict 是**已经发生过的事实**,就地改它等于改写历史
     # 的显示(见 `_apply_agent_join` 里 spec 那段的教训)。
     return {k: v for k, v in state.items() if k != "location"}
+
+
+def _apply_host_scene(proj: Projection, e: Event) -> None:
+    """主持人开过的口。**每人只留最后一条** —— 这一格答的是"此刻那一屏是什么",
+    而"他这一路听过哪些开场"是日志的活,不是投影的。"""
+    payload = e.payload or {}
+    player_id = str(payload.get("player_id") or "")
+    if not player_id:
+        return
+    proj.host_scenes[player_id] = {**payload, "seq": int(e.seq or 0)}
+
+
+def _apply_beat_fired(proj: Projection, e: Event) -> None:
+    """指着某个玩家的那条拍响过了 —— 记下 seq,主持人的时刻钥匙要读它。
+
+    **只认带 `for` 的那些**:世界级的拍不是"对他发生的事",拿它去叫醒每个人的
+    主持人,一条公共剧情就会让所有人的屏幕同时重开。
+    """
+    subject = str((e.payload or {}).get("for") or "")
+    if not subject.startswith("player:"):
+        return
+    proj.player_beat_seq[subject[len("player:"):]] = int(e.seq or 0)
 
 
 def _apply_player_join(proj: Projection, e: Event) -> None:

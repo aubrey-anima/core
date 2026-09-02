@@ -8296,6 +8296,313 @@ class World:
         )
         return {} if perceived is None else perceived.to_dict()
 
+    def host_turn(self, player_id: str, *, ask: bool = False) -> dict[str, Any]:
+        """主持人的**那一屏**:一段场景 + 3–5 个选项 + 永远在最后的自由输入。
+
+        玩家点进一个世界,从前看到的是名册、地图,和一个空白的聊天框 —— 他不知道
+        自己是谁、该找谁、说什么。跑团桌上没有这个问题,因为 GM 永远先开口。
+
+        **一个方法,不是四个。** 说场景和递选项必须是同一次调用:分开的话就是对一个
+        动着的世界取两次快照 —— 场景说「芬格尔在门口抽烟」,选项里他已经走了,
+        而这种不一致一处都不报错。「回应」不新造(动词的 `emit.text` / `ToolResult` /
+        `narrative` 事件已经是三条路),「导演」不在这一版里。
+
+        **只在四个时刻开口**(`HOST_MOMENTS`),而这道闸就在这个函数里:它算一把
+        **时刻钥匙** `(place, day, 指着我的最后一条 beat_fired 的 seq)`,和上一条
+        `host_scene` 事件上的那把不同才开口,否则原样返回上一屏
+        (`scene.source == "cached"`)。**引擎里没有第二条生成场景的路**,所以这条
+        纪律是结构性的,不是提示词里的一句话。第四个时刻(玩家点「我该干嘛」)
+        走 `ask=True`,另加一道 `host.ask_cooldown_ticks` —— 否则连点十下就是十次
+        LLM 调用。契约里报这四个名字与那个冷却,**只为让宿主把按钮置灰;宿主守不守,
+        不改变这个函数的行为**。
+
+        🔴 **藏起来的人一个字都不许漏。** `card.billing == "hidden"` 的角色不进候选,
+        **而且根本不进给 LLM 的那份提示** —— 不是"给了再叮嘱它别说"。那三扇结构化
+        的门(roster / perception / player-options)宿主能按行筛掉藏起来的人,而这一屏
+        交出去的是**散文**,名字是模型写进去的,宿主筛不了,**筛一半比不筛更坏**。
+        所以这道闸只能在引擎侧,而落法是让那份提示**没有第二个名字来源**。
+
+        场景那段话走**背景槽**(`llm.background.model`),一次调用同时写场景和每一项
+        的钩子;没 key / 失败 / 超时 → 模板句(`host.mock_scene`),**不重试、不合批**。
+        **挑哪几项是纯算术,LLM 没有否决权** —— 同一个世界同一时刻挑两次逐项相同。
+
+        形状(契约,`contract --json` 的 `host` 段报它):
+
+            {"player_id", "tick", "day", "place", "place_name",
+             "trigger": "arrive|new_day|beat|ask",
+             "scene": {"text", "source": "llm|mock|cached", "seq"},
+             "options": [ … ],
+             "blocked", "blocked_text"}
+
+        一项:`{"id", "kind", "label", "hook", "tone", "available", "reason",
+        "refusal", "cost", "door": {"method", "params"}}`。
+        `available` / `reason` / `refusal` / `cost` **从 `player_options` 原样透传**,
+        一个字不另算(另算一份就是第二套判断)。
+
+        ⚠️ **`blocked` 不吞掉主持人。** 一个没写 `kinds` 的世界 `player_options` 直接
+        `blocked:"no_ontology"` 且 `own` 是空的 —— 而人、地点、邀请这三类选项一个都
+        不依赖本体层。那两格原样透传给宿主,选项该有多少还是多少。
+        """
+        from anima_world import host as host_mod
+
+        pid = str(player_id or "").strip()
+        if not pid:
+            raise ValueError("host_turn 要一个 player_id")
+        self._touch_player(pid)
+        state = self.state()
+        clock = state.get("world_time") or {}
+        tick = int(clock.get("tick") or 0)
+        day, hour = int(clock.get("day") or 0), int(clock.get("hour") or 0)
+        minute = int(clock.get("minute") or 0)
+        row = self.players.get(pid) or {}
+        place = str(row.get("location") or "")
+        places = {loc["id"]: loc for loc in state.get("locations") or []}
+        place_name = str((places.get(place) or {}).get("name") or place)
+
+        menu = self.player_options(pid)
+        options = host_mod.select_options(
+            self._host_candidates(pid, place, places, menu),
+            limit=int(self.config_get("host.max_options", default=5) or 5),
+        )
+
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            last = dict(self.scheduler._memory_projection.host_scenes.get(pid) or {})
+            beat_seq = int(self.scheduler._memory_projection.player_beat_seq.get(pid, 0))
+        trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
+                                     tick=tick, ask=bool(ask))
+        if trigger is None:
+            scene = {"text": str(last.get("text") or ""), "source": "cached",
+                     "seq": int(last.get("seq") or 0)}
+        else:
+            text, source = self._host_scene_text(
+                place_name=place_name,
+                place_desc=str((places.get(place) or {}).get("description") or ""),
+                day=day, hour=hour, minute=minute, options=options,
+            )
+            self._record_and_fan({
+                "type": "host_scene", "who": f"player:{pid}",
+                "payload": {"player_id": pid, "place": place, "day": day, "tick": tick,
+                            "beat_seq": beat_seq, "trigger": trigger,
+                            "text": text, "source": source,
+                            "options": [o["id"] for o in options]},
+            })
+            with self.scheduler._lock:
+                stored = self.scheduler._memory_projection.host_scenes.get(pid) or {}
+                seq = int(stored.get("seq") or 0)
+            scene = {"text": text, "source": source, "seq": seq}
+        # 「我该干嘛」那颗按钮什么时候才按得动。**带在返回里,不是只写进 `contract`**
+        # (2026-09-02 站点量出来的):站点对世界只有 `/internal/v1/*`,没有一扇门答
+        # `contract --json` —— 一个到不了消费方的冷却值,等于没有这个冷却值。
+        # ⚠️ 它是**给人置灰用的读数,不是闸**:闸在 `_host_trigger` 里,宿主照着它
+        # 画不画,都不改变这个函数的行为。
+        cooldown = int(self.config_get("host.ask_cooldown_ticks", default=12) or 0)
+        ask_ready = int(last.get("tick") or 0) + cooldown if last else tick
+        return {
+            "player_id": pid, "tick": tick, "day": day,
+            "place": place, "place_name": place_name,
+            "trigger": trigger or str(last.get("trigger") or "arrive"),
+            "scene": scene, "options": options,
+            "ask_ready_tick": ask_ready,
+            "ask_ready": tick >= ask_ready,
+            "blocked": menu.get("blocked", ""),
+            "blocked_text": menu.get("blocked_text", ""),
+        }
+
+    def _host_hidden_agents(self) -> set[str]:
+        """`card.billing == "hidden"` 的那些人 —— 主持人一个字都不许提到他们。
+
+        🔴 **这道闸只能在引擎侧,而且只能是"根本不给",不能是"给了再叮嘱"。**
+        roster / perception / player-options 那三扇门交出去的是**行**,宿主能按
+        `billing` 逐行筛掉;这一屏交出去的是**散文**,名字是模型写进去的 —— 宿主
+        筛不了,而**筛一半比不筛更坏**(漏出去的那一个正好是最该藏的那一个)。
+        所以候选先筛,而给 LLM 的提示只由筛过的候选拼出来:模型手上没有他的名字。
+        """
+        hidden: set[str] = set()
+        for row in (self.roster().get("agents") or []):
+            if str(row.get("billing") or "") == "hidden":
+                hidden.add(str(row.get("agent_id") or ""))
+        return hidden
+
+    def _host_candidates(self, pid: str, place: str, places: dict[str, Any],
+                         menu: dict[str, Any]) -> list[dict[str, Any]]:
+        """候选池。**每一项都指向今天已经存在的那扇门**(`door.method` 是闭集)。
+
+        `door.params` 的键集写在 `contract --json` 的 `host.door_params` 里 ——
+        消费方**按段对表,别按这份代码猜**。
+        """
+        hidden = self._host_hidden_agents()
+        out: list[dict[str, Any]] = []
+
+        # ① 有人在等你点头。**只发"答应"这一侧**:拒绝是一等公民,但它已经有自己的
+        #    面(邀请面板),而把两颗按钮都塞进这 3–5 个名额会把别的全挤掉。
+        for invite in self.invitations(pid):
+            payload = invite.get("payload") or invite
+            if not invite.get("pending"):
+                continue
+            agent_id = str(payload.get("agent_id") or "")
+            if agent_id in hidden:
+                continue
+            name = str(payload.get("agent_name") or agent_id)
+            seq = int(invite.get("seq") or 0)
+            out.append({
+                "id": f"opt:invite:{seq}", "kind": "invitation",
+                "label": f"答应{name}", "hook": "", "tone": "social",
+                "available": True, "reason": "", "refusal": "", "cost": "",
+                "door": {"method": "answer_invitation",
+                         "params": {"invite_seq": seq, "accept": True}},
+            })
+
+        # ② 这条线走到哪儿了:一条**指着我**、还没为我响过、而且在等我和某个人碰面
+        #    的拍 → 「去找他」。它是**推导出来的**,不是编出来的:那个 `co_located`
+        #    谓词就写在作者的拍里。
+        for beat_option in self._host_beat_options(pid, place, places, hidden):
+            out.append(beat_option)
+
+        # ③ 这儿的人。
+        present = (self.presence(pid) or {}).get("agents") or {}
+        names = {row.get("agent_id"): row for row in (self.roster().get("agents") or [])}
+        for agent_id, where in sorted(present.items()):
+            if where != place or agent_id in hidden or not place:
+                continue
+            row = names.get(agent_id) or {}
+            out.append({
+                "id": f"opt:talk:{agent_id}", "kind": "talk",
+                "label": f"和{row.get('name') or agent_id}说说话",
+                "hook": "", "tone": "social",
+                "available": True, "reason": "", "refusal": "", "cost": "",
+                "door": {"method": "chat", "params": {"agent_id": agent_id}},
+            })
+
+        # ④ 摸得着的东西。**四格拒绝原样透传**,一个字不另算。
+        for target in menu.get("targets") or []:
+            for verb in target.get("verbs") or []:
+                out.append({
+                    "id": f"opt:verb:{target['id']}:{verb['verb']}", "kind": "verb",
+                    "label": f"{verb.get('label') or verb['verb']}{target.get('name') or target['id']}",
+                    "hook": "", "tone": "risky" if verb.get("cost") else "safe",
+                    "available": bool(verb.get("available")),
+                    "reason": str(verb.get("reason") or ""),
+                    "refusal": str(verb.get("refusal") or ""),
+                    "cost": str(verb.get("cost") or ""),
+                    "door": {"method": "player_tool",
+                             "params": {"tool_id": "interact",
+                                        "params": {"target": target["id"],
+                                                   "verb": verb["verb"]}}},
+                })
+
+        # ⑤ 走开。**只给同一个父级下的兄弟地点**:全世界每一个地点都列出来的话,
+        #    这一格会把别的选项整个挤掉,而"能走到"本来就不是"世界上存在"。
+        here = places.get(place) or {}
+        for loc_id, loc in sorted(places.items()):
+            if loc_id == place or loc.get("kind") == "region":
+                continue
+            if here and loc.get("parent") != here.get("parent"):
+                continue
+            out.append({
+                "id": f"opt:go:{loc_id}", "kind": "travel",
+                "label": f"去{loc.get('name') or loc_id}", "hook": "", "tone": "safe",
+                "available": True, "reason": "", "refusal": "", "cost": "",
+                "door": {"method": "player_walk", "params": {"location": loc_id}},
+            })
+        return out
+
+    def _host_beat_options(self, pid: str, place: str, places: dict[str, Any],
+                           hidden: set[str]) -> list[dict[str, Any]]:
+        """还没为我响过、而且在等我跟某个人碰面的那几拍 → 「去找他」。
+
+        **窄到只推导得出来的那一种**:一条 `for_each: {"node": "player"}` 的拍,
+        `trigger.when` 里有一个 `co_located`,名单正好是 `player` 加**一个**人,
+        而那个人此刻在别处。别的形状一律不猜 —— 猜出来的目标板比没有目标板更坏。
+        """
+        from anima_world.beats import PLAYER_TOKEN, is_per_player
+
+        director = self.scheduler.beat_director
+        if director is None:
+            return []
+        subject = f"player:{pid}"
+        present = (self.presence(pid) or {}).get("agents") or {}
+        out: list[dict[str, Any]] = []
+        names = {row.get("agent_id"): row for row in (self.roster().get("agents") or [])}
+        for beat in director.script.beats:
+            if not is_per_player(beat) or (beat["id"], subject) in director.fired:
+                continue
+            for pred in (beat.get("trigger") or {}).get("when") or []:
+                if pred.get("pred") != "co_located":
+                    continue
+                others = [str(a) for a in (pred.get("agents") or []) if a != PLAYER_TOKEN]
+                if len(others) != 1 or others[0] in hidden:
+                    continue
+                where = str(present.get(others[0]) or "")
+                if not where or where == place:
+                    continue          # 已经碰上了 —— 那一拍下一 tick 自己会响
+                row = names.get(others[0]) or {}
+                out.append({
+                    "id": f"opt:beat:{beat['id']}", "kind": "beat",
+                    "label": f"去找{row.get('name') or others[0]}",
+                    "hook": "", "tone": "risky",
+                    "available": True, "reason": "", "refusal": "", "cost": "",
+                    "door": {"method": "player_walk", "params": {"location": where}},
+                })
+                break
+        return out
+
+    def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
+                      beat_seq: int, tick: int, ask: bool) -> str | None:
+        """这一刻要不要开口,要的话是四个时刻里的哪一个。`None` = 闭嘴,用上一屏。
+
+        **次序是有意的**:换了地方 → `arrive`(最强的一次场景切换);剧情拍响了 →
+        `beat`;新的一天 → `new_day`。三样同时变时报最强的那个,而不是把它们拼成
+        一句"变了" —— 宿主要拿它决定这一屏怎么进场。
+        """
+        if not last:
+            return "arrive"
+        if str(last.get("place") or "") != place:
+            return "arrive"
+        if int(last.get("beat_seq") or 0) != beat_seq:
+            return "beat"
+        if int(last.get("day") or 0) != day:
+            return "new_day"
+        if ask:
+            cooldown = int(self.config_get("host.ask_cooldown_ticks", default=12) or 0)
+            if tick - int(last.get("tick") or 0) >= cooldown:
+                return "ask"
+        return None
+
+    def _host_scene_text(self, *, place_name: str, place_desc: str, day: int,
+                         hour: int, minute: int,
+                         options: list[dict[str, Any]]) -> tuple[str, str]:
+        """场景那段话 + 顺手把钩子填进 `options`(就地改)。返回 `(正文, 来源)`。
+
+        **一次调用,失败即模板,不重试、不合批** —— 和判定那一层同一条纪律。
+        没有 key 时 `_background_llm` 本来就是 Mock,而 Mock 会答一句「收到:…」:
+        那不是场景,所以这里**按有没有 key 判**,不按客户端类型判。
+        """
+        from anima_world import host as host_mod
+
+        fallback = host_mod.mock_scene(place_name=place_name, day=day, hour=hour,
+                                       options=options)
+        service = getattr(self, "chat_service", None)
+        client = getattr(service, "_background_llm", None) if service else None
+        if client is None or not str(self.config_get("llm.api_key", default="") or ""):
+            return fallback, "mock"
+        messages = host_mod.scene_messages(
+            place_name=place_name, place_desc=place_desc, day=day, hour=hour,
+            minute=minute, world_setting=str(self.world_setting().get("text") or ""),
+            options=options,
+        )
+        try:
+            reply = self._bridge.run(client.complete(messages))
+        except Exception as exc:  # noqa: BLE001 - 一屏说不出话不该掀翻这次请求
+            logger.warning("主持人的场景生成失败(%s),这一屏用模板", type(exc).__name__)
+            return fallback, "mock"
+        text, hooks = host_mod.parse_scene_reply(reply, options=options)
+        if not text:
+            return fallback, "mock"
+        for option, hook in zip([o for o in options if o["kind"] != "free"], hooks):
+            option["hook"] = hook
+        return text, "llm"
+
     def player_options(self, player_id: str) -> dict[str, Any]:
         """**这个人此时此地点得动什么** —— 一份可以直接渲染成按钮的菜单。
 

@@ -417,6 +417,19 @@ def _build_parser() -> argparse.ArgumentParser:
     player_options.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
     )
+    player_host = player_commands.add_parser(
+        "host",
+        help="主持人的那一屏:一段场景 + 3–5 个选项 + 自由输入(世界永远先开口)",
+    )
+    _add_world_args(player_host)
+    player_host.add_argument("--player", required=True, help="他的 player_id")
+    player_host.add_argument(
+        "--ask", action="store_true",
+        help="他点了「我该干嘛」—— 第四个开口时刻,受 host.ask_cooldown_ticks 管",
+    )
+    player_host.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
     player_erase = player_commands.add_parser(
         "erase",
         help="法务抹除:删他的转录与记忆、事件里抹名抹原文(用户行使删除权时用;"
@@ -6578,6 +6591,34 @@ def run_world_setting(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_host_turn(args: argparse.Namespace, turn: dict[str, Any]) -> int:
+    """主持人那一屏。**渲染是赠品,`--json` 才是契约**(和 `map` 同一条)。"""
+    if getattr(args, "as_json", False):
+        print(json.dumps(turn, ensure_ascii=False, indent=2))
+        return 0
+    print()
+    print(f"  第 {turn['day']} 天 · {turn['place_name']}"
+          f"  〔{turn['trigger']} · {turn['scene']['source']}〕")
+    print("  " + "─" * 56)
+    print(f"  {turn['scene']['text']}")
+    print()
+    for index, option in enumerate(turn.get("options") or [], 1):
+        mark = " " if option.get("available") else "×"
+        line = f"  {mark}{index}. {option['label']}"
+        if option.get("cost"):
+            line += f"({option['cost']})"
+        print(line)
+        if option.get("hook"):
+            print(f"       {option['hook']}")
+        if not option.get("available") and (option.get("refusal") or option.get("reason")):
+            print(f"       {option.get('refusal') or option.get('reason')}")
+    if turn.get("blocked_text"):
+        print()
+        print(f"  {turn['blocked_text']}")
+    print()
+    return 0
+
+
 def run_player(args: argparse.Namespace) -> int:
     """`player forget` / `player options` / `player erase` —— 玩家数据的三个出口。
 
@@ -6598,8 +6639,8 @@ def run_player(args: argparse.Namespace) -> int:
     from anima_world.api import World
 
     command = getattr(args, "player_command", None)
-    if command not in {"forget", "options", "erase"}:
-        print("[player] 只有 forget / options / erase 三个子命令", file=sys.stderr)
+    if command not in {"forget", "options", "erase", "host"}:
+        print("[player] 只有 forget / options / erase / host 四个子命令", file=sys.stderr)
         return 2
 
     redis, world_id, mysql = _world_args(args)
@@ -6616,6 +6657,12 @@ def run_player(args: argparse.Namespace) -> int:
         finally:
             world.close()
         return _print_player_options(args, menu)
+    if command == "host":
+        try:
+            turn = world.host_turn(args.player, ask=bool(getattr(args, "ask", False)))
+        finally:
+            world.close()
+        return _print_host_turn(args, turn)
     if command == "erase":
         try:
             receipt = world.erase_player(
@@ -7345,6 +7392,13 @@ def contract_payload() -> dict[str, Any]:
     )
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
     from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.host import (
+        DOOR_METHODS,
+        FREE_OPTION_ID,
+        HOST_MOMENTS,
+        OPTION_KINDS,
+        TONES,
+    )
     from anima_world.expressions import EDGE_PREFIXES
     from anima_world.rules import RULE_SELECTORS
     from anima_world.world_file import AUTHOR_SECTIONS
@@ -8043,6 +8097,56 @@ def contract_payload() -> dict[str, Any]:
                 "该写几。⚠️ 触发器**队列在 tick 开头快照、drain 一遍**,"
                 "自己 emit 的落进下一 tick:没有同轮递归,代价是滞后一轮"
                 "(和规律那一层的双缓冲同一笔账)"
+            ),
+        },
+        # 🆕 3.9.0:主持人 —— 「世界永远先开口」那一屏。
+        # **这一格缺席 = 这支引擎没有它**(不是 `null`)。按段探测,别比版本号。
+        "host": {
+            "method": "host_turn",
+            "cli": "anima-world player host --player <pid> [--json] [--ask]",
+            "moments": list(HOST_MOMENTS),
+            "option_kinds": list(OPTION_KINDS),
+            "door_methods": list(DOOR_METHODS),
+            # 🔴 **每种门的 params 键集写在这儿,消费方按段对表、别按名字猜**
+            # (2026-09-02 站点量出来的:契约只写了 `player_tool` 一种,另外四种
+            # 站点只能按自己的字段名假定 —— 猜对了没人知道,猜错了那一项画得出来
+            # 但点不动)。`?` 结尾 = 可选。
+            "door_params": {
+                "answer_invitation": ["invite_seq", "accept"],
+                "chat": ["agent_id", "text?"],
+                "player_walk": ["location"],
+                "player_tool": ["tool_id", "params"],
+                "free": [],
+            },
+            "tones": list(TONES),
+            "free_option_id": FREE_OPTION_ID,
+            "free_option_always": True,
+            "event": "host_scene",
+            "max_options_key": "host.max_options",
+            "ask_cooldown_key": "host.ask_cooldown_ticks",
+            # 冷却那个数**也带在 `host_turn` 的返回里**(`ask_ready_tick` /
+            # `ask_ready`):站点对世界只有 `/internal/v1/*`,够不着这扇门 ——
+            # 一个到不了消费方的契约格,等于没有这一格。
+            "turn_keys": ["player_id", "tick", "day", "place", "place_name", "trigger",
+                          "scene", "options", "ask_ready_tick", "ask_ready",
+                          "blocked", "blocked_text"],
+            "option_keys": ["id", "kind", "label", "hook", "tone", "available",
+                            "reason", "refusal", "cost", "door"],
+            "gloss": (
+                "一次调用交出一屏:一段场景 + 3–5 个选项 + **永远在最后**的自由输入"
+                "(`kind:\"free\"`,不占 `host.max_options` 的名额)。"
+                "🔴 **主持人是荐者不是执行者** —— 每一项的 `door` 都指向今天已经存在"
+                "的那扇门,引擎这一层一条新的「写世界」的路都不开。"
+                "`available` / `reason` / `refusal` / `cost` 是 `player-options` 那四格"
+                "**原样透传**,别另算。"
+                "**只在四个时刻开口**(进地点 / 新一天 / 指着他的剧情拍响 / 他点"
+                "「我该干嘛」),闸在引擎里(时刻钥匙 vs 上一条 `host_scene` 事件);"
+                "没到时刻就原样返回上一屏,`scene.source == \"cached\"`。"
+                "🔴 **`card.billing == \"hidden\"` 的角色不进候选,也不进给模型的那份"
+                "提示** —— 那三扇结构化的门你们能按行筛,而这一屏是散文,筛一半比不筛"
+                "更坏,所以这道闸在引擎侧。"
+                "场景那段话走背景槽,一次调用、失败即模板、不重试;**挑哪几项是纯算术**,"
+                "同一个世界同一时刻挑两次逐项相同。"
             ),
         },
         "beats": {

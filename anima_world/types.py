@@ -113,6 +113,20 @@ class Projection:
     为什么必须有它:折叠端只认 `.delta` 后缀,而 `payment` 是**内核**事件 ——
     改名破坏消费方,两条都发是同一笔钱记两遍账。**只有"多一格声明"这条不破坏任何人。**
     """
+    host_scenes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """主持人此刻给每个玩家的**那一屏**,折自 `host_scene` 事件(3.9.0)。
+
+    **每人只留最后一条**,所以它按玩家数封顶 —— 和 `SETTLED_INVITATIONS_KEPT` 同一种
+    有界法。场景那段话是生成出来的、不可复现,所以它必须被存下来;而存的地方是
+    **事件日志**,这一格只是它的投影。刷新一次页面就重生成一段的话,同一个时刻的
+    世界会对同一个人说两种话,而两次都"对"。
+    """
+    player_beat_seq: dict[str, int] = field(default_factory=dict)
+    """指着这个玩家的最后一条 `beat_fired` 的 seq(3.9.0)。
+
+    它是主持人那把**时刻钥匙**的第三格:「剧情拍响了」是四个开口时刻之一,而
+    "响没响过"唯一可靠的读法就是日志里那条事件的序号。
+    """
     players_joined: dict[str, int] = field(default_factory=dict)
     """每个玩家**第一次**走进这个世界那一天(世界日),折自 `player_join` 事件。
 

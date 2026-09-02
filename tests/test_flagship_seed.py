@@ -737,3 +737,32 @@ def test_橱窗里她真的约得动人_而且到点会过期(open_world):
     assert [e for e in world.history(kind="state_change", limit=500)["events"]
             if (e["payload"] or {}).get("cause") == "invitation_declined"] == []
     assert world.scheduler.edge_store.all(together.EDGE_TYPE) == [], "边没跟着断"
+
+
+def test_橱窗里主持人开得了口_而且挑得出三项(open_world):
+    """**做了却开箱看不见等于没做。**
+
+    新用户装上包看到的第一屏就是这个世界,而这一单要治的病正是"点进去只能聊天,
+    该聊什么我也不知道" —— 所以橱窗必须**挑得出**东西来:一个动词表空、没人在场的
+    世界,主持人只能递一句「你要做什么?」,那和空白输入框是同一件事。
+
+    ⚠️ 这条钉的是**橱窗的内容够不够**,不是主持人的逻辑对不对(那在
+    `tests/test_host_turn.py`)。它会在有人把橱窗掏空的那天红。
+    """
+    world = open_world()
+    world.player_move("p1", "cafe")
+    world.tick(3)
+    turn = world.host_turn("p1")
+
+    assert turn["scene"]["text"].strip(), "橱窗里主持人一句话都说不出来"
+    real = [o for o in turn["options"] if o["kind"] != "free"]
+    assert len(real) >= 3, f"橱窗只挑得出 {len(real)} 项:{[o['label'] for o in real]}"
+    assert turn["options"][-1]["kind"] == "free"
+    # 三类里至少有两类 —— 全是同一类(比如清一色「端详 X」)等于没挑
+    assert len({o["kind"] for o in real}) >= 2, "挑出来的全是同一类"
+    # 🔴 橱窗自带一个 `billing: "hidden"` 的角色,而他一个字都不许出现在这一屏上。
+    hidden = [row["name"] for row in world.roster()["agents"]
+              if row.get("billing") == "hidden"]
+    assert hidden, "橱窗里那个藏起来的人没了,上面那条闸就白站着"
+    blob = json.dumps(turn, ensure_ascii=False)
+    assert all(name not in blob for name in hidden)
