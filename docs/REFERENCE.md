@@ -3521,6 +3521,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
 | 🆕 `world.world_setting()` | 这个世界的**世界观**此刻是什么:`{text, source, length}`。`source` 用 `prompt_list()` 那一套词(`默认值` / `世界文件`),不另造一套 |
 | 🆕 `world.set_world_setting(text=None, *, clear=False, dry_run=False)` | 改**一个已经跑着的世界**的世界观(3.8.0,收件箱 D4)。覆盖;`clear=True` 回落到引擎内置那份(**不是变成空的**);`None` / 空白 **拒绝**(`ValueError`);逐字相同 `changed: false`;`dry_run=True` 一个字节都不写。回执 `{before, after, source, changed, cleared, dry_run, length}`。CLI 出口是 `anima-world world setting`(§4.7.1) |
+| 🆕 `world.install_pack(path)` | 把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。`path` 是一份带 `pack` 段的 `.cyberworld`。**一个文件就是一个 pack**。这条路新开的三段:剧情拍(按 id 合并,**零点是这个包落地那天**)/ 作者动过的开关 / 世界观;其余段照旧只填缺不覆盖,走开机那条路上同一批播种函数。回执 `{pack, version, note, day, tick, beats, config, world_setting, agents, locations}`;装不进抛 `PackInstallError`,而且**一个字节都没写**(判断全在写之前)。⚠️ 2a-① 明确不做:改在册的人的人设、给在册的人补记忆、停用一个包。CLI 出口是 `anima-world pack install`(§4.11) |
 | 🆕 `world.packs()` | 这个世界装了哪几份**内容包**,按落地先后(3.10.0)。每行 `id` / `version` / `note` / `day`(**第一次**落地那天,也是这份包里那些拍的零点)/ `tick` / `sections`(每个段各带了哪几个 id)。🔴 **折自 `pack_installed` 事件,没有第二张表** —— 和余额折自 `payment` 逐字同一种;存一份直接写的清单就多出一种和日志对不上的坏法,而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。只读门自己补课(`catch_up_projection`)。CLI 出口是 `anima-world pack list`(§4.11) |
 
 ### 持久化与底层
@@ -4467,12 +4468,18 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 ```
 
 **不连 Redis、不建世界**(跑不了世界也要答得出,和 `world inspect` 同一类)。
-顶层**十三**段:`operation` · `engine_version` · `storage` · `chat_tools` ·
-**`config`** · **`plugins`** · `package` · `report` · `seed` · `character_card` ·
-`erasure` · `invitations` · `beats`。
+顶层**十五**段:`beats` · `character_card` · `chat_tools` · **`config`** ·
+`engine_version` · `erasure` · **`host`** · `invitations` · `operation` ·
+`package` · **`packs`** · **`plugins`** · `report` · `seed` · `storage`。
 ⚠️ **这份清单是"顶层有什么"的权威**,照它写探测器 —— 上一版漏了 `plugins`
 (2026-08-26 验收 C 挑的),而一份漏了一段的清单会让读它的人以为那一段不存在。
 判据敲得动:`anima-world contract --json | jq 'keys'`。
+🔴 **它又烂过一次,而这次是我自己**:3.9.0 加了 `host` 段却没改这一行,于是它在
+`13` 上停了一版 —— **一份没人验的键表,和一句没人验的话是同一种东西**,而这一份
+的读者是另外三个仓库。3.10.0 起有机器闸了
+(`tests/test_contract_command.py::test_REFERENCE_里那份顶层段清单_和真门逐格相等`):
+**别数数,点名** —— 这一行里的名字必须和 `contract --json` 的 keys 逐个相等,
+少一个、多一个、拼错一个都当场红。
 
 ⚠️ **消费方按段/格在不在做能力探测,别比版本号**(全员纪律)。
 **新加的格在老引擎上是「缺席」,不是 `null`** —— 一律
@@ -4516,6 +4523,78 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 
 判据 `tests/test_contract_command.py`:和 `_DEFAULTS` **逐键**对账 —— 只断条数的话,
 加一个键同时漏掉另一个仍然是绿的。
+
+---
+
+### 4.11 anima-world pack —— 往一个**跑着的**世界投一份更新(3.10.0)
+
+老板 2026-09-02:「我要的是创作者能控制这个东西,相当于每周都能有更新」。
+
+```bash
+anima-world pack install 第二周.cyberworld --world-id w [--json]
+anima-world pack list --world-id w [--json]
+```
+
+**一份内容包 = 一份 `.cyberworld` + 一条 `pack` 记录**(作者层第十五个段):
+
+```jsonc
+{"kind": "author", "type": "pack",
+ "body": {"id": "第二周", "version": "1.0.0", "note": "社团活动 / 夜宵 / 实习课"}}
+```
+
+**一个文件就是一个 pack**,这份包里的作者记录全归属它 —— 段是"对象型",
+"一个文件里两个包"在这一层根本表达不出来。带 `pack` 记录的包 `engine_min`
+**必须写 `3.10.0`**:老引擎见到不认识的作者层 `type` 是**开不了机的硬失败**
+(和 `beat` / `plugin` / `edge` 逐字同一种,响的)。
+
+**它和 `--world-file` 的分界不是"装什么",是"谁在装"**:`--world-file` 在开机第一秒
+装,装完这个进程才开始跑;`pack install` 在世界**已经在跑**的时候装,而**装包的那个
+进程就是在跑的那个进程**。于是"别的进程装的东西这个进程看不见"这个问题整个消失。
+
+这条路新开的是三段(其余段照旧**只填缺不覆盖**,走开机那条路上同一批播种函数):
+
+| 段 | `pack install` | `--world-file` 装进一个**已有**世界 |
+|---|---|---|
+| `beat` | ✅ 按 id 合并;**零点是这个包落地那天** | ❌ 整份不装(**退出码 2**,3.10.0 起) |
+| `config`(作者动过的键) | ✅ 写进 `:config`,当场生效 | ❌ 不装(它钉在创世那一刻)—— 会说一句 |
+| `world_setting` | ✅ 换一段 | ❌ 不装 —— 会说一句 |
+| `kind` / `rule` | ✅ 同名覆盖(声明) | ✅ 同上 |
+| `entity` / `location` / `agent`(新的)/ `plugin` / `edge` / `stock` / `item` | ✅ 只填缺 | ✅ 同上 |
+| 在册的人的 `personality` / `memory` | ❌ **还没做**(2a-②)—— 会说一句 | ❌ 同上 |
+
+**拍的零点跟着来路走**(`trigger.at.since`,闭集 `pack` / `world`,缺省 `pack`):
+
+| 这条拍怎么进来的 | 零点 |
+|---|---|
+| 创世那批(没有 pack) | 世界第 0 天 —— **逐字如旧** |
+| 一份 pack 装进来的 | 那个 pack **第一次**落地那天 |
+| 写了 `for_each: {"node": "player"}` | 他入场那天 |
+| **两者都有** | **`max`(两者)** |
+
+🔴 **`max` 是唯一能同时让两句话成立的写法**:老玩家从包落地起算(否则第 2 周的剧情
+对他永远不响),而包落地三天后才进来的新玩家从他自己那天起算(否则他一进门就被
+一堆过期的拍砸中)。逃生舱是显式的 `"since": "world"` —— 我要的就是世界第 N 天。
+
+⚠️ **`trigger` 与 `trigger.at` 这两层的键 3.10.0 起是闭集**(此前一个都不查,
+`since` 写下去会被照收然后丢掉)。
+
+**几条拒绝,每条都在写第一个字节之前**(拒了世界一个字节都没变):
+
+- 没有 `pack` 段 —— 没有 id 的话,以后没有一处说得清那几拍是哪一周加的,而**事后
+  补不回来**。
+- 带**状态记录** —— 一份跑过的世界的 dump 不是内容包;还原它用 `world import`。
+- 拍的 **id 撞车** —— `beat_fired` 那份历史按 id 配对,重了就再也分不出是谁响过,
+  而分不出的样子是"这一拍又响了一次"或者"再也不响",没有一处会报错。
+- 作者层那三道闸没过 —— **和开机、和 `world check --edit` 同一份判断**。
+
+**没有 `--dry-run`**:`world drop` / `player erase` / `plugin remove` 那三条默认预演
+是因为**它们删东西**;装一份包是加东西,而"加了什么"由回执逐格答得出。要**先**知道
+装不装得进,那条命令已经有了:`anima-world world check <文件> --edit --json`。
+
+回执(`--json`):`{pack, version, note, day, tick, beats, config, world_setting,
+agents, locations}`。`day` 是**落地那天**,也就是这份包里那些拍的零点。
+
+`pack list` 读的是 `World.packs()` —— **折自 `pack_installed` 事件,没有第二张表**。
 
 ---
 

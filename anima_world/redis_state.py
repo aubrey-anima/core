@@ -2438,6 +2438,24 @@ class RedisBeatsStore:
         self._redis.rpush(self._key, *[_dumps(dict(b)) for b in entries])
         return len(entries)
 
+    def append(self, entries: list) -> int:
+        """把新的几拍**接在后面**(3.10.0,一次内容包安装)。
+
+        `seed()` 有意没有 `merge=`(理由见它自己),而这一条不是"合并" ——
+        它是**追加**:内容包里的拍是**新的 id**(撞车在装包那一层就当场拒了),
+        接在后面于是保住了"先写的先判"那条顺序语义,`after` 那条链照旧成立。
+
+        🔴 **为什么不是 `seed` 加一个 `merge=True`**:`seed` 的语义是"空的时候播
+        一次",它的**默认必须是不合并**(内置橱窗每次开机都在手上,让它逐条合并
+        会把橱窗的剧情塞进别人的世界)。把两种语义挤进一个函数,下一个人只会看到
+        一个 `merge=` 参数而看不到那条理由。
+        """
+        rows = [dict(b) for b in entries]
+        if not rows:
+            return 0
+        self._redis.rpush(self._key, *[_dumps(b) for b in rows])
+        return len(rows)
+
     def definitions(self) -> list[dict]:
         """作者写下的那一串,按写的顺序。读不出来的行**当场报错,不静默跳过** ——
         少装半份剧情和一拍不响是同一种病。"""

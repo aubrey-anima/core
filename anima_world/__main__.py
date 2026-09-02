@@ -490,6 +490,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", dest="as_json", help="机器可读输出"
     )
 
+    # ── pack(3.10.0,周更链路 2a-①)──────────────────────────────────────────
+    pack_cmd = sub.add_parser(
+        "pack",
+        help="内容包:往一个**跑着的**世界投一份更新(install),看装了哪几周(list)",
+    )
+    pack_commands = pack_cmd.add_subparsers(dest="pack_command")
+    pack_install = pack_commands.add_parser(
+        "install",
+        help="把一份带 `pack` 段的 `.cyberworld` 装进这个世界 —— 不重建、不停机、"
+             "玩家进度不丢。拍的零点是**这个包落地那天**",
+    )
+    _add_world_args(pack_install)
+    pack_install.add_argument("file", help="那份 `.cyberworld`(必须有 `pack` 段)")
+    pack_install.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
+    )
+    pack_list = pack_commands.add_parser(
+        "list", help="这个世界装了哪几份内容包:id / 版本 / 哪天落地 / 带了什么",
+    )
+    _add_world_args(pack_list)
+    pack_list.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
+
     drift_cmd = sub.add_parser(
         "drift",
         help="她还是不是她:人设漂移的尺子(纯计数,不调模型;含迎合度这一格)",
@@ -3944,6 +3968,275 @@ def _record_pack_installed(
         },
     })
     return pack_id
+
+
+class PackInstallError(ValueError):
+    """一份内容包装不进这个世界;带着每一条理由。
+
+    **和 `WorldSeedError` / `PluginError` 同一类**:作者写错了东西,而作者该看到的
+    是那几行中文,不是一段 Python 堆栈。
+    """
+
+    def __init__(self, errors: list[str]):
+        self.errors = list(errors)
+        super().__init__("这份内容包装不进去:\n" + "\n".join(f"- {e}" for e in errors))
+
+
+def install_authored_pack(scheduler: Any, path: Path | str) -> dict[str, Any]:
+    """把一份**内容包**装进一个正在跑的世界(3.10.0,周更链路 2a-①)。
+
+    这是**运行期**那条路;`--world-file` 是创世 / 离线编辑那条。两条路的区别不是
+    "装什么",是**谁在装**:
+
+    - `--world-file` 在**开机第一秒**装,装完这个进程才开始跑;
+    - 这一条在世界**已经在跑**的时候装,而**装包的那个进程就是在跑的那个进程** ——
+      于是"别的进程装的东西这个进程看不见"这个问题整个消失。
+
+    🔴 **有意不做"让别的进程装的包被跑着的进程看见"**:那要给 `:config` / `:kinds` /
+    `:world_rules` / `:plugins` / `:beats` / 名册**各加一份版本号 + 一次进程内重装**,
+    而进程内重装就是 `build_serve_scheduler` 的下半场 —— **第二条创世路径**,
+    正是这个仓库最贵的那条纪律反对的(FOR-STUDIO §3.46:「`--world-file` 那条路
+    已经是创世,它不需要孪生兄弟」)。
+
+    落三段是这一条新开的:
+
+    - **`beat`** —— 按 id 合并进 `:beats`(`--world-file` 那条路整份不装,理由是
+      "一份写着 `day: 0..6` 的包装进跑到第 40 天的世界,八拍一 tick 全烧"。
+      那个理由是对的,而 `trigger.at.since` 把它解决了:一条 pack 装进来的拍,
+      零点是**这个包落地那天**)。**id 撞车当场拒绝**,不猜。
+    - **`config`(作者动过的那几个键)** —— `--world-file` 那条钉在 `fresh_world` 上,
+      于是一个有人在玩的世界改不了自己的开关,而且**一个字都不说**。
+    - **`world_setting`** —— 同上,`_seed_world_setting` 由 `not persisted` 把着门。
+
+    其余段**照今天那样只填缺**,走的是开机那条路上**同一批**播种函数
+    (`_seed_world_defs` / `_seed_ontology` / `_install_plugins` / …)——
+    另写一份的那天,两条路会先给出不同的答案,再由某个人在一个坏掉的世界上发现。
+
+    ⚠️ **2a-① 明确不做**:人设覆盖、给在册的人补记忆、停用一个包。
+    那三件各自要一把 compare-and-set 的尺(「这一格还等于我上次写的值吗」),
+    而**「同一个 pack 就能覆盖」是错的**:第 1 周的包给她写过一句人设,玩家跟她
+    聊了三十天,第 2 周包一升级就把那三十天抹了,账面上什么都看不出来。
+    """
+    from anima_world.redis_state import (
+        RedisBeatsStore, RedisBlackboard, RedisPluginStore, RedisRulesStore, agent_key,
+    )
+    from anima_world.world_file import author_records_to_seed, read_world_file
+    from anima_world.beats import BeatDirector
+    from anima_world.ontology import OntologyError
+    from anima_world.plugins import PluginError
+    from anima_world.world_seed import WorldSeedError
+
+    redis = scheduler.redis
+    world_id = scheduler.world_id
+    event_log = scheduler.event_log
+    if event_log is None:
+        raise PackInstallError(["这个世界没有事件日志,装不了内容包"])
+
+    # ── ① 读文件:**只收作者层。**
+    #
+    # 一份内容包是**作者写下的东西**;带状态记录的是一个跑过的世界的 dump,
+    # 把它"装"进另一个世界没有一种正确答案(合并会重号,覆盖会抹掉这期间发生的
+    # 一切)。`--world-file` 那条路对这种文件是滤掉 + 说一句,而这一条**当场拒绝**:
+    # 那儿滤掉是因为托管环境每次开机都指着同一份文件,而这儿是人按下的一次动作。
+    try:
+        _, records = read_world_file(path)
+        rows = list(records)
+    except Exception as exc:  # noqa: BLE001 - 读不动就说读不动,别甩堆栈
+        raise PackInstallError([f"{path} 读不了:{exc}"]) from None
+    stateful = [r for r in rows if r.get("kind") in ("redis", "event", "mysql")]
+    if stateful:
+        raise PackInstallError([
+            f"{path} 里有 {len(stateful)} 条状态记录 —— 内容包只装**作者写下的东西**。"
+            "一个跑过的世界导出来的包要还原用 `anima-world world import`(目标必须是空的)"
+        ])
+    try:
+        authored = author_records_to_seed(rows)
+    except Exception as exc:  # noqa: BLE001
+        raise PackInstallError([str(exc)]) from None
+
+    body = authored.get("pack")
+    if not isinstance(body, dict) or not body.get("id"):
+        raise PackInstallError([
+            f"{path} 没有 `pack` 段 —— 一份内容包要先有身份:"
+            '`{"kind": "author", "type": "pack", "body": {"id": …, "version": …}}`。'
+            "没有 id 的话,以后没有一处说得清那几拍是哪一周加的,而**事后补不回来**"
+        ])
+    pack_id = str(body["id"])
+
+    # ── ② 装不装得进:**和开机、和离线那两扇门同一份判断。**
+    errors = list(authored_layer_errors(authored, complete=False))
+    if errors:
+        raise PackInstallError(errors)
+
+    rules_store = RedisRulesStore(redis, world_id)
+    plugin_store = RedisPluginStore(redis, world_id)
+    location_store = scheduler.location_store
+    economy_store = scheduler.economy_store
+    ontology_store = scheduler.ontology_store
+    config_store = scheduler.config_store
+    prompt_store = scheduler.prompt_store
+    stock_store = scheduler.stock_store
+    visibility_store = scheduler.visibility_store
+    bt_store = scheduler.bt_store
+
+    # 插件声明的种类先并进 `kinds` —— **和开机那条路逐字同序**(见
+    # `build_serve_scheduler` 里那一段:晚一步的话,引用不到的 `spawn.kind` 会
+    # 绕过预检,到 `_load_ontology` 那儿才炸,而那时表已经写过几张了)。
+    merged = _merge_plugin_kinds(config_store, plugin_store, authored) or authored
+    boot_plugin_bodies = _plugin_bodies(config_store, plugin_store, authored)
+    namespaces = tuple(
+        str(b.get("id") or "") for b in boot_plugin_bodies if str(b.get("id") or "")
+    )
+    try:
+        if merged.get("kinds"):
+            _precheck_ontology(merged, rules_store, location_store, economy_store,
+                               ontology_store, namespaces=namespaces)
+        if merged.get("edges"):
+            edge_errors, edge_warnings = _edge_layer_verdict(
+                merged, _parsed_plugins_or_none(boot_plugin_bodies),
+                complete_namespaces=True)
+            for problem in edge_warnings:
+                logger.warning("%s", problem)
+            if edge_errors:
+                raise WorldSeedError(edge_errors)
+    except (WorldSeedError, OntologyError) as exc:
+        raise PackInstallError(list(getattr(exc, "errors", None) or [str(exc)])) from None
+
+    # 剧情:**先验,再写**,而且 id 撞车当场拒。
+    #
+    # 🔴 `:beats` 里已经有的 id 不许再来一条:`beat_fired` 那份历史按 id 配对,
+    # 两份包各有一条同名的拍,历史就再也分不出是谁响过了 —— 而分不出的样子是
+    # "这一拍又响了一次"或者"这一拍再也不响",没有一处会报错。
+    new_beats = list(authored.get("beats") or [])
+    have_beats = RedisBeatsStore(redis, world_id).definitions()
+    if new_beats:
+        clash = sorted({str(b.get("id")) for b in new_beats}
+                       & {str(b.get("id")) for b in have_beats})
+        if clash:
+            raise PackInstallError([
+                f"这几拍的 id 这个世界里已经有了:{clash} —— 一份新包不许重用旧 id"
+                "(`beat_fired` 那份历史按 id 配对,重了就再也分不出是谁响过)。"
+                "改一个名字;要改已经发出去的那一拍,那是另一件事(还没做)"
+            ])
+        try:
+            BeatScript.from_data({"beats": have_beats + new_beats})
+        except BeatScriptError as exc:
+            raise PackInstallError(list(exc.errors)) from None
+
+    tick = int(scheduler.clock)
+    day = int(scheduler.world_time(tick).day)
+
+    receipt: dict[str, Any] = {
+        "pack": pack_id,
+        "version": str(body.get("version") or ""),
+        "note": str(body.get("note") or ""),
+        "day": day,
+        "tick": tick,
+        "beats": [str(b.get("id")) for b in new_beats],
+        "config": [],
+        "world_setting": False,
+        "agents": [],
+        "locations": [],
+    }
+
+    with scheduler._lock:
+        # ── ③ 其余段:开机那条路上**同一批**播种函数,`merge=True`(只填缺)。
+        new_points = _seed_world_defs(location_store, bt_store, authored, merge=True)
+        _seed_material_layer(economy_store, authored, merge=True)
+        _seed_world_rules(rules_store, authored, merge=True)
+        _seed_stock_visibility(authored, visibility_store, merge=True)
+        _seed_stock_places(authored, visibility_store, merge=True)
+        redeclared = _seed_ontology(ontology_store, authored, fresh_world=True,
+                                    merge=True, namespaces=namespaces)
+        scheduler.world_rules = _load_world_rules(
+            rules_store, warn=True,
+            ticks_per_day=max(1, 1440 // max(1, scheduler._minutes_per_tick())))
+        scheduler.ontology = _load_ontology(
+            ontology_store, scheduler.world_rules, location_store, economy_store,
+            namespaces=namespaces)
+        _seed_stocks(authored, stock_store, ontology=scheduler.ontology,
+                     tick=scheduler.clock, merge=True)
+        if scheduler.ontology is not None:
+            _apply_ontology(scheduler.ontology, stock_store, visibility_store,
+                            tick=scheduler.clock, redeclare_kinds=redeclared,
+                            rules=scheduler.world_rules)
+        try:
+            _install_plugins(scheduler, plugin_store, stock_store, visibility_store,
+                             location_store, authored)
+        except PluginError as exc:
+            raise PackInstallError(list(exc.errors)) from None
+        _seed_edges(scheduler, authored, merge=True)
+
+        # ── ④ 新角色:走**中途入场那唯一的窄口**(`Scheduler.register`),
+        # 和一条剧情拍的 `agent_join` 逐字同一条路。
+        known = set(scheduler.agents) | set(scheduler._memory_projection.agents)
+        newcomers: list[dict[str, str]] = []
+        for entry in _seed_entry_dicts(authored, "agents"):
+            aid = entry.get("id")
+            if not isinstance(aid, str) or aid in known:
+                continue
+            known.add(aid)
+            newcomers.append({
+                "id": aid,
+                "name": str(entry.get("name", aid)),
+                "location": str(entry.get("location") or ""),
+                "personality": str(entry.get("personality", "")),
+            })
+        for entry in newcomers:
+            _seed_agent_tree(bt_store, entry["id"], authored)
+            scheduler.register(scheduler._beat_agent_factory(entry))
+            brain = scheduler.agents[entry["id"]]
+            board = RedisBlackboard(redis, agent_key(world_id, entry["id"]))
+            board.seed_missing(brain.agent.blackboard.snapshot())
+            brain.agent.blackboard = board
+
+        # ── ⑤ 三段这一条新开的。
+        if new_beats:
+            RedisBeatsStore(redis, world_id).append(new_beats)
+        author_config = authored.get("config")
+        if isinstance(author_config, dict) and config_store is not None:
+            for key, value in author_config.items():
+                try:
+                    config_store.set(str(key), value)
+                except Exception as exc:  # noqa: BLE001 - 一个坏键不该掀翻整包
+                    logger.warning("内容包里的配置 %s 没写进去:%s", key, exc)
+                    continue
+                receipt["config"].append(str(key))
+        setting = authored.get("world_setting")
+        if isinstance(setting, str) and setting.strip() and prompt_store is not None:
+            prompt_store.set("world.setting", setting.strip())
+            receipt["world_setting"] = True
+
+        # ── ⑥ 落账:**事件先记,再折。**
+        joined = _join_authored_additions(
+            event_log, scheduler, authored, location_store, newcomers, new_points,
+        ) if (newcomers or new_points) else set()
+        _record_pack_installed(event_log, authored, day=day, tick=tick)
+        persisted = event_log.replay()
+        scheduler.reset_projection(persisted)   # 水位跟着挪
+        scheduler.load_persisted_events(persisted)
+        if joined and scheduler.memory_store is not None and scheduler.memory_store.count() > 0:
+            _fold_seeded_memories(scheduler.memory_store, persisted, joined)
+
+        # ── ⑦ 剧情:**重建导演,而"响过哪几拍"从日志重放** —— 两份真相里存一份。
+        if new_beats:
+            script = BeatScript.from_data(
+                {"beats": RedisBeatsStore(redis, world_id).definitions()})
+            fired = {
+                (e.payload.get("beat_id"), str(e.payload.get("for") or ""))
+                for e in persisted
+                if e.type == "beat_fired" and e.payload.get("beat_id")
+            }
+            scheduler.beat_director = BeatDirector(script, fired=fired)
+
+    receipt["agents"] = [e["id"] for e in newcomers]
+    receipt["locations"] = list(new_points)
+    logger.info(
+        "内容包 %r(%s)装进了世界 %r:第 %d 天 · %d 拍 · %d 个开关 · %d 个新角色 · %d 个新地点",
+        pack_id, receipt["version"], world_id, day, len(receipt["beats"]),
+        len(receipt["config"]), len(receipt["agents"]), len(receipt["locations"]),
+    )
+    return receipt
 
 
 def _seed_initial_world(
@@ -8450,6 +8743,84 @@ def contract_payload() -> dict[str, Any]:
     }
 
 
+def run_pack(args: argparse.Namespace) -> int:
+    """`anima-world pack install / list` —— 往一个**跑着的**世界投一份内容包。
+
+    🔴 **它开的是一扇写门,而它没有 `--dry-run` 的对偶**:`world drop` /
+    `player erase` / `plugin remove` 那三条默认预演,理由是**它们删东西**;
+    装一份包是加东西,而"加了什么"由回执逐格答得出。要**先**知道装不装得进,
+    那条命令已经有了:`anima-world world check <文件> --edit --json`。
+    """
+    redis, world_id, mysql = _world_args(args)
+    command = getattr(args, "pack_command", None)
+    if command not in {"install", "list"}:
+        print("[pack] 只有 install / list 两个子命令", file=sys.stderr)
+        return 2
+    if not _world_exists(redis, world_id):
+        # 装包是**给一个已经在跑的世界**加东西 —— 对着一个不存在的名字创世,
+        # 拿到的是一个"排版正常、时钟 0"的新世界,而作者以为他更新了线上那个。
+        # (`map` 那条老教训 `5ce6aed` 的同一种。)
+        print(f"[pack] 还没有 {world_id!r} 这个世界。装包是给一个**已经在跑的**"
+              "世界投更新;要新建请用 `anima-world start --world-file`。",
+              file=sys.stderr)
+        return 2
+
+    from anima_world.api import World
+
+    world = World.open(world_id, redis=redis, mysql=mysql, force_mock_llm=True)
+    try:
+        if command == "list":
+            rows = world.packs()
+            if getattr(args, "as_json", False):
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+                return 0
+            if not rows:
+                print("这个世界还没有装过内容包。")
+                return 0
+            print(f"{world_id} 装了 {len(rows)} 份内容包:")
+            for row in rows:
+                sections = row.get("sections") or {}
+                what = "、".join(
+                    f"{name} {len(ids)}" for name, ids in sorted(sections.items())
+                ) or "(空)"
+                note = f" —— {row['note']}" if row.get("note") else ""
+                print(f"  · {row['id']} v{row.get('version') or '?'}"
+                      f"(第 {row.get('day', 0)} 天落地){note}")
+                print(f"      带了:{what}")
+            return 0
+
+        try:
+            receipt = world.install_pack(args.file)
+        except PackInstallError as exc:
+            # **作者看到的该是那几行中文,不是一段 Python 堆栈**
+            # (2026-08-26 验收 C 那条:一次被拒的降级,屏幕先甩 Traceback)。
+            print(f"[pack] 这份包装不进 {world_id!r}:", file=sys.stderr)
+            for line in exc.errors:
+                print(f"  ✗ {line}", file=sys.stderr)
+            return 2
+        if getattr(args, "as_json", False):
+            print(json.dumps(receipt, ensure_ascii=False, indent=2))
+            return 0
+        print(f"内容包 {receipt['pack']} v{receipt['version']} 装进了 {world_id}"
+              f"(世界第 {receipt['day']} 天)。")
+        if receipt["beats"]:
+            print(f"  · {len(receipt['beats'])} 拍剧情 —— 零点是**今天**"
+                  f"(第 {receipt['day']} 天),`day: 0` 的那一拍下一 tick 就响")
+        if receipt["config"]:
+            print(f"  · {len(receipt['config'])} 个开关:{'、'.join(receipt['config'])}")
+        if receipt["world_setting"]:
+            print("  · 世界观换了一段")
+        if receipt["agents"]:
+            print(f"  · {len(receipt['agents'])} 个新角色进了这个世界:"
+                  f"{'、'.join(receipt['agents'])}")
+        if receipt["locations"]:
+            print(f"  · {len(receipt['locations'])} 个新地点上了地图:"
+                  f"{'、'.join(receipt['locations'])}")
+        return 0
+    finally:
+        world.close()
+
+
 def run_plugin(args: argparse.Namespace) -> int:
     """`anima-world plugin list / remove` —— 这个世界装着哪些插件,以及卸掉一个。
 
@@ -9711,6 +10082,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_player(args)
     if args.command == "plugin":
         return run_plugin(args)
+    if args.command == "pack":
+        return run_pack(args)
     if args.command == "report":
         return run_report(args)
     if args.command == "validate":

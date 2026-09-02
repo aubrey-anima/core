@@ -188,3 +188,41 @@ def test_可见性五档进了契约_而且和引擎读的是同一份常量():
     assert listed == ["self", "connected", "here", "public", "hidden"], listed
     # ⚠️ **「没声明 = 感知不到」不在这张表里** —— 它是缺席的语义,不是第六档。
     assert "none" not in listed and "" not in listed, listed
+
+
+def test_REFERENCE_里那份顶层段清单_和真门逐格相等():
+    """🔴 **别数数,点名。**
+
+    REFERENCE §4.8 里那句「顶层**十五**段:…」是三个下游仓库照着写探测器的那一行,
+    而它和代码之间原本没有任何机械联系 —— 于是它在 `13` 上停了一版:3.9.0 加了
+    `host` 段,那一行一个字没动,而**没有一处会红**。
+
+    **一份没人验的键表,和一句没人验的话是同一种东西**,而这一份的读者是另外三个仓库。
+
+    ⚠️ 判据是**逐个名字**,不是条数:只断条数的话,加一段的同时漏掉另一段仍然是绿的
+    (这个仓库为"只断条数"红过一次,`_DEFAULTS` 那条逐键对账就是那么来的)。
+    """
+    import re
+    from pathlib import Path
+
+    reference = Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md"
+    text = reference.read_text(encoding="utf-8")
+    marker = "顶层**十五**段:"
+    assert marker in text, (
+        "REFERENCE §4.8 那句「顶层**N**段」不见了或者换了写法 —— "
+        "这道闸靠它定位;改写法就顺手改这里,别把闸留成一句永远找不到东西的话"
+    )
+    start = text.index(marker) + len(marker)
+    # 那一句到句号为止(它跨几行,所以按句号截,不按行)。
+    listed = set(re.findall(r"`([a-z_]+)`", text[start:text.index("。", start)]))
+
+    payload = json.loads(_contract("--json").stdout)
+    assert listed == set(payload), (
+        f"REFERENCE 那一行说 {sorted(listed)},而真门答 {sorted(payload)} —— "
+        "少一个会让下游以为那一段不存在,多一个会让它去探测一个不存在的段"
+    )
+    # 数字那一半也钉住:句子里写着"十五"而列了十四个名字,同样是一句假话。
+    chinese = {13: "十三", 14: "十四", 15: "十五", 16: "十六", 17: "十七", 18: "十八"}
+    assert chinese.get(len(payload)) == marker[2:-2].rstrip("段:").strip("*"), (
+        f"那一行写的数字和真门的段数对不上:真门 {len(payload)} 段"
+    )

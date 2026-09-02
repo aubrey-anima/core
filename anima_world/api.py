@@ -2890,6 +2890,33 @@ class World:
         subject = agent_id if agent_id.startswith("agent:") else f"agent:{agent_id}"
         return self.scheduler.knowledge_graph.query(subject=subject)
 
+    def install_pack(self, path: str) -> dict[str, Any]:
+        """把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。
+
+        `path` 是一份 `.cyberworld`,里头必须有 `pack` 段(身份:`{id, version, note}`)。
+        **一个文件就是一个 pack**,这份包里的作者记录全归属它。
+
+        和 `World.open(world_file=…)` 的分界**不是"装什么",是"谁在装"**:
+        那一条在开机第一秒装,装完这个进程才开始跑;这一条在世界**已经在跑**的
+        时候装,而**装包的那个进程就是在跑的那个进程** —— 于是"别的进程装的东西
+        这个进程看不见"这个问题整个消失(那是 2026-09-02 量到的五种可见性)。
+
+        这一条新开的是三段:**剧情拍**(按 id 合并,零点是这个包落地那天)、
+        **作者动过的开关**、**世界观**。其余段照旧**只填缺不覆盖**,走的是开机
+        那条路上同一批播种函数。
+
+        返回一张回执:`{pack, version, note, day, tick, beats, config,
+        world_setting, agents, locations}`。装不进当场抛 `PackInstallError`,
+        而且**一个字节都没写**(判断全在写之前)。
+
+        ⚠️ **2a-① 明确不做**:改在册的人的人设、给在册的人补记忆、停用一个包。
+
+        CLI 出口是 `anima-world pack install <文件>`。
+        """
+        from anima_world.__main__ import install_authored_pack
+
+        return install_authored_pack(self.scheduler, path)
+
     def packs(self) -> list[dict[str, Any]]:
         """这个世界装了哪几份内容包 —— **按落地先后**(3.10.0)。
 
