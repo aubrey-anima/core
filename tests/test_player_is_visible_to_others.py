@@ -36,7 +36,8 @@ ROLE = {
 # 给它加一个 here 档的量,这一族会整个变绿而什么都没测到。
 SEED = {
     "agents": [{"id": "恺撒", "name": "恺撒", "location": "校园", "personality": "傲慢"}],
-    "locations": [{"id": "校园", "name": "卡塞尔学院", "description": "常青藤下的红砖楼。"}],
+    "locations": [{"id": "校园", "name": "卡塞尔学院", "description": "常青藤下的红砖楼。"},
+                  {"id": "宿舍", "name": "学生宿舍", "description": "三个人的房间。"}],
     "kinds": [{"id": "notice", "gloss": "一张告示", "affordances": {"look": {}},
                "prompt": {"budget": 2}}],
     "entities": [{"id": "notice:board", "name": "布告栏", "location": "校园"}],
@@ -108,3 +109,69 @@ def test_撤掉最后一条声明之后那个答案也要跟着变(tmp_path):
         assert w.scheduler._actor_is_visible_to_others() is True
         w.scheduler.visibility_store.undeclare("agent", "role.评级")
         assert w.scheduler._actor_is_visible_to_others() is False
+
+
+def test_装包那一刻在线的玩家_也拿得到新声明的量(tmp_path):
+    """🔴 **同一个世界里两种玩家,而差别只是「装包那会儿你在不在线」。**
+
+    播种从前挂在 `_touch_player` 的 `fresh` 分支里,而 `fresh` 是那张**带 TTL** 的
+    在场行报的 —— 可"这个世界声明了哪些量"是会变的:装一份编辑包、热开一个出厂
+    插件,都在运行期。于是那一刻在线的老玩家拿不到新声明的量,`rc=0`、日志不提。
+
+    理由和 `_record_player_join` 挪出 `fresh` 那一条**逐字相同**:
+    「第一次」不能记在带 TTL 的在场上。
+    """
+    bare = {k: v for k, v in SEED.items() if k != "plugins"}
+    base = write_seed_file(tmp_path / "hot2.json", bare)
+    with open_world_at(tmp_path / "hot2.db", world_file=base) as w:
+        w.player_move("old", "校园")                      # 装包之前就在线
+        w.tick(1)
+        assert "role.评级" not in w.stocks("agent:player:old")
+
+    # 运行期装一份只含作者层的**编辑包** —— 创作台走的就是这条路。
+    edit = write_seed_file(tmp_path / "edit.json", {"plugins": [ROLE]})
+    with open_world_at(tmp_path / "hot2.db", world_file=edit) as w:
+        w.player_move("old", "校园")                      # 他还在,只是又露了个面
+        assert w.stocks("agent:player:old").get("role.评级") == 0.0, (
+            "在线的老玩家没拿到新声明的量 —— 播种多半又挂回 `fresh` 分支里了"
+        )
+        readouts = {r["key"] for r in w.player_options("old")["own"]["readouts"]}
+        assert "role.评级" in readouts
+
+        w.player_move("brandnew", "校园")                 # 同一刻新进来的人
+        assert w.stocks("agent:player:brandnew").get("role.评级") == 0.0
+
+
+def test_没写kinds的世界_own那两格照样有(tmp_path):
+    """🔴 `blocked` 该挡的只有 `targets`(3.9.0,创作台验收 C 逮的)。
+
+    `own` 不依赖本体层也不依赖他站在哪:量住 `stock:agent:player:<id>`,档词与人话
+    名字走**可见性表**。从前它挂在 `no_ontology` 早退后面 —— 于是一个用插件给玩家
+    挂了 `role.评级` 而没写 `kinds` 的世界,Redis 里真有那个量、可见性表里真有 bands,
+    而 `own.readouts` 是 `[]`,站点的状态四格一片空白;随手加一个 `kind`,
+    同一份插件立刻出「评级 预科」。**"全绿而产物是坏的"那个形状。**
+    """
+    no_kinds = {k: v for k, v in SEED.items() if k not in ("kinds", "entities")}
+    path = write_seed_file(tmp_path / "nokinds.json", no_kinds)
+    with open_world_at(tmp_path / "nokinds.db", world_file=path) as w:
+        w.player_move("p9", "校园")
+        w.tick(1)
+        menu = w.player_options("p9")
+        assert menu["blocked"] == "no_ontology"
+        assert menu["targets"] == [], "挡住的本来就是这一格"
+        rows = {r["key"]: r for r in menu["own"]["readouts"]}
+        assert "role.评级" in rows, "他身上真有这个量,而这一格把它吞了"
+        assert rows["role.评级"]["word"] == "预科"
+        assert rows["role.评级"]["text"] == "评级 预科"
+
+
+def test_在路上的时候own也还在(tmp_path):
+    """同一条理由:他在走路,不代表他身上的量消失了。"""
+    path = write_seed_file(tmp_path / "walk.json", SEED)
+    with open_world_at(tmp_path / "walk.db", world_file=path) as w:
+        w.player_move("p8", "校园")
+        w.tick(1)
+        w.player_walk("p8", "宿舍")
+        menu = w.player_options("p8")
+        assert menu["blocked"] == "in_transit"
+        assert {r["key"] for r in menu["own"]["readouts"]} >= {"role.评级"}

@@ -7298,12 +7298,22 @@ class World:
         #    而在那之前他每一条 per-player 拍都没有零点可算。
         # 重复由投影挡(这个函数自己查),所以在外面叫是安全的。
         self._record_player_join(player_id)
+        # 他身上声明过的量在这儿落地 —— 和角色走同一份(`register` 那条路),
+        # 只填缺不覆盖。这里是玩家侧唯一的窄口,和 `register` 的地位一样。
+        # 少了这一步,`requires: ["me_体力 >= 4"]` 对他恒不成立:世界里每一件
+        # 要力气的事他都做不了,而回执只说"你做不了",一个字不提原因。
+        #
+        # 🔴 **也不在 `fresh` 分支里叫,而理由和上面那条逐字相同**(3.9.0,创作台
+        # 验收 A 逮的)。`fresh` 是那张**带 15 分钟 TTL** 的在场行报的,而"这个世界
+        # 声明了哪些量"是会变的:**装一份编辑包、热开一个出厂插件,都在运行期**。
+        # 挂在 `fresh` 里面的下场:那一刻**正在线**的玩家拿不到新声明的量 ——
+        # 装完 `role.评级` 之后,老玩家 `stocks()` 里没有它、`readouts` 是空的,
+        # 而同一刻新进来的人有;`rc=0`、日志不提。**同一个世界里两种玩家**,
+        # 而差别只是"装包那会儿你在不在线"。
+        # 这一步本身是幂等的(`seed_actor_quantities` **逐个量填**,只补缺的那几个),
+        # 所以每次露面都叫是安全的 —— 代价是一次 hash 读,买到的是"声明了就一定有"。
+        self.scheduler.seed_actor_quantities(f"player:{player_id}")
         if fresh:
-            # 他身上声明过的量在这儿落地 —— 和角色走同一份(`register` 那条路),
-            # 只填缺不覆盖。这里是玩家侧唯一的窄口,和 `register` 的地位一样。
-            # 少了这一步,`requires: ["me_体力 >= 4"]` 对他恒不成立:世界里每一件
-            # 要力气的事他都做不了,而回执只说"你做不了",一个字不提原因。
-            self.scheduler.seed_actor_quantities(f"player:{player_id}")
             self._grant_player_allowance(player_id)
         self.presence_store.update(
             player_id, {**fields, "last_seen": time.time()}
@@ -8702,9 +8712,34 @@ class World:
             "own": {"quantities": {}, "readouts": []},
         }
 
+        def _fill_own() -> None:
+            """他**自己身上**那几个量 —— 和"这儿有什么"是两件事。
+
+            🔴 **它不依赖本体层,也不依赖他站在哪**(3.9.0,创作台验收 C 逮的):
+            量住 `stock:agent:player:<id>`,档词与人话名字走**可见性表** —— 两样
+            都和 `kinds` 无关。从前它挂在 `no_ontology` 早退后面,于是一个用插件
+            给玩家挂了 `role.评级`(Redis 里真有、可见性表里真有 bands)、而没写
+            `kinds` 的世界,`own.readouts` 是 `[]` → 站点的状态四格一片空白;
+            随手加一个 `kind` 之后同一份插件立刻出「评级 外门」。
+            **"全绿而产物是坏的"那个形状**:`blocked` 该挡的只有 `targets`。
+            """
+            seen_own = self.player_perception(pid)
+            values = dict(seen_own.get("own") or {})
+            blank["own"] = {
+                "quantities": values,
+                "readouts": perception_mod.readouts(
+                    values,
+                    (seen_own.get("words") or {}).get("own") or {},
+                    seen_own.get("own_units") or {},
+                    (seen_own.get("labels") or {}).get("own") or {},
+                ),
+            }
+
         def blocked(reason: str) -> dict[str, Any]:
             blank["blocked"] = reason
             blank["blocked_text"] = self._BLOCKED_WORDS[reason]
+            if pid:
+                _fill_own()      # 挡住的是"这儿有什么",不是"他是谁"
             return blank
 
         if not pid:
@@ -8777,16 +8812,7 @@ class World:
                 "verbs": rows,
             })
         blank["targets"] = targets
-        own_values = dict(seen.get("own") or {})
-        blank["own"] = {
-            "quantities": own_values,
-            "readouts": perception_mod.readouts(
-                own_values,
-                (seen.get("words") or {}).get("own") or {},
-                seen.get("own_units") or {},
-                (seen.get("labels") or {}).get("own") or {},
-            ),
-        }
+        _fill_own()
         return blank
 
     def _affordance_cost(self, affordance: Any) -> str:
