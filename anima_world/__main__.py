@@ -8900,12 +8900,22 @@ def run_simulate(args: argparse.Namespace) -> int:
                   f"           或改用 --llm mock / --no-llm 空跑。", file=sys.stderr)
             return 2
 
+    # 🔴 **和 `run` 走同一扇门**(3.9.0,验收 C 逮的)。从前这儿直接
+    # `build_serve_scheduler`,而**让世界看得见在场玩家的那根线接在 `World` 里**
+    # (`api.py` 的 `scheduler._present_players = self._present_roster`,全仓唯一一处)。
+    # 于是 `simulate` 出来的世界 `_present_players is None` —— `co_located` 取不到人、
+    # per-player 的剧情拍**一拍都不响**,而 `fast_forward` 照样跑完、rc=0、日志干净。
+    # 作者拿 `--ticks 0` 当校验器、拿快进验第一周剧情,量到的是一片"没发生",
+    # 而那正是这条命令最常见的两种用法(创作台这一单就撞上了)。
+    # **两条路各有一半世界,是这个仓库最怕的那种坏法**,所以合成一条。
+    from anima_world.api import World
+
     try:
-        scheduler = build_serve_scheduler(
+        world = World.open(
             world_id,
-            redis,
+            redis=redis,
             mysql=mysql,
-            n_agents=args.agents,
+            agents=args.agents,
             world_file=args.world_file,
             force_mock_llm=(tier == "mock"),
             mock_narrative=(tier == "planner"),
@@ -8914,6 +8924,7 @@ def run_simulate(args: argparse.Namespace) -> int:
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[simulate] {exc}", file=sys.stderr)
         return 2
+    scheduler = world.scheduler
 
     mpt = DEFAULT_MINUTES_PER_TICK
     if scheduler.config_store is not None:
@@ -8986,6 +8997,9 @@ def run_simulate(args: argparse.Namespace) -> int:
                   + (f",{len(idle_only)} 人整场无事发生:{'、'.join(idle_only)}" if idle_only else "")
                   + (f",{len(unfired)} 拍一次都没响:{'、'.join(unfired)}" if unfired else "")
                   + ")")
+    # `stop()` 上面按"读完日志再停"的次序调过了(幂等);这里收的是 `World` 那一半
+    # ——桥循环与聊天服务,它们是 `World.open` 带来的,不收就把线程留给下一个进程。
+    world.close()
     return 0
 
 

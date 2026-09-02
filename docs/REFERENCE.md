@@ -3710,6 +3710,11 @@ anima-world player host --world-id w --player p1 --ask      # 他点了「我该
 **没配 key 时整条路照样跑**(场景是模板句)—— 一个"没 key 就不成立"的机制等于在
 默认状态下缺席。
 
+⚠️ **它读起来像只读,其实会写世界。** 和 `player options` 不同,这条命令走的是
+`World.host_turn`,而那扇门第一件事就是 `_touch_player` —— 一个**打错的 `--player`**
+会在世界里落一条 `player_join`(以及他的见面礼),退出码照旧 0。
+判据是"这个 id 你敢不敢让它成为一个玩家";要只看不写,用 `anima-world player options`。
+
 ### 4.2.3.1 anima-world player forget —— 一个人离开了这个世界
 
 ```bash

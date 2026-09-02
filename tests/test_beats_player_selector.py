@@ -362,3 +362,37 @@ def test_没告别的人_一段停留之内零点不动(tmp_path):
         assert w.scheduler._memory_projection.players_joined["p3"] == first
         joins = [e for e in w.scheduler.event_log.replay() if e.type == "player_join"]
         assert len(joins) == 1
+
+
+def test_simulate_看得见在场玩家_per_player拍照样响(tmp_path, monkeypatch):
+    """🔴 **两条路各有一半世界,是这个仓库最怕的那种坏法**(3.9.0 验收 C 逮的)。
+
+    「让世界看得见在场玩家」那根线接在 `World` 里(全仓唯一一处),而 `simulate`
+    从前直接 `build_serve_scheduler` —— 于是它出来的世界 `_present_players is None`,
+    `co_located` 取不到人、per-player 拍**一拍都不响**,而快进照样跑完、rc=0、
+    日志干净。作者拿它验第一周剧情,量到的是一片"没发生"。
+
+    这条钉的是**两扇门给同一个世界同一个答案**,不是 CLI 的输出长什么样。
+    """
+    from _worldfile import current_client, reset_current
+    from anima_world.__main__ import main
+
+    path = write_seed_file(tmp_path / "sim.json", SEED)
+    reset_current()
+    with open_world_at(tmp_path / "sim.db", world_file=path) as w:
+        w.player_move("p1", "宿舍")
+        w.tick(2)
+        assert w.scheduler._present_players is not None
+        assert w.scheduler.beat_director.fired == set(), "他的第 1 天还没到"
+    client = current_client()
+
+    monkeypatch.setattr("anima_world.__main__._redis_client", lambda *a, **k: client,
+                        raising=False)
+    rc = main(["simulate", "--world-id", "w", "--ticks", "300", "--llm", "mock"])
+    assert rc == 0
+
+    with open_world_at(tmp_path / "sim.db") as w2:
+        fired = {(b, s) for b, s in w2.scheduler.beat_director.fired}
+        assert ("见面", "player:p1") in fired, (
+            "simulate 快进完这一拍还没响 —— 那根「看得见在场玩家」的线多半又断了"
+        )

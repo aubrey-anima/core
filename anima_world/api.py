@@ -2030,6 +2030,7 @@ class World:
         beats_path: str | None = None,
         agents: int | None = None,
         force_mock_llm: bool = False,
+        mock_narrative: bool = False,
     ) -> "World":
         """打开(或创建)一个世界。**世界住在 Redis 里,`world_id` 是它的名字。**
 
@@ -2046,6 +2047,11 @@ class World:
         `mysql` 给了的话,随时间无限增长的四样(events / memories /
         conversations / messages)归 MySQL —— 判据是"她带不带得进上下文"。
         **传工厂,别传裸连接**(`mysql=lambda: pymysql.connect(...)`)。
+
+        `force_mock_llm` / `mock_narrative` 是两档降级:前者整条 LLM 走 Mock,
+        后者只把**叙事**换成模板(规划与判定照旧真调)。`simulate` 的 `--llm` 三档
+        走的就是这两格 —— 它从 3.9.0 起和 `run` 一样经这扇门开世界,理由见
+        `run_simulate`。
         """
         from anima_world.__main__ import build_serve_scheduler  # 延迟导入避免环
         from anima_world.redis_state import RedisLock, durability_warning, lock_key
@@ -2058,6 +2064,7 @@ class World:
             world_file=world_file,
             beats_path=beats_path,
             force_mock_llm=force_mock_llm,
+            mock_narrative=mock_narrative,
         )
         world = cls(scheduler)
         # 跨进程的世界锁。**在调度器那把 RLock 之外,不是替代它** ——
