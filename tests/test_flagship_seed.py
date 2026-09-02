@@ -766,3 +766,28 @@ def test_橱窗里主持人开得了口_而且挑得出三项(open_world):
     assert hidden, "橱窗里那个藏起来的人没了,上面那条闸就白站着"
     blob = json.dumps(turn, ensure_ascii=False)
     assert all(name not in blob for name in hidden)
+
+
+def test_橱窗里展示了内容包(tmp_path):
+    """**做了却开箱看不见等于没做。**
+
+    3.10.0 加了作者层第十五个段 `pack`,而这个仓库的三道闸第一道就是「橱窗里展示
+    它了吗」。橱窗那条 `pack` 记录同时钉住一句语义:**创世那一趟的包落在世界第 0 天**
+    —— 同一份文件既可能当创世用、也可能当一份包装进一个跑着的世界,而
+    `since: "pack"` 在两种用法上都成立,**没有特例**。
+    """
+    from _worldfile import bundled_seed, open_world_at
+
+    seed = bundled_seed()
+    assert isinstance(seed.get("pack"), dict), (
+        "橱窗里没有 `pack` 段 —— 新用户装上包看到的第一屏里,"
+        "「这份内容是第几周的」这件事整个不存在"
+    )
+    assert seed["pack"].get("id") and seed["pack"].get("version")
+
+    with open_world_at(str(tmp_path / "flag.db"), force_mock_llm=True) as world:
+        rows = world.packs()
+    assert [r["id"] for r in rows] == [seed["pack"]["id"]], rows
+    assert rows[0]["day"] == 0, "创世那一趟的包不落在世界第 0 天"
+    # 带了什么,一格不落地报出来 —— `pack list` 那一屏读的就是它。
+    assert "agents" in rows[0]["sections"] and "kinds" in rows[0]["sections"], rows[0]

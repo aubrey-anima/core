@@ -122,7 +122,12 @@ GOLDEN = json.loads(GOLDEN_PATH.read_text())
 # ⚠️ **不能靠"重采基线"化解**:基线记的是旧路的行为,而旧路的代码已经删了 ——
 # 拿 HEAD 重采一遍,这道闸就变成 HEAD 和 HEAD 比,永远绿而且什么都不测。
 # 所以滤,而且**只滤这一种**:多一条别的、少一条、payload 差一个字节,照旧当场红。
-_PARITY_IGNORED_EVENTS = ("narrative", "player_join")
+# 🆕 **`pack_installed` 同理(3.10.0)**:橱窗从这一版起自带一条 `pack` 记录
+# (「做了却开箱看不见等于没做」),于是每个从橱窗建起来的世界创世那一趟多一条
+# `pack_installed`。它和 `player_join` 逐字同一种情形 —— **一次独立的、有意的
+# 行为变更,不是搬家搬出来的偏差**,而基线所在的那棵旧路的树里根本没有这个事件。
+# ⚠️ 同样不能靠重采化解,理由和上面那句逐字相同。
+_PARITY_IGNORED_EVENTS = ("narrative", "player_join", "pack_installed")
 
 ASYNC_KEYS = ("narrative_log", "recent_events", "runtime")
 

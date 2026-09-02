@@ -415,3 +415,81 @@ def test_那五句话里不许有裸markdown星号(tmp_path):
     path = write_seed_file(tmp_path / "stars.cyberworld", _SILENT_PACK)
     r = run_cli("world", "check", path, "--edit")
     assert "**" not in r.stdout, r.stdout
+
+    # 🔴 **别数源码里的星号,去问屏幕**(这条判据 3.7.0 立的)。`pack` 这一族的
+    # 真出口逐条敲一遍 —— 那道 AST 闸只扫 `print()` 实参与 `help=`,而这一屏上
+    # 有几句是先攒进回执再印的。
+    redis_for(tmp_path / "stars.db")
+    base = write_seed_file(tmp_path / "stars-base.cyberworld", BASE)
+    from anima_world.api import World
+
+    client = redis_for(tmp_path / "stars.db")
+    World.open("w", redis=client, world_file=base, force_mock_llm=True).close()
+    good = _pack(tmp_path, "stars-ok", pack={"id": "第二周", "version": "1.0.0"},
+                 beats=[_beat("社团", 0)],
+                 config={"narrative.player.enabled": True},
+                 world_setting="第二周。")
+    for argv in (("pack", "--help"), ("pack", "install", "--help"),
+                 ("pack", "list", "--help"),
+                 ("pack", "install", good, "--world-id", "w"),
+                 ("pack", "list", "--world-id", "w"),
+                 ("pack", "install", good, "--world-id", "w"),      # 第二遍 = 撞车那一屏
+                 ("pack", "install", good, "--world-id", "没有这个世界")):
+        r = run_cli(*argv)
+        assert "**" not in (r.stdout + r.stderr), (argv, r.stdout, r.stderr)
+
+
+def test_验收标准第一条原样_四十天两个老玩家_三拍per_player_新玩家也响(tmp_path):
+    """**任务单 §3.1 验收标准 ① 逐字照抄的那一条。**
+
+    一份第 2 周包(`pack` 段 + 三拍 `for_each: player` + 一个 config 键 + 世界观一段)
+    装进一个已跑 40 世界日、有两个老玩家的世界:
+    `:packs`(= `World.packs()`)有它 · `pack_installed` 在 · 三拍对两个老玩家
+    **从落地那天起**各响一次 · 之后进来的第三个玩家也响 · **没有一拍在装的那一 tick 全烧**。
+    """
+    day = 288
+    with _world(tmp_path, name="acc") as world:
+        world.tick(3)
+        world._touch_player("老甲")
+        world._touch_player("老乙")
+        world.tick(day * 40)
+        assert world.state()["world_time"]["day"] == 40
+
+        path = _pack(
+            tmp_path, "acc-week2",
+            pack={"id": "第二周", "version": "1.0.0", "note": "社团活动 / 夜宵 / 实习课"},
+            beats=[_beat("社团", 0, for_each={"node": "player"}),
+                   _beat("夜宵", 1, for_each={"node": "player"}),
+                   _beat("实习课", 2, for_each={"node": "player"})],
+            config={"narrative.player.enabled": True},
+            world_setting="第二周的旧港。")
+        receipt = world.install_pack(path)
+        assert receipt["day"] == 40
+
+        # `:packs` 有它,`pack_installed` 在事件流里。
+        assert [r["id"] for r in world.packs()] == ["第二周"]
+        assert any(e.type == "pack_installed"
+                   for e in world.scheduler.event_log.replay())
+        # 开关与世界观当场生效。
+        assert world.config_get("narrative.player.enabled") is True
+        assert world.world_setting()["text"] == "第二周的旧港。"
+
+        # 🔴 装的那一 tick 一拍都没烧。
+        assert _fired(world) == []
+
+        world.tick(1)
+        assert sorted(_fired(world)) == [("社团", "player:老乙"), ("社团", "player:老甲")]
+        world.tick(day)
+        assert ("夜宵", "player:老甲") in _fired(world)
+        world.tick(day)
+        assert ("实习课", "player:老乙") in _fired(world)
+        # 每人各一次,不多不少。
+        assert len(_fired(world)) == 6, sorted(_fired(world))
+
+        # 第三个玩家在包落地之后才进来 —— 从**他自己**进来那天起算,一样响三次。
+        world._touch_player("新丙")
+        world.tick(1)
+        assert ("社团", "player:新丙") in _fired(world)
+        world.tick(day * 2)
+        mine = sorted(b for b, who in _fired(world) if who == "player:新丙")
+        assert mine == ["夜宵", "实习课", "社团"], mine

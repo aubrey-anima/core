@@ -493,13 +493,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── pack(3.10.0,周更链路 2a-①)──────────────────────────────────────────
     pack_cmd = sub.add_parser(
         "pack",
-        help="内容包:往一个**跑着的**世界投一份更新(install),看装了哪几周(list)",
+        help="内容包:往一个「跑着的」世界投一份更新(install),看装了哪几周(list)",
     )
     pack_commands = pack_cmd.add_subparsers(dest="pack_command")
     pack_install = pack_commands.add_parser(
         "install",
         help="把一份带 `pack` 段的 `.cyberworld` 装进这个世界 —— 不重建、不停机、"
-             "玩家进度不丢。拍的零点是**这个包落地那天**",
+             "玩家进度不丢。拍的零点是「这个包落地那天」",
     )
     _add_world_args(pack_install)
     pack_install.add_argument("file", help="那份 `.cyberworld`(必须有 `pack` 段)")
@@ -1091,7 +1091,7 @@ PACK_KEYS = ("id", "version", "note")
 EDIT_PATH_NOTES: dict[str, str] = {
     "beats": (
         "`--world-file` 装不进一个「已经有剧情」的世界:节拍和 `beat_fired` 那份历史"
-        "配对,而一份写着 `day: 0..6` 的包装进一个跑了很久的世界,那几拍会在同一 tick"
+        "配对,而一份写着 `day: 0..6` 的包装进一个跑了很久的世界,那几拍会在同一 tick 里"
         "全部烧掉。要给一个「跑着的」世界加剧情,用 "
         "`anima-world pack install <文件>` —— 那条路按内容包记账,拍的零点是"
         "「这个包落地那天」"
@@ -1107,15 +1107,18 @@ EDIT_PATH_NOTES: dict[str, str] = {
         "改一个跑着的世界的世界观用 `anima-world world setting --set`(3.8.0),"
         "或者把它写进一份内容包走 `pack install`"
     ),
+    # ⚠️ 措辞**以条件打头**,不以断言打头:离线那两扇门不知道谁在册,而第一版
+    # 写成「这份文件给已经在册的人写了 …」之后,一份只带**新人**的包也会读到那句话
+    # —— **一句念不通的拒绝语,和一句错的一样贵**(这个仓库记过好几次)。
     "personality": (
-        "这份文件给「已经在册」的人写了 `personality`,而它一个字都装不进去:"
-        "名册的权威是事件日志,作者层只收名册「之外」的新人。改一个在册的人的人设"
-        "今天还没有出口(周更批 2a-② 会开)"
+        "这份文件写了 `personality`,而其中「已经在册」的那些人一个字都装不进去:"
+        "名册的权威是事件日志,作者层只收名册「之外」的新人(新人照旧带得进来)。"
+        "改一个在册的人的人设今天还没有出口(周更批 2a-② 会开)"
     ),
     "memories": (
-        "这份文件给「已经在册」的人写了 `memory`,而它一条都装不进去:"
-        "创世记忆只在创世那条路上折,合并那条只给新人。给一个在册的人补记忆"
-        "今天还没有出口(周更批 2a-② 会开)"
+        "这份文件写了 `memory`,而其中「已经在册」的那些人一条都装不进去:"
+        "创世记忆只在创世那条路上折,合并那条只给新人(新人照旧带得进来)。"
+        "给一个在册的人补记忆今天还没有出口(周更批 2a-② 会开)"
     ),
     "roster_state": (
         "这份文件给「已经在册」的人写了关系 / 目标 / 随身物品 / 钱,而它们装不进去"
@@ -1181,9 +1184,9 @@ def _roster_note(key: str, who: list[str], on_roster: Any) -> str:
     """名册那两格的话。**开机点得出名字,离线只说得出条件句。**"""
     names = "、".join(who[:8]) + ("…" if len(who) > 8 else "")
     if on_roster is None:
-        return (f"{EDIT_PATH_NOTES[key]}(这份文件里有 {len(who)} 个人:{names};"
-                "他们在不在册,离线这一格答不出来)")
-    return f"{EDIT_PATH_NOTES[key]}(点得出名字:{names})"
+        return (f"{EDIT_PATH_NOTES[key]}(这份文件里写到 {len(who)} 个人:{names};"
+                "他们在不在册,离线这一格答不出来 —— 全是新人的话这一句不适用)")
+    return f"{EDIT_PATH_NOTES[key]}(在册而被丢掉的是:{names})"
 
 
 def world_pack_errors(authored: dict[str, Any] | None) -> list[str]:
@@ -8418,7 +8421,7 @@ def contract_payload() -> dict[str, Any]:
             # ⚠️ **它只管规律那一层的 `emit`**:触发器的 `emit` 根本没有
             # `importance` 这一格,那儿的 `text` 是载荷里的一句话、不进记忆。
             "emit_key_requires": {k: list(v) for k, v in EMIT_KEY_REQUIRES.items()},
-            "trigger_keys": list(BEAT_TRIGGER_KEYS),
+            "trigger_keys": list(TRIGGER_KEYS),
             "trigger_required_keys": list(TRIGGER_REQUIRED_KEYS),
             # 创作台在这一格上是全仓**唯一一处写死的空白判断**,所以它点名要了。
             "kind_local_pattern": KIND_LOCAL_PATTERN,
@@ -8897,7 +8900,7 @@ def run_pack(args: argparse.Namespace) -> int:
         # 装包是**给一个已经在跑的世界**加东西 —— 对着一个不存在的名字创世,
         # 拿到的是一个"排版正常、时钟 0"的新世界,而作者以为他更新了线上那个。
         # (`map` 那条老教训 `5ce6aed` 的同一种。)
-        print(f"[pack] 还没有 {world_id!r} 这个世界。装包是给一个**已经在跑的**"
+        print(f"[pack] 还没有 {world_id!r} 这个世界。装包是给一个「已经在跑的」"
               "世界投更新;要新建请用 `anima-world start --world-file`。",
               file=sys.stderr)
         return 2
@@ -8941,7 +8944,7 @@ def run_pack(args: argparse.Namespace) -> int:
         print(f"内容包 {receipt['pack']} v{receipt['version']} 装进了 {world_id}"
               f"(世界第 {receipt['day']} 天)。")
         if receipt["beats"]:
-            print(f"  · {len(receipt['beats'])} 拍剧情 —— 零点是**今天**"
+            print(f"  · {len(receipt['beats'])} 拍剧情 —— 零点是「今天」"
                   f"(第 {receipt['day']} 天),`day: 0` 的那一拍下一 tick 就响")
         if receipt["config"]:
             print(f"  · {len(receipt['config'])} 个开关:{'、'.join(receipt['config'])}")
