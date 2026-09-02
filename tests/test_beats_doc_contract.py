@@ -86,3 +86,77 @@ def test_every_predicate_is_documented_with_the_fields_the_validator_wants():
         if documented.get(pred) != sorted(fields)
     }
     assert not mismatched, f"字段对不上:{mismatched}"
+
+
+# ── §9.1 的两张收拒表(3.9.0)────────────────────────────────────────────────
+#
+# 上面那两张清单有闸,而 3.9.0 新加的这两张一格都没扫过(验收 B 逮的)。
+# 理由和上面逐字相同:**加载期严格的全部价值,押在"作者能知道什么是对的"上面**,
+# 而 `player` 这一族拒得比谁都硬(写错一格当场开不了机)。表错了就是刁难。
+
+_PLAYER_ROW = re.compile(r"^\|\s*`(?P<name>[a-z_]+)`\s*\|(?P<fields>[^|]*)\|")
+
+
+def _player_table(start_marker: str, end_marker: str) -> dict[str, list[str]]:
+    """一行一个名字的收拒表;`—` / 空 = 一格都写不下(**不进映射**,和代码同构)。"""
+    text = _REFERENCE.read_text(encoding="utf-8")
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    table: dict[str, list[str]] = {}
+    for line in text[start:end].splitlines():
+        match = _PLAYER_ROW.match(line.strip())
+        if not match:
+            continue
+        fields = [
+            f.strip().strip("`")
+            for f in re.split(r"[,、/]", match.group("fields"))
+            if f.strip() and f.strip() not in ("—", "-")
+        ]
+        if fields:
+            table[match.group("name")] = sorted(fields)
+    return table
+
+
+def test_那两张收拒表真的被解析到了():
+    """解析器坏掉的话,下面两条会变成永远绿的空断言 —— 上面那条同款。"""
+    assert _player_table("**op 的收拒表**", "**谓词的收拒表**"), "op 那张一行都没读出来"
+    assert _player_table("**谓词的收拒表**", "⚠️ **这两张表是机器校验的"), "谓词那张一行都没读出来"
+
+
+def test_op收拒表和校验器一致():
+    from anima_world.beats import PLAYER_ALLOWED_OP_FIELDS, VALID_OPS
+
+    documented = _player_table("**op 的收拒表**", "**谓词的收拒表**")
+    code = {op: sorted(fields) for op, fields in PLAYER_ALLOWED_OP_FIELDS.items()}
+    assert documented == code, f"文档 {documented} ≠ 代码 {code}"
+    # **拒掉的那些也要逐个写在表上** —— 少写一行,作者只会以为"文档没提 = 大概能写"。
+    listed = set(_all_names("**op 的收拒表**", "**谓词的收拒表**"))
+    assert listed == set(VALID_OPS), (
+        f"表上多出:{sorted(listed - set(VALID_OPS))};缺:{sorted(set(VALID_OPS) - listed)}"
+    )
+
+
+def test_谓词收拒表和校验器一致():
+    from anima_world.beats import PLAYER_ALLOWED_PREDICATE_FIELDS, _VALID_PREDICATES
+
+    end = "⚠️ **这两张表是机器校验的"
+    documented = _player_table("**谓词的收拒表**", end)
+    code = {p: sorted(f) for p, f in PLAYER_ALLOWED_PREDICATE_FIELDS.items()}
+    assert documented == code, f"文档 {documented} ≠ 代码 {code}"
+    listed = set(_all_names("**谓词的收拒表**", end))
+    assert listed == set(_VALID_PREDICATES), (
+        f"表上多出:{sorted(listed - set(_VALID_PREDICATES))};"
+        f"缺:{sorted(set(_VALID_PREDICATES) - listed)}"
+    )
+
+
+def _all_names(start_marker: str, end_marker: str) -> list[str]:
+    """表上出现过的每一个名字 —— **含拒掉的那些**(它们不进上面那个映射)。"""
+    text = _REFERENCE.read_text(encoding="utf-8")
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    return [
+        m.group("name")
+        for line in text[start:end].splitlines()
+        if (m := _PLAYER_ROW.match(line.strip()))
+    ]

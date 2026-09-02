@@ -5119,22 +5119,37 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 **哪一格写得下 `player`,是加载期判的**(下面这两张表就是 `contract --json` 的
 `beats.player_selector`;拒了当场说,**没有第三种"静默跳过"**):
 
+**op 的收拒表**(一行一个 op;`—` = 一格都写不下):
+
 | op | 写得下 `player` 的格 | 写不下的那些为什么 |
 |---|---|---|
-| `sentiment_delta` / `r_type` | `target` | `as` 写不下 —— 关系的主语只能是角色 |
-| `pay` | `from` / `to` | |
+| `sentiment_delta` | `target` | `as` 写不下 —— 关系的主语只能是角色 |
+| `r_type` | `target` | 同上 |
+| `pay` | `from`、`to` | |
 | `grant_item` | `agent_id` | |
-| `memory` | **一格都没有** | 玩家那一头没有记忆表 |
-| `broadcast_memory` | **一格都没有** | 它写的是在场角色的记忆 |
-| `persona_update` | **一格都没有** | 玩家没有 persona |
-| `agent_join` / `agent_leave` / `agent_return` | **一格都没有** | 玩家的来去是在场,不是世界事件;唯一窄口是 `World._touch_player` |
+| `memory` | — | 玩家那一头没有记忆表 |
+| `broadcast_memory` | — | 它写的是在场角色的记忆 |
+| `persona_update` | — | 玩家没有 persona |
+| `agent_join` | — | 玩家不走 agent_join,唯一窄口是 `World._touch_player` |
+| `agent_leave` | — | 玩家的来去是在场,不是世界事件 |
+| `agent_return` | — | 同上 |
+| `location_desc` | — | 它和人无关 |
 
-| 谓词 | 写得下 `player` 的格 |
-|---|---|
-| `co_located` | `agents` |
-| `money` / `has_item` | `agent` |
-| `sentiment` / `r_type` | `target`(`as` 写不下,同上) |
-| `need` / `memory` | **一格都没有**(需求住角色的黑板,记忆是角色的) |
+**谓词的收拒表**(一行一个谓词):
+
+| 谓词 | 写得下 `player` 的格 | 写不下的那些为什么 |
+|---|---|---|
+| `co_located` | `agents` | |
+| `money` | `agent` | |
+| `has_item` | `agent` | |
+| `sentiment` | `target` | `as` 写不下 —— 关系的主语只能是角色 |
+| `r_type` | `target` | 同上 |
+| `need` | — | 需求住在角色的黑板上 |
+| `memory` | — | 记忆是角色的 |
+
+⚠️ **这两张表是机器校验的,不是散文**(`tests/test_beats_doc_contract.py`)——
+和上面那两张 op/谓词清单同一条理由:加载期严格的全部价值押在"作者能知道什么是对的"
+上面,而作者唯一的依据就是这张表。表错了,严格校验就从护栏变成刁难。
 
 ⚠️ **一条拍的顶层键从 3.9.0 起是闭集**(`id` / `for_each` / `trigger` / `payload` /
 `once`)。3.8.0 一个都不查 —— 所以**写了 `for_each` 的包在 3.8.0 上开得了机**,
