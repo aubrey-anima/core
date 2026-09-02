@@ -3521,6 +3521,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
 | 🆕 `world.world_setting()` | 这个世界的**世界观**此刻是什么:`{text, source, length}`。`source` 用 `prompt_list()` 那一套词(`默认值` / `世界文件`),不另造一套 |
 | 🆕 `world.set_world_setting(text=None, *, clear=False, dry_run=False)` | 改**一个已经跑着的世界**的世界观(3.8.0,收件箱 D4)。覆盖;`clear=True` 回落到引擎内置那份(**不是变成空的**);`None` / 空白 **拒绝**(`ValueError`);逐字相同 `changed: false`;`dry_run=True` 一个字节都不写。回执 `{before, after, source, changed, cleared, dry_run, length}`。CLI 出口是 `anima-world world setting`(§4.7.1) |
+| 🆕 `world.packs()` | 这个世界装了哪几份**内容包**,按落地先后(3.10.0)。每行 `id` / `version` / `note` / `day`(**第一次**落地那天,也是这份包里那些拍的零点)/ `tick` / `sections`(每个段各带了哪几个 id)。🔴 **折自 `pack_installed` 事件,没有第二张表** —— 和余额折自 `payment` 逐字同一种;存一份直接写的清单就多出一种和日志对不上的坏法,而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。只读门自己补课(`catch_up_projection`)。CLI 出口是 `anima-world pack list`(§4.11) |
 
 ### 持久化与底层
 

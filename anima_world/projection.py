@@ -70,6 +70,8 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_beat_fired(proj, e)
     elif e.type == "player_departed":
         _apply_player_departed(proj, e)
+    elif e.type == "pack_installed":
+        _apply_pack_installed(proj, e)
     elif e.type == "agent_invites":
         _apply_agent_invites(proj, e)
     elif e.type == "invitation_settled":
@@ -297,6 +299,35 @@ def _apply_player_join(proj: Projection, e: Event) -> None:
         proj.players_joined[player_id] = day        # 新的一段停留,新的零点
         return
     proj.players_joined.setdefault(player_id, day)
+
+
+def _apply_pack_installed(proj: Projection, e: Event) -> None:
+    """一份内容包落地了(3.10.0)。
+
+    🔴 **`day` 只在第一次落地时定,升级不动它** —— 零点是"这一周的内容是什么时候
+    进这个世界的",而不是"作者最后一次改它是什么时候"。让它跟着升级走的话,
+    一次错别字修订会把整份第 2 周剧情往后推一周,而**没有一处会报错**:那几拍
+    只是"还没到"。
+    """
+    payload = e.payload or {}
+    pack_id = str(payload.get("pack_id") or "")
+    if not pack_id:
+        return
+    try:
+        day = int(payload.get("day", 0))
+    except (TypeError, ValueError):
+        day = 0
+    have = proj.packs.get(pack_id)
+    row = {
+        "version": str(payload.get("version") or ""),
+        "note": str(payload.get("note") or ""),
+        # 第一次落地那天赢 —— 升级只换版本号与清单,不换零点。
+        "day": int(have["day"]) if have else day,
+        "tick": int(have["tick"]) if have else int(payload.get("tick", 0) or 0),
+        "sections": dict(payload.get("sections") or {}),
+        "seq": int(e.seq or 0),
+    }
+    proj.packs[pack_id] = row
 
 
 def _apply_agent_join(proj: Projection, e: Event) -> None:

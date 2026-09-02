@@ -2890,6 +2890,28 @@ class World:
         subject = agent_id if agent_id.startswith("agent:") else f"agent:{agent_id}"
         return self.scheduler.knowledge_graph.query(subject=subject)
 
+    def packs(self) -> list[dict[str, Any]]:
+        """这个世界装了哪几份内容包 —— **按落地先后**(3.10.0)。
+
+        每行:`id` / `version` / `note` / `day`(第一次落地那天,也是这份包里那些拍
+        的零点)/ `tick` / `sections`(每个段各带了哪几个 id)。
+
+        🔴 **它折自 `pack_installed` 事件,没有第二张表。** 和余额折自 `payment`
+        逐字同一种:存一份直接写的"装了哪几周"就多出一种和日志对不上的坏法,
+        而这一层对不上的样子是**「这一周的拍从哪天起算」答错** —— 没有一处会报错,
+        只是那几拍一起在同一 tick 响掉,或者永远不响。
+
+        ⚠️ **只读门自己补课**(`catch_up_projection`):跑着的世界会在下一次追加时
+        自愈,暂停的不会 —— 而运维台正是在世界不动的时候来问"装了哪几周"的。
+        """
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            rows = dict(self.scheduler._memory_projection.packs)
+        return [
+            {"id": pack_id, **{k: v for k, v in row.items() if k != "seq"}}
+            for pack_id, row in sorted(rows.items(), key=lambda kv: int(kv[1].get("seq") or 0))
+        ]
+
     def cliques(self) -> list[dict[str, Any]]:
         """social-v5:小团体(friendship 连通分量,日切重算的派生缓存)。"""
         if self.scheduler.event_log is None:

@@ -1477,3 +1477,91 @@ def test_状态层那张表里的键_必须真的是这个世界里的键(tmp_pa
     )
     # 而"查过的"这一格也必须真的有料:五张表全空的话,上面那条也照样过。
     assert scan.rows, "登记过的那几张表一行都没读到 —— 那道闸此刻是死的"
+
+
+# ── 内容包(作者层第十五个段,3.10.0)────────────────────────────────────────
+#
+# 🔴 **加一种新的开机失败,就必须同一轮补进离线那两扇门。** 3.7.0 收 `beat` 段时
+# 漏过一次(收了段没补门,于是 `world check` 对一份**开不了机**的文件照答
+# `loadable: true`),而 `tests/...::test_每个检查器都在表上` 那条通用用例**不会**
+# 替你发现它:在表上 ≠ 覆盖了开机会拒的每一种。下面这份枚举才是。
+
+def _pack_row(**body) -> dict:
+    return {"kind": "author", "type": "pack", "body": body}
+
+
+_GOOD_PACK = _pack_row(id="第二周", version="1.0.0", note="社团活动")
+
+#: 开机会拒的每一种,一行一条。`needle` 是报错里必须出现的那几个字。
+_PACK_REJECTIONS: tuple[tuple[str, dict, str], ...] = (
+    ("id 里有点号",
+     _pack_row(id="第二.周", version="1.0.0"), "pack.id"),
+    ("id 里有空格",
+     _pack_row(id="第二 周", version="1.0.0"), "pack.id"),
+    ("id 是空的",
+     _pack_row(id="", version="1.0.0"), "pack.id"),
+    ("少了 version",
+     _pack_row(id="第二周"), "pack.version"),
+    ("version 不是文本",
+     _pack_row(id="第二周", version=2), "pack.version"),
+    ("note 不是文本",
+     _pack_row(id="第二周", version="1.0.0", note=["社团"]), "pack.note"),
+    ("多写了一个键",
+     _pack_row(id="第二周", version="1.0.0", author="谁"), "不认识的键"),
+)
+
+
+@pytest.mark.parametrize(
+    "case, row, needle", _PACK_REJECTIONS,
+    ids=[case for case, _row, _needle in _PACK_REJECTIONS],
+)
+def test_内容包那一段的每一种拒绝_三扇门说同一句话(
+    tmp_path, fresh_redis, case, row, needle,
+):
+    """**开机是权威**:比它松是假绿,比它严是假红。"""
+    path = _write(tmp_path / "bad-pack.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, row])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, f"「{case}」开机是拦的,离线那两扇门必须一起拦"
+    assert any(needle in e for e in errors), (case, errors)
+
+
+def test_写对的内容包_三条路都放行_而且它真的落进这个世界的账上(tmp_path, fresh_redis):
+    """对照组 + 落地。
+
+    🔴 **没有下半句,上面那一摞对一个「有 `pack` 段就一律拦」的实现同样成立。**
+    而"装进去了没有"的判据是 `World.packs()`,它折自 `pack_installed` 事件 ——
+    **没有第二张表**,所以这一句同时钉住了"那条事件真的发出去了"。
+    """
+    path = _write(tmp_path / "ok-pack.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, _GOOD_PACK])
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"一份写对的内容包被拦下来了:{errors}"
+
+    from anima_world.api import World
+
+    with World.open("packed", redis=fresh_redis, world_file=path,
+                    force_mock_llm=True) as world:
+        packs = world.packs()
+    assert [p["id"] for p in packs] == ["第二周"], packs
+    # 创世那一趟落地的是**世界第 0 天** —— 于是同一份文件当创世用时,
+    # `since: "pack"` 和「世界第 0 天」是同一个答案,没有特例。
+    assert packs[0]["day"] == 0, packs
+    assert packs[0]["version"] == "1.0.0"
+
+
+def test_一份没写pack的老包_这一层整个缺席(tmp_path, fresh_redis):
+    """**声明本身就是开关** —— 和 `beats` / `kinds` / perception 逐字同构。
+
+    ⚠️ 这一条钉的是"老包一个字不用改":上面那份枚举全绿而这一条红的话,
+    就是这一层从"可选"变成了"必填",而**已经发出去的每一个世界都会开不了机**。
+    """
+    path = _write(tmp_path / "no-pack.cyberworld", [_MANIFEST, _YARD, _JIA])
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, errors
+
+    from anima_world.api import World
+
+    with World.open("nopack", redis=fresh_redis, world_file=path,
+                    force_mock_llm=True) as world:
+        assert world.packs() == []

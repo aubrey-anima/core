@@ -1035,6 +1035,66 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
     )
 
 
+#: 一个 pack 的 id 长什么样。**照 `PLUGIN_ID_PATTERN` 那条先例给一格正则**,
+#: 别让消费方猜 —— 只是这一层中文优先(章节名会是「第二周」这种),所以是
+#: **把不行的那几样排掉**,不是小写字母白名单(和 `KIND_LOCAL_PATTERN` 同一条)。
+#: ⚠️ 不许有空白、`.`、`:`、`/`:它进事件载荷、进 `:packs` 的 field、进 CLI 参数,
+#: 而这四样在那三处各有各的含义。
+PACK_ID_PATTERN = r"^[^\s.:/]{1,64}$"
+_PACK_ID = re.compile(PACK_ID_PATTERN)
+
+#: 一个 `pack` 段认哪几个键。闭集,和 `BEAT_KEYS` / `PLUGIN_KEYS` 同一条纪律:
+#: 不认识的键**当场说**,而不是照收然后丢掉(那一族这个仓库收了五轮)。
+PACK_KEYS = ("id", "version", "note")
+
+
+def world_pack_errors(authored: dict[str, Any] | None) -> list[str]:
+    """作者写下的那个 `pack` 段立不立得住(3.10.0)。
+
+    **一份文件最多一个 pack**(段是"对象型",列表在这一层根本表达不出来),
+    所以这道闸只查那一份的形状:id / version 必填,`note` 可选,别的键不认。
+
+    ⚠️ **加一种新的开机失败,就必须同一轮补进离线那两扇门** —— 这条纪律
+    3.7.0 收 `beat` 段时漏过一次(收了段没补门,`world check` 对一份开不了机的
+    文件照答 `loadable: true`),所以这个函数和它在 `AUTHORED_LAYER_CHECKS`
+    里的那一行是**同一个 commit 的两半**。
+
+    ⚠️ **没写 `pack` 的文件这一层整个缺席** —— 和 `beats` / `kinds` / perception
+    逐字同构:老包一个字不用改,`install_pack` 那条路才要求它。
+    """
+    if not authored:
+        return []
+    body = authored.get("pack")
+    if body is None:
+        return []
+    if not isinstance(body, dict):
+        return [f"pack:body 必须是一个对象(收到 {type(body).__name__})"]
+    errors: list[str] = []
+    unknown = sorted(set(body) - set(PACK_KEYS))
+    if unknown:
+        errors.append(
+            f"pack:不认识的键 {unknown} —— 一个内容包只有 {list(PACK_KEYS)}"
+            "(问 `contract --json` 的 `packs.pack_keys`,别照文档记一份清单)"
+        )
+    pack_id = body.get("id")
+    if not isinstance(pack_id, str) or not _PACK_ID.match(pack_id):
+        errors.append(
+            f"pack.id {pack_id!r} 不合 `{PACK_ID_PATTERN}` —— 1~64 个字符,"
+            "不许有空白 / `.` / `:` / `/`(它要同时当事件载荷、Redis 的 field "
+            "和一个 CLI 参数用)"
+        )
+    version = body.get("version")
+    if not isinstance(version, str) or not version.strip():
+        errors.append(
+            f"pack.version {version!r} 要是一段非空文本(例 `\"1.0.0\"`)—— "
+            "没有版本号就说不出「这一周装的是第几版」,而那是升级唯一的判据"
+        )
+    note = body.get("note")
+    if note is not None and not isinstance(note, str):
+        errors.append(f"pack.note 要是一段文本(收到 {type(note).__name__})")
+    return errors
+
+
 def world_beat_errors(authored: dict[str, Any] | None) -> list[str]:
     """作者写下的节拍立不立得住 —— **和开机同一份判断,不是第二份**(3.7.0)。
 
@@ -1161,6 +1221,7 @@ def _register_authored_layer_checks() -> None:
         world_beat_errors,
         world_plugin_errors,
         world_edge_errors,
+        world_pack_errors,
     )
 
 
@@ -2231,6 +2292,17 @@ def build_serve_scheduler(
         # 这两句话必须一起说。只说"生效了",作者会以为文件能把这个世界改回创世那天;
         # 只说"不覆盖",他又会以为改一条写错的规律得把世界抹掉重建(而那要连玩家
         # 的进度一起抹)。
+        if isinstance(world_seed, dict) and world_seed.get("pack"):
+            # 🆕 3.10.0:**`--world-file` 不按内容包装。**
+            # 它是创世 / 离线编辑那条路;把一份带身份的包按"编辑"装进去,身份就
+            # 丢了(以后说不清那几拍是哪一周加的),而**事后补不回来**。
+            logger.warning(
+                "这份文件带着内容包的身份(pack %r)—— 而 `--world-file` 是"
+                "创世 / 离线编辑那条路,**它不按内容包装**:身份不会登记、"
+                "拍的零点还是世界第 0 天。要把它当第几周的更新投进这个世界,"
+                "用 `anima-world pack install <文件>`(或宿主的 `install_pack`)。",
+                str((world_seed.get("pack") or {}).get("id") or "?"),
+            )
         logger.info(
             "--world-file %s 装进了一个「已有」的世界 %r(%d 条事件)—— 这是一次编辑:"
             "同名的「声明」(kinds / rules)照文件里这份重写,"
@@ -2342,6 +2414,13 @@ def build_serve_scheduler(
             _seed_capability_catalog(event_log, config_store, force_mock_llm)
             _seed_world_setting(prompt_store, world_seed)
             _seed_mock_narration(prompt_store, world_seed)
+            # 🆕 3.10.0:**创世那一趟的 pack 落在世界第 0 天。**
+            #
+            # 同一份文件既可能当创世用、也可能当一份包装进一个跑着的世界,而作者
+            # 写它的时候不知道是哪一种。让创世也登记一次,`since: "pack"` 于是在
+            # 两种用法上都成立(创世那一趟它等于「世界第 0 天」,本来就该是那样)
+            # —— **没有特例,就没有一条只在其中一种用法上对的语义。**
+            _record_pack_installed(event_log, world_seed, day=0, tick=0)
             persisted = event_log.replay()
             # Only re-fold here: genesis events were just appended above,
             # so the projection Scheduler.__init__ built (from the
@@ -3802,6 +3881,69 @@ def _join_spec(aid: str, agent: Any, world_seed: dict[str, Any] | None) -> dict[
     if card:
         spec["card"] = card
     return spec
+
+
+#: 一份包里,每个段各带了哪几个 id —— `pack_installed` 载荷里的 `sections`。
+#:
+#: 🔴 **`beats` 那一格是承重的**:一条 pack 装进来的拍,它 `trigger.at.day` 的零点
+#: 就是这个包落地那天,而"这条拍属于哪个包"唯一的答案就在这儿
+#: (`beats.pack_days_from`)。少了它,一份写着 `day: 0..6` 的第 2 周包装进一个
+#: 跑到第 40 天的世界,**八拍在同一 tick 全部烧掉**,零报错。
+#:
+#: 别的段今天只用来**给人看**(`pack list` 那一屏 / 审计),所以取不到 id 的段
+#: 就不取 —— 一个猜出来的 id 比没有更坏。
+def _pack_sections(world_seed: dict[str, Any] | None) -> dict[str, list[str]]:
+    from anima_world import world_file
+
+    if not isinstance(world_seed, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for section in world_file.AUTHOR_SECTIONS.values():
+        rows = world_seed.get(section)
+        if not isinstance(rows, list) or not rows:
+            continue
+        ids = [str(r["id"]) for r in rows
+               if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"]]
+        if ids:
+            out[section] = ids
+    config = world_seed.get("config")
+    if isinstance(config, dict) and config:
+        out["config"] = sorted(str(k) for k in config)
+    if isinstance(world_seed.get("world_setting"), str) and world_seed["world_setting"].strip():
+        out["world_setting"] = ["world.setting"]
+    return out
+
+
+def _record_pack_installed(
+    event_log: EventLog, world_seed: dict[str, Any] | None, *, day: int, tick: int,
+) -> str:
+    """一份内容包落地了 —— 记一条 `pack_installed`,**没有第二张表**。
+
+    「装了哪几周」折自这条事件(`Projection.packs` / `World.packs()`),和余额
+    折自 `payment` 逐字同一种。存一份直接写的清单就多出一种和日志对不上的坏法,
+    而这一层对不上的样子是**「这一周的拍从哪天起算」答错** —— 没有一处会报错,
+    只是那几拍一起在同一 tick 响掉,或者永远不响。
+
+    没写 `pack` 的文件这里什么都不做(**声明本身就是开关**)。返回 pack id,
+    没有就返回空串 —— 调用方拿它写日志。
+    """
+    body = (world_seed or {}).get("pack")
+    if not isinstance(body, dict) or not body.get("id"):
+        return ""
+    pack_id = str(body["id"])
+    event_log.append({
+        "ts": int(tick),
+        "type": "pack_installed",
+        "payload": {
+            "pack_id": pack_id,
+            "version": str(body.get("version") or ""),
+            "note": str(body.get("note") or ""),
+            "day": int(day),
+            "tick": int(tick),
+            "sections": _pack_sections(world_seed),
+        },
+    })
+    return pack_id
 
 
 def _seed_initial_world(
@@ -7389,7 +7531,10 @@ def contract_payload() -> dict[str, Any]:
         _ERASURE_PROGRESS_TTL_SECONDS,
         _PLAYER_TTL_SECONDS,
     )
+    from anima_world import world_file
     from anima_world.beats import (
+        AT_KEYS,
+        AT_SINCE,
         BEAT_KEYS,
         FOR_EACH_NODES,
         OP_REQUIRED_FIELDS,
@@ -7397,6 +7542,7 @@ def contract_payload() -> dict[str, Any]:
         PLAYER_ALLOWED_PREDICATE_FIELDS,
         PLAYER_TOKEN,
         PREDICATE_REQUIRED_FIELDS,
+        BEAT_TRIGGER_KEYS,
         VALID_OPS,
         _VALID_PREDICATES,
     )
@@ -7842,7 +7988,7 @@ def contract_payload() -> dict[str, Any]:
             # ⚠️ **它只管规律那一层的 `emit`**:触发器的 `emit` 根本没有
             # `importance` 这一格,那儿的 `text` 是载荷里的一句话、不进记忆。
             "emit_key_requires": {k: list(v) for k, v in EMIT_KEY_REQUIRES.items()},
-            "trigger_keys": list(TRIGGER_KEYS),
+            "trigger_keys": list(BEAT_TRIGGER_KEYS),
             "trigger_required_keys": list(TRIGGER_REQUIRED_KEYS),
             # 创作台在这一格上是全仓**唯一一处写死的空白判断**,所以它点名要了。
             "kind_local_pattern": KIND_LOCAL_PATTERN,
@@ -8240,6 +8386,66 @@ def contract_payload() -> dict[str, Any]:
                     "不写 `for_each` 的老拍逐字不变 —— 声明本身就是开关。"
                 ),
             },
+            # 🆕 3.10.0(周更链路 2a-①):**拍的零点有第三种了。**
+            # **这一格缺席 = 这支引擎按世界时算每一条拍** —— 而那正是"一份写着
+            # `day: 0..6` 的第 2 周包装进跑到第 40 天的世界,八拍一 tick 全烧"
+            # 的那一支。**按这一格探测,不比版本号。**
+            "since": {
+                "values": list(AT_SINCE),
+                "default": AT_SINCE[0],
+                "at_keys": list(AT_KEYS),
+                "trigger_keys": list(BEAT_TRIGGER_KEYS),
+                "combines_with_player": "max",
+                "gloss": (
+                    "`trigger.at.since` 说这条拍的 `day` 从哪一天算起。**缺省 "
+                    "`\"pack\"` = 从它所属的那份内容包落地那天** —— 一条不属于任何包"
+                    "的拍(创世那批)于是照旧从世界第 0 天算,逐字如旧。"
+                    "`\"world\"` 是逃生舱:我要的就是世界第 N 天。"
+                    "🔴 **和 `for_each: {\"node\": \"player\"}` 同时写时取 `max`** ——"
+                    "老玩家从包落地起算(否则第 2 周的剧情对他永远不响),而包落地"
+                    "三天后才进来的新玩家从他自己那天起算(否则他一进门就被一堆"
+                    "过期的拍砸中)。**只有 `max` 能同时让这两句话成立。**"
+                    "⚠️ `trigger` 与 `trigger.at` 这两层的键从 3.10.0 起是**闭集**"
+                    "(此前一个都不查,`since` 写下去会被照收然后丢掉)。"
+                ),
+            },
+        },
+        # 🆕 3.10.0(周更链路 2a-①):**内容包。作者层第十五个段。**
+        # **这一段缺席 = 这支引擎不认内容包** —— 装包的门、`pack list`、
+        # `pack_installed` 事件一个都没有,而一份带 `pack` 记录的包在它上面是
+        # **开不了机的硬失败**(不认识的作者层 `type`)。
+        # **按这一段在不在探测,不比版本号。**
+        "packs": {
+            "author_type": "pack",
+            "world_file_section": "pack",
+            "one_pack_per_file": True,
+            "pack_keys": list(PACK_KEYS),
+            "id_pattern": PACK_ID_PATTERN,
+            "event": "pack_installed",
+            "subscribable": False,
+            "method": "install_pack",
+            "cli": "anima-world pack install <file> / anima-world pack list",
+            "installs_sections": ["beat", "config", "world_setting"],
+            "merge_sections": sorted(
+                set(world_file.AUTHOR_SECTIONS.values()) - {"beats"}
+            ),
+            "storage": "事件日志(`pack_installed`)—— 没有第二张表",
+            "gloss": (
+                "一份内容包的身份:`{\"kind\": \"author\", \"type\": \"pack\", "
+                "\"body\": {\"id\", \"version\", \"note\"}}`。**一个文件就是一个"
+                " pack**,这份包里的作者记录全归属它 —— 段是「对象型」,"
+                "「一个文件里两个包」在这一层根本表达不出来。"
+                "🔴 **身份不放 manifest**:manifest 的不认识键进 `extra`,老引擎会"
+                "**静默忽略身份而照装内容**,包进去了、以后再也说不清那几拍是哪一周"
+                "加的。作者层的 `type` 是闭集,老引擎见到它是**开不了机的硬失败** ——"
+                "所以带 `pack` 记录的包 `engine_min` 必须写 `3.10.0`。"
+                "🔴 **「装了哪几周」没有第二张表**:它折自 `pack_installed` 事件"
+                "(`World.packs()`),和余额折自 `payment` 逐字同一种。存一份直接写的"
+                "清单就多出一种和日志对不上的坏法,而这一层对不上的样子是"
+                "「这一周的拍从哪天起算」答错,没有一处会报错。"
+                "⚠️ `pack_installed` **不进** `plugins.subscribable_events`:它的当事人"
+                "是世界**外面**的人(作者、运营),订它的插件做不出任何世界里的事。"
+            ),
         },
     }
 

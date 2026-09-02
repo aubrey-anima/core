@@ -127,6 +127,22 @@ class Projection:
     它是主持人那把**时刻钥匙**的第三格:「剧情拍响了」是四个开口时刻之一,而
     "响没响过"唯一可靠的读法就是日志里那条事件的序号。
     """
+    packs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """装进这个世界的内容包,折自 `pack_installed`(3.10.0)。
+
+    `{pack_id: {"version", "note", "day", "tick", "seq", "sections": {段: [id, …]}}}`。
+
+    🔴 **它是投影,不是账本。** 真相是那一串 `pack_installed` 事件 —— 和 `balances`
+    逐字同一种东西。存一份直接写的"装了哪几周"就多出一种和日志对不上的坏法,
+    而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。
+
+    ⚠️ **`day` 这一格是承重的**:一条 pack 装进来的拍,它 `trigger.at.day` 的零点
+    就是这个数(`beats.day_zero_for`)。少了它,一份写着 `day: 0..6` 的第 2 周包
+    装进一个跑到第 40 天的世界,**八拍在同一 tick 全部烧掉**,零报错。
+
+    ⚠️ **同一个 pack 升级会重写这一行,而 `day` 不跟着动** —— 零点是**第一次**
+    落地那天:一份第 2 周的剧情不该因为作者改了个错别字就整体往后推一周。
+    """
     players_departed: set[str] = field(default_factory=set)
     """说过再见、世界不再等他的那些人,折自 `player_departed`(3.9.0 验收 A 逮的)。
 

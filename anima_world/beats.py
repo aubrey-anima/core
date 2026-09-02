@@ -89,6 +89,73 @@ FOR_EACH_NODES = ("player",)
 # 3.8.0(它已经发出去了),它救的是**下一个**不认识的键:让"我又漏了一层"有人喊。
 BEAT_KEYS = ("id", "for_each", "trigger", "payload", "once")
 
+# ── 拍的**零点**:第三种(3.10.0,周更链路 2a-①)──────────────────────────────
+#
+# 从前只有两种零点:世界第 0 天(默认)与这个玩家入场那天(`for_each: {node: player}`)。
+# 第三种是**这条拍所属的那份内容包落地那天** —— 而它不是一个"可选特性",
+# 它是**「一个跑着的世界改得了剧情」这件事的前提**:
+#
+#   `trigger.at` 的语义是「**不早于**」(tick 粒度对不上等号)。于是一份写着
+#   `day: 0..6` 的第 2 周包装进一个已经跑到第 40 天的世界,**八拍在同一 tick
+#   全部烧掉**,零报错 —— 而这正是引擎从前拒绝合并节拍的唯一正确理由
+#   (`RedisBeatsStore.seed` 的 docstring)。
+#
+# 🔴 **所以零点跟着「这条拍是怎么进来的」走,而不是靠作者记得写一个关键字。**
+# 默认必须落在安全的那一边:这一层写错的样子不是报错,是整份剧情在一 tick 里烧完。
+#
+#   创世那批(世界文件首启装的,没有 pack)     → 世界第 0 天,**逐字如旧**
+#   一个 pack 装进来的                          → 那个 pack **第一次**落地那天
+#   写了 `for_each: {"node": "player"}`         → 他入场那天(3.9.0 已有)
+#   **两者都有**                                → `max(两者)`
+#
+# 最后一行是承重的,而且**只有 `max` 能同时让两句话成立**:老玩家从包落地起算
+# (否则第 2 周的剧情对他永远不响);包落地三天后才进来的新玩家从他自己那天起算
+# (否则他一进门就被一堆过期的拍砸中)。
+#
+# 逃生舱是**显式**的:`trigger.at.since: "world"` = 我要的就是世界第 N 天
+# (「世界第 100 天」这种绝对时刻)。不写 = `"pack"` = 按来路。
+# ⚠️ 一条不属于任何 pack 的拍写 `since: "pack"`,零点就是世界第 0 天 —— 它本来
+# 就是那样。**不报错是有意的**:同一份文件既可能当创世用,也可能当一份包装进去,
+# 而作者在写它的时候不知道是哪一种。
+AT_SINCE = ("pack", "world")
+AT_KEYS = ("day", "minute_of_day", "since")
+# ⚠️ **名字里带 `BEAT_` 不是啰嗦**:`plugins.TRIGGER_KEYS` 已经占着这个名字
+# (那是插件触发器的键),而 `run_contract` 把两边都 import 进同一个作用域 ——
+# 第一版就撞了,契约里那一格印出来的是插件那五个键。**撞了不报错**,
+# 它只是安安静静地答另一个问题。
+BEAT_TRIGGER_KEYS = ("at", "after", "when")
+
+
+def day_zero_for(
+    beat: dict[str, Any], pack_days: dict[str, int] | None = None,
+    join_day: int | None = None,
+) -> int:
+    """这一趟从哪一天算起 —— **零点只有这一处算得出来**。
+
+    `pack_days` 是 `{拍 id: 它那个包落地那天}`,由 `Projection.packs` 折出来
+    (`BeatDirector.due_beats` 自己折,调用方不用传第二份 —— 传第二份就是
+    「一份名单和它要判的那份数据来自两次不同的合并」那个形状)。
+    """
+    at = (beat.get("trigger") or {}).get("at")
+    since = (at or {}).get("since") or AT_SINCE[0]
+    base = 0 if since == "world" else int((pack_days or {}).get(str(beat.get("id")), 0))
+    if join_day is None:
+        return base
+    return max(base, int(join_day))
+
+
+def pack_days_from(projection: Any) -> dict[str, int]:
+    """`{拍 id: 它那个包落地那天}` —— 折自 `Projection.packs`,**不另存一份**。"""
+    out: dict[str, int] = {}
+    for row in (getattr(projection, "packs", None) or {}).values():
+        try:
+            day = int(row.get("day") or 0)
+        except (TypeError, ValueError):
+            day = 0
+        for bid in ((row.get("sections") or {}).get("beats") or ()):
+            out[str(bid)] = day
+    return out
+
 # 🔴 **逐个 op、逐个谓词裁「玩家能不能出现在这一格」,而拒绝在加载期当场说。**
 # 从前这一层的形状是"不认识就 warning 一句跳过",而那正是上面那个洞的形状。
 # 「坏声明一个字都不写」在这一层的落法:**每一格都有结论,没有第三种"静默跳过"**。
@@ -221,11 +288,34 @@ def _validate_for_each(for_each: Any, label: str) -> tuple[list[str], bool]:
 
 
 def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False) -> list[str]:
-    if not isinstance(trigger, dict) or not any(k in trigger for k in ("at", "after", "when")):
+    if not isinstance(trigger, dict) or not any(k in trigger for k in BEAT_TRIGGER_KEYS):
         return [f"{label}: 'trigger' must contain at least one of at/after/when"]
     errors: list[str] = []
+    # 🔴 **闭集,两层都是**(3.10.0)。这两层从前**一个键都不查**,于是 `since`
+    # 写下去会被照收然后丢掉 —— 而"不认识的键照收然后丢掉"这一族,这个仓库
+    # 一层一层收过五轮,**一层一层收本身就是这个 bug 的形状**。加 `since` 这一格
+    # 的同一轮就把它所在的那两层一起收掉。
+    unknown = sorted(set(trigger) - set(BEAT_TRIGGER_KEYS))
+    if unknown:
+        errors.append(
+            f"{label}: trigger 里不认识的字段 {unknown} —— 只有 {list(BEAT_TRIGGER_KEYS)}"
+        )
     at = trigger.get("at")
     if at is not None:
+        if isinstance(at, dict):
+            unknown_at = sorted(set(at) - set(AT_KEYS))
+            if unknown_at:
+                errors.append(
+                    f"{label}: trigger.at 里不认识的字段 {unknown_at} —— "
+                    f"只有 {list(AT_KEYS)}"
+                )
+            since = at.get("since")
+            if since is not None and since not in AT_SINCE:
+                errors.append(
+                    f"{label}: trigger.at.since {since!r} 不认识 —— 只收 "
+                    f"{list(AT_SINCE)}(`pack` = 从这份内容包落地那天算起,也是缺省;"
+                    "`world` = 从世界第 0 天算起)"
+                )
         if not isinstance(at, dict) or not isinstance(at.get("day"), int) or at["day"] < 0:
             errors.append(f"{label}: trigger.at needs an integer day >= 0")
         else:
@@ -951,19 +1041,28 @@ class BeatDirector:
         prerequisite fires this same tick becomes due on the next one.
         """
         due: list[tuple[dict[str, Any], str]] = []
+        # 🔴 **一次折出来,不缓存**(3.10.0):`{拍 id: 它那个包落地那天}` 折自
+        # 同一份 `projection` —— 也就是这一层判「该不该响」用的那一份。
+        # 存第二份的下场是"零点"和"这一拍响没响"来自两次不同的合并,而这个仓库
+        # 为那个形状红过一次(2026-08-28 的插件命名空间回归)。
+        pack_days = pack_days_from(projection)
         for beat in self.script.beats:
             if is_per_player(beat):
                 for player_id, join_day in sorted((players or {}).items()):
                     subject = f"player:{player_id}"
                     if (beat["id"], subject) in self.fired:
                         continue
-                    if trigger_ready(beat, now, self.fired, projection, agent_locs,
-                                     reader, subject=subject, day_zero=int(join_day)):
+                    if trigger_ready(
+                        beat, now, self.fired, projection, agent_locs, reader,
+                        subject=subject,
+                        day_zero=day_zero_for(beat, pack_days, int(join_day)),
+                    ):
                         due.append((beat, subject))
                 continue
             if (beat["id"], "") in self.fired:
                 continue
-            if trigger_ready(beat, now, self.fired, projection, agent_locs, reader):
+            if trigger_ready(beat, now, self.fired, projection, agent_locs, reader,
+                             day_zero=day_zero_for(beat, pack_days)):
                 due.append((beat, ""))
         return due
 
