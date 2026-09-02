@@ -5535,3 +5535,109 @@ if not seen:
 `::test_不认识的作者层type_照旧当场开不了机_而且报错列出认得的那几个` ·
 `tests/test_validate_matches_boot.py` 八之三那一整节 ·
 `tests/test_world_file.py::test_没写edge段的老世界_多出这个段之后一个字节都没变`。
+
+## 3.61 玩法层批 1 的**裁决**(2026-09-02;⚠️ 这一节大半是「将要」,只有 (a) 是今天就有的)
+
+⚠️ **先说清这一节的时态**,免得它以"现状"的身份被引用四个版本(这个仓库为这条吃过亏):
+下面 **(a) 是 2026-09-02 在 HEAD `d279675`(3.8.0)上真跑过的,你们今天就能写**;
+**(b)(c) 是同日的裁决,代码还没有** —— 它们进 3.9.0,任务单
+`docs/任务单/2026-09-02-玩法层批1-点进去有的玩.md` §2 是全文。老板 D52 拍的四条里有一条是
+「主持人提前到批 1」。
+
+### (a) ✅ 今天就有:**「玩家的身份档」不用等引擎,一条 `plugin` 记录就写得出来**
+
+我们本来打算给你们做一个出厂插件 `role`,**裁决是不做** —— 因为量了一遍发现**它已经有了**,
+而"出厂"那层壳反而接不住你们要写的东西(出厂插件的物理形态是一个 Python 函数返回的 dict,
+只从配置读一个开关;"预科到 S 各是什么感觉"是**作者的内容**,不该搬进引擎)。
+
+写法(这一份是真跑过的,逐字可抄):
+
+```jsonc
+{"kind": "author", "type": "plugin", "body": {
+  "id": "role", "version": "1.0.0", "label": "评级",
+  "facts": {"评级": {
+    "bearer": "player",              // ← 挂在玩家身上;BEARER_FORMS 早就收这个词
+    "shape": "state",                // ← 有序档位;表达式读到的是下标,**顺序承重**
+    "default": "预科",                // ← 这就是「开局钩子」,不需要另写触发器
+    "visibility": "public",
+    "label": "评级",
+    "values": [{"name": "预科", "description": "还没参加过 3E,档案上什么都没有。"},
+               {"name": "F",   "description": "垫底那一档,谁提起你都要顿一下。"},
+               {"name": "E",   "description": "勉强站住了脚。"}]}}}}
+```
+
+量到的四件(fakeredis,`World.debug_prompt` / `player_options` / redis 键各查了一遍):
+
+1. 玩家身上真落了那个值(`anima:{world}:stock:agent:player:<pid>` 的 `role.评级`),
+   播种走 `Scheduler.seed_actor_quantities` —— 那是**玩家与角色唯一的共同窄口**,你们不用碰它。
+2. `player_options(pid)["own"]["readouts"]` 出 `{"key":"role.评级","label":"评级","word":"预科",
+   "text":"评级 预科"}` —— **网站的「状态四格」读的就是这个 `text`**,数字不上屏。
+3. **档词与那句描述真的进了 NPC 的提示词**(在恺撒的 `debug_prompt` 里逐字查过:
+   「评级」「预科」「还没参加过 3E,档案上什么都没有。」三样全在)。
+4. `values` 的每一项**要么是一个名字,要么是 `{"name": …, "description": …}`** ——
+   写成 `["预科", "描述"]` 这种两元组会被当场拒(拒绝语原文就是这句,照它改)。
+
+🔴 **但有一个坑,而且线上龙族此刻就踩着它,你们不修的话上面第 3 条对你们不成立:**
+
+> 引擎里那道「她身上有没有别人看得见的量」的闸(`Scheduler._actor_is_visible_to_others`)
+> 读的是**本体层** `kinds["agent"].quantities`,而**插件声明的事实只落进可见性表,不进
+> `ontology.kinds`**。判假之后,玩家整个不进 `stock_places` —— **任何 NPC 的 `perception`
+> 里都没有他**,世界照跑、日志干净、一个字都不报。
+> 线上现敲:`anima-world ontology --world-id longzu-1 --kind agent --json` → `"quantities": []`。
+
+**引擎这一轮会修它**(判据换成读可见性表 + 那个缓存要能失效),所以 3.9.0 之后你们不用管。
+**在那之前**,如果你们要在 3.8.0 的世界上先试 `role`:在本体层给 `agent` 种类加**任意一个**
+`here` 或 `public` 的量(比如「气色」),那道闸就开了,整条链当场通 —— 这是我拿来反证病根的
+那次实验,可以直接当临时办法用。
+
+### (b) 🔜 3.9.0:剧情拍指得到「任何玩家」
+
+一条拍顶层加 `"for_each": {"node": "player"}`,之后 `payload` / `trigger.when` 里的保留字
+`"player"` 指"这一趟展开的那个人"。**声明本身就是开关**:不写它的老拍一个字不用改。
+三件配套语义(都是裁决定下的,实现随 3.9.0 到):
+
+- `trigger.at.day` 换算成**这个玩家自己的第几天**(他第 40 个世界日进来,拿到的仍是他的第 1 天);
+- `once` 按玩家**各算一次**;
+- **op 与谓词逐个裁「收还是拒」,拒的在加载期当场报**(不再是运行期一句 warning 就跳过)。
+  今天的起点:**收** `co_located` / `money` / `has_item` / `pay` / `grant_item` /
+  `sentiment_delta{target}` / `r_type{target}`;**拒** `memory`(玩家那头没有记忆表)/
+  `persona_update` / `broadcast_memory` / `agent_join`·`agent_leave`·`agent_return` /
+  `need`(需求住 NPC 的黑板)/ `sentiment_delta{as:"player"}`·`r_type{as:"player"}`。
+  **最终以 `contract --json` 的 `beats.player_selector` 那张表为准,别记一份清单。**
+
+🔴 **两条给你们的硬提醒**:
+
+1. **写了 `for_each` 的包,`engine_min` 必须写 `3.9.0`** —— 和 3.7.0 加 `beat` 段那次逐字同一种。
+2. ⚠️ **而它比那次更阴,所以别指望 `world check` 替你们挡**:`beats` 今天**不查一条拍的顶层键**,
+   于是这种包在 3.8.0 上**开得了机**、拍按世界时响一次、`mark_fired`、烧掉 ——
+   **静默作废,而且重启不重放**。3.9.0 会给顶层键加闭集(让**下一个**不认识的键有人喊),
+   但那救不了已经装在 3.8.0 上的世界。
+   **发出去之前的判据是 `contract --json | jq .beats.player_selector` 在不在,不是版本号**
+   —— `anima-world:3.8.0` 这个名字下今天就有两支能力不同的引擎。
+
+### (c) 🔜 3.9.0:主持人(`anima-world player host`)
+
+「世界永远先开口」那一屏:一段场景 + 3–5 个选项 + 永远在最后的自由输入。
+门面上是**一个**新方法(**一个**,不是设计稿里的四个 —— 场景和选项必须同一次取,
+否则就是对一个动着的世界取了两次快照,而那种不一致一处都不报错;名字与签名见任务单 §2.1(a),
+**这一节等交付那天再抄进来**),CLI 是
+`anima-world player host --player <pid> [--json] [--ask]`(挂在已有的 `player` 组下,
+参数名照 `player options --player`),契约是 `contract --json` 的新顶层段 `host`。
+
+⚠️ **这一节有意不写那个方法的签名**,而这不是懒:`tests/test_reference_docs.py` 那道闸
+**连 FOR-STUDIO 一起扫**,文档里写成方法调用的名字必须真的存在 —— 我第一版把签名写进来,
+它当场红了(`文档提到了不存在的成员:["FOR-STUDIO.md:['host_turn']"]`)。
+**闸是对的:一份说着还不存在的 API 的回执,比没有回执更坏。**
+
+对你们那侧,只有三句话是要紧的:
+
+1. **它不是新的"能做什么"** —— 每一项选项都带一格 `door`,指向今天**已经存在**的那扇门
+   (`player_tool` / `chat` / `player_walk` / `answer_invitation` / `free`,闭集)。
+   **主持人是荐者不是执行者,它一条新的写世界的路都不开。**
+2. **它挑得出什么,取决于你们在世界里配了什么** —— 候选池是「可用的动词 + 在场的人 +
+   活着的剧情拍 + 未读邀请 + 可去的地点」。一个动词表空、拍全指着 NPC 的世界,
+   主持人只能递「跟某某聊聊」。**这一格是内容的活,不是引擎的活。**
+3. **每步之后那一行回应不需要新东西**:打开 `narrative.player.enabled`(3.6.0 就有,默认关)。
+
+**判据**(3.9.0 交付时这一节会补上测试名;在那之前这三条是**裁决不是现状**):
+`contract --json | jq '.host, .beats.player_selector'` 两格在 = 这支引擎有它们。
