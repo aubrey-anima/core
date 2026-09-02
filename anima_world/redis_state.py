@@ -2625,18 +2625,48 @@ class RedisConfigBackend:
     行的形状和 world.db 时代的 `config` 表逐列相同(value/value_type/category/
     is_secret/description/updated_at),而且**只存作者动过的** —— 判据照旧是
     "引擎声明过什么",不是"这儿有没有行"(那套逻辑全在 ConfigStore,这里纯存取)。
+
+    🆕 **3.10.0:多一个版本号 `:config_rev`**(和 `:entities_rev` 逐字同一个用途)。
+
+    在这之前 `ConfigStore` 开机 `_hydrate` 一次进进程内缓存,`get()` 只读缓存 ——
+    于是**另一个进程 `config set` 之后,正在服务玩家的那个进程照答旧值,直到有人
+    重启它,零报错**(2026-09-02 实测:Redis 那一行已经改了、`config list` 显示
+    新值,而世界里那个数没动)。这一层"两份真相里有一份不更新"正是这个仓库
+    最怕的坏法,而它的样子最安静:运维改了 tick_rate,世界照旧按老的跑。
+
+    ⚠️ **用版本号而不是"每次读都 HGETALL"**:`ConfigStore.get` 在 tick 路上,
+    一个世界日几百次;而版本号是**一次 `GET` 一个整数**,只在 tick 边界问一次
+    (`Scheduler.tick`)与只读门上问一次。**一个 tick 之内配置不变**因此是
+    有意的语义,和规律那一层的双缓冲逐字同一条:同一轮里读到的是同一份值。
     """
 
-    __slots__ = ("_rows",)
+    __slots__ = ("_rows", "_redis", "_rev_key")
 
     def __init__(self, redis: Any, world_id: str) -> None:
         self._rows = RedisRows(redis, f"{KEY_PREFIX}:{world_id}:config")
+        self._redis = redis
+        self._rev_key = f"{KEY_PREFIX}:{world_id}:config_rev"
 
     def all(self) -> dict[str, dict]:
         return self._rows.all()
 
     def put(self, key: str, row: dict) -> None:
         self._rows.put(key, row)
+        # **先写行再动版本号**:反过来的话,别的进程会在看到新版本号之后读到旧行,
+        # 然后把那个旧值当成"最新的"缓存起来 —— 而它下一次再也不会重读。
+        try:
+            self._redis.incr(self._rev_key)
+        except Exception:  # noqa: BLE001 - 版本号动不了只影响别的进程什么时候看见
+            logger.warning("配置版本号推不动,别的进程可能要到重启才看得见这次改动",
+                           exc_info=True)
+
+    def revision(self) -> int:
+        """配置表改过几次。别的进程拿它判断"我手里那份还新不新"。"""
+        try:
+            raw = self._redis.get(self._rev_key)
+        except Exception:  # noqa: BLE001 - 读不到就当没变,别掀翻 tick
+            return -1
+        return int(raw) if raw else 0
 
 
 class RedisChatStore:

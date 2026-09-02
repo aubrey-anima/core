@@ -3517,7 +3517,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | 函数 | 说明 |
 |---|---|
 | `world.config_list(category=None, mask=True)` | 全部配置(secret 默认打码为 `前3***后4`);每行带 `source`:`默认值` / `世界文件` / `环境变量` / `机器配置 <路径>` |
-| `world.config_get(key, default=None)` / `world.config_set(key, value)` | 读/写;写按声明类型强转、立即生效;未知键 KeyError,secret 空值 / 非法 tick_rate 抛 ValueError |
+| `world.config_get(key, default=None)` / `world.config_set(key, value)` | 读/写;写按声明类型强转、立即生效;未知键 KeyError,secret 空值 / 非法 tick_rate 抛 ValueError。🆕 **3.10.0:别的进程改过的配置这两扇门也看得见** —— 此前 `ConfigStore` 开机 hydrate 一次进进程内缓存,于是另一个进程 `config set` 之后,正在服务玩家的那个进程照答旧值直到有人重启它(零报错)。现在按 `:config_rev` 版本号重读:**只读门自己补课**,而引擎内部那条路在 **tick 边界**上重读一次 —— 「一个 tick 之内配置不变」是有意的语义(`get` 在 tick 路上一个世界日几百次),和规律那一层的双缓冲逐字同一条 |
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
 | 🆕 `world.world_setting()` | 这个世界的**世界观**此刻是什么:`{text, source, length}`。`source` 用 `prompt_list()` 那一套词(`默认值` / `世界文件`),不另造一套 |
 | 🆕 `world.set_world_setting(text=None, *, clear=False, dry_run=False)` | 改**一个已经跑着的世界**的世界观(3.8.0,收件箱 D4)。覆盖;`clear=True` 回落到引擎内置那份(**不是变成空的**);`None` / 空白 **拒绝**(`ValueError`);逐字相同 `changed: false`;`dry_run=True` 一个字节都不写。回执 `{before, after, source, changed, cleared, dry_run, length}`。CLI 出口是 `anima-world world setting`(§4.7.1) |

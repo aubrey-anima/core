@@ -330,3 +330,65 @@ def test_只读门自己会补课_因为世界不一定正在动(two_processes):
     row = next(r for r in keeper.roster()["agents"] if r["agent_id"] == agent_id)
     assert row["billing"] == "lead", "roster() 没补课"
     assert f"{agent_id}|ghost-c" in keeper.state()["relations"], "state() 没补课"
+
+
+# ── 配置的跨进程可见(3.10.0)──────────────────────────────────────────────
+#
+# 🔴 **2026-09-02 实测**:`ConfigStore` 开机 `_hydrate` 一次进 `_cache`,`get()` 只读
+# 缓存 —— 于是另一个进程 `config set` 之后,Redis 那一行**已经改了**、`config list`
+# 显示新值(它是另一个进程),而**正在服务玩家的那个进程照答旧值**,直到有人重启它,
+# 零报错。两份真相里有一份不更新,是这个仓库最怕的坏法。
+#
+# ⚠️ 对照组(同一趟量的,两个方向都有):`:locations` 与 `:prompts`(世界观热改)
+# **本来就是跨进程活的**。所以这一条治的是 `:config` 这一格,不是"所有缓存"。
+
+def test_别的进程改了配置_只读门自己补课(tmp_path, fresh_redis):
+    from anima_world.api import World
+
+    from _worldfile import write_seed_file
+
+    seed = {
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "小店"}],
+        "agents": [{"id": "甲", "name": "甲", "location": "cafe", "personality": "p"}],
+    }
+    path = write_seed_file(tmp_path / "cfg.cyberworld", seed)
+    with World.open("cfgw", redis=fresh_redis, world_file=path,
+                    force_mock_llm=True) as live:
+        assert live.config_get("narrative.player.enabled") is False
+        with World.open("cfgw", redis=fresh_redis, force_mock_llm=True) as other:
+            other.config_set("narrative.player.enabled", True)
+        # **不重开**。跑着的那个进程这一刻就该看得见。
+        assert live.config_get("narrative.player.enabled") is True, (
+            "另一个进程改了配置,这个进程还答旧值 —— 它要到重启才看得见"
+        )
+        row = next(r for r in live.config_list()
+                   if r["key"] == "narrative.player.enabled")
+        assert row["source"] == "世界文件", row
+
+
+def test_跑着的世界在tick边界上看见新配置(tmp_path, fresh_redis):
+    """`get()` **不是**每次都问 Redis —— 它在 tick 路上一个世界日几百次。
+
+    🔴 所以这一条钉的是**引擎内部**那条路:tick 边界上重读一次,于是
+    「一个 tick 之内配置不变」是有意的语义(和规律那一层的双缓冲同一条),
+    而不是「永远看不见」。
+    """
+    from anima_world.api import World
+
+    from _worldfile import write_seed_file
+
+    seed = {
+        "locations": [{"id": "cafe", "name": "咖啡馆", "description": "小店"}],
+        "agents": [{"id": "甲", "name": "甲", "location": "cafe", "personality": "p"}],
+    }
+    path = write_seed_file(tmp_path / "cfg2.cyberworld", seed)
+    with World.open("cfgw2", redis=fresh_redis, world_file=path,
+                    force_mock_llm=True) as live:
+        store = live.scheduler.config_store
+        assert store.get("social.enabled") is False
+        with World.open("cfgw2", redis=fresh_redis, force_mock_llm=True) as other:
+            other.config_set("social.enabled", True)
+        # 引擎内部那条路(直接问 store)在 tick 之前还是旧的 —— 那是有意的。
+        assert store.get("social.enabled") is False
+        live.tick(1)
+        assert store.get("social.enabled") is True, "tick 边界上没重读"

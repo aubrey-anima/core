@@ -107,11 +107,51 @@ class ConfigStore:
         self._lock = lock if lock is not None else threading.RLock()
         self._cache: dict[str, Any] = {}
         self._meta: dict[str, dict[str, Any]] = {}
+        #: 手里这份是照着底座第几版折的(3.10.0)。`-1` = 这个底座答不出版本号
+        #: (进程内的测试替身),那时这一层退回从前的样子:开机读一次,不再重读。
+        self._revision: int = -1
         self._hydrate()
+
+    def refresh_if_changed(self) -> bool:
+        """底座变了就重读一遍 —— 别的进程 `config set` 之后,这个进程看得见。
+
+        🔴 在这之前,`_hydrate` 只在 `__init__` 跑一次、`get()` 只读缓存:于是
+        **另一个进程改了配置,正在服务玩家的那个进程照答旧值,直到有人重启它**
+        (2026-09-02 实测,零报错)。`config list` 显示的是新值(它是另一个进程),
+        而世界里那个数没动 —— 两份真相里有一份不更新,这个仓库最怕的那种坏法。
+
+        ⚠️ **调用点是 tick 边界与只读门,不是每一次 `get()`**:`get` 在 tick 路上
+        一个世界日几百次,而这里每次是一个 Redis 往返。**一个 tick 之内配置不变**
+        因此是有意的语义,和规律那一层的双缓冲逐字同一条。
+
+        返回真表示这一趟真的重读了。
+        """
+        revision = getattr(self._backend, "revision", None)
+        if revision is None:
+            return False
+        try:
+            remote = int(revision())
+        except Exception:  # noqa: BLE001 - 读不到版本号不该掀翻 tick
+            return False
+        if remote < 0 or remote == self._revision:
+            return False
+        self._hydrate()
+        return True
 
     def _hydrate(self) -> None:
         with self._lock:
             rows = self._backend.all()
+            revision = getattr(self._backend, "revision", None)
+            # **先记版本号再折行**:反过来的话,两次读之间别人写进来的那一版
+            # 会被记成「我已经折过了」,而它其实没折 —— 于是这个进程再也不会重读它。
+            try:
+                self._revision = int(revision()) if revision is not None else -1
+            except Exception:  # noqa: BLE001
+                self._revision = -1
+            # 重读时**先清干净**:留着旧行的话,一个被撤掉的键会永远留在缓存里
+            # (今天没有删配置这条路,而「今天没有」不是「以后不会有」)。
+            self._cache.clear()
+            self._meta.clear()
         for key, row in rows.items():
             is_secret = bool(row.get("is_secret"))
             value_type = row.get("value_type") or "str"
@@ -245,6 +285,14 @@ class ConfigStore:
                 "description": description,
             }
             self._cache[key] = value
+            # 自己写的这一版**自己已经是最新的** —— 不对齐的话,下一次
+            # `refresh_if_changed` 会为自己刚写的那一行白重读一整张表。
+            revision = getattr(self._backend, "revision", None)
+            if revision is not None:
+                try:
+                    self._revision = int(revision())
+                except Exception:  # noqa: BLE001
+                    pass
 
     def undecryptable_secrets(self) -> list[str]:
         """世界里读不回来的 secret。SQLite 与 keyfile 退役后这个集合恒空 ——

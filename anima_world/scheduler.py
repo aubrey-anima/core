@@ -1637,6 +1637,17 @@ class Scheduler:
         with self._lock:
             if self._stopped:
                 return
+            # 🆕 3.10.0:**别的进程改过的配置,在 tick 边界上被这个进程看见。**
+            #
+            # 在这之前 `ConfigStore` 开机 hydrate 一次进缓存,于是运维台改了
+            # tick_rate / 开关,正在服务玩家的那个进程照旧按老的跑,零报错。
+            # ⚠️ **在这儿问,不在每一次 `get()` 里问**:`get` 在 tick 路上一个
+            # 世界日几百次,而这是一个 Redis 往返。**一个 tick 之内配置不变**
+            # 于是是有意的语义,和规律那一层的双缓冲逐字同一条。
+            if self.config_store is not None:
+                refresh = getattr(self.config_store, "refresh_if_changed", None)
+                if refresh is not None and refresh():
+                    logger.info("配置被别的进程改过了 —— 这一 tick 起用新的那份")
             self._in_tick = True
             try:
                 self._tick_frame()

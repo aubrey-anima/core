@@ -7804,6 +7804,7 @@ class World:
         store = self.scheduler.config_store
         if store is None:
             return []
+        self._refresh_config()
         rows = []
         for row in store.list(category=category):
             value = row["value"]
@@ -7813,8 +7814,21 @@ class World:
         return rows
 
     def config_get(self, key: str, default: Any = None) -> Any:
+        self._refresh_config()
         store = self.scheduler.config_store
         return default if store is None else store.get(key, default=default)
+
+    def _refresh_config(self) -> None:
+        """别的进程改过的配置,只读门这一侧也**自己补课**(3.10.0)。
+
+        跑着的世界会在下一次 tick 上自愈(`Scheduler.tick`),**暂停的不会** ——
+        而运维台正是在世界不动的时候来问"这个键现在是多少"的。
+        和 `state()` / `roster()` 那条「只读门自己补课」逐字同一条。
+        """
+        store = self.scheduler.config_store
+        refresh = getattr(store, "refresh_if_changed", None) if store else None
+        if refresh is not None:
+            refresh()
 
     def config_set(self, key: str, value: Any) -> None:
         """按声明类型强转后写入,立即生效。未知键抛 KeyError。
