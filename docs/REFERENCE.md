@@ -5101,7 +5101,7 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 ```jsonc
 {"id": "day1-letter",
  "for_each": {"node": "player"},          // ← 对每个玩家各跑一遍
- "trigger": {"at": {"day": 1},            // ← 他自己的第 1 天,不是世界的第 1 天
+ "trigger": {"at": {"day": 1},            // ← 从他入场那天起算的第 1 天 = 入场后第二天
              "when": [{"pred": "co_located", "agents": ["芬格尔", "player"]}]},
  "payload": [{"op": "grant_item", "agent_id": "player", "item_id": "letter"}]}
 ```
@@ -5112,7 +5112,11 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
   `who`、在场位置用的都是这个形状。⚠️ **不是 `agent:player:<id>`**:那个是量表的形状
   (`me_*` 读的那一头)。挑错一个,每一条都安静地不成立。
 - **零点是 `player_join`** —— 他第一次走进这个世界那一天。老板在世界第 40 天点进来,
-  拿到的仍然是**他的**第 1 天那封信。⚠️ 这个"第一次"记在**账本**上,不记在在场上
+  拿到的仍然是**他自己那条时间线**上的第 1 天,不是世界的第 1 天。
+  🔴 **`day` 是从入场那天起算的偏移,不是"第几天"这个序数**:`day: 0` = **他入场当天**
+  (`(now.day - 入场日, minute_of_day) >= (at.day, at.minute_of_day)`),`day: 1` = 入场后
+  **第二天**。一封"报到当天就该拿到的信"要写 `day: 0`;写 `day: 1` 会晚一天。
+  ⚠️ 这个"第一次"记在**账本**上,不记在在场上
   (在场带 TTL,挂在那儿的话他的第一周每次登录重开一遍)。
 - **`once` 按玩家各算一次**:`beat_fired` 多一格 `for`(= `player:<id>`);老事件没有
   这一格 = 世界级,那正是它们当初的语义。

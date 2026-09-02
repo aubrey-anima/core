@@ -8211,7 +8211,10 @@ def contract_payload() -> dict[str, Any]:
                 "token": PLAYER_TOKEN,
                 "binds_to": "player:{player_id}",
                 "beat_keys": sorted(BEAT_KEYS),
+                # 零点来自哪条事件,以及 `at.day` 相对它怎么算 ——
+                # **偏移,不是序数**(`0` = 入场当天)。
                 "day_zero": "player_join",
+                "day_is_offset_from_join": True,
                 "once_scope": "per_player",
                 "fired_event_key": "for",
                 # 🔴 **逐格的收拒表,而不是一句"支持玩家了"。** 一句话的能力声明
@@ -8228,9 +8231,10 @@ def contract_payload() -> dict[str, Any]:
                 "gloss": (
                     "一条拍顶层写 `\"for_each\": {\"node\": \"player\"}`,之后 "
                     "`payload` / `trigger.when` 里的保留字 `player` 指**这一趟展开的"
-                    "那个人**。三件配套语义:`trigger.at.day` 从**他第一次进这个世界"
-                    "那一天**算起(零点是 `player_join` 事件,记在账本上不记在带 TTL "
-                    "的在场上);`once` 按玩家**各算一次**(`beat_fired` 多一格 "
+                    "那个人**。三件配套语义:`trigger.at.day` 是**从他入场那天起算的"
+                    "偏移**(零点是 `player_join` 事件,记在账本上不记在带 TTL 的在场上)"
+                    "—— 🔴 **偏移不是序数**:`day: 0` = 他入场当天,`day: 1` = 入场后"
+                    "第二天,一封「报到当天该拿到的信」写 `0` 不写 `1`;`once` 按玩家**各算一次**(`beat_fired` 多一格 "
                     "`for`,老事件没有它 = 世界级);**每一格写不写得下 `player` 是"
                     "加载期判的**,拒了就当场说,没有第三种「静默跳过」。"
                     "不写 `for_each` 的老拍逐字不变 —— 声明本身就是开关。"
