@@ -2917,6 +2917,26 @@ class World:
 
         return install_authored_pack(self.scheduler, path, force=force)
 
+    def disable_pack(self, pack_id: str) -> dict[str, Any]:
+        """停用一份内容包 —— **拍不再响、它带来的新人退场、它开的开关回落**(3.10.0)。
+
+        🔴 **停用不是删除。** 玩家的记忆里有这一周发生过的事,他的钱包里有那 800 块,
+        她记得那天下过雨 —— 删掉那几条事件 = 让历史指向不存在的东西,而这个引擎里
+        "对账即重放",一段被抹掉的历史会让投影和日志对不上,**且没有任何地方会报错**。
+        所以它**只往日志里追加一条事实**(`pack_disabled`),朝前看的那一半跟着变,
+        朝后看的一个字不动 —— 和 `forget_player` 逐字同一个形状。
+
+        ⚠️ **开关回落的是"这个世界原来的样子"**,不是引擎默认值;而且**只回落至今
+        还等于这份包写下去的那个值的那几个** —— 装完之后运维又调过的那一格不该被
+        这一趟撤销(回执的 `kept` 点名说哪几个留着没动)。
+
+        再装一次同一个包 = 重新启用。回执:`{pack, version, day, tick, beats,
+        agents, config, kept}`。CLI 出口是 `anima-world pack disable`(§4.11)。
+        """
+        from anima_world.__main__ import disable_authored_pack
+
+        return disable_authored_pack(self.scheduler, pack_id)
+
     def packs(self) -> list[dict[str, Any]]:
         """这个世界装了哪几份内容包 —— **按落地先后**(3.10.0)。
 
@@ -8591,6 +8611,13 @@ class World:
         pid = str(player_id or "").strip()
         if not pid:
             raise ValueError("host_turn 要一个 player_id")
+        # 🔴 **「他刚才在不在」必须在 `_touch_player` 之前问**(3.10.0,2a-②)。
+        # 在场行带 TTL,而这一句本身就会把它续上 —— 问晚一步,答案永远是"在"。
+        # ⚠️ 第一版拿「现在的 tick 减他上一屏那个 tick」当"离线",而那是错的:
+        # 一个**一直在玩**的人拿到的多半是 `cached`,`last.tick` 根本不往前走 ——
+        # 于是世界过了一天,他会被告知"你有 1 天没来了"。**"世界走了多久"不是
+        # "他离开了多久"**,而这两个数在屏幕上长得一模一样。
+        was_present = pid in (self.players or {})
         self._touch_player(pid)
         state = self.state()
         clock = state.get("world_time") or {}
@@ -8618,13 +8645,18 @@ class World:
             last = dict(self.scheduler._memory_projection.host_scenes.get(pid) or {})
             beat_seq = int(self.scheduler._memory_projection.player_beat_seq.get(pid, 0))
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
-                                     tick=tick, ask=bool(ask))
+                                     tick=tick, ask=bool(ask),
+                                     was_present=was_present)
         if trigger is None:
             scene = {"text": str(last.get("text") or ""), "source": "cached",
                      "seq": int(last.get("seq") or 0)}
         else:
             going = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
             recap = self._host_recap(pid, since_seq=int(last.get("seq") or 0)) if last else []
+            if trigger == "return":
+                # 🔴 **「你不在的时候……本周更新……」排在回顾的最前面**(2a-②)。
+                # 「本周更新」读的是 `pack_installed`,不是一份另攒的公告栏。
+                recap = self._host_welcome_back(last, tick=tick, day=day) + recap
             text, source = self._host_scene_text(
                 place_name=place_name,
                 place_desc=str((places.get(place) or {}).get("description") or ""),
@@ -8858,7 +8890,8 @@ class World:
         return out
 
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
-                      beat_seq: int, tick: int, ask: bool) -> str | None:
+                      beat_seq: int, tick: int, ask: bool,
+                      was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是四个时刻里的哪一个。`None` = 闭嘴,用上一屏。
 
         **次序是有意的**:换了地方 → `arrive`(最强的一次场景切换);剧情拍响了 →
@@ -8867,6 +8900,12 @@ class World:
         """
         if not last:
             return "arrive"
+        # 🆕 3.10.0(2a-②):**「你回来了」排在换地方前面。**
+        # 一个离线三天的人回来时多半也换了地方,而这两句话里他更需要读到的是
+        # 「你不在的时候……本周更新……」——「三样同时变时报最强的那个」这条
+        # 次序纪律在这一格上的落法。
+        if self._host_returning(last, tick=tick, was_present=was_present):
+            return "return"
         if str(last.get("place") or "") != place:
             return "arrive"
         if int(last.get("beat_seq") or 0) != beat_seq:
@@ -8930,6 +8969,47 @@ class World:
         return host_mod.recap_lines(
             rows, player_key=player_key, item_names=items, agent_names=agent_names,
         )
+
+    def _host_welcome_back(self, last: dict[str, Any], *, tick: int,
+                           day: int) -> list[str]:
+        """「你回来了」那一屏开头的一两句 —— 离开了几天 + 这段时间装了哪几份包。"""
+        from anima_world import host as host_mod
+
+        last_seq = int(last.get("seq") or 0)
+        since_day = int(last.get("day") or 0)
+        with self.scheduler._lock:
+            packs = list(self.scheduler._memory_projection.packs.items())
+        fresh = [
+            {"id": pid, "note": row.get("note") or ""}
+            for pid, row in sorted(packs, key=lambda kv: int(kv[1].get("seq") or 0))
+            if int(row.get("seq") or 0) > last_seq and not row.get("disabled")
+        ]
+        return host_mod.welcome_back(away_days=max(0, day - since_day), packs=fresh)
+
+    def _host_returning(self, last: dict[str, Any], *, tick: int,
+                        was_present: bool = True) -> bool:
+        """他是不是"刚回来"(3.10.0,2a-②)。**零新状态,两个判据都是减法。**
+
+        · **离线太久**:现在的 tick 减他上一屏那个 tick,超过 `host.away_ticks`。
+        · **有新内容包**:有一条 `pack_installed` 落在他上一屏之后。
+
+        ⚠️ **两个判据都读已经在的东西** —— `host_scene` 的载荷里本来就有 `tick`,
+        `pack_installed` 本来就在同一条日志上。加一张"谁什么时候离开过"的表是
+        这一层最容易的错:那是**第二份真相**,而它和日志对不上时没有一处会报错。
+        """
+        since = int(last.get("tick") or 0)
+        away = int(self.config_get("host.away_ticks", default=288) or 0)
+        # **两个条件都要**:他刚才真的不在(在场行过期了),而且世界走了这么久。
+        # 少了前一条,一个一直在玩的人会被告知"你有 1 天没来了"。
+        if not was_present and away > 0 and tick - since >= away:
+            return True
+        # 🔴 **按 `seq` 比,不按 `tick` 比。** 装包和上一屏可以发生在**同一个
+        # tick** 里(世界不必动一步),而那一趟正是最该说「本周更新」的一次 ——
+        # 拿 tick 比会把它判成"不是新的"。seq 是只增的,它答得出先后。
+        last_seq = int(last.get("seq") or 0)
+        with self.scheduler._lock:
+            packs = dict(self.scheduler._memory_projection.packs)
+        return any(int(row.get("seq") or 0) > last_seq for row in packs.values())
 
     def _host_scene_text(self, *, place_name: str, place_desc: str, day: int,
                          hour: int, minute: int, options: list[dict[str, Any]],

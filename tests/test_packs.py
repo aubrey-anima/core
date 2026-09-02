@@ -853,3 +853,117 @@ def test_包里带一个新插件_它声明的种类真的进了本体(tmp_path)
     with World.open("w", redis=client, force_mock_llm=True) as again:
         assert "menpai.sect" in {k["id"] for k in again.kinds()}, "重开一次就没了"
         assert "menpai.sect:狮心会" in {e["id"] for e in again.entities()}
+
+
+# ── 八、2a-② K7:停用(`pack disable`)────────────────────────────────────────
+#
+# 🔴 **停用不是删除。** 玩家的记忆里有这一周发生过的事,他的钱包里有那 800 块 ——
+# 删掉那几条事件 = 让历史指向不存在的东西,而"对账即重放"会让投影和日志对不上,
+# **且没有任何地方会报错**(和 `forget_player` 逐字同一个形状)。
+
+def test_停用之后_那几拍不再响_而已经响过的照旧在历史里(tmp_path):
+    day = 288
+    with _world(tmp_path, name="dis1") as world:
+        world.tick(3)
+        world.install_pack(_pack(
+            tmp_path, "d1", pack={"id": "第二周", "version": "1.0.0"},
+            beats=[_beat("社团", 0), _beat("夜宵", 2)]))
+        world.tick(1)
+        assert [b for b, _ in _fired(world)] == ["社团"]
+
+        receipt = world.disable_pack("第二周")
+        assert sorted(receipt["beats"]) == ["夜宵", "社团"]
+        world.tick(day * 3)
+        assert [b for b, _ in _fired(world)] == ["社团"], (
+            "停用之后那一拍还是响了"
+        )
+        # 🔴 **已经响过的那一条一个字没动** —— 历史是历史。
+        assert any(e.type == "beat_fired" and e.payload["beat_id"] == "社团"
+                   for e in world.scheduler.event_log.replay())
+
+
+def test_停用_它带来的新人退场_而他造成的后果留着(tmp_path):
+    with _world(tmp_path, name="dis2") as world:
+        world.tick(3)
+        world.install_pack(_pack(
+            tmp_path, "d2", pack={"id": "第二周", "version": "1.0.0"},
+            locations=[{"id": "yard", "name": "院子", "description": "d"}],
+            agents=[{"id": "乙", "name": "乙", "location": "yard",
+                     "personality": "新来的"}]))
+        assert "乙" in world.scheduler.agents
+        receipt = world.disable_pack("第二周")
+        assert receipt["agents"] == ["乙"]
+        assert "乙" not in world.scheduler.agents, "他还在台上"
+        # **不是删人**:他 join 那条事件、那个地点都留着。
+        assert any(e.type == "agent_join" and e.who == "乙"
+                   for e in world.scheduler.event_log.replay())
+        assert "yard" in {l["id"] for l in world.scheduler.location_store.all()}
+
+
+def test_停用_开关回落到装包前那个值_而不是引擎默认值(tmp_path):
+    with _world(tmp_path, name="dis3") as world:
+        world.tick(3)
+        world.config_set("host.max_options", 4)          # 这个世界原来的样子
+        world.install_pack(_pack(
+            tmp_path, "d3", pack={"id": "第二周", "version": "1.0.0"},
+            config={"host.max_options": 2, "narrative.player.enabled": True}))
+        assert world.config_get("host.max_options") == 2
+        world.disable_pack("第二周")
+        assert world.config_get("host.max_options") == 4, "回落到引擎默认值去了"
+        # 装包前根本没有的那一格 → 撤掉整行,回落引擎声明的那个值。
+        assert world.config_get("narrative.player.enabled") is False
+        row = next(r for r in world.config_list()
+                   if r["key"] == "narrative.player.enabled")
+        assert row["source"] == "默认值", row
+
+
+def test_停用_装完之后被人调过的那一格_留着没动而且说出来(tmp_path):
+    """🔴 **compare-and-set 在这一层的同一把尺**:撤销一次运维的调整等于把它悄悄
+    抹掉,而账面上什么都看不出来。"""
+    with _world(tmp_path, name="dis4") as world:
+        world.tick(3)
+        world.install_pack(_pack(
+            tmp_path, "d4", pack={"id": "第二周", "version": "1.0.0"},
+            config={"host.max_options": 2}))
+        world.config_set("host.max_options", 5)          # 运维后来又调过
+        receipt = world.disable_pack("第二周")
+        assert receipt["config"] == [] and receipt["kept"] == ["host.max_options"]
+        assert world.config_get("host.max_options") == 5
+
+
+def test_再装一次同一个包_等于重新启用(tmp_path):
+    with _world(tmp_path, name="dis5") as world:
+        world.tick(3)
+        world.install_pack(_pack(tmp_path, "d5a",
+                                 pack={"id": "第二周", "version": "1.0.0"},
+                                 beats=[_beat("社团", 1)]))
+        world.disable_pack("第二周")
+        assert world.packs()[0]["disabled"] is True
+        world.install_pack(_pack(tmp_path, "d5b",
+                                 pack={"id": "第二周", "version": "1.1.0"}))
+        assert world.packs()[0]["disabled"] is False
+        world.tick(288 * 2)
+        assert [b for b, _ in _fired(world)] == ["社团"], "重新启用之后那一拍没响"
+
+
+def test_停用一个没装过的包_拒得念得通(tmp_path):
+    from anima_world.__main__ import PackInstallError
+
+    with _world(tmp_path, name="dis6") as world:
+        world.tick(3)
+        with pytest.raises(PackInstallError) as raised:
+            world.disable_pack("根本没有这一周")
+        assert "pack list" in str(raised.value)
+
+
+def test_cli停用_那一屏念得通(tmp_path):
+    client = redis_for(tmp_path / "disc.db")
+    with _world(tmp_path, name="disc") as world:
+        world.tick(3)
+        world.install_pack(_pack(tmp_path, "dc", pack={"id": "第二周", "version": "1.0.0"},
+                                 beats=[_beat("社团", 5)]))
+    r = run_cli("pack", "disable", "第二周", "--world-id", "w")
+    assert r.returncode == 0, r.stderr
+    assert "不是删除" in r.stdout and "**" not in r.stdout, r.stdout
+    r = run_cli("pack", "disable", "第二周", "--world-id", "w")
+    assert r.returncode == 2 and "已经是停用的" in r.stderr

@@ -29,7 +29,11 @@ from typing import Any, Iterable
 
 # 四个时刻。**这不是一份说明,是引擎里那道闸的取值** —— `World.host_turn` 只在
 # 时刻钥匙变了的时候开口,别处没有第二条生成场景的路。
-HOST_MOMENTS = ("arrive", "new_day", "beat", "ask")
+# 🆕 3.10.0(2a-②):第五个时刻 **`return`** ——「你回来了」。
+# 离线超过 `host.away_ticks`,或者他上一屏之后有新的内容包落地。
+# **零新状态**:`host_scene` 事件载荷里已经有 `tick`、投影里每个玩家一条,
+# 而 `pack_installed` 也在同一条日志上 —— 两个判据都是减法。
+HOST_MOMENTS = ("arrive", "new_day", "beat", "ask", "return")
 OPTION_KINDS = ("invitation", "beat", "talk", "verb", "travel", "free")
 # 点下去走哪条**今天已经有**的门。闭集 —— 多一种就是多一条写世界的路。
 DOOR_METHODS = ("answer_invitation", "chat", "player_walk", "player_tool", "free")
@@ -349,6 +353,24 @@ def select_options(candidates: Iterable[dict[str, Any]], *, limit: int) -> list[
     chosen.sort(key=lambda o: (_KIND_RANK.get(o["kind"], 99), o["id"]))
     chosen.append(free_option())
     return chosen
+
+
+def welcome_back(*, away_days: int = 0, packs: list[dict[str, Any]] | None = None
+                 ) -> list[str]:
+    """「你回来了」那一屏开头的一两句(3.10.0,2a-②)。
+
+    🔴 **「本周更新」读的是 `pack_installed`,不是一份另攒的公告栏** —— 攒一份就多
+    一种和日志对不上的坏法,而这一层对不上的样子是"横幅上写着这周加了三件事,
+    而世界里一件都没有"。
+    """
+    out: list[str] = []
+    if away_days > 0:
+        out.append(f"你有 {away_days} 天没来了。")
+    for row in (packs or ()):
+        note = str(row.get("note") or "").strip()
+        out.append(f"这段时间世界更新了:{note}" if note
+                   else f"这段时间世界更新了一次({row.get('id')})。")
+    return out
 
 
 def mock_scene(*, place_name: str, day: int, hour: int,

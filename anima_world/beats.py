@@ -158,6 +158,20 @@ def day_zero_for(
     return max(base, int(join_day))
 
 
+def disabled_beats_from(projection: Any) -> set[str]:
+    """停用了的那几份包带来的拍(3.10.0,K7)。**它们不再进候选。**
+
+    已经响过的照旧响过 —— `beat_fired` 是历史,而停用管的是朝前看的那一半。
+    """
+    out: set[str] = set()
+    for row in (getattr(projection, "packs", None) or {}).values():
+        if not row.get("disabled"):
+            continue
+        for bid in ((row.get("sections") or {}).get("beats") or ()):
+            out.add(str(bid))
+    return out
+
+
 def pack_days_from(projection: Any) -> dict[str, int]:
     """`{拍 id: 它那个包落地那天}` —— 折自 `Projection.packs`,**不另存一份**。"""
     out: dict[str, int] = {}
@@ -1152,7 +1166,12 @@ class BeatDirector:
         # 存第二份的下场是"零点"和"这一拍响没响"来自两次不同的合并,而这个仓库
         # 为那个形状红过一次(2026-08-28 的插件命名空间回归)。
         pack_days = pack_days_from(projection)
+        # **停用了的那几拍不再进候选**(K7)。折自同一份 `projection`,
+        # 和零点那张表来自同一次合并 —— 两次不同的合并是这个仓库红过的形状。
+        disabled = disabled_beats_from(projection)
         for beat in self.script.beats:
+            if str(beat.get("id")) in disabled:
+                continue
             if is_per_player(beat):
                 for player_id, join_day in sorted((players or {}).items()):
                     subject = f"player:{player_id}"

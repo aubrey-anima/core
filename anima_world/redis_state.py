@@ -2650,6 +2650,21 @@ class RedisConfigBackend:
     def all(self) -> dict[str, dict]:
         return self._rows.all()
 
+    def drop(self, key: str) -> int:
+        """撤掉作者那一行 —— **回落到引擎声明的那个值**(3.10.0,K7 停用)。
+
+        ⚠️ **「撤掉一行」和「写一个默认值进去」不是同一件事**:后者会让
+        `config list` 那一行的 `source` 从「默认值」变成「世界文件」,于是引擎哪天
+        改了默认值,这个世界再也吃不到 —— 而那正是 1.4.0 拆「创世播默认值」时
+        治过的那个病本身。
+        """
+        removed = self._rows.drop(key)
+        try:
+            self._redis.incr(self._rev_key)
+        except Exception:  # noqa: BLE001
+            logger.warning("配置版本号推不动", exc_info=True)
+        return removed
+
     def put(self, key: str, row: dict) -> None:
         self._rows.put(key, row)
         # **先写行再动版本号**:反过来的话,别的进程会在看到新版本号之后读到旧行,

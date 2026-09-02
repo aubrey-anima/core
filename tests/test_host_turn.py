@@ -596,3 +596,74 @@ def test_只有旁白没有台词时_旁白当旁白写(tmp_path):
     said = mock_opening("芬格尔", beat_note="手机震了一下,是个没存过的号码。")
     assert said.startswith("手机震了一下"), said
     assert "「手机震了一下" not in said, f"旁白被塞进引号里:{said}"
+
+
+# ── 2a-②:第五个时刻「你回来了」(3.10.0)──────────────────────────────────
+
+def test_离线太久回来_是return那一屏(tmp_path):
+    """🔴 **两个判据都是减法,零新状态**:`host_scene` 载荷里本来就有 `tick`,
+    在场行本来就带 TTL。加一张「谁什么时候离开过」的表是这一层最容易的错 ——
+    那是第二份真相,而它和日志对不上时没有一处会报错。
+    """
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "ret.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert world.host_turn("p1")["trigger"] == "arrive"
+        world.tick(288 * 2)
+        world.player_leave("p1")            # 在场行没了 = 他真的走了
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "return", turn["trigger"]
+        assert "没来了" in turn["scene"]["text"], turn["scene"]["text"]
+
+
+def test_一直在玩的人_世界过了一天也不算他回来(tmp_path):
+    """🔴 **"世界走了多久"不是"他离开了多久"**,而这两个数在屏幕上长得一模一样。
+
+    第一版拿「现在的 tick 减他上一屏那个 tick」当离线 —— 而一个一直在玩的人拿到的
+    多半是 `cached`,`last.tick` 根本不往前走,于是世界过了一天他会被告知
+    「你有 1 天没来了」。判据换成**在场行还在不在**(而且必须在 `_touch_player`
+    之前问:那一句本身就会把 TTL 续上,问晚一步答案永远是"在")。
+    """
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "stay.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        for _ in range(3):                  # 一边玩一边过日子
+            world.tick(288)
+            world.host_turn("p1")
+        assert world.host_turn("p1")["trigger"] != "return"
+
+
+def test_他上一屏之后装了新包_也是return_而且说得出本周更新(tmp_path):
+    """「本周更新」读的是 `pack_installed`,**不是一份另攒的公告栏** —— 攒一份就多
+    一种和日志对不上的坏法,而那时横幅上写着这周加了三件事,世界里一件都没有。"""
+    from _worldfile import open_world_at, write_seed_file
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    with open_world_at(tmp_path / "pk.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert world.host_turn("p1")["trigger"] == "arrive"
+        path = tmp_path / "week2.cyberworld"
+        write_world_file(
+            path, WorldFileManifest(world_id="f", engine_min="3.10.0"),
+            seed_to_author_records({"pack": {"id": "第二周", "version": "1.0.0",
+                                             "note": "社团活动 / 夜宵"}}),
+            compress=False, checksum=False)
+        world.install_pack(str(path))
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "return", turn["trigger"]
+        assert "社团活动" in turn["scene"]["text"], turn["scene"]["text"]
+
+
+def test_return进了contract的moments(tmp_path):
+    from anima_world.__main__ import contract_payload
+
+    assert contract_payload()["host"]["moments"] == [
+        "arrive", "new_day", "beat", "ask", "return"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import argparse
 import contextlib
 import json
@@ -509,6 +510,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "不带它时那种包「当场拒绝并逐条列出」—— `beat_fired` 是历史,烧掉回不来",
     )
     pack_install.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
+    )
+    pack_disable = pack_commands.add_parser(
+        "disable",
+        help="停用一份内容包:它的拍不再响、它带来的新人退场、它开的开关回落。"
+             "「不是删除」—— 玩家的记忆里有这一周发生过的事",
+    )
+    _add_world_args(pack_disable)
+    pack_disable.add_argument("pack", help="要停用的内容包 id")
+    pack_disable.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
     )
     pack_list = pack_commands.add_parser(
@@ -4280,6 +4291,130 @@ class PackInstallError(ValueError):
         super().__init__("这份内容包装不进去:\n" + "\n".join(f"- {e}" for e in errors))
 
 
+def disable_authored_pack(scheduler: Any, pack_id: str) -> dict[str, Any]:
+    """停用一份内容包 —— **拍不再响、它带来的新人退场、它开的开关回落**(3.10.0,K7)。
+
+    🔴 **停用不是删除,而这一条是硬的**:玩家的记忆里有这一周发生过的事,他的钱包
+    里有那 800 块,她记得那天下过雨。删掉那几条事件 = 让历史指向不存在的东西 ——
+    而这个引擎里"对账即重放",一段被抹掉的历史会让投影和日志对不上,**且没有任何
+    地方会报错**。所以停用**只往日志里追加一条事实**(`pack_disabled`),
+    朝前看的那一半跟着变;朝后看的那一半一个字不动。
+
+    ⚠️ **和 `forget_player` 逐字同一个形状**,理由也逐字相同(见那个方法)。
+
+    三件"朝前看的":
+
+    - **拍不再响**:`BeatDirector` 跳过这个包带来的那几拍。已经响过的照旧响过
+      (`beat_fired` 是历史)。
+    - **新人退场**:走 `agent_leave` 那条已有的路(`Scheduler.unregister` + 一条
+      事件),和一条剧情拍的 `agent_leave` op 逐字同一条。**不是删人** ——
+      他说过的话、他造成的后果留在世界里。
+    - **开关回落**:回到**这个世界原来的样子**(装包前那个值),不是回到引擎默认值。
+      ⚠️ **只回落"至今还等于我写下去的那个值"的那几个键** —— 装完之后运维又调过的
+      那一格不该被这一趟撤销,而那正是 compare-and-set 在这一层的同一把尺。
+    """
+    from anima_world.beats import BeatDirector, BeatScript
+    from anima_world.redis_state import RedisBeatsStore
+
+    event_log = scheduler.event_log
+    if event_log is None:
+        raise PackInstallError(["这个世界没有事件日志,停用不了内容包"])
+    pack_id = str(pack_id or "").strip()
+    with scheduler._lock:
+        scheduler.catch_up_projection()
+        row = dict(scheduler._memory_projection.packs.get(pack_id) or {})
+    if not row:
+        raise PackInstallError([
+            f"这个世界没有装过 {pack_id!r} 这份内容包。"
+            "装了哪几周问 `anima-world pack list`"
+        ])
+    if row.get("disabled"):
+        raise PackInstallError([f"内容包 {pack_id!r} 已经是停用的了。"])
+
+    sections = row.get("sections") or {}
+    wrote = row.get("wrote") or {}
+    tick = int(scheduler.clock)
+    day = int(scheduler.world_time(tick).day)
+    receipt: dict[str, Any] = {
+        "pack": pack_id, "version": str(row.get("version") or ""),
+        "day": day, "tick": tick,
+        "beats": sorted(str(b) for b in (sections.get("beats") or ())),
+        "agents": [], "config": [], "kept": [],
+    }
+
+    with scheduler._lock:
+        # ① 它带来的新人退场 —— 走 `agent_leave` 那条已有的路。
+        for aid in (sections.get("agents") or ()):
+            aid = str(aid)
+            if aid not in scheduler.agents:
+                continue
+            here = scheduler.agents[aid].agent.location
+            scheduler.unregister(aid)
+            scheduler._transit.pop(aid, None)
+            scheduler._plans.pop(aid, None)
+            scheduler._current_action.pop(aid, None)
+            event_log.append({
+                "ts": tick, "who": aid, "loc": here, "type": "agent_leave",
+                "payload": {"agent_id": aid, "reason": "pack_disabled",
+                            "pack": pack_id},
+            })
+            receipt["agents"].append(aid)
+
+        # ② 开关回落 —— **只回落至今还等于我写下去的那几个**。
+        store = scheduler.config_store
+        mine = (wrote.get("config") or {})
+        before = (wrote.get("config_before") or {})
+        for key, written in sorted(mine.items()):
+            if store is None:
+                break
+            now = repr(store.world_value(key, None))
+            if now != written:
+                # 装完之后被人调过了。**撤销它等于把那次调整悄悄抹掉**,
+                # 而账面上什么都看不出来 —— 留着,并说出来。
+                receipt["kept"].append(key)
+                continue
+            had = before.get(key, "")
+            try:
+                if had:
+                    store.set(key, ast.literal_eval(had))
+                else:
+                    store.unset(key)
+            except Exception as exc:  # noqa: BLE001 - 一个键回落不了不该掀翻整趟
+                logger.warning("内容包 %s 的开关 %s 回落不了:%s", pack_id, key, exc)
+                continue
+            receipt["config"].append(key)
+
+        # ③ 落一条事实,然后重折 —— 和 `forget_player` 逐字同一条路。
+        event_log.append({
+            "ts": tick, "type": "pack_disabled",
+            "payload": {"pack_id": pack_id, "day": day, "tick": tick,
+                        "beats": receipt["beats"], "agents": receipt["agents"]},
+        })
+        persisted = event_log.replay()
+        scheduler.reset_projection(persisted)
+        scheduler.load_persisted_events(persisted)
+
+        # ④ 导演重建 —— **停用的那几拍从此不再进候选**。
+        script_rows = RedisBeatsStore(scheduler.redis, scheduler.world_id).definitions()
+        if script_rows:
+            fired = {
+                (e.payload.get("beat_id"), str(e.payload.get("for") or ""))
+                for e in persisted
+                if e.type == "beat_fired" and e.payload.get("beat_id")
+            }
+            scheduler.beat_director = BeatDirector(
+                BeatScript.from_data({"beats": script_rows}, stored=True), fired=fired)
+
+    logger.info(
+        "内容包 %r 停用了(世界第 %d 天):%d 拍不再响 · %d 个人退场 · %d 个开关回落"
+        "%s",
+        pack_id, day, len(receipt["beats"]), len(receipt["agents"]),
+        len(receipt["config"]),
+        f";{len(receipt['kept'])} 个开关装完之后被人调过,留着没动" if receipt["kept"] else "",
+    )
+    return receipt
+
+
 def _current_personality(scheduler: Any, agent_id: str) -> str:
     """她此刻的人设是哪一句 —— **问投影,不问黑板**(2a-②)。
 
@@ -4619,14 +4754,23 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         if new_beats:
             RedisBeatsStore(redis, world_id).append(new_beats)
         author_config = authored.get("config")
+        wrote_config: dict[str, str] = {}
+        config_before: dict[str, str] = {}
         if isinstance(author_config, dict) and config_store is not None:
             for key, value in author_config.items():
+                # **先记下「之前是什么」再写** —— 停用那一刻要拿它回落
+                # (K7:开关回落,而"回落"是回到**这个世界原来的样子**,
+                # 不是回到引擎默认值)。`world_value` 只看世界那一层,
+                # 正是"作者动过没有"这个问题。
+                had = config_store.world_value(str(key), None)
                 try:
                     config_store.set(str(key), value)
                 except Exception as exc:  # noqa: BLE001 - 一个坏键不该掀翻整包
                     logger.warning("内容包里的配置 %s 没写进去:%s", key, exc)
                     continue
                 receipt["config"].append(str(key))
+                wrote_config[str(key)] = repr(config_store.world_value(str(key), None))
+                config_before[str(key)] = "" if had is None else repr(had)
         setting = authored.get("world_setting")
         if isinstance(setting, str) and setting.strip() and prompt_store is not None:
             prompt_store.set("world.setting", setting.strip())
@@ -4682,7 +4826,9 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         # **落账写的是回执**(真的落地了什么),文件里那份另起 `declared` ——
         # 两份真相那一格就是这么来的(2a-① 验收 C)。
         _record_pack_installed(event_log, authored, day=day, tick=tick,
-                               wrote={"personality": dict(persona_wanted)}, landed={
+                               wrote={"personality": dict(persona_wanted),
+                                      "config": dict(wrote_config),
+                                      "config_before": dict(config_before)}, landed={
             k: v for k, v in (
                 ("beats", receipt["beats"]),
                 ("agents", receipt["agents"]),
@@ -9110,6 +9256,10 @@ def contract_payload() -> dict[str, Any]:
             # 「我该干嘛」整整 60 真实分钟按不动,而那正是他最需要按它的一个小时。
             # 冷却防的是"连点十下 = 十次 LLM 调用",而进门第一次问不是那件事。
             "ask_free_after": "arrive",
+            # 🆕 3.10.0(2a-②):第五个时刻。两个判据都是减法,**零新状态** ——
+            # 他刚才在不在(在场行带 TTL),以及他上一屏之后有没有新的 `pack_installed`。
+            "away_key": "host.away_ticks",
+            "return_reads": ["presence", "pack_installed"],
             # 冷却那个数**也带在 `host_turn` 的返回里**(`ask_ready_tick` /
             # `ask_ready`):站点对世界只有 `/internal/v1/*`,够不着这扇门 ——
             # 一个到不了消费方的契约格,等于没有这一格。
@@ -9261,9 +9411,14 @@ def contract_payload() -> dict[str, Any]:
             "pack_keys": list(PACK_KEYS),
             "id_pattern": PACK_ID_PATTERN,
             "event": "pack_installed",
+            # 🆕 3.10.0(2a-② K7):停用。**追加一条事实,不删任何东西** ——
+            # 玩家的记忆里有这一周发生过的事。再装一次同一个包 = 重新启用。
+            "disable_event": "pack_disabled",
+            "disable_method": "disable_pack",
             "subscribable": False,
             "method": "install_pack",
-            "cli": "anima-world pack install <file> / anima-world pack list",
+            "cli": ("anima-world pack install <file> / anima-world pack list / "
+                    "anima-world pack disable <id>"),
             # ⚠️ **两张表都用「编译段名」,不混作者层 `type`**(2a-① 验收:
             # 上一版 `installs_sections` 报的是 `beat`/`config`/`world_setting`
             # (作者层的 `type`),而 `merge_sections` 报的是 `beats`/`kinds`/…
@@ -9306,8 +9461,8 @@ def run_pack(args: argparse.Namespace) -> int:
     """
     redis, world_id, mysql = _world_args(args)
     command = getattr(args, "pack_command", None)
-    if command not in {"install", "list"}:
-        print("[pack] 只有 install / list 两个子命令", file=sys.stderr)
+    if command not in {"install", "list", "disable"}:
+        print("[pack] 只有 install / list / disable 三个子命令", file=sys.stderr)
         return 2
     if not _world_exists(redis, world_id):
         # 装包是**给一个已经在跑的世界**加东西 —— 对着一个不存在的名字创世,
@@ -9342,6 +9497,33 @@ def run_pack(args: argparse.Namespace) -> int:
                 print(f"      带了:{what}")
             return 0
 
+        if command == "disable":
+            try:
+                receipt = world.disable_pack(args.pack)
+            except PackInstallError as exc:
+                print(f"[pack] 停用不了 {args.pack!r}:", file=sys.stderr)
+                for line in exc.errors:
+                    print(f"  ✗ {line}", file=sys.stderr)
+                return 2
+            if getattr(args, "as_json", False):
+                print(json.dumps(receipt, ensure_ascii=False, indent=2))
+                return 0
+            print(f"内容包 {receipt['pack']} 停用了(世界第 {receipt['day']} 天)。"
+                  "「这不是删除」—— 已经发生过的事一件都没动。")
+            if receipt["beats"]:
+                print(f"  · {len(receipt['beats'])} 拍从此不再响"
+                      "(已经响过的照旧响过)")
+            if receipt["agents"]:
+                print(f"  · {len(receipt['agents'])} 个人退场:"
+                      f"{'、'.join(receipt['agents'])}")
+            if receipt["config"]:
+                print(f"  · {len(receipt['config'])} 个开关回落到装包前那个值:"
+                      f"{'、'.join(receipt['config'])}")
+            if receipt["kept"]:
+                print(f"  · {len(receipt['kept'])} 个开关装完之后被人调过,留着没动:"
+                      f"{'、'.join(receipt['kept'])}")
+            return 0
+
         try:
             receipt = world.install_pack(args.file, force=bool(getattr(args, "force", False)))
         except PackInstallError as exc:
@@ -9357,8 +9539,11 @@ def run_pack(args: argparse.Namespace) -> int:
         print(f"内容包 {receipt['pack']} v{receipt['version']} 装进了 {world_id}"
               f"(世界第 {receipt['day']} 天)。")
         if receipt["beats"]:
-            print(f"  · {len(receipt['beats'])} 拍剧情 —— 零点是「今天」"
-                  f"(第 {receipt['day']} 天),`day: 0` 的那一拍下一 tick 就响")
+            # ⚠️ **别断言一件这一屏不知道的事**:上一版这里写死着「`day: 0` 的那
+            # 一拍下一 tick 就响」,而这份包里可能一条 `day: 0` 都没有 ——
+            # 一句念不通的话和一句错的一样贵。说零点,别替它算什么时候响。
+            print(f"  · {len(receipt['beats'])} 拍剧情 —— 它们的 `day` 从「今天」"
+                  f"(第 {receipt['day']} 天)起算")
         if receipt["config"]:
             print(f"  · {len(receipt['config'])} 个开关:{'、'.join(receipt['config'])}")
         if receipt["world_setting"]:

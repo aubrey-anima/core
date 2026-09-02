@@ -6076,3 +6076,64 @@ anima-world contract --json | jq '.host.opening_method, .host.suggestions_method
                                   (.beats.ops | index("hail")),
                                   .host.door_params.chat'
 ```
+
+## 3.64 停用一份内容包,以及「你回来了」那一屏(2a-②,3.10.0,已交付)
+
+### (a) 在册的人的**人设**改得动了 —— 但要过一把尺
+
+```bash
+anima-world pack install 第二周.cyberworld --world-id w          # 冲突当场拒
+anima-world pack install 第二周.cyberworld --world-id w --force  # 我确实要覆盖
+```
+
+判据**不是**「我是同一个 pack」,是 **「这一格此刻的值,还等于我上一版写下去的那个
+值吗」**。三种下场:
+
+| 情形 | 下场 |
+|---|---|
+| 这份包上一版写的,至今没被动过 | ✅ 覆盖(这就是「改自己发过的」) |
+| 创世写的 / 别的包写的 / 写下去之后被世界改过 | ❌ **当场拒**,并点名是谁 |
+| 加了 `--force` | ✅ 覆盖,回执 `forced: true` |
+
+🔴 **为什么不是「同 pack 就能覆盖」**:第 1 周的包给她写过一句人设,玩家跟她聊了
+三十天、她的人设被 `persona_update` 改过 —— 第 2 周包一升级就把那三十天抹了,
+而账面上什么都看不出来。
+
+**在册的人的记忆**同轮开了:**只增不改**,按 `(agent_id, summary)` 去重
+(同一份包装两遍不会让她记得两次)。已有的一条一个字不动 —— 记忆是演化态。
+
+回执多两格:`personality: [谁]` / `memories: N`;拒掉的那几个在 `skipped.personality`。
+
+### (b) 停用:`pack disable`
+
+```bash
+anima-world pack disable 第二周 --world-id w [--json]
+```
+
+- 它的**拍不再响**(已经响过的照旧响过 —— `beat_fired` 是历史)
+- 它带来的**新人退场**(走 `agent_leave`,**不是删人**:他说过的话留在世界里)
+- 它开的**开关回落到装包前那个值**(不是引擎默认值)
+
+🔴 **停用不是删除**,而这一条是硬的:玩家的记忆里有这一周发生过的事,他的钱包里
+有那 800 块。删掉那几条事件 = 让历史指向不存在的东西,而这个引擎"对账即重放",
+一段被抹掉的历史会让投影和日志对不上、**且没有任何地方会报错**。
+
+⚠️ **只回落至今还等于这份包写下去的那个值的那几个开关** —— 装完之后运维又调过的
+那一格不该被这一趟撤销,回执的 `kept` 点名说哪几个留着没动。
+
+**再装一次同一个包 = 重新启用**,不用先「取消停用」。
+
+### (c) 主持人第五个时刻:`return`
+
+`contract.host.moments` 从四个变五个。他离线超过 `host.away_ticks`(默认一个世界日),
+**或者**他上一屏之后有新的 `pack_installed` → 下一屏是「你回来了」,开头先说
+「你有 N 天没来了」+「这段时间世界更新了:<你写的 `note`>」,再说景、再递选项。
+
+**所以 `pack` 那一段的 `note` 是玩家会读到的一句话** —— 写「社团活动 / 夜宵 / 实习课」
+比写「week2」有用得多。
+
+### (d) 探测
+
+```bash
+anima-world contract --json | jq '.packs.disable_method, .host.moments, .host.away_key'
+```

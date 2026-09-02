@@ -294,6 +294,30 @@ class ConfigStore:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def unset(self, key: str) -> bool:
+        """撤掉作者写下的那一行 —— **回落到引擎声明的那个值**(3.10.0,K7 停用)。
+
+        ⚠️ **不是「写一个默认值进去」**:那会让这一行的 `source` 从「默认值」变成
+        「世界文件」,于是引擎哪天改了默认值,这个世界再也吃不到 —— 1.4.0 拆
+        「创世播默认值」时治的正是那个病。
+
+        底座答不出 `drop` 的(进程内的测试替身)返回 False,**不假装成功**。
+        """
+        drop = getattr(self._backend, "drop", None)
+        if drop is None:
+            return False
+        with self._lock:
+            removed = bool(drop(key))
+            self._cache.pop(key, None)
+            self._meta.pop(key, None)
+            revision = getattr(self._backend, "revision", None)
+            if revision is not None:
+                try:
+                    self._revision = int(revision())
+                except Exception:  # noqa: BLE001
+                    pass
+        return removed
+
     def undecryptable_secrets(self) -> list[str]:
         """世界里读不回来的 secret。SQLite 与 keyfile 退役后这个集合恒空 ——
         方法留着是因为 `World.state()` / doctor 的报告面还在问。"""
@@ -363,6 +387,7 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "llm.max_retries": (2, "int", "llm", False, "LLM SDK max retries"),
     "host.max_options": (5, "int", "host", False, "Host: how many options to offer (the always-present free-input item does not count)"),
     "host.ask_cooldown_ticks": (12, "int", "host", False, "Host: ticks before the player's \"what should I do\" can regenerate a scene"),
+    "host.away_ticks": (288, "int", "host", False, "Host: ticks away before the next screen is a \"welcome back\" (0 = never); one world day by default"),
     "llm.stream.first_timeout": (30.0, "float", "llm", False, "Streaming: seconds to wait for the FIRST chunk (prefill lives here; deliberately the same as llm.timeout was)"),
     "llm.stream.gap_timeout": (15.0, "float", "llm", False, "Streaming: seconds allowed BETWEEN chunks once text started; a stall before any prose is retried once"),
     "scheduler.tick_rate": (1 / DEFAULT_SECONDS_PER_TICK, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),

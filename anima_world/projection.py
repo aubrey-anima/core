@@ -72,6 +72,8 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_player_departed(proj, e)
     elif e.type == "pack_installed":
         _apply_pack_installed(proj, e)
+    elif e.type == "pack_disabled":
+        _apply_pack_disabled(proj, e)
     elif e.type == "agent_invites":
         _apply_agent_invites(proj, e)
     elif e.type == "invitation_settled":
@@ -360,9 +362,32 @@ def _apply_pack_installed(proj: Projection, e: Event) -> None:
         # 「我写过而且没人动过」错判成「不是我写的」,于是作者改不动自己上周那一句。
         "wrote": _merge_wrote((have or {}).get("wrote"), payload.get("wrote")),
         "declared": dict(payload.get("declared") or {}),
+        # 再装一次 = 重新启用(见 `_apply_pack_disabled`)。
+        "disabled": False,
         "seq": int(e.seq or 0),
     }
     proj.packs[pack_id] = row
+
+
+def _apply_pack_disabled(proj: Projection, e: Event) -> None:
+    """一份内容包停用了(3.10.0,K7)。
+
+    🔴 **只标一格,不删任何东西。** 玩家的记忆里有这一周发生过的事,他的钱包里有
+    那 800 块 —— 删掉那几条事件 = 让历史指向不存在的东西,而"对账即重放"会让投影
+    和日志对不上,**且没有任何地方会报错**(`forget_player` 那条 docstring 写的
+    是同一句)。停用管的是**朝前看**的那一半。
+
+    ⚠️ **再装一次同一个包会把它重新启用** —— `_apply_pack_installed` 把这一格清掉。
+    「装回来」和「从没停过」在世界里是同一件事,而这一格记的是"此刻停没停",
+    不是"停用过没有"。
+    """
+    payload = e.payload or {}
+    pack_id = str(payload.get("pack_id") or "")
+    row = proj.packs.get(pack_id)
+    if row is None:
+        return
+    row["disabled"] = True
+    row["disabled_day"] = int(payload.get("day", 0) or 0)
 
 
 def _apply_agent_join(proj: Projection, e: Event) -> None:
