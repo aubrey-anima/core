@@ -1643,3 +1643,45 @@ def test_封皮说3_9_0而包里有pack段_两扇离线门一起拒(tmp_path, fr
     assert ok_validate is False and ok_check is False, (errors, check_errors)
     assert errors == check_errors, "两扇门说了不同的话"
     assert any("engine_min" in e for e in errors), errors
+
+
+#: `hail` 那一族的装载期拒绝(3.10.0,批 1.2 ②)。**加一种新的开机失败,就必须
+#: 同一轮补进离线那两扇门** —— 3.7.0 收 `beat` 段时漏过一次。
+_HAIL_REJECTIONS: tuple[tuple[str, dict, str], ...] = (
+    ("target 写的是一个角色",
+     _beat_row(id="h1", for_each={"node": "player"}, trigger={"at": {"day": 0}},
+               payload=[{"op": "hail", "agent_id": "甲", "target": "乙"}]),
+     "只写得下 'player'"),
+    ("少了 agent_id",
+     _beat_row(id="h2", for_each={"node": "player"}, trigger={"at": {"day": 0}},
+               payload=[{"op": "hail", "target": "player"}]),
+     "hail"),
+    ("line 不是文本",
+     _beat_row(id="h3", for_each={"node": "player"}, trigger={"at": {"day": 0}},
+               payload=[{"op": "hail", "agent_id": "甲", "target": "player",
+                         "line": ["下来一趟"]}]),
+     "'line' 要是一段文本"),
+)
+
+
+@pytest.mark.parametrize(
+    "case, row, needle", _HAIL_REJECTIONS,
+    ids=[case for case, _row, _needle in _HAIL_REJECTIONS],
+)
+def test_hail那一族的每一种拒绝_三扇门说同一句话(tmp_path, fresh_redis, case, row, needle):
+    path = _write(tmp_path / "bad-hail.cyberworld", [_MANIFEST, _YARD, _JIA, row])
+    ok, _, errors = _both(path, fresh_redis)
+    assert not ok, f"「{case}」开机是拦的,离线那两扇门必须一起拦"
+    assert any(needle in e for e in errors), (case, errors)
+
+
+def test_写对的hail_三条路都放行(tmp_path, fresh_redis):
+    """对照组。没有它,上面那一摞对一个「有 `hail` 就一律拦」的实现同样成立。"""
+    path = _write(tmp_path / "ok-hail.cyberworld", [
+        _MANIFEST, _YARD, _JIA,
+        _beat_row(id="h4", for_each={"node": "player"}, trigger={"at": {"day": 0}},
+                  payload=[{"op": "hail", "agent_id": "甲", "target": "player",
+                            "line": "下来一趟。"}]),
+    ])
+    ok, _, errors = _both(path, fresh_redis)
+    assert ok, f"写对的 hail 被拦下来了:{errors}"

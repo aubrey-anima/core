@@ -4644,6 +4644,78 @@ class Scheduler:
             return []
         return [str(row.get("summary") or "") for row in rows]
 
+    def _beat_hail(self, op: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """`hail`:让一个角色**主动来找玩家搭话**(3.10.0,批 1.2 ②)。
+
+        老板原话:「不让他们自己搭话吗」。剧情往下走从前只有一条路 —— 玩家自己去
+        点某个人;这一条让作者写得出「芬格尔在车站等你」那种**世界主动来找你**的时刻。
+
+        🔴 **它一条新路都不开**:走的是 `agent_hail` 那条已经存在的事件
+        (`reach_out` / 欠着的回话都发它,站点的 `hail.ts` 已经在听),
+        加上"把她挪到他跟前"那一下 —— 而那正是 `narrative_direction` 早就在做的事。
+        另发一种事件的话,站点要写第二套弹窗,而两套迟早只有一套跟着代码走。
+
+        ⚠️ **频率上限沿用 `claim_hail`** —— 和 `reach_out`、和欠着的回话共用一个
+        水位。取向是**像个人不像推送**(邀请门那一课):一天之内她已经叫过你一次,
+        这一拍就不再叫第二次;而"没叫成"不等于"这一拍作废",它照旧 `mark_fired`
+        (拍是剧情,响过就是响过 —— 让它留在待办里,下一 tick 会再试一遍,
+        那才是真的推送)。
+
+        ⚠️ **玩家不在场也照发**:那正是「他不在的时候」那一段的来源
+        (`return` 时刻会提)。她走到他**上一次在**的地方,事件照旧落进日志。
+        """
+        agent_id = str(op.get("agent_id") or "")
+        subject = str(op.get("target") or "")
+        if agent_id not in self.agents:
+            logger.warning("beat hail: agent %r 不在这个世界里 —— 跳过", agent_id)
+            return None
+        if not subject.startswith(self.PLAYER_PREFIX):
+            logger.warning("beat hail: target %r 不是玩家 —— 跳过", subject)
+            return None
+        player_id = subject[len(self.PLAYER_PREFIX):]
+        # 在场名册走 `_present_players` 那**唯一**一根线(`World` 注入的)——
+        # 这个仓库为"只有一处赋值 ≠ 接得上"记过一次,而另开一条读法是它的另一面。
+        roster: dict[str, Any] = {}
+        if self._present_players is not None:
+            try:
+                roster = self._present_players() or {}
+            except Exception:  # noqa: BLE001 - 读不到名册不该掀翻这一拍
+                logger.warning("beat hail:读在场玩家名册失败", exc_info=True)
+        info = roster.get(player_id) or {}
+        here = str(info.get("location") or "")
+        # 她走过去 —— **真的挪**,不是一句散文(「她的选择必须在世界里兑现」)。
+        if here:
+            brain = self.agents.get(agent_id)
+            if brain is not None:
+                brain.agent.blackboard.write("loc", here)
+                brain.agent.location = here
+        if self.claim_hail(agent_id, player_id):
+            # 今天已经叫过一次了。**说一句**,别静默 —— 作者会以为这一拍没写对。
+            logger.info("beat hail:%s 今天已经叫过 %s 了,这一拍不再叫第二次",
+                        agent_id, player_id)
+            return []
+        return [{
+            "type": "agent_hail",
+            "who": agent_id,
+            "loc": here,
+            "payload": {
+                "agent_id": agent_id,
+                "agent_name": self.agent_display_name(agent_id),
+                "player_id": player_id,
+                "player_name": info.get("display_name") or player_id,
+                "location": here,
+                "location_name": self.place_name(here or ""),
+                # 这一条是**剧情安排的**,不是她闲着想找人 —— 宿主可以按它把弹窗
+                # 写成「他来找你」而不是「他来打招呼」。
+                "reason": "beat",
+                # 作者写了就用他的,没写就让 `chat_open` 现生成一句
+                # (**引擎不在这里编台词**:它手上只有 op 名)。
+                **({"line": str(op["line"])} if str(op.get("line") or "").strip() else {}),
+                "opening": True,
+            },
+        }]
+
+
     def _expand_beat_op(self, op: dict[str, Any]) -> list[dict[str, Any]] | None:
         """One op → raw events (plus side effects for the two special ops).
         None ⇒ the op was skipped and must not appear in ops_applied.
@@ -4659,6 +4731,8 @@ class Scheduler:
             return self._beat_agent_leave(op)
         if kind == "agent_return":
             return self._beat_agent_return(op)
+        if kind == "hail":
+            return self._beat_hail(op)
         if kind == "location_desc":
             # config path (nested-map D7): writes the locations table, no event.
             self.update_location_description(str(op.get("location")), str(op.get("description", "")))

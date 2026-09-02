@@ -3077,6 +3077,157 @@ class World:
         ):
             yield token
 
+    def chat_open(
+        self,
+        agent_id: str,
+        player_id: str,
+        *,
+        display_name: str | None = None,
+        role: str = "",
+        hook: str = "",
+        meta: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
+        """**她先开口。** 一场对话的第一句由角色说(3.10.0,批 1.2 ①)。
+
+        老板 2026-09-02 真进去玩之后的原话:「让我去跟他们说话我不知道说啥,
+        剧情没法往下走啊,不让他们自己搭话吗」——「世界永远先开口」这条纪律
+        3.9.0 只做进了主持人那一屏,**没做进对话里**:玩家点「跟夏说说话」,
+        拿到的还是一个空白输入框。
+
+        **和 `chat()` 共用整套提示词**(人设 / 记忆 / 感知 / stance / 身份 / 在场):
+        它调的是同一个 `ChatService.respond`,只多两样 —— 一条"这一轮你先开口"的
+        系统指令,和**这一刻的由头**(主持人给这一项写的 `hook`、以及最近一条
+        指着这个玩家的剧情拍那句 `narrate`)。**另拼一份提示词的话,她主动开口时
+        会是另一个人,而没有一处会报错。**
+
+        静音闸、身份、在场、联系水位**一格都不跳** —— 它们答的是"这一场对话成不
+        成立",而那件事和谁先开口无关(见 `_chat_prelude`)。
+
+        流式产出,和 `chat()` 逐字同一个形状。**这一句要落进转录**:调用方拿它
+        走 `record_chat_turn(agent_id, player_id, [{"role":"assistant", …}])`,
+        完整转录仍归宿主。没配 key / 调用失败 → 一句模板(`host.mock_opening`),
+        **不重试** —— 和主持人那一屏同一条。
+
+        主持人那一屏里,`talk` 那一项的 `door.params` 带 `opening: true`,
+        宿主照它决定点下去是"她先说"还是"你先说"。
+        """
+        from anima_world import host as host_mod
+
+        prelude = self._chat_prelude(
+            agent_id, [], player_id=player_id, display_name=display_name,
+            role=role, opening=True,
+        )
+        interlocutor = prelude["interlocutor"]
+        beat_note = self._recent_beat_note(player_id)
+        # 作者写在 `hail` 上的那句台词 —— **它比旁白更该被说出口**:那正是作者
+        # 写它的原因。拿真 CLI 敲一遍才发现第一版把旁白塞进引号里当她的台词念。
+        line = self._recent_hail_line(agent_id, player_id)
+        place = str(interlocutor.get("location_name") or "")
+        name = self.scheduler.agent_display_name(agent_id)
+        if not str(self.config_get("llm.api_key", default="") or ""):
+            # 没配 key 是**默认状态**,所以这不是降级路上的边角料。
+            yield host_mod.mock_opening(name, line=line, hook=hook, beat_note=beat_note)
+            return
+        extra = host_mod.opening_context(
+            line=line, hook=hook, beat_note=beat_note, place_name=place)
+        stream = self.chat_service.respond(
+            agent_id, [], interlocutor_id=player_id, interlocutor=interlocutor,
+            meta=meta, extra_system=extra,
+        )
+        said = False
+        for chunk in self._bridge.iterate(stream):
+            said = said or bool(str(chunk).strip())
+            yield chunk
+        if not said:
+            # **空回复和"她不想说"在界面上分不出来**,而这一层没有"不想说"这回事:
+            # 是引擎叫她开的口。给一句模板,别给一个空白气泡。
+            yield host_mod.mock_opening(name, line=line, hook=hook, beat_note=beat_note)
+
+    def chat_suggestions(self, agent_id: str, player_id: str) -> list[str]:
+        """输入框上方那两三句**他可以说的话**(3.10.0,批 1.2 ③)。
+
+        「我不知道说啥」的另一半:她先开了口,而他还是得自己想下一句。
+
+        🔴 **挑什么是纯算术,LLM 只写字** —— 和主持人挑选项那一层逐字同一条纪律。
+        由头是这一刻真有的三样:最近一条指着他的剧情拍、她此刻在做什么、
+        她对他的 stance。没配 key 时那几句种子**直接就是**建议(可复现);
+        有 key 时它们是给模型的由头,模型只负责把它们写成人话。
+
+        返回 2–3 条短句;**永远不空** —— 一份空的建议和没有这个功能一样。
+        """
+        from anima_world import host as host_mod
+
+        if agent_id not in self.scheduler.agents:
+            raise KeyError(f"agent {agent_id} not found")
+        beat_note = self._recent_beat_note(player_id)
+        # **「某某此刻在做什么」这个仓库只有一句措辞**(`_activities_now`),
+        # 三个读者共用它 —— 另拼一句的话,同一件事在建议句里和在她的提示词里
+        # 是两种说法。键是 `stock_owner_of` 那个命名空间(`agent:夏`)。
+        doing = self._activities_now().get(f"agent:{agent_id}", "")
+        stance = ""
+        try:
+            row = self.chat_state.stance(agent_id, player_id) or {}
+            stance = str(row.get("stance") or row.get("kind") or "")
+        except Exception:  # noqa: BLE001 - 少一个由头不该掀翻这一屏
+            stance = ""
+        seeds = host_mod.suggestion_seeds(
+            hook=doing, beat_note=beat_note,
+            agent_name=self.scheduler.agent_display_name(agent_id), stance=stance,
+        )
+        client = getattr(self.chat_service, "_background_llm", None)
+        if client is None or not str(self.config_get("llm.api_key", default="") or ""):
+            return seeds
+        messages = host_mod.suggestion_messages(
+            agent_name=self.scheduler.agent_display_name(agent_id),
+            beat_note=beat_note, doing=doing, seeds=seeds,
+        )
+        try:
+            reply = self._bridge.run(client.complete(messages))
+        except Exception:  # noqa: BLE001 - 失败即模板,不重试(和主持人那一屏同一条)
+            return seeds
+        lines = host_mod.parse_suggestions(reply, limit=len(seeds))
+        return lines or seeds
+
+    def _recent_hail_line(self, agent_id: str, player_id: str) -> str:
+        """最近一条**这个角色对这个玩家**的 `agent_hail` 上,作者写的那句台词。
+
+        它是 `hail` 那条 op 的 `line`(可选)。**只认作者写的**:引擎在这一层
+        不编台词,和 `_recent_beat_note` 逐字同一条理由。
+        """
+        log = self.scheduler.event_log
+        if log is None:
+            return ""
+        for event in reversed(log.replay()):
+            if event.type != "agent_hail":
+                continue
+            payload = event.payload or {}
+            if str(payload.get("agent_id") or "") != agent_id:
+                continue
+            if str(payload.get("player_id") or "") != player_id:
+                continue
+            return str(payload.get("line") or "")
+        return ""
+
+    def _recent_beat_note(self, player_id: str) -> str:
+        """最近一条**指着这个玩家**的剧情拍,作者写的那句话(`narrate`)。
+
+        ⚠️ **只认作者写的那一句**:这一层手上只有 op 名,把「这一拍响了」翻译成
+        一句剧情是作者的活 —— 引擎编一句的下场是她开口说一件世界里没有的事,
+        而它听起来像真的(和 `host.recap_lines` 那一格逐字同一条理由)。
+        """
+        log = self.scheduler.event_log
+        if log is None:
+            return ""
+        key = f"{Scheduler.PLAYER_PREFIX}{player_id}"
+        for event in reversed(log.replay()):
+            if event.type != "beat_fired":
+                continue
+            if str((event.payload or {}).get("for") or "") != key:
+                continue
+            return str((event.payload or {}).get("narrate") or "")
+        return ""
+
+
     def _chat_prelude(
         self,
         agent_id: str,
@@ -3085,6 +3236,7 @@ class World:
         player_id: str,
         display_name: str | None,
         role: str,
+        opening: bool = False,
     ) -> dict[str, Any]:
         """一轮聊天开口之前要办的事:校验、静音闸、身份、在场。
 
@@ -3093,7 +3245,12 @@ class World:
         """
         if agent_id not in self.scheduler.agents:
             raise KeyError(f"agent {agent_id} not found")
-        if not messages or messages[-1].get("role") != "user":
+        # 🆕 3.10.0(批 1.2 ①):**她先开口那一轮没有"他说的那一句"。**
+        # 这里放宽的只有这一条形状检查与下面那句自报家门 —— 静音闸、身份、在场、
+        # 联系水位**一格都不跳**,因为它们答的是"这一场对话成不成立",
+        # 而那件事和谁先开口无关。**开两条 prelude 的那天,一条路上守住的边界
+        # 会在另一条上漏**(这个函数自己的 docstring 写着这句)。
+        if not opening and (not messages or messages[-1].get("role") != "user"):
             raise ValueError("messages must end with a user turn")
         # 软静音(#15):世界当场拒,消息不进 LLM。硬静音(锁输入框)由宿主按
         # `mute_started` 事件自己决定 —— 引擎不替 UI 做主。
@@ -3102,7 +3259,9 @@ class World:
             raise AgentUnavailable(agent_id, player_id, quiet)
         # 他自报家门的话,在这儿就落库 —— **要早于 `_interlocutor_for`**,这一轮的
         # 身份块才读得到"他刚说了他叫什么"。记完照旧往下走:这一轮仍然是对话。
-        self._note_self_introduction(agent_id, player_id, str(messages[-1].get("content") or ""))
+        if not opening:
+            self._note_self_introduction(
+                agent_id, player_id, str(messages[-1].get("content") or ""))
         interlocutor = self._interlocutor_for(player_id, display_name, role)
         # 记住这个玩家叫什么。记忆文本里写的是名字,不是 id —— 检索 query 用得上
         # (见 world_context)。身份即参数,所以世界只在被告知时才知道。
@@ -3137,7 +3296,7 @@ class World:
         self._note_player_contact(agent_id, player_id, interlocutor["address"])
         return {
             "interlocutor": interlocutor,
-            "user_text": str(messages[-1].get("content") or ""),
+            "user_text": "" if opening else str(messages[-1].get("content") or ""),
         }
 
     def _note_self_introduction(self, agent_id: str, player_id: str, user_text: str) -> None:
@@ -8606,7 +8765,12 @@ class World:
                 "label": f"和{row.get('name') or agent_id}说说话",
                 "who": str(row.get("name") or agent_id), "hook": "", "tone": "social",
                 "available": True, "reason": "", "refusal": "", "cost": "",
-                "door": {"method": "chat", "params": {"agent_id": agent_id}},
+                # 🆕 3.10.0(批 1.2 ①):**`opening: true` = 点下去她先开口。**
+                # 老板原话:「让我去跟他们说话我不知道说啥」。这一格让宿主照它决定
+                # 走 `chat_open`(她先说)还是 `chat`(你先说)—— 而**判断在引擎侧**:
+                # 让站点自己猜"要不要让她先说",就是让它拿一份对世界的猜测做决定。
+                "door": {"method": "chat",
+                         "params": {"agent_id": agent_id, "opening": True}},
             })
 
         # ④ 摸得着的东西。**四格拒绝原样透传**,一个字不另算。

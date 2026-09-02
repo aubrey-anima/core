@@ -9075,6 +9075,11 @@ def contract_payload() -> dict[str, Any]:
         # **这一格缺席 = 这支引擎没有它**(不是 `null`)。按段探测,别比版本号。
         "host": {
             "method": "host_turn",
+            # 🆕 3.10.0(批 1.2):对话那一侧的两扇门。**这一段缺席 = 这支引擎的
+            # 「世界先开口」只做进了主持人那一屏,没做进对话里**(玩家点「跟她
+            # 说说话」拿到的还是一个空白输入框)。按段探测,不比版本号。
+            "opening_method": "chat_open",
+            "suggestions_method": "chat_suggestions",
             "cli": "anima-world player host --player <pid> [--json] [--ask]",
             "moments": list(HOST_MOMENTS),
             "option_kinds": list(OPTION_KINDS),
@@ -9085,7 +9090,11 @@ def contract_payload() -> dict[str, Any]:
             # 但点不动)。`?` 结尾 = 可选。
             "door_params": {
                 "answer_invitation": ["invite_seq", "accept"],
-                "chat": ["agent_id", "text?"],
+                # 🆕 3.10.0(批 1.2 ①):`opening` —— 真时点下去**她先开口**
+                # (走 `World.chat_open`);缺席 / False = 老样子,你先说。
+                # **判断在引擎侧**:让宿主自己猜"要不要让她先说",就是让它拿一份
+                # 对世界的猜测做决定。
+                "chat": ["agent_id", "text?", "opening?"],
                 "player_walk": ["location"],
                 "player_tool": ["tool_id", "params"],
                 "free": [],

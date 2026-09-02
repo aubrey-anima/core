@@ -39,7 +39,14 @@ EVENT_OPS = {
     # 的投影,所以不新增 schema、不改 db 格式。
     "pay", "grant_item",
 }
-VALID_OPS = EVENT_OPS | {"agent_join", "location_desc", "agent_leave", "agent_return"}
+# 🆕 3.10.0(批 1.2 ②):`hail` —— **让一个角色主动来找玩家搭话。**
+#
+# 老板原话:「不让他们自己搭话吗」。剧情往下走从前只有一条路:玩家自己去点某个人。
+# 这一条让作者写得出「芬格尔在车站等你」那种**世界主动来找你**的时刻。
+# 它走的是**已有那条**(`agent_hail` 事件 + 站点已有的 `hail.ts`),
+# 引擎这一层一条新的"写世界"的路都不开。
+VALID_OPS = EVENT_OPS | {"agent_join", "location_desc", "agent_leave", "agent_return",
+                         "hail"}
 
 # 物质 op 里 `from`/`to` 允许写的非角色持有者。金库允许负债(economy.TOWN),
 # 世界是凭空来源 —— 一件道具"本来就在她口袋里"不需要有人先失去它。
@@ -183,6 +190,9 @@ def pack_days_from(projection: Any) -> dict[str, int]:
 # 关系的**主语**只能是角色:`as: "player"` 拒、`target: "player"` 收 —— 引擎里
 # "他对她的看法"是角色那一侧的四轴,不是玩家的。
 PLAYER_ALLOWED_OP_FIELDS: dict[str, tuple[str, ...]] = {
+    # 🆕 3.10.0:`hail` 的 `target` **只写得下玩家** —— 「角色去找角色搭话」是
+    # 行为树那条路的事,不该由剧情拍代劳(那会是第二份"谁去找谁"的判断)。
+    "hail": ("target",),
     "sentiment_delta": ("target",),
     "r_type": ("target",),
     "pay": ("from", "to"),
@@ -485,6 +495,8 @@ _OP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "sentiment_delta": ("as", "target", "delta"),
     "r_type": ("as", "target"),
     "persona_update": ("agent_id", "spec"),
+    # `target` 只写得下 `player`(见 `PLAYER_ALLOWED_OP_FIELDS`);`line` 可选。
+    "hail": ("agent_id", "target"),
     "location_desc": ("location", "description"),
     "agent_leave": ("agent_id",),
     "agent_return": ("agent_id", "location"),
@@ -525,6 +537,24 @@ def _validate_payload(payload: Any, label: str, *, per_player: bool = False) -> 
             errors.append(f"{op_label}: r_type op needs r_type and/or r_type_back")
         if kind == "persona_update" and not isinstance(op.get("spec"), dict):
             errors.append(f"{op_label}: persona_update 'spec' must be an object")
+        if kind == "hail":
+            # 🔴 **`target` 只写得下保留字 `player`。** 两个理由,都在加载期就能说:
+            # ① 世界文件写在玩家出现之前,**一条拍写不出玩家的 id**;
+            # ② 「角色去找角色搭话」是行为树那条路的事,由剧情拍代劳就是第二份
+            #    「谁去找谁」的判断。放行的样子是安静的:运行期一句 warning 跳过,
+            #    而这一拍照旧 `mark_fired` —— **永久失效,且重启不重放**
+            #    (`for_each` 那个洞逐字同一种形状)。
+            if str(op.get("target") or "") != PLAYER_TOKEN:
+                errors.append(
+                    f"{op_label}: hail 的 'target' 只写得下 {PLAYER_TOKEN!r} —— "
+                    "世界文件写在玩家出现之前,一条拍写不出他的 id;而"
+                    "「角色去找角色搭话」走的是行为树那条路,不由剧情拍代劳"
+                )
+            if not str(op.get("agent_id") or "").strip():
+                errors.append(f"{op_label}: hail 少了 'agent_id'(谁来找他)")
+            line = op.get("line")
+            if line is not None and not isinstance(line, str):
+                errors.append(f"{op_label}: hail 的 'line' 要是一段文本")
         if kind in ("memory", "broadcast_memory"):
             errors.extend(_validate_memory_fields(op, op_label))
         if kind == "agent_join":

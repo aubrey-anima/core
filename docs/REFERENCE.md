@@ -3339,6 +3339,8 @@ from anima_world.api import World
 | `world.achat(...)` | `chat()` 的原生 async 版本(参数逐字相同) |
 | `world.chat_reply(...)` | 同上,非流式,直接返回整段 |
 | `world.chat_burst(agent_id, messages, *, player_id, display_name=None, role="player", interrupt_check=None)` | **连着说到她自己想停**(#17)。产出步骤 dict:`budget` / `text` / `message` / `stance` / `tool_call` / `stop`。`interrupt_check` 是一个 `() -> str | None` 回调,返回一句话就是玩家插话 —— 接着说还是转向**由她判**。`chat.loop.enabled` 关着时只跑一步,形状不变。`world.achat_burst(...)` 是 async 版 |
+| 🆕 `world.chat_open(agent_id, player_id, *, display_name=None, role="", hook="", meta=None)` | **她先开口** —— 一场对话的第一句由角色说(3.10.0,批 1.2)。老板真进去玩之后的原话:「让我去跟他们说话我不知道说啥,剧情没法往下走啊,不让他们自己搭话吗」——「世界永远先开口」这条纪律 3.9.0 只做进了主持人那一屏,**没做进对话里**。流式,形状和 `chat()` 逐字相同;**共用整套提示词**(同一个 `ChatService.respond`),只多两样:一条「这一轮你先开口」的系统指令,和这一刻的由头(主持人给这一项写的 `hook` + 最近一条指着他的剧情拍那句 `narrate`)。静音闸 / 身份 / 在场 / 联系水位**一格都不跳**。没 key 或空回复 → 一句模板(`host.mock_opening`),**不重试**。这一句要落进转录:调用方拿它走 `record_chat_turn`。主持人那一屏 `talk` 项的 `door.params.opening` 为真时就该走这条 |
+| 🆕 `world.chat_suggestions(agent_id, player_id)` | 输入框上方那 **2–3 句他可以说的话**(3.10.0,批 1.2)。「我不知道说啥」的另一半。🔴 **挑什么是纯算术,LLM 只写字** —— 和主持人挑选项那一层逐字同一条纪律;由头是这一刻真有的三样(最近一条指着他的拍 / 她此刻在做什么 / 她对他的 stance)。没 key 时那几条种子直接就是建议(可复现);有 key 时模型只把它们写成人话,失败即回落。**永远不空** —— 一份空的建议和没有这个功能一样 |
 | `world.record_chat_turn(agent_id, player_id, messages, *, meta=None)` | 把完成回合(恰好 user→assistant 两条)记入世界并关闭:摘要 + 一个 conversation 事件 + 关系判定。返回会话 id。失败即异常,重试由调用方决定。`meta` 把 `chat()` 那轮的观测量落到消息行上(intent 落用户那行,stance / tool_calls 落她那行) |
 | `world.conversations(agent_id)` / `world.conversation_messages(conversation_id)` | 会话列表 / 消息 |
 | `world.close_conversation(conversation_id)` | 手动关会话(摘要+事件+判定) |
@@ -5067,6 +5069,7 @@ MySQL。两个理由都是硬的:① 一行一条 —— 塞进一个 `redis` li
 | `agent_leave` | `agent_id` | 离场(无配对 `agent_return` 只警告,不阻塞) |
 | `agent_return` | `agent_id`, `location` | 返场,**必须说明回到哪里** |
 | `location_desc` | `location`, `description` | 改地点描述 |
+| `hail` | `agent_id`, `target` | 🆕 **3.10.0:让这个角色主动来找玩家搭话**(3.10.0,§9.1.2)。`target` 只写得下保留字 `player`,所以它只在 `for_each: {"node":"player"}` 的拍上有意义;可选 `line` 是作者写的**她的台词**(和拍上的 `narrate` 是两种东西:那是旁白)。走已有的 `agent_hail` 事件 + 真的把她挪到他跟前;频率沿用 `claim_hail`,**没叫成不等于这一拍作废** |
 | `pay` | `from`, `to`, `amount` | 转账(可选 `reason`)。持有者可以是角色、`__town__`(金库,允许负债)或 `__world__`。`amount` 必须 > 0 —— 反向转账把 `from`/`to` 调过来 |
 | `grant_item` | `agent_id`, `item_id` | 给/拿走一件东西(可选 `qty`,**负数 = 拿走**;可选 `from`,缺省 `__world__`) |
 
@@ -5236,6 +5239,7 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 | `agent_leave` | — | 玩家的来去是在场,不是世界事件 |
 | `agent_return` | — | 同上 |
 | `location_desc` | — | 它和人无关 |
+| `hail` | `target` | 🆕 3.10.0:而且 `target` **只**写得下它 —— 「角色去找角色搭话」走的是行为树那条路,不由剧情拍代劳 |
 
 **谓词的收拒表**(一行一个谓词):
 
@@ -5258,6 +5262,35 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 3.8.0 上开得了机**,拍按世界时响一次、烧掉。这个闭集救不了 3.8.0,它救的是下一个
 不认识的键;**发包前的判据是 `contract --json` 里 `beats.player_selector` 在不在,
 不是版本号。**
+
+#### 9.1.2 `hail`:让一个角色主动来找玩家搭话(3.10.0)
+
+```jsonc
+{"id": "芬格尔来找你", "for_each": {"node": "player"},
+ "trigger": {"at": {"day": 0, "minute_of_day": 60}},
+ "narrate": "手机震了一下,是个没存过的号码。",
+ "payload": [{"op": "hail", "agent_id": "芬格尔", "target": "player",
+              "line": "师弟!下来一趟,车站这边。"}]}
+```
+
+老板 2026-09-02 的原话:「不让他们自己搭话吗」。剧情往下走从前只有一条路 ——
+**玩家自己去点某个人**;这一条让作者写得出「芬格尔在车站等你」那种世界主动
+来找你的时刻。
+
+🔴 **它一条新路都不开**:走的是 `agent_hail` 那条已经存在的事件(`reach_out`
+与欠着的回话都发它,站点已经在听),加上「把她挪到他跟前」那一下 ——
+而那正是 `narrative_direction` 早就在做的事。另发一种事件的话,站点要写第二套
+弹窗,而两套迟早只有一套跟着代码走。
+
+- `target` **只写得下 `player`**(所以这条 op 只在 `for_each: {"node":"player"}`
+  的拍上有意义)。「角色去找角色搭话」是行为树那条路的事,不该由剧情拍代劳 ——
+  那会是第二份「谁去找谁」的判断。
+- `line` 可选:作者写了就带在事件上,没写就让 `chat_open` 现生成一句。
+  **引擎在这一层不编台词**(它手上只有 op 名)。
+- 频率上限沿用 `claim_hail`,和 `reach_out`、和欠着的回话**共用一个水位** ——
+  一天之内她已经叫过你一次,这一拍就不再叫第二次(取向是像个人不像推送)。
+  没叫成**不等于这一拍作废**:它照旧 `mark_fired`,拍是剧情,响过就是响过。
+- 玩家不在场也照发:那正是「他不在的时候」那一段的来源。
 
 #### 9.1.1 `narrate`:这一拍响的时候,给玩家看的那一句话(3.10.0)
 

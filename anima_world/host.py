@@ -212,6 +212,97 @@ def recap_lines(
     return lines
 
 
+# ── 世界先开口,而这一条要开到**对话里**去(3.10.0,批 1.2)────────────────
+#
+# 老板 2026-09-02 刷新之后真进去玩,原话:
+#   「让我去跟他们说话我不知道说啥,剧情没法往下走啊,不让他们自己搭话吗」
+#
+# 🔴 **「世界永远先开口」这条纪律,3.9.0 只做进了主持人那一屏,没做进对话里。**
+# 玩家点「跟夏说说话」,拿到的还是一个空白输入框 —— 而跑团桌上 GM 不会把 NPC
+# 推到你面前然后闭嘴。这一族三件:她先说第一句 · 拍子能让她主动来找你 ·
+# 输入框上方几句现成的话。
+
+OPENING_SYSTEM = (
+    "这一轮「你先开口」:对方还没有说任何话。"
+    "用一到三句话主动搭话 —— 说你此刻在做什么、为什么注意到他,"
+    "或者把你想跟他说的那件事说出来。"
+    "「不要」替他说话,「不要」问他「你想聊什么」,也「不要」复述这条指示。"
+)
+
+
+def opening_context(*, line: str = "", hook: str = "", beat_note: str = "",
+                    place_name: str = "") -> list[str]:
+    """她先开口那一轮,除了平常那一整套之外还要知道的几件。
+
+    **只加"这一刻的由头",不加第二份人设/记忆/感知** —— 那一整套走的是
+    `ChatService.prompt_blocks`,和玩家先说话那条路**逐字同一份**。
+    各拼一份的话,她主动开口时会是另一个人,而没有一处会报错。
+    """
+    out: list[str] = [OPENING_SYSTEM]
+    if place_name:
+        out.append(f"你们此刻都在{place_name}。")
+    if line:
+        # 作者写在 `hail` 上的**她的台词**。给模型当由头,不强迫它逐字念 ——
+        # 逐字念就成了一句永远不变的台词,而她此刻的心情、你们的关系都白算了。
+        out.append(f"你正想对他说的是这个意思:「{line}」")
+    if beat_note:
+        # 指着他的那一拍刚响过 —— **这就是"剧情往下走"的那个由头**。
+        out.append(f"你正惦记着这件事:{beat_note}")
+    if hook:
+        # 主持人那一屏给这一项写的钩子。同一件事在两处说同一句话。
+        out.append(f"他看到的那句提示是:{hook}")
+    return out
+
+
+def mock_opening(agent_name: str, *, line: str = "", hook: str = "",
+                 beat_note: str = "") -> str:
+    """没配 key / LLM 挂了时她开的那一句。**没配 key 是默认状态**,所以这不是
+    降级路上的边角料,而是很多人看到的第一句话。
+
+    🔴 **`line` 和 `beat_note` 不是同一种东西,别当成同一种用**(拿真 CLI 敲出来的):
+    `line` 是作者写在 `hail` 上的**她的台词**(「师弟!下来一趟。」),
+    `beat_note` 是拍上的 `narrate`,是**旁白**(「手机震了一下,是个没存过的号码。」)。
+    把旁白塞进引号里当她的台词念,出来的是一句念不通的话 —— 而**一句念不通的话
+    和一句错的一样贵**。有台词就用台词,只有旁白就把旁白当旁白写。
+    """
+    name = str(agent_name or "").strip() or "她"
+    if line:
+        return f"{name}朝你走过来:「{line}」"
+    if beat_note:
+        return f"{beat_note}{name}抬眼看见你。"
+    if hook:
+        return f"{name}正{hook},看见你,停了一下。"
+    return f"{name}抬头看见你,朝你点了点头:「你来了。」"
+
+
+#: 建议句一屏给几条。**2–3 条** —— 给一条等于替他做决定,给五条又变成另一份菜单。
+SUGGESTION_LIMIT = 3
+
+
+def suggestion_seeds(*, hook: str = "", beat_note: str = "",
+                     agent_name: str = "", stance: str = "") -> list[str]:
+    """没有 LLM 时那几句建议 —— **纯算术,同一时刻挑两次逐字相同**。
+
+    🔴 和主持人挑选项那一层同一条纪律:**挑什么是算出来的,LLM 只写字**。
+    有 key 时这几句是给模型的**由头**,没 key 时它们直接就是那几句。
+    """
+    name = str(agent_name or "").strip()
+    out: list[str] = []
+    if beat_note:
+        out.append("问问他刚才说的那件事")
+    if hook:
+        out.append("接着他手上那件事往下问")
+    if stance in ("试探", "回避", "刺"):
+        out.append("直接问他怎么了")
+    out.append(f"问问{name}最近怎么样" if name else "问问他最近怎么样")
+    out.append("说说你自己")
+    seen: list[str] = []
+    for line in out:
+        if line not in seen:
+            seen.append(line)
+    return seen[:SUGGESTION_LIMIT]
+
+
 def free_option() -> dict[str, Any]:
     """自由输入那一项。**永远在,永远最后,而且不占 `host.max_options` 的名额。**
 
@@ -371,3 +462,45 @@ def parse_scene_reply(text: str, *, options: list[dict[str, Any]]) -> tuple[str,
         if line:
             hooks.append(line)
     return scene, hooks[:wanted]
+
+
+def suggestion_messages(*, agent_name: str, beat_note: str, doing: str,
+                        seeds: list[str]) -> list[dict[str, str]]:
+    """把那几个"由头"交给背景槽写成人话。**一次调用,失败即模板,不重试。**
+
+    🔴 **模型只写字,不挑事**:给它的是已经挑好的那几条,它把每一条写成一句
+    玩家可以直接说出口的短话。让它自己想说什么,同一个世界同一时刻会给出不同的
+    现实 —— 那正是主持人那一层写死过的同一条。
+    """
+    listed = "\n".join(f"{i}. {s}" for i, s in enumerate(seeds, 1))
+    system = (
+        "你在帮一个文字冒险游戏的玩家想「接下来可以说什么」。"
+        "用中文写,每条不超过 15 字,是玩家「直接说得出口」的一句话,"
+        "「不要」写成旁白或指示,「不要」加编号以外的任何符号。"
+    )
+    user = (
+        f"对方是{agent_name}。"
+        + (f"他此刻{doing}。\n" if doing else "\n")
+        + (f"刚发生的事:{beat_note}\n" if beat_note else "")
+        + f"请把下面每一条改写成一句玩家能直接说的话,一行一条,顺序不变:\n{listed}"
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def parse_suggestions(text: str, *, limit: int) -> list[str]:
+    """把模型那几行拆成建议句。**读不懂就少给,绝不猜** —— 和 `parse_scene_reply`
+    逐字同一个姿势;调用方拿不到就回落到那几条种子。"""
+    out: list[str] = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        for sep in (". ", "、", ":", ":", ") ", ")"):
+            head, found, tail = line.partition(sep)
+            if found and len(head) <= 3 and any(ch.isdigit() for ch in head):
+                line = tail.strip()
+                break
+        line = line.strip("-·— 「」\"'")
+        if line:
+            out.append(line[:20])
+        if len(out) >= limit:
+            break
+    return out

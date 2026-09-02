@@ -448,3 +448,87 @@ def test_世界级的拍写narrate_当场拒(tmp_path):
             "id": "世界级", "trigger": {"at": {"day": 0}}, "narrate": "哈",
             "payload": [{"op": "memory", "agent_id": "甲", "summary": "s"}]}]})
     assert "没有「那个人」" in str(err.value), str(err.value)
+
+
+# ── 批 1.2 ②:`hail` —— 让一个角色主动来找玩家搭话(3.10.0)──────────────────
+
+def _hail_world(tmp_path, name, **over):
+    from _worldfile import open_world_at, write_seed_file
+
+    seed = {
+        "locations": [{"id": "车站", "name": "车站", "description": "d"},
+                      {"id": "宿舍", "name": "宿舍", "description": "d"}],
+        "agents": [{"id": "芬格尔", "name": "芬格尔", "location": "车站",
+                    "personality": "话多"}],
+    }
+    seed.update(over)
+    path = write_seed_file(tmp_path / f"{name}.cyberworld", seed)
+    return open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
+                         force_mock_llm=True)
+
+
+_HAIL_BEAT = {
+    "id": "芬格尔来找你", "for_each": {"node": "player"},
+    "trigger": {"at": {"day": 0}},
+    "payload": [{"op": "hail", "agent_id": "芬格尔", "target": "player",
+                 "line": "师弟!下来一趟,车站这边。"}],
+}
+
+
+def test_hail_让她真的走过来_并且发的是已有那条事件(tmp_path):
+    """🔴 **它一条新路都不开**:走的是 `agent_hail`(站点已经在听)+ 把她挪过去。
+    另发一种事件的话,站点要写第二套弹窗,而两套迟早只有一套跟着代码走。"""
+    with _hail_world(tmp_path, "h1", beats=[_HAIL_BEAT]) as world:
+        world.player_move("p1", "宿舍")
+        world.tick(3)
+        hails = [e.payload for e in world.scheduler.event_log.replay()
+                 if e.type == "agent_hail"]
+        assert len(hails) == 1, hails
+        assert hails[0]["agent_id"] == "芬格尔"
+        assert hails[0]["player_id"] == "p1"
+        assert hails[0]["reason"] == "beat"
+        assert hails[0]["line"] == "师弟!下来一趟,车站这边。"
+        assert hails[0]["opening"] is True
+        # **真的挪过去** —— 「她的选择必须在世界里兑现」。
+        assert world.scheduler.agents["芬格尔"].agent.location == "宿舍"
+
+
+def test_hail的target只写得下玩家(tmp_path):
+    """「角色去找角色搭话」是行为树那条路的事,不该由剧情拍代劳 ——
+    那会是第二份「谁去找谁」的判断。"""
+    from anima_world.beats import BeatScript, BeatScriptError
+
+    with pytest.raises(BeatScriptError) as raised:
+        BeatScript.from_data({"beats": [{
+            "id": "x", "trigger": {"at": {"day": 0}},
+            "payload": [{"op": "hail", "agent_id": "芬格尔", "target": "柔"}]}]})
+    assert "target" in str(raised.value)
+
+
+def test_hail一天只叫一次_而那一拍照旧算响过(tmp_path):
+    """频率上限沿用 `claim_hail`,和 `reach_out`、和欠着的回话**共用一个水位** ——
+    取向是像个人不像推送。⚠️ **没叫成不等于这一拍作废**:拍是剧情,响过就是响过。
+    """
+    second = {**_HAIL_BEAT, "id": "再来一次",
+              "trigger": {"at": {"day": 0, "minute_of_day": 30}}}
+    with _hail_world(tmp_path, "h2", beats=[_HAIL_BEAT, second]) as world:
+        world.player_move("p1", "宿舍")
+        world.tick(12)
+        hails = [e for e in world.scheduler.event_log.replay()
+                 if e.type == "agent_hail"]
+        assert len(hails) == 1, "一天叫了两次 —— 那是推送不是人"
+        fired = sorted(e.payload["beat_id"] for e in world.scheduler.event_log.replay()
+                       if e.type == "beat_fired")
+        assert fired == ["再来一次", "芬格尔来找你"], "没叫成的那一拍被当成作废了"
+
+
+def test_hail指着一个不在的人_跳过而不是掀翻这一拍(tmp_path):
+    with _hail_world(tmp_path, "h3", beats=[{
+        **_HAIL_BEAT, "payload": [{"op": "hail", "agent_id": "谁也不是",
+                                   "target": "player"}]}]) as world:
+        world.player_move("p1", "宿舍")
+        world.tick(3)
+        assert [e.payload["beat_id"] for e in world.scheduler.event_log.replay()
+                if e.type == "beat_fired"] == ["芬格尔来找你"]
+        assert not [e for e in world.scheduler.event_log.replay()
+                    if e.type == "agent_hail"]

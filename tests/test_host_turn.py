@@ -504,3 +504,95 @@ def test_turn_keys_契约与真门逐格相等(world):
 
     turn = world.host_turn("p1")
     assert sorted(contract_payload()["host"]["turn_keys"]) == sorted(turn)
+
+
+# ── 批 1.2:世界先开口,而这一条要开到对话里去(3.10.0)──────────────────────
+#
+# 老板 2026-09-02 刷新之后真进去玩,原话:
+#   「让我去跟他们说话我不知道说啥,剧情没法往下走啊,不让他们自己搭话吗」
+# 🔴 **「世界永远先开口」这条纪律,3.9.0 只做进了主持人那一屏,没做进对话里。**
+
+def test_她先开口_没配key也有一句话(world):
+    """**没配 key 是默认状态** —— 这不是降级路上的边角料,而是很多人读到的第一句。"""
+    said = "".join(world.chat_open("夏", "p1"))
+    assert said.strip(), "她被叫起来开口,却给了一个空白气泡"
+    assert "夏" in said or "苏晚夏" in said, said
+
+
+def test_她先开口那一轮_静音闸照旧管得住(world):
+    """🔴 **静音闸、身份、在场一格都不跳** —— 它们答的是「这一场对话成不成立」,
+    而那件事和谁先开口无关。开两条 prelude 的那天,一条路上守住的边界会在另一条上漏。
+    """
+    from anima_world.api import AgentUnavailable
+
+    world.chat_state.set_quiet("夏", "p1", minutes=5)
+    with pytest.raises(AgentUnavailable):
+        list(world.chat_open("夏", "p1"))
+
+
+def test_她先开口_不认识的人当场抛(world):
+    with pytest.raises(KeyError):
+        list(world.chat_open("根本没有这个人", "p1"))
+
+
+def test_主持人那一屏的talk项_告诉宿主她先开口(world):
+    """**判断在引擎侧**:让站点自己猜"要不要让她先说",就是让它拿一份对世界的
+    猜测做决定。"""
+    turn = world.host_turn("p1")
+    talk = [o for o in turn["options"] if o["kind"] == "talk"]
+    assert talk, turn["options"]
+    assert talk[0]["door"] == {"method": "chat",
+                               "params": {"agent_id": talk[0]["door"]["params"]["agent_id"],
+                                          "opening": True}}, talk[0]["door"]
+
+
+def test_建议句_没配key也有两三条_而且可复现(world):
+    """🔴 **挑什么是纯算术,LLM 只写字** —— 同一个世界同一时刻挑两次逐字相同。
+    **永远不空**:一份空的建议和没有这个功能一样。"""
+    first = world.chat_suggestions("夏", "p1")
+    assert 1 <= len(first) <= 3, first
+    assert all(s.strip() for s in first)
+    assert world.chat_suggestions("夏", "p1") == first, "同一时刻两次给了不同的现实"
+
+
+def test_建议句_不认识的人当场抛(world):
+    with pytest.raises(KeyError):
+        world.chat_suggestions("根本没有这个人", "p1")
+
+
+def test_她先开口那一句_用作者写的台词_而不是把旁白塞进引号里(tmp_path):
+    """🔴 **拿真 CLI 敲一遍才发现的**:`line` 和 `narrate` 不是同一种东西 ——
+    `line` 是作者写在 `hail` 上的**她的台词**(「师弟!下来一趟。」),
+    `narrate` 是**旁白**(「手机震了一下,是个没存过的号码。」)。
+    把旁白塞进引号里当她的台词念,出来的是一句念不通的话,而**一句念不通的话
+    和一句错的一样贵**。
+    """
+    from _worldfile import open_world_at, write_seed_file
+
+    seed = {
+        "locations": [{"id": "宿舍", "name": "宿舍", "description": "四人间"}],
+        "agents": [{"id": "芬格尔", "name": "芬格尔", "location": "宿舍",
+                    "personality": "话多"}],
+        "beats": [{"id": "夜宵局", "for_each": {"node": "player"},
+                   "trigger": {"at": {"day": 0}},
+                   "narrate": "手机震了一下,是个没存过的号码。",
+                   "payload": [{"op": "hail", "agent_id": "芬格尔",
+                                "target": "player", "line": "师弟!下来一趟。"}]}],
+    }
+    path = write_seed_file(tmp_path / "line.cyberworld", seed)
+    with open_world_at(str(tmp_path / "line.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "宿舍")
+        world.tick(3)
+        said = "".join(world.chat_open("芬格尔", "p1"))
+        assert "师弟!下来一趟。" in said, said
+        assert "手机震了一下" not in said, f"旁白被当成她的台词念了:{said}"
+
+
+def test_只有旁白没有台词时_旁白当旁白写(tmp_path):
+    """对照组:**没有它,上面那条对一个「永远不用 narrate」的实现同样成立**。"""
+    from anima_world.host import mock_opening
+
+    said = mock_opening("芬格尔", beat_note="手机震了一下,是个没存过的号码。")
+    assert said.startswith("手机震了一下"), said
+    assert "「手机震了一下" not in said, f"旁白被塞进引号里:{said}"
