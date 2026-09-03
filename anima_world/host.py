@@ -148,6 +148,48 @@ PLAYER_MOVE_EVENT_TYPES = (
 #: 「『拒绝』和『过期』必须分得开」。
 PLAYER_MOVE_INVITE_OUTCOMES = ("accepted", "declined")
 
+#: 时刻钥匙上,**哪几格的意思是「他自己动过手」**(3.11.2,真站第四轮)。
+#:
+#: 🔴 **这张表存在的理由是一个犯了两次的错。** 「他动过手没有」这个事实有**两处**
+#: 要问:开屏那道闸(`_host_trigger` 的 `acted` 那一格)和编剧那道守卫
+#: (「没有『刚』就不写」)。从前两处各写各的:
+#:
+#: · 3.11.1 验收 A ①:守卫拿**时刻名** `trigger == "acted"` 当判据,而时刻名是
+#:   优先级的赢家 —— 玩家走一步时 `arrive` 赢了名额,于是走路那一半的操作
+#:   编剧一个字不写。
+#: · 3.11.2 真站第四轮:守卫改成比 `move_seq` 了,而同一轮我又给钥匙加了
+#:   `chat_tick`(聊天不发事件)**只加在闸那一侧** —— 于是聊一轮之后屏重写、
+#:   抬头是 `acted`,而编剧照旧一个字不写。**同一个形状,一版之内第二次。**
+#:
+#: 所以现在它是**一张表加一个函数**:`acted_since` 是这个事实的唯一算法,闸和守卫
+#: 都调它。再加一格时**没有第二处要记得改**,而 `test_director_world.py` 那张
+#: 逐格驱动表会在忘了写驱动时当场红。
+ACTED_GRAINS = ("move_seq", "chat_tick")
+
+
+def acted_since(last: dict[str, Any] | None, *, move_seq: int = 0,
+                chat_tick: int = 0) -> bool:
+    """自**上一屏**之后,他自己动过手没有 —— **一个事实,一处算**。
+
+    ⚠️ 这不是「这一屏怎么进场」(那是 `HOST_MOMENTS` 的次序,最强的那个赢),
+    是一个独立的事实:玩家走一步时 `arrive` 赢了抬头,而他确实动了手。
+    两者在真站上分岔过两次,见 `ACTED_GRAINS`。
+
+    ⚠️ **`last` 为空(他还没有过一屏)时答 `False`** —— 第一屏他还没动过手,
+    而那时开口写出来的是一句「关于什么都没发生」的旁白顶在开场白前面。
+    """
+    if not last:
+        return False
+    now = {"move_seq": int(move_seq or 0), "chat_tick": int(chat_tick or 0)}
+    for grain in ACTED_GRAINS:
+        try:
+            was = int(last.get(grain) or 0)
+        except (TypeError, ValueError):
+            was = 0
+        if was != now[grain]:
+            return True
+    return False
+
 
 def player_move_seq_of(event_type: str, payload: dict[str, Any], who: str,
                        player_key: str) -> bool:

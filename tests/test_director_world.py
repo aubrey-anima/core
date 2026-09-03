@@ -624,3 +624,86 @@ def test_说过话也算动过手_而它不进事件日志(tmp_path):
             f"聊了一轮而屏纹丝不动:{turn['trigger']} / {turn['scene']['source']}")
         # 而且**没有**为此新发一条事件(那条不变量还在)
         assert not [e for e in world.events() if e["type"] == "conversation"]
+
+
+def test_回来那一屏之后聊一轮_编剧必须写那一拍(tmp_path):
+    """🔴 **线上复现(龙族,`director.enabled` 刚设 true)**:玩家真聊了一轮
+    (`/chat` 200,诺诺回了话),之后两发 `/internal/v1/host` 都是
+    `trigger=return` / `source=cached`,`director_log` 仍然 **0**。
+
+    两条,都真:
+
+    ① **那个 `trigger=return` 是上一屏的抬头,不是这一屏的**:`trigger is None`
+      时返回里报的是 `last.trigger`(为了 `ask_ready` 那一格说真话)。
+      **「这一屏没开口」只有 `scene.source == "cached"` 说得出来**,`trigger` 说不出。
+
+    ② **而编剧那道守卫又漏了聊天那一半**:3.11.2 把 `chat_tick` 加进了**时刻钥匙**,
+      于是聊一轮之后屏会重写、抬头是 `acted` —— 可 `acted_since` 还只比 `move_seq`。
+      🔴 **这和 3.11.1 验收 A ① 逮的是同一个形状**:开屏用的是一个事实,
+      而判"他动过手没有"用的是另一个。我修那次时**只把守卫从时刻名换成 `move_seq`,
+      没有回头问一句「他动过手」这件事一共有几个来源」** —— 一个月内第二次。
+    """
+    with open_world_at(tmp_path / "back.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")                       # 第一屏 arrive
+        world.tick(288 * 2)
+        world.player_leave("p1")                    # 他真的走了
+        back = world.host_turn("p1")
+        assert back["trigger"] == "return", back["trigger"]
+        before = len(_logs(world))
+
+        # 他回来之后**聊了一轮** —— 站点那条路(record_chat_turn)写的水位
+        world.scheduler.contact_store.note_contact(
+            agent, "p1", int(world.scheduler.clock) + 1)
+        turn = world.host_turn("p1")
+
+        assert turn["scene"]["source"] != "cached", (
+            f"聊了一轮而这一屏没开口(抬头 {turn['trigger']} 是上一屏的)")
+        assert turn["trigger"] == "acted", turn["trigger"]
+        assert len(_logs(world)) == before + 1, (
+            f"屏开了而编剧一个字没写:{before} → {len(_logs(world))}")
+
+
+# ── 「他动过手没有」那张钥匙表:闸和守卫必须逐格都认(3.11.2,真站第四轮)──────
+
+def _drive_chat(world, pid):
+    """聊一轮 —— 走的是站点那条路写的水位,**不发事件**(硬不变量)。"""
+    world.scheduler.contact_store.note_contact(
+        next(iter(world.scheduler.agents)), pid, int(world.scheduler.clock) + 1)
+
+
+#: 每一格钥匙**怎么让它动**。⚠️ 这张表要和 `host.ACTED_GRAINS` 逐格对上 ——
+#: 加一格而忘了写驱动,下面第一条用例当场红。
+_ACTED_DRIVERS = {
+    "move_seq": _act_once,
+    "chat_tick": _drive_chat,
+}
+
+
+def test_钥匙表上每一格都有驱动():
+    """加一格 `ACTED_GRAINS` 而不写驱动 = 那一格没有人测过。"""
+    from anima_world import host
+
+    assert set(_ACTED_DRIVERS) == set(host.ACTED_GRAINS), (
+        f"驱动表 {sorted(_ACTED_DRIVERS)} vs 钥匙表 {sorted(host.ACTED_GRAINS)}")
+
+
+@pytest.mark.parametrize("grain", list(_ACTED_DRIVERS))
+def test_每一格钥匙动了_屏要开口而且编剧要写(tmp_path, grain):
+    """🔴 **一格钥匙有两个读者,而它们分岔过两次**(见 `host.ACTED_GRAINS`):
+    开屏那道闸认得,编剧那道守卫不认得 —— 下场是**屏重写了而剧情一个字没有**,
+    零报错。这条用例把两个读者钉在同一格上逐格问一遍。
+    """
+    with open_world_at(tmp_path / f"g-{grain}.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.host_turn("p1")                       # 第一屏(他还没动过手)
+        before = len(_logs(world))
+        _ACTED_DRIVERS[grain](world, "p1")
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "acted", f"{grain}:闸没认 → {turn['trigger']}"
+        assert turn["scene"]["source"] != "cached", f"{grain}:屏没开口"
+        assert len(_logs(world)) == before + 1, (
+            f"{grain}:屏开了而编剧一个字没写({before} → {len(_logs(world))})")

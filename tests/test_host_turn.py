@@ -872,3 +872,28 @@ def test_一条要花时间的动词_按下去也得有一句话(tmp_path):
         assert "报到" in got["text"] and "狮心会报到处" in got["text"], got["text"]
         # **说的是"开始了",不是"做完了"** —— 他还没做完
         assert got["text"] != "你报到了狮心会报到处。", got["text"]
+
+
+def test_闭嘴那一趟_抬头是上一屏的而source说了实话(tmp_path):
+    """🔴 **真站第四轮那条误诊的根**:这一趟没开口时,`trigger` 报的是**上一屏**
+    那个抬头 —— 于是运维侧读到 `trigger=return` + `source=cached`,断成
+    「回来那一屏把编剧短路了」,查错了一整轮方向。
+
+    这**不是 bug**:返回的确实还是上一屏,那一屏就是回来那一屏,而 `ask_ready`
+    要照这个抬头说真话(`arrive` 那一屏之后第一次问不起冷却)。
+    ⚠️ **但它意味着一句契约**:问「这一趟变了没有」**只有 `scene.source` 答得了**。
+    这条用例把这句话钉住,免得下一个人"顺手"把抬头清空 —— 那会让站点分不清
+    「回来那一屏」和「进门那一屏」。
+    """
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "echo.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert world.host_turn("p1")["trigger"] == "arrive"
+        world.tick(288 * 2)
+        world.player_leave("p1")
+        assert world.host_turn("p1")["trigger"] == "return"
+        again = world.host_turn("p1")               # 什么都没发生
+        assert again["scene"]["source"] == "cached", again["scene"]["source"]
+        assert again["trigger"] == "return", "抬头该是上一屏那个"

@@ -8895,7 +8895,12 @@ class World:
             # 9 次走路,`director_log` 只有 11 条)。
             # 🔴 而我 3a 那条「二十次操作二十拍、零沉默」的用例**二十次全是动词、
             # 一次没走** —— 它测的是我写对了的那一半。**试牙也要试对地方。**
-            acted_since = bool(last) and move_seq != int(last.get("move_seq") or 0)
+            # 🔴 **和开屏那道闸问的是同一个函数**(3.11.2,真站第四轮)。
+            # 上一版这儿自己比 `move_seq` —— 而同一轮加进钥匙的 `chat_tick`
+            # 只加在闸那一侧:于是聊完一轮屏重写了、抬头是 `acted`,
+            # 编剧照旧一个字不写。**这正是 A ① 那个形状的第二次。**
+            acted_since = host_mod.acted_since(
+                last, move_seq=move_seq, chat_tick=chat_tick)
             said = self._director_turn(
                 pid, recap=recap, place=place, place_name=place_name, day=day,
                 tick=tick, trigger=trigger, beat_fired=(trigger == "beat"),
@@ -8943,6 +8948,15 @@ class World:
         ask_ready = scene_tick + cooldown
         # `arrive` 那一屏之后那一次问不起冷却(见 `_host_trigger`),所以这个读数
         # 也得跟着说真话 —— **一个读数和它旁边那扇门说两句话,比没有这个读数更坏。**
+        # 🔴 **`trigger` 答不了「这一趟有没有开口」,`scene.source` 才答得了**
+        # (3.11.2,真站第四轮)。这一趟闭嘴时,返回里报的是**上一屏那个抬头** ——
+        # 因为返回的确实还是上一屏,而 `ask_ready` 那一格要照它说真话。
+        # ⚠️ 于是屏幕上会出现 `trigger=return` + `source=cached` 这种组合,
+        # 而它的意思是「什么都没发生,上一屏碰巧是回来那一屏」——
+        # **运维侧照它读成过一次「回来那一屏把编剧短路了」**,查错了方向一整轮。
+        # 契约那一句写在 REFERENCE 与 FOR-STUDIO §3.67(f):**问「变了没有」
+        # 只有一个读数,是 `scene.source`。**不另加一格布尔 —— 同一个问题两个读数,
+        # 就是下一次它们说两句话。
         shown_trigger = trigger or str(last.get("trigger") or "arrive")
         ready = tick >= ask_ready or shown_trigger == "arrive"
         return {
@@ -9436,6 +9450,8 @@ class World:
         `beat`;新的一天 → `new_day`。三样同时变时报最强的那个,而不是把它们拼成
         一句"变了" —— 宿主要拿它决定这一屏怎么进场。
         """
+        from anima_world import host as host_mod
+
         if not last:
             return "arrive"
         # 🆕 3.10.0(2a-②):**「你回来了」排在换地方前面。**
@@ -9457,11 +9473,11 @@ class World:
         # 一个手上已经有操作记录的老玩家会被判成 `acted` 开一次口 —— 那是对的
         # (他确实做过事而屏幕没说),而且**只多开一次**:这一屏落库时就带上
         # 这一格了。少了这一句注释,下一个人会以为它是个 bug 去"修"掉。
-        if int(last.get("move_seq") or 0) != move_seq:
-            return "acted"
-        # 🆕 3.11.2:**他跟人说过话** —— 那条路不进事件日志(见 `host_turn`),
-        # 所以它自己一格。
-        if int(last.get("chat_tick") or 0) != int(chat_tick):
+        # 🆕 3.11.2:**他跟人说过话**也算动过手,而那条路不进事件日志
+        # (见 `host_turn`),所以它在钥匙上自己一格。
+        # 🔴 **两格都由 `host.acted_since` 一处算**(真站第四轮):这个事实
+        # 编剧那道守卫也要问,而从前两处各写各的 —— 一版之内分岔了两次。
+        if host_mod.acted_since(last, move_seq=move_seq, chat_tick=chat_tick):
             return "acted"
         if int(last.get("day") or 0) != day:
             return "new_day"
