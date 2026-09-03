@@ -8845,8 +8845,20 @@ class World:
             beat_seq = int(self.scheduler._memory_projection.player_beat_seq.get(pid, 0))
             # 🆕 3.11.0(批 3a):钥匙的第四格 —— 「他自己刚动过手没有」。
             move_seq = int(self.scheduler._memory_projection.player_move_seq.get(pid, 0))
+        # 🆕 3.11.2(真站第三轮):**说过话也算动过手,而它不进事件日志。**
+        #
+        # 🔴 `conversation` 只在**会话关闭**那一刻发一条(「聊天子系统与事件核解耦:
+        # 整场会话只在关闭时发一个事件」是这个仓库的硬不变量)—— 而站点把会话
+        # **一直开着**。于是玩家聊了十轮,`move_seq` 一格没动,`_host_trigger`
+        # 答 `None`,整屏纹丝不动:**「每操作一次就有新剧情」在最常见的那条路上不成立。**
+        #
+        # ⚠️ **不许为它加一条每轮事件** —— 那正是那条不变量挡的东西。
+        # 接的是**转录那一侧本来就在写的水位**(`contact_store.last_contact_tick`,
+        # `World.chat` / `record_chat_turn` 两扇门都写它,`claim_hail` 的 docstring
+        # 早就写着这句)。它是 tick 不是 seq,所以**单独一格**,不和 `move_seq` 混。
+        chat_tick = self._last_chat_tick(pid)
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
-                                     move_seq=move_seq,
+                                     move_seq=move_seq, chat_tick=chat_tick,
                                      tick=tick, ask=bool(ask),
                                      was_present=was_present)
         if trigger is None:
@@ -8901,12 +8913,13 @@ class World:
                 place_desc=str((places.get(place) or {}).get("description") or ""),
                 day=day, hour=hour, minute=minute, options=options,
                 going_to=str((places.get(going) or {}).get("name") or going),
-                recap=recap,
+                recap=recap, in_transit=in_transit,
             )
             self._record_and_fan({
                 "type": "host_scene", "who": f"player:{pid}",
                 "payload": {"player_id": pid, "place": place, "day": day, "tick": tick,
                             "beat_seq": beat_seq, "move_seq": move_seq,
+                            "chat_tick": chat_tick,
                             "trigger": trigger,
                             "text": text, "source": source,
                             "options": [o["id"] for o in options]},
@@ -9415,7 +9428,7 @@ class World:
 
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
                       beat_seq: int, tick: int, ask: bool,
-                      move_seq: int = 0,
+                      move_seq: int = 0, chat_tick: int = 0,
                       was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是 `HOST_MOMENTS` 里的哪一个。`None` = 闭嘴,用上一屏。
 
@@ -9446,6 +9459,10 @@ class World:
         # 这一格了。少了这一句注释,下一个人会以为它是个 bug 去"修"掉。
         if int(last.get("move_seq") or 0) != move_seq:
             return "acted"
+        # 🆕 3.11.2:**他跟人说过话** —— 那条路不进事件日志(见 `host_turn`),
+        # 所以它自己一格。
+        if int(last.get("chat_tick") or 0) != int(chat_tick):
+            return "acted"
         if int(last.get("day") or 0) != day:
             return "new_day"
         if ask:
@@ -9461,6 +9478,28 @@ class World:
             if tick - int(last.get("tick") or 0) >= cooldown:
                 return "ask"
         return None
+
+    def _last_chat_tick(self, pid: str) -> int:
+        """他上一次跟**任何人**说话是第几 tick —— 转录那一侧本来就在写的水位。
+
+        🔴 **它不是事件**,而那是有意的:「整场会话只在关闭时发一个事件」是这个
+        仓库的硬不变量(chat 子系统与事件核解耦)。所以主持人那把钥匙上,
+        「他说过话没有」只能读这个水位,而不能等一条不会来的事件。
+        """
+        store = getattr(self.scheduler, "contact_store", None)
+        if store is None:
+            return 0
+        latest = 0
+        for agent_id in list(self.scheduler.agents):
+            try:
+                row = store.get(agent_id, pid) or {}
+            except Exception:  # noqa: BLE001 - 读不到水位不该掀翻这一屏
+                continue
+            try:
+                latest = max(latest, int(row.get("last_contact_tick") or 0))
+            except (TypeError, ValueError):
+                continue
+        return latest
 
     def _host_recap(self, pid: str, *, since_seq: int) -> list[str]:
         """上一屏之后**跟这个玩家有关**的那几件事(3.10.0,批 1.1 ①)。
@@ -9553,8 +9592,8 @@ class World:
 
     def _host_scene_text(self, *, place_name: str, place_desc: str, day: int,
                          hour: int, minute: int, options: list[dict[str, Any]],
-                         going_to: str = "", recap: list[str] | None = None
-                         ) -> tuple[str, str]:
+                         going_to: str = "", recap: list[str] | None = None,
+                         in_transit: bool = False) -> tuple[str, str]:
         """场景那段话 + 顺手把钩子填进 `options`(就地改)。返回 `(正文, 来源)`。
 
         **一次调用,失败即模板,不重试、不合批** —— 和判定那一层同一条纪律。
@@ -9564,7 +9603,8 @@ class World:
         from anima_world import host as host_mod
 
         fallback = host_mod.mock_scene(place_name=place_name, day=day, hour=hour,
-                                       options=options, going_to=going_to, recap=recap)
+                                       options=options, going_to=going_to, recap=recap,
+                                       in_transit=in_transit)
         service = getattr(self, "chat_service", None)
         client = getattr(service, "_background_llm", None) if service else None
         if client is None or not str(self.config_get("llm.api_key", default="") or ""):

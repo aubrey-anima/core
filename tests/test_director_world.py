@@ -563,3 +563,64 @@ def test_那一屏的最近几拍_只给他自己的(tmp_path):
             assert (row["payload"] or {}).get("player_id") == "p1", (
                 f"别人的剧情漏到他这一屏了:{row['payload']}")
         assert any("只给 p1" in str((r["payload"] or {}).get("line")) for r in mine)
+
+
+# ── 真站第三轮那三条(3.11.2)────────────────────────────────────────────────
+
+
+def test_编剧默认开着():
+    """🔴 **默认关的下场是实测出来的**:三个世界换到 3.11.1 之后编剧根本没开 ——
+    **老板的主命题在线上不存在**,而屏幕上一切正常。
+
+    这个仓库的规矩是「引擎默认值全关」,而这一条是**有意的例外**:
+    编剧不是一个特性,是产品命题本身。
+    ⚠️ 它**没配 key 也照跑**(整条 mock 路是活的),所以"默认开"不会让任何
+    世界因为缺 key 而变坏。
+    """
+    from anima_world.config_store import _DEFAULTS
+
+    assert _DEFAULTS["director.enabled"][0] is True
+    said = _DEFAULTS["director.enabled"][4]
+    assert "DEFAULT ON" in said, said
+
+
+def test_编剧关着时_动词之后屏照样要换(tmp_path):
+    """**「每操作一次就有新剧情」在 `director.enabled=false` 下退化成什么,要写清**:
+    至少 `acted` 那个时刻与「上一屏之后发生了什么」那半句要在(批 1.1 承诺的)——
+    **编剧只是这一屏的上半场**,不是它的全部。
+    """
+    with open_world_at(tmp_path / "off.db") as world:
+        world.config_set("director.enabled", False)
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        first = world.host_turn("p1")
+        _act_once(world, "p1")
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "acted", turn["trigger"]
+        assert turn["scene"]["source"] != "cached"
+        assert turn["scene"]["text"] != first["scene"]["text"], "屏一个字没变"
+        # 编剧关着 —— 一拍都不该写
+        assert _logs(world) == []
+
+
+def test_说过话也算动过手_而它不进事件日志(tmp_path):
+    """🔴 **真站第三轮那条的根因**:`conversation` 只在**会话关闭**那一刻发一条
+    (「整场会话只在关闭时发一个事件」是这个仓库的硬不变量),而站点把会话
+    **一直开着** —— 于是玩家聊了十轮,`move_seq` 一格没动,整屏纹丝不动。
+
+    ⚠️ **不许为它加一条每轮事件** —— 那正是那条不变量挡的东西。
+    接的是转录那一侧本来就在写的水位(`contact_store.last_contact_tick`)。
+    """
+    with open_world_at(tmp_path / "ct.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        # 会话**不关**,只记一轮 —— 站点就是这么用的
+        world.scheduler.contact_store.note_contact(
+            agent, "p1", tick=int(world.scheduler.clock) + 1)
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "acted", (
+            f"聊了一轮而屏纹丝不动:{turn['trigger']} / {turn['scene']['source']}")
+        # 而且**没有**为此新发一条事件(那条不变量还在)
+        assert not [e for e in world.events() if e["type"] == "conversation"]

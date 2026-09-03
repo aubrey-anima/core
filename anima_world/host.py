@@ -544,7 +544,7 @@ def welcome_back(*, away_days: int = 0, packs: list[dict[str, Any]] | None = Non
 
 def mock_scene(*, place_name: str, day: int, hour: int,
                options: list[dict[str, Any]], going_to: str = "",
-               recap: list[str] | None = None) -> str:
+               recap: list[str] | None = None, in_transit: bool = False) -> str:
     """没有 key / LLM 挂了 / 超时时那一段话。
 
     **没配 key 是这个引擎的默认状态**,所以这不是降级路径上的边角料,而是很多人看到
@@ -564,6 +564,12 @@ def mock_scene(*, place_name: str, day: int, hour: int,
     if going_to:
         # 在路上的人不该被告知"你在出发地" —— 那正是两扇门说两句话的那一格。
         return said + f"第 {day} 天{when},你在去{going_to}的路上。到了地方再说。"
+    # 🆕 3.11.2(真站第三轮 ③):**在路上而目的地也说不出名字**。
+    # `going_to` 空、`place_name` 也空 —— 上一版落到下面那句「你还没落个脚」,
+    # 而他明明**正在赶路**。两句话都对不上他此刻的处境,
+    # 而「一句念不通的话和一句错的一样贵」。
+    if in_transit:
+        return said + f"第 {day} 天{when},你在路上。到了地方再说。"
     if not place_name:
         return said + f"第 {day} 天{when}。你还没落个脚 —— 先挑个地方站过去。"
     head = said + f"第 {day} 天{when},你在{place_name}。"

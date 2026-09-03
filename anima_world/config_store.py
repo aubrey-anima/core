@@ -390,7 +390,14 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "host.away_ticks": (288, "int", "host", False, "Host: ticks away before the next screen is a \"welcome back\" (0 = never); one world day by default"),
     # ── 实时编剧(3.11.0,批 3a)。**默认关** —— 引擎默认值 = 没人说话时的样子;
     # 橱窗里打开它(内置种子是橱窗不是毛坯)。
-    "director.enabled": (False, "bool", "director", False, "Director: write a story beat after every player move (3a)"),
+    # 🔴 **默认 `true`,而这是一次有意的例外**(3.11.2,真站第三轮)。
+    # 这个仓库的规矩是「引擎默认值全关 = 没人说话时的样子」,而编剧**不是一个
+    # 特性,是产品命题本身**(老板:「让玩家玩出自己的剧情」)。默认关的下场是
+    # 实测出来的:三个世界换到 3.11.1 之后编剧根本没开 —— **主命题在线上不存在**,
+    # 而屏幕上一切正常。
+    # ⚠️ 它**没配 key 也照跑**(整条 mock 路是活的:每次操作一句指着他刚做的事
+    # 的旁白),所以"默认开"不会让任何世界因为缺 key 而变坏。
+    "director.enabled": (True, "bool", "director", False, "Director: write a story beat after every player move. DEFAULT ON — the director is the product, not an option; it runs without an API key too (template lines)."),
     "director.max_per_player_per_hour": (6, "int", "director", False, "Director: how many beats one player can get per WORLD hour (over it degrades to a template line, never silence)"),
     "director.pin_ticks": (12, "int", "director", False, "Director: how long the summoned NPC stays put and carries the beat's intent"),
     "director.due_hours": (48, "int", "director", False, "Director: world hours before an open thread's stake is collected"),

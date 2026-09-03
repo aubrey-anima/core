@@ -5366,14 +5366,22 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 3. **自由输入永远在,永远最后,而且不占 `host.max_options` 的名额。** 跑团的规矩正是
    这样:GM 给选项,玩家可以不选,但 GM 先说话。
 4. **只在六个时刻开口** —— 进地点(`arrive`)/ 新的一天(`new_day`)/ 指着他的剧情拍
-   响了(`beat`)/ **他自己刚做了一件事**(`acted`,3.11.0,批 3a:钥匙的第四格
-   `move_seq`,`host.PLAYER_MOVE_EVENT_TYPES` 那张策展表说哪几种事件算)/
+   响了(`beat`)/ **他自己刚做了一件事**(`acted`,3.11.0,批 3a:
+   钥匙的第四、五格,见下)/
    他点了「我该干嘛」(`ask`)/ **你回来了**(`return`,3.10.0,2a-②:
    离线超过 `host.away_ticks`,或者他上一屏之后有新的内容包落地)。
    闸在 `host_turn` 里(时刻钥匙 vs 上一条 `host_scene` 事件),**引擎里没有第二条生成
    场景的路**,所以这条纪律是结构性的,不是提示词里的一句话。几样同时变时报最强的那个
    (`return` > `arrive` > `beat` > `acted` > `new_day`)—— `return` 排最前是因为一个离线三天的人
    回来时多半也换了地方,而这两句话里他更需要读到的是「你不在的时候……」。
+   ⚠️ **`acted` 那一格的钥匙有两格,而第二格不是事件。** 第四格 `move_seq` 数
+   已发生的动作(`host.PLAYER_MOVE_EVENT_TYPES` 那张策展表说哪几种事件算);
+   第五格 `chat_tick`(3.11.2)—— 🔴 **聊天也算"做了一件事",而它不发事件**:
+   `conversation` 只在**会话关闭那一刻**发一条,站点却把会话一直开着,于是一个
+   聊了十轮的人 `move_seq` 一格不动、整屏纹丝不动。这一格读的是转录那侧本来就在
+   写的水位(`contact_store.last_contact_tick`),**没有新事件、也没有新键** ——
+   「整场会话只在关闭时发一个事件」那条不变量挡的正是"每轮补一条事件"这种修法。
+
    ⚠️ **这份名单以 `contract --json` 的 `host.moments` 为准**,而且
    `tests/test_host_doc_contract.py` 拿它逐格比着这一段 —— 下一个时刻加进来时这里会
    当场红。上一次加 `return` 时它没红,于是这两处「五个时刻」后面只列了四个。
