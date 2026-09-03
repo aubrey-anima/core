@@ -189,6 +189,39 @@ def tension_now(value: float, since_tick: int, now_tick: int,
     return round(base * (TENSION_DECAY_PER_HOUR ** hours), 4)
 
 
+def story_text(tension: float, phase: str) -> str:
+    """这条线此刻读作**一句话** —— 不是两句(3.11.3,验收 A ⑤ / B+C ④)。
+
+    🔴 真站上量到的:屏上并排印着「到节骨眼了」和「松弛」。**两句都是引擎说的,
+    而它们互相打脸。** 3.11.2 已经让相位跟着张力走,可**张力还会随时间衰减** ——
+    一条搁了三天的高潮线松下来是真的,于是同一屏上又出现了这一对。
+
+    相位是**走到哪一幕**(它不倒退),张力是**此刻绷不绷**(它会松)。
+    两个都真,而**并排印出来就是一句自相矛盾的话**。所以这一层给一句合成的:
+    松下来的高潮说「到过节骨眼,这会儿松下来了」,而不是让读的人自己去调和。
+
+    ⚠️ **一处生成**:引擎屏和站点读同一句(`contract.director.text_keys`)——
+    各写一遍的话,同一个世界会说两种话,而没有一处会报错。
+    """
+    word = tension_text(tension)
+    phase_word = PHASE_LABELS.get(str(phase or ""), "")
+    if not phase_word:
+        return word
+    try:
+        got = float(tension)
+    except (TypeError, ValueError):
+        got = 0.0
+    if str(phase) == "release":
+        # 「松下来了」自己已经把张力那半说完了,再缀一个档词是同义反复。
+        return phase_word
+    # 这一相当初是靠攒到目标才翻的篇,而现在掉回目标之下 = 它松下来了。
+    # ⚠️ `setup` 不走这一支:它是**起点**,没有"到过"可言
+    #(「到过刚起头」是一句不通的话)。
+    if str(phase) != PHASES[0] and got < PHASE_TARGET.get(str(phase or ""), 0.0):
+        return f"到过「{phase_word}」,这会儿{word}"
+    return f"{phase_word},{word}"
+
+
 def next_phase(phase: str, move: str, *, tension: float) -> str:
     """这一拍之后,这条线走到哪一相。**升级是默认行为**(口径 4),但**要带着张力走**。
 
@@ -490,13 +523,30 @@ def parse_decision(text: str, *, allowed: Sequence[str],
 #: **一个把三种原因合成一句的读数,指不出任何一种修法**:
 #: 顶安全阀是**世界该这样**(不用管)· 答出闭集之外是**提示词要改** ·
 #: 没配 key 是**去配一把 key**。
-SOURCES = ("llm", "mock", "ceiling", "refused")
+#: ⚠️ **3.11.3(验收 A ④ / B+C ②)在同一个地方又抓到同一个形状。**
+#: 3.11.2 把「三合一」拆成四种,可拆完之后 `else` 那一支写着 `refused` ——
+#: 而**「模型答废了」和「压根没问过模型」是两件事**:算术就选了 `breathe`、
+#: 这会儿没人可派、这一小时额度用完了、撞上锚点 —— 四种都没调过客户端,
+#: 却全被记成「模型答的不在闭集里」。真站上 12 拍里 10 条 `refused`,
+#: 而假客户端只被调过 6 次 —— **读数自己就对不上,而没有一处报错**。
+#: 🔴 **拆三合一时最容易犯的错,是拆出一个新的三合一。**
+#: 判据换成一句能证伪的话:**这一拍到底调没调过客户端**(`called`)。
+SOURCES = ("llm", "mock", "ceiling", "refused",
+           "capped", "anchor", "no_cast", "arith")
 SOURCE_LABELS: dict[str, str] = {
     "llm": "模型写的",
     "mock": "没配 key,模板句",
     "ceiling": "张力顶到安全阀了,这一拍有意写小",
     "refused": "模型答的不在闭集里,退成模板句",
+    "capped": "这一小时的额度用完了,这一拍有意写小",
+    "anchor": "这一 tick 有一条为他响的拍,让给锚点",
+    "no_cast": "这会儿一个派得出的人都没有",
+    "arith": "算术就选了喘一口气(离目标很近)",
 }
+
+#: 这几种**根本没调过客户端** —— `doctor` 拿它分「该管的」和「不用管的」。
+#: 一个把它们和 `refused` 混着数的读数,会让人去改一个从来没被问过的提示词。
+SOURCES_WITHOUT_A_CALL = ("mock", "ceiling", "capped", "anchor", "no_cast", "arith")
 
 
 def mock_move(recap: Sequence[str], *, place_name: str = "",

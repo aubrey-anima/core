@@ -362,7 +362,8 @@ def director_pass(world_summary, arcs, llm) -> list[dict]:
     return accepted[:2]
 ```
 
-**config**:`director.enabled`(默认 false)/ `director.max_beats_per_day`。
+**config**:`director.enabled`(⚠️ **3.11.2 起默认 true** —— 见下面第 2 条那个
+例外;这份路线图写下时是 false)/ `director.max_beats_per_day`。
 **World API**:`world.arcs()` / `world.quests(player_id)` / `world.complete_quest(...)`。
 
 ---
@@ -570,6 +571,10 @@ def import_letter(world, package_path):
 1. **每一版的新 LLM 用途都走同一个模式**:LLM 只能提案(反思/导演/铸造角色/写信),
    出口永远是严格校验的闸门,校验不过就丢弃留痕。世界状态只被"通过校验的普通事件"改变。
 2. **每一版的新机制都带开关**(`needs.enabled` / `director.enabled` / …,默认关):
+   ⚠️ **`director.enabled` 3.11.2 起是这条规矩唯一的例外,而那是有意的**:
+   编剧不是一个可选特性,它就是那一版的产品命题,且没配 key 也照跑
+   (整条 mock 路是活的)。实测过默认关的下场 —— 三个世界升上去之后**一拍都没写**,
+   而每一块屏幕都显示正常。**这条例外要留在这儿,否则下一个人会照这一段把它关回去。**
    大版本升级 ≠ 行为突变,studio 可以按世界逐个点亮。
 3. **连续量不进事件日志**:需求曲线、价格、强度衰减都是公式派生或台阶事件 ——
    日志只记跨档,防止 288 tick/日 × 百角色的事件洪水。

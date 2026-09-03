@@ -27,12 +27,15 @@ from anima_world.beats import (
 )
 from anima_world.director import (
     MOVE_LABELS as DIRECTOR_MOVE_LABELS, PHASE_LABELS as DIRECTOR_PHASE_LABELS,
+    SOURCES as DIRECTOR_SOURCES, SOURCE_LABELS as DIRECTOR_SOURCE_LABELS,
     STAKE_LABELS as DIRECTOR_STAKE_LABELS,
     MOVES as DIRECTOR_MOVES, PHASES as DIRECTOR_PHASES,
     STAKE_KINDS as DIRECTOR_STAKE_KINDS,
     TARGET_CURVE_PHASES as DIRECTOR_TARGET_CURVE,
 )
-from anima_world.host import PLAYER_MOVE_EVENT_TYPES
+from anima_world.host import (
+    ACTED_GRAINS as HOST_ACTED_GRAINS, PLAYER_MOVE_EVENT_TYPES,
+)
 # `PackInstallError` 住在 `world_package` 而不是这儿 —— `python -m` 会把本文件
 # 加载两遍(`__main__` 与 `anima_world.__main__`),同一个 class 语句于是产生
 # 两个不相等的类,`except` 抓不住另一条路抛的那个(验收 A ⑫)。
@@ -2554,7 +2557,8 @@ def build_serve_scheduler(
     # 到 `_load_ontology` 那儿才炸,而那时表已经写过几张了。
     if seed_author_layer:
         world_seed = _merge_plugin_kinds(
-            config_store, RedisPluginStore(redis, world_id), world_seed)
+            config_store, RedisPluginStore(redis, world_id), world_seed,
+            on_boot=True)
 
     # 🔴 **这一趟到底有哪几个插件命名空间:文件那份 + 库里那份 + 出厂那几个**
     # (2026-08-28 修回归)。喂给本体那一层的 `kinds` 是**库合并之后的全集**
@@ -2564,7 +2568,7 @@ def build_serve_scheduler(
     # 而那个插件明明就在库里。**两份东西必须来自同一次合并**,这正是
     # `_seed_ontology` 自己 docstring 反对的那件事(喂全集、判局部)。
     boot_plugin_bodies = _plugin_bodies(
-        config_store, RedisPluginStore(redis, world_id), world_seed)
+        config_store, RedisPluginStore(redis, world_id), world_seed, on_boot=True)
     boot_namespaces = tuple(
         str(body.get("id") or "")
         for body in boot_plugin_bodies
@@ -4016,7 +4020,8 @@ def _plugin_namespaces(seed: Any) -> tuple[str, ...]:
 
 
 def _plugin_bodies(config_store: Any, plugin_store: Any,
-                   world_seed: dict[str, Any] | None) -> list[dict[str, Any]]:
+                   world_seed: dict[str, Any] | None,
+                   on_boot: bool = False) -> list[dict[str, Any]]:
     """这个世界这一趟要装的插件声明,**已经按"谁赢"合并好**。
 
     三个来源,后面的赢前面的:**出厂**(`_factory_plugins`,由配置开关决定)→
@@ -4024,8 +4029,25 @@ def _plugin_bodies(config_store: Any, plugin_store: Any,
     (`--world-file` 或创世)。
     ⚠️ **出厂那几个 id 上 `_factory_plugins` 是唯一权威** —— 库里那一行是上一次装的
     痕迹,不是"该不该装"的答案(不滤掉的话 `needs.enabled` 关掉之后它会自己活回来)。
+
+    ## 🔴 `on_boot`:「库里那份说了算」要**连声明带规律**一起算(3.11.3,验收 A ①)
+
+    3.11.2 只把这句话做进了 `install_plugins` 的**那一张局部名单** —— 它挡住的是
+    「别拿旧声明去覆盖库里那一行」,而**这个函数照旧让文件那份赢**。下场是一个
+    只有真部署才有的裂口:
+
+        库里记着 2.2.0 · `scheduler.plugins` 跑的是 **2.1.0** ·
+        2.2.0 那几条规律**一条都不在跑** · `projected_facts` 空着 ·
+        而日志一本正经地说「库里那份说了算」
+
+    **两处各说各的,而屏幕上什么都不少。** 一句写在日志里、却没做进运行时的话,
+    比没有那句话更坏:它让人以为自己已经修好了。
+
+    所以开机路上这里也要判一次版本:**同 id 谁的版本高谁赢**。
+    ⚠️ 只在 `on_boot` 上这么判 —— `pack install` 那条路照旧"文件里那份赢",
+    因为那是人按下的一次编辑,而编辑本来就该覆盖。
     """
-    from anima_world.plugins import merge_bodies, stored_bodies
+    from anima_world.plugins import merge_bodies, stored_bodies, version_tuple
 
     incoming = [
         dict(row) for row in ((world_seed or {}).get("plugins") or [])
@@ -4033,12 +4055,36 @@ def _plugin_bodies(config_store: Any, plugin_store: Any,
     ]
     stored = [row for row in stored_bodies(plugin_store)
               if str(row.get("id") or "") not in FACTORY_PLUGINS]
+    if on_boot and stored and incoming:
+        newer = {str(row.get("id") or ""): row for row in stored}
+        kept, fresh = [], []
+        for row in incoming:
+            rid = str(row.get("id") or "")
+            was = str((newer.get(rid) or {}).get("version") or "")
+            mine = str(row.get("version") or "")
+            if rid in newer and version_tuple(was) > version_tuple(mine):
+                kept.append(f"{rid}(库里 {was} > 文件 {mine})")
+                continue
+            fresh.append(row)
+        if kept:
+            # 🔴 **这一句现在说在这儿,因为决定是在这儿做的**(3.11.3,验收 A ①)。
+            # 3.11.2 把它说在 `install_plugins` 里,而那一层只管"别拿旧声明覆盖
+            # 库里那一行" —— 运行时装的是**哪一份**,从来不由它决定。
+            # ⚠️ warning 不是 info:它是「你以为你升级了、其实库里那份在跑」
+            # 唯一的现场证据,而运维台按 warning 抓日志。
+            logger.warning(
+                "这几个插件库里那份更新,这次开机按库里那份跑(声明和规律都是它):"
+                "%s —— 「库里那份说了算」"
+                "(要装新的一版走 `anima-world pack install`)",
+                "、".join(kept))
+        incoming = fresh
     return merge_bodies(merge_bodies(_factory_plugins(config_store), stored), incoming)
 
 
 def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
                         world_seed: dict[str, Any] | None,
-                        ticks_per_day: int = 288) -> dict[str, Any] | None:
+                        ticks_per_day: int = 288,
+                        on_boot: bool = False) -> dict[str, Any] | None:
     """把插件声明的种类/动词并进 `world_seed["kinds"]`。**声明坏了当场抛。**
 
     ⚠️ **同 id 的种类:插件那份赢。** 和 `kinds` 那条"文件里那份赢"逐字同一个理由 ——
@@ -4050,7 +4096,9 @@ def _merge_plugin_kinds(config_store: Any, plugin_store: Any,
         parse_plugins,
     )
 
-    bodies = _plugin_bodies(config_store, plugin_store, world_seed)
+    # ⚠️ **和真装那一处喂同一份名单**(见 `_install_plugins` 里那段注释):
+    # 种类按一份来、事实按另一份来的那种不一致**不报错**。
+    bodies = _plugin_bodies(config_store, plugin_store, world_seed, on_boot=on_boot)
     if not bodies:
         return world_seed
     plugins = order_plugins(parse_plugins(bodies, ticks_per_day=ticks_per_day))
@@ -4220,7 +4268,8 @@ def _install_plugins(
     # **三个来源怎么合并、谁赢,只有一份判断**(`_plugin_bodies`)—— 开机那一处
     # (并 `kinds`)和这一处(真装)喂的必须是同一份名单,不然种类按一份来、
     # 事实按另一份来,而那种不一致不报错。
-    bodies = _plugin_bodies(scheduler.config_store, plugin_store, world_seed)
+    bodies = _plugin_bodies(scheduler.config_store, plugin_store, world_seed,
+                            on_boot=on_boot)
     # 每次重装都从头建 —— 这个函数在开机和 `config set` 两条路上都会被调,
     # 而"接着上一次的名单往上加"会让关掉一个开关之后它的规律还在跑。
     scheduler.plugins = []
@@ -5054,8 +5103,10 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
     # 插件声明的种类先并进 `kinds` —— **和开机那条路逐字同序**(见
     # `build_serve_scheduler` 里那一段:晚一步的话,引用不到的 `spawn.kind` 会
     # 绕过预检,到 `_load_ontology` 那儿才炸,而那时表已经写过几张了)。
-    merged = _merge_plugin_kinds(config_store, plugin_store, authored) or authored
-    boot_plugin_bodies = _plugin_bodies(config_store, plugin_store, authored)
+    merged = _merge_plugin_kinds(config_store, plugin_store, authored,
+                                 on_boot=True) or authored
+    boot_plugin_bodies = _plugin_bodies(config_store, plugin_store, authored,
+                                        on_boot=True)
     namespaces = tuple(
         str(b.get("id") or "") for b in boot_plugin_bodies if str(b.get("id") or "")
     )
@@ -8421,10 +8472,18 @@ def run_player(args: argparse.Namespace) -> int:
             print(f"  这个世界不认识 {args.player} —— 他没进来过"
                   "(问问是不是 pid 打错了)。")
             return 0
-        print(f"  张力 {story['tension']:.2f}({story['tension_text']})"
-              f"· 这条线{story['phase_text']}"
+        # 🔴 **屏上不印那个浮点,也不印两句打架的话**(3.11.3,验收 A ⑤ / B+C ④)。
+        # 上一版印的是「张力 0.00(松弛)· 这条线到节骨眼了」—— 三宗罪挤在一行:
+        # ① `0.00` 是给机器看的(§3.67(b) 那条「两样都别自己译」的反面教材,
+        #    而这一屏正是那条规矩的作者);
+        # ② 「到节骨眼了」和「松弛」**互相打脸**(相位不倒退,张力会衰减);
+        # ③ 紧接着还印「还没有开着的线」—— 一条不存在的线"到了节骨眼"。
+        # 现在读 `story_text` 那一句合成的,而**它和站点读的是同一句**。
+        print(f"  {story['story_text']}"
               f"· 编剧一共写过 {story['moves']} 拍")
         if not story["threads"]:
+            # ⚠️ 没有线的时候,上面那句讲的是**这个玩家**此刻的松紧,不是某条线
+            # —— 措辞不能说成"这条线",否则和这一句并排就是自相矛盾。
             print("  还没有开着的线。")
         for thread in story["threads"]:
             when = (f",{thread['due_text']}要有个交代"
@@ -9314,7 +9373,7 @@ def contract_payload() -> dict[str, Any]:
             # 🆕 3.11.1(player 带回):**给屏用的那几格人话**。
             # `tension` 是浮点、`phase` 是枚举,而宿主按纪律两样都不上屏 ——
             # 照 `host.ask_ready_text` 那条先例,引擎给人话,宿主照印。
-            "text_keys": ["tension_text", "phase_text"],
+            "text_keys": ["tension_text", "phase_text", "story_text"],
             # 🆕 3.11.2(验收 B ⑤,tool 三处在等):**三张人话表进契约。**
             # 🔴 **分档表只有一份** —— 各译一遍的话,同一个世界会在
             # 引擎屏 / 创作台 / 站点上说三种话,而没有一处会报错。
@@ -9323,13 +9382,21 @@ def contract_payload() -> dict[str, Any]:
             "stake_labels": dict(DIRECTOR_STAKE_LABELS),
             # 🆕 3.11.1(platform 带回):`known` 分开「查无此人」与「认识但还没
             # 动过手」—— 别让壳自己去翻 `player_join`。
-            "story_keys": ["player_id", "known", "tension", "tension_text",
+            "story_keys": ["player_id", "known", "tension", "tension_text", "story_text",
                            "phase", "phase_text", "threads", "moves", "recent_log"],
             "thread_text_keys": ["phase_text", "due_text"],
             "config_keys": ["director.enabled", "director.max_per_player_per_hour",
                             "director.pin_ticks", "director.due_hours"],
+            "sources": list(DIRECTOR_SOURCES),
+            "source_labels": dict(DIRECTOR_SOURCE_LABELS),
             "moment": "acted",
             "move_event_types": list(PLAYER_MOVE_EVENT_TYPES),
+            # 🆕 3.11.3(验收 B+C ⑦):**「他动过手没有」那把钥匙有几格,报出来。**
+            # 下游探不到这一格的下场:站点为「聊完一轮屏不动」自己加一条每轮事件
+            # ——而那正是「整场会话只在关闭时发一个事件」那条硬不变量挡的东西。
+            # ⚠️ `chat_seq` **不是事件**(聊天那条路不进日志),所以它单独一格:
+            # 拿 `move_event_types` 去数会永远少一格,而少的正是最常走的那条路。
+            "acted_grains": list(HOST_ACTED_GRAINS),
             "gloss": (
                 "**实时编剧**:世界里一个不上场的角色,在玩家玩的时候即兴写下一拍。"
                 "触发是**玩家的每一次操作**(`host.moments` 里那个 `acted`,"
@@ -10975,6 +11042,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     # (`Scheduler.RUN_SINCE_SEQ`)。**戳不在 ≠ 没问题**,见 `_report_engagements_kept`。
     run_since_seq = _run_since_seq(redis, world_id)
     plugin_events: dict[str, int] = {}
+    from anima_world.director import SOURCES_WITHOUT_A_CALL as _DIRECTOR_FALLBACK_SOURCES
+
     director_moves = director_collected = director_mock = 0
     director_by_source: dict[str, int] = {}
     director_refused = director_this_run = 0
@@ -10994,14 +11063,21 @@ def run_doctor(args: argparse.Namespace) -> int:
             director_moves += 1
             if move == "collect":
                 director_collected += 1
-            elif str(payload.get("source") or "") in ("mock", "ceiling", "refused"):
-                # 🔴 **三种分开数**(3.11.2,验收 A ③):它们指向三种修法 ——
-                # 顶安全阀是世界该这样、答出闭集之外是提示词要改、
-                # 没配 key 是去配一把 key。合成一个数,一种都指不出来。
+            elif str(payload.get("source") or "") in _DIRECTOR_FALLBACK_SOURCES:
+                # 🔴 **每一种分开数**(3.11.3,验收 A ④):它们指向不同的修法 ——
+                # 顶安全阀 / 额度用完 / 让给锚点 / 算术选的都是**世界该这样**,
+                # 没人可派是去看 `gates`/`forbidden`/`cast_pool`,
+                # 答出闭集之外是提示词要改,没配 key 是去配一把 key。
+                # 合成一个数,一种都指不出来。
                 director_by_source[str(payload["source"])] = (
                     director_by_source.get(str(payload["source"]), 0) + 1)
                 director_mock += 1
-            if payload.get("refused_by"):
+            # 🔴 **`capped` 也要数**(3.11.3,验收 B+C ③)。这一行原先只看
+            # `refused_by`,而顶上限那几拍**根本走不到同意门**(`pick_move` 当场
+            # 就返回 `breathe`)—— 于是那句「N 拍被同意门或上限挡过」里,
+            # **"或上限"那半永远是 0**,而标签自己把它写进去了。
+            # 一个把两件事写进同一句、却只数了其中一件的读数,比不报更坏。
+            if payload.get("refused_by") or payload.get("capped"):
                 director_refused += 1
             # 🔴 **`run_since_seq` 是 `int | None`,而 `None` 是「答不上来」**
             # (3.11.1,验收 C ③)。上一版这儿直接 `> run_since_seq`,于是一个
@@ -11100,7 +11176,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             said = "、".join(
                 f"{SOURCE_LABELS.get(k, k)} {n}"
                 for k, n in sorted(director_by_source.items()))
-            print(f"      {onboarding.dim('退成模板句的那几拍:' + said)}")
+            print(f"      {onboarding.dim('没走模型的那几拍:' + said)}")
         if director_moves and director_mock == director_moves:
             problems += 1
             print(f"  {onboarding.yellow(onboarding.WARN)} 每一拍都是模板句 —— "

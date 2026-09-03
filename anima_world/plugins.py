@@ -2470,7 +2470,11 @@ def install_plugins(
                 continue
             fresh.append(plugin)
         if kept:
-            logger.info(
+            # 🔴 **warning 不是 info**(3.11.3,验收 B+C ⑥):和拍那一层
+            # 「这一份文件里的 beat 已经在世界里了」同级。运维台按 warning 抓日志,
+            # 而这一句正是「你以为你升级了、其实库里那份在跑」唯一的现场证据 ——
+            # 印成 info 等于**只在事后翻全量日志时才看得见**。
+            logger.warning(
                 "这几个插件库里那份更新,这次开机不动它们:%s —— "
                 "「库里那份说了算」(要装新的一版走 `anima-world pack install`)",
                 "、".join(kept))

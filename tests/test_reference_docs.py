@@ -477,3 +477,31 @@ def test_the_config_key_gate_is_not_satisfied_by_a_prompt_template_name(monkeypa
     monkeypatch.setitem(config_store._DEFAULTS, victim, True)
     with pytest.raises(AssertionError, match=re.escape(victim)):
         test_every_declared_config_key_is_documented()
+
+
+def test_配置表里那一列默认值_和_DEFAULTS对得上():
+    """🔴 **3.11.3(验收 B+C ⑤)**:`director.enabled` 3.11.2 翻成了 `true`,
+    而 REFERENCE 的配置表照旧写着 `false` —— **文档是运营和作者唯一的入口**,
+    一个写错的默认值比没写更坏:照它去"打开"一个本来就开着的开关不会报错,
+    照它以为"默认关着"而不去关的世界会开着跑。
+
+    ⚠️ 上一条闸只查**这个键在不在表里**,查不出**那一格写的是什么** ——
+    一张齐全而说谎的表,和一张缺行的表是两种病。
+    """
+    import re
+
+    from anima_world.config_store import _DEFAULTS
+
+    text = REFERENCE.read_text(encoding="utf-8")
+    rows = dict(re.findall(r"^\| `([a-z0-9_.]+)` \| \w+ \| ([^|]+?) \|", text, re.M))
+    wrong = []
+    for key, spec in _DEFAULTS.items():
+        said = rows.get(key)
+        if said is None:
+            continue                      # 缺行由上面那条闸管
+        want = spec[0]
+        got = said.strip().strip("*").strip()
+        if isinstance(want, bool):
+            if got.lower().strip("*") != str(want).lower():
+                wrong.append(f"{key}: 表里写 {got!r},而 _DEFAULTS 是 {want}")
+    assert not wrong, "配置表那一列在说谎:\n" + "\n".join(wrong)

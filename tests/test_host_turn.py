@@ -337,6 +337,15 @@ def test_在路上的人_两扇门说同一句话(world):
     assert turn["blocked"] == menu["blocked"]
     assert (turn["place"], turn["place_name"]) == (menu["location"], menu["location_name"])
     assert "路上" in turn["scene"]["text"], "场景不该说他在出发地"
+    # 🔴 **「两边相等」不够 —— 两边一起退化时它照样绿**(3.11.3,验收 A ③)。
+    # 实测:在场行里那一格叫 `__transit__`,于是 `location_name` 恒为「路上」、
+    # 目的地丢了,而同一屏的**场景那句话**说得出「去家的路上」(它读 `state()`
+    # 那份)。这条用例当时是绿的。
+    # **一条只比两边相等的闸,量不出两边同时坏掉。** 加一颗牙:名字里要有目的地。
+    home = world.scheduler.place_name("home") or "home"
+    assert home in turn["place_name"], (
+        f"在路上那一格丢了目的地:{turn['place_name']!r}(该含「{home}」)")
+    assert home in turn["scene"]["text"], turn["scene"]["text"]
 
     for option in turn["options"]:
         if option["kind"] in ("travel", "free"):

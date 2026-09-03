@@ -3075,6 +3075,10 @@ class World:
             "known": known,
             "tension": tension,
             "tension_text": dmod.tension_text(tension),
+            # 🆕 3.11.3(验收 A ⑤):**相位和张力合成的那一句**。
+            # 两格都真(相位不倒退、张力会衰减),而**并排印出来就是一句
+            # 自相矛盾的话**(真站:「到节骨眼了」+「松弛」)。屏上印这一句。
+            "story_text": dmod.story_text(tension, str(row.get("phase") or "setup")),
             "phase": str(row.get("phase") or "setup"),
             "phase_text": dmod.PHASE_LABELS.get(str(row.get("phase") or "setup"), ""),
             "threads": threads,
@@ -8859,9 +8863,9 @@ class World:
         # 接的是**转录那一侧本来就在写的水位**(`contact_store.last_contact_tick`,
         # `World.chat` / `record_chat_turn` 两扇门都写它,`claim_hail` 的 docstring
         # 早就写着这句)。它是 tick 不是 seq,所以**单独一格**,不和 `move_seq` 混。
-        chat_tick, chat_with = self._last_chat(pid)
+        chat_seq, chat_with = self._last_chat(pid)
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
-                                     move_seq=move_seq, chat_tick=chat_tick,
+                                     move_seq=move_seq, chat_seq=chat_seq,
                                      tick=tick, ask=bool(ask),
                                      was_present=was_present)
         if trigger is None:
@@ -8875,7 +8879,7 @@ class World:
             # 一字不差。**一屏没变化和一屏没开口,在玩家眼里是同一件事**,
             # 而真站上量到的正是「同一句台词连出三屏」。
             # 读的是开屏用的**同一个水位**,不另攒一份。
-            if last and chat_tick != int(last.get("chat_tick") or 0) and chat_with:
+            if last and chat_seq != int(last.get("chat_seq") or 0) and chat_with:
                 said = host_mod.chat_line(self.scheduler.agent_display_name(chat_with))
                 if said:
                     recap = list(recap) + [said]
@@ -8908,11 +8912,11 @@ class World:
             # 🔴 而我 3a 那条「二十次操作二十拍、零沉默」的用例**二十次全是动词、
             # 一次没走** —— 它测的是我写对了的那一半。**试牙也要试对地方。**
             # 🔴 **和开屏那道闸问的是同一个函数**(3.11.2,真站第四轮)。
-            # 上一版这儿自己比 `move_seq` —— 而同一轮加进钥匙的 `chat_tick`
+            # 上一版这儿自己比 `move_seq` —— 而同一轮加进钥匙的 `chat_seq`
             # 只加在闸那一侧:于是聊完一轮屏重写了、抬头是 `acted`,
             # 编剧照旧一个字不写。**这正是 A ① 那个形状的第二次。**
             acted_since = host_mod.acted_since(
-                last, move_seq=move_seq, chat_tick=chat_tick)
+                last, move_seq=move_seq, chat_seq=chat_seq)
             said = self._director_turn(
                 pid, recap=recap, place=place, place_name=place_name, day=day,
                 tick=tick, trigger=trigger, beat_fired=(trigger == "beat"),
@@ -8936,7 +8940,7 @@ class World:
                 "type": "host_scene", "who": f"player:{pid}",
                 "payload": {"player_id": pid, "place": place, "day": day, "tick": tick,
                             "beat_seq": beat_seq, "move_seq": move_seq,
-                            "chat_tick": chat_tick,
+                            "chat_seq": chat_seq,
                             "trigger": trigger,
                             "text": text, "source": source,
                             "options": [o["id"] for o in options]},
@@ -9079,16 +9083,10 @@ class World:
             recent=context["recent"], keep=self._director_keep(thread, tick),
         )
         decision: dict[str, Any] | None = None
-        # 🔴 **这一拍是怎么来的,要分得开**(3.11.2,验收 A ③)。
-        # 上一版三种情形都记成 `source: "mock"` —— 而它们指向三种修法。
-        if move == "breathe" and tension >= ceiling and not capped and not beat_fired:
-            why_source = "ceiling"        # 世界该这样,不用管
-        elif not self._llm_key_configured_for_director():
-            why_source = "mock"           # 去配一把 key
-        else:
-            why_source = "refused"        # 提示词要改(模型答的不在闭集里)
+        called = False
         if move != "breathe" and cast:
             # 这一轮**最多**写到 `move`;模型只能在它及以下里挑。
+            called = True
             ladder = list(dmod.MOVES[:dmod.MOVES.index(move) + 1])
             messages = dmod.decide_messages(
                 recap=recap, cast=cast, allowed=[m for m in ladder if m in allowed],
@@ -9099,6 +9097,30 @@ class World:
                 self._director_reply(messages),
                 allowed=[m for m in ladder if m in allowed],
                 cast_ids=[c["id"] for c in cast])
+        # 🔴 **这一拍是怎么来的,要分得开** —— 而**判据是「调没调过客户端」**
+        # (3.11.3,验收 A ④ / B+C ②)。3.11.2 那一版把它算在调用**之前**,
+        # 于是 `else` 那一支写着 `refused`,而算术选了 `breathe` / 没人可派 /
+        # 额度用完 / 撞上锚点 **四种都没问过模型**,却全被记成「模型答的不在
+        # 闭集里」:真站 12 拍里 10 条 `refused`,而假客户端只被调过 6 次。
+        # 🔴 **拆三合一时最容易犯的错,是拆出一个新的三合一。**
+        # ⚠️ 次序是承重的:算术那几种排在「没配 key」前面 —— 算术选了喘气时,
+        # 有没有 key 根本不影响这一拍,写成 `mock` 会让人去配一把不解决问题的 key。
+        if capped:
+            why_source = "capped"
+        elif move == "breathe" and beat_fired:
+            why_source = "anchor"
+        elif move == "breathe" and tension >= ceiling:
+            why_source = "ceiling"
+        elif move == "breathe":
+            why_source = "arith"
+        elif not cast:
+            why_source = "no_cast"
+        elif not self._llm_key_configured_for_director():
+            # ⚠️ 排在 `refused` 前面:没 key 时 `_director_reply` 答一句空的,
+            # 而"空的读不懂"记成「模型答废了」会让人去改提示词。
+            why_source = "mock"
+        else:
+            why_source = "refused" if called else "arith"
         if decision is None:
             decision = dmod.mock_move(recap, place_name=place_name,
                                       source=why_source)
@@ -9465,7 +9487,7 @@ class World:
 
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
                       beat_seq: int, tick: int, ask: bool,
-                      move_seq: int = 0, chat_tick: int = 0,
+                      move_seq: int = 0, chat_seq: int = 0,
                       was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是 `HOST_MOMENTS` 里的哪一个。`None` = 闭嘴,用上一屏。
 
@@ -9500,7 +9522,7 @@ class World:
         # (见 `host_turn`),所以它在钥匙上自己一格。
         # 🔴 **两格都由 `host.acted_since` 一处算**(真站第四轮):这个事实
         # 编剧那道守卫也要问,而从前两处各写各的 —— 一版之内分岔了两次。
-        if host_mod.acted_since(last, move_seq=move_seq, chat_tick=chat_tick):
+        if host_mod.acted_since(last, move_seq=move_seq, chat_seq=chat_seq):
             return "acted"
         if int(last.get("day") or 0) != day:
             return "new_day"
@@ -9519,7 +9541,21 @@ class World:
         return None
 
     def _last_chat(self, pid: str) -> tuple[int, str]:
-        """他上一次跟**谁**说话、是第几 tick —— 转录那一侧本来就在写的水位。
+        """他**一共说过几轮话**、上一次是跟谁 —— 转录那一侧本来就在写的那一行。
+
+        🔴 **读的是轮数(`contact_seq`),不是那个 tick**(3.11.3,验收 A ②)。
+        `last_contact_tick` 是**世界时钟**,而龙族一个 tick 是 4.2 真实分钟 ——
+        玩家一个 tick 里聊十轮,那个数一格没动,于是**十轮里只有一轮换屏**;
+        而那正是"真站第四轮"报上来的症状本身。3.11.2 那两条用例是手喂
+        `clock + 1` 才绿的:**那是把测试改绿,不是把东西修好**,
+        而两扇真门传的都是 `scheduler.clock`。
+
+        **求和不是取最大**:计数分散在每个「她 × 他」一行上,取最大的话,他换一个
+        人聊时那个新行从 1 开始、总数反而不动 —— 而"换个人聊"恰恰最该换屏。
+        每一轮只让其中一行加一,所以求和是单调的。
+
+        ⚠️ 老世界那几行没有这一格(读作 0):升级之后第一轮聊天会多开一次口,
+        **而那是对的**(他确实说过话而屏幕没说),且只多这一次。
 
         🔴 **它不是事件**,而那是有意的:「整场会话只在关闭时发一个事件」是这个
         仓库的硬不变量(chat 子系统与事件核解耦)。所以主持人那把钥匙上,
@@ -9534,19 +9570,20 @@ class World:
         store = getattr(self.scheduler, "contact_store", None)
         if store is None:
             return 0, ""
-        latest, who = 0, ""
+        total, latest, who = 0, -1, ""
         for agent_id in list(self.scheduler.agents):
             try:
                 row = store.get(agent_id, pid) or {}
-            except Exception:  # noqa: BLE001 - 读不到水位不该掀翻这一屏
+            except Exception:  # noqa: BLE001 - 读不到这一行不该掀翻这一屏
                 continue
             try:
+                total += int(row.get("contact_seq") or 0)
                 seen = int(row.get("last_contact_tick") or 0)
             except (TypeError, ValueError):
                 continue
             if seen > latest:
                 latest, who = seen, agent_id
-        return latest, who
+        return total, who
 
     @staticmethod
     def _director_keep(thread: dict[str, Any] | None, tick: int) -> str:
@@ -9841,7 +9878,14 @@ class World:
             # ⚠️ **补在这儿而不是补在主持人那一屏**:两扇门对同一时刻必须说同一句话
             # (`test_在路上的人_两扇门说同一句话` 钉着),而补在上面那扇门里就是
             # 让它们分岔。
-            going = str((self.players.get(pid) or {}).get("transit", {}).get("to") or "")
+            # 🔴 **读 `_player_transit`,不是在场行**(3.11.3,验收 A ③ / B+C ①)。
+            # 在场行里那一格叫 `__transit__`(它和在场同住一个 hash),于是
+            # `.get("transit")` 恒为空 —— `location_name` 永远是「路上」、拿不到
+            # 目的地,而**同一屏的场景那句话却说得出「去家的路上」**(它读的是
+            # `state()` 那份)。同一时刻两扇门又说了两句话。
+            # ⚠️ 读的是 `player_in_transit` 用的**同一个来源**:上一句刚问过
+            # 「他在不在路上」,下一句就该问同一个东西要目的地。
+            going = str((self._player_transit.get(pid) or {}).get("to") or "")
             from anima_world import host as host_mod
 
             blank["location_name"] = host_mod.transit_place_name(

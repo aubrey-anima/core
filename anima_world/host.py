@@ -169,29 +169,36 @@ PLAYER_MOVE_INVITE_OUTCOMES = ("accepted", "declined")
 #:   优先级的赢家 —— 玩家走一步时 `arrive` 赢了名额,于是走路那一半的操作
 #:   编剧一个字不写。
 #: · 3.11.2 真站第四轮:守卫改成比 `move_seq` 了,而同一轮我又给钥匙加了
-#:   `chat_tick`(聊天不发事件)**只加在闸那一侧** —— 于是聊一轮之后屏重写、
+#:   `chat_seq`(聊天不发事件)**只加在闸那一侧** —— 于是聊一轮之后屏重写、
 #:   抬头是 `acted`,而编剧照旧一个字不写。**同一个形状,一版之内第二次。**
 #:
 #: 所以现在它是**一张表加一个函数**:`acted_since` 是这个事实的唯一算法,闸和守卫
 #: 都调它。再加一格时**没有第二处要记得改**,而 `test_director_world.py` 那张
 #: 逐格驱动表会在忘了写驱动时当场红。
-ACTED_GRAINS = ("move_seq", "chat_tick")
+ACTED_GRAINS = ("move_seq", "chat_seq")
 
 
 def acted_since(last: dict[str, Any] | None, *, move_seq: int = 0,
-                chat_tick: int = 0) -> bool:
+                chat_seq: int = 0) -> bool:
     """自**上一屏**之后,他自己动过手没有 —— **一个事实,一处算**。
 
     ⚠️ 这不是「这一屏怎么进场」(那是 `HOST_MOMENTS` 的次序,最强的那个赢),
     是一个独立的事实:玩家走一步时 `arrive` 赢了抬头,而他确实动了手。
     两者在真站上分岔过两次,见 `ACTED_GRAINS`。
 
+    ⚠️ **它答的是「日志和水位上看得见的那几格动没动」,不是「他有没有做过动作」**
+    (3.11.3,验收 A ⑥ —— 上一版这句 docstring 把话说满了)。一次**被拒**的操作
+    (在忙时再点同一个长动词)不留任何痕迹,这里照旧答 `False` ——
+    那不是它漏了,是它**能看见的东西里确实什么都没变**。
+    「被拒也算他做过一次」要不要开口,动的是 `contract.host.moments` 那张表,
+    不在这个函数里(`test_在忙的时候连点同一个长动词…` 钉着当前行为)。
+
     ⚠️ **`last` 为空(他还没有过一屏)时答 `False`** —— 第一屏他还没动过手,
     而那时开口写出来的是一句「关于什么都没发生」的旁白顶在开场白前面。
     """
     if not last:
         return False
-    now = {"move_seq": int(move_seq or 0), "chat_tick": int(chat_tick or 0)}
+    now = {"move_seq": int(move_seq or 0), "chat_seq": int(chat_seq or 0)}
     for grain in ACTED_GRAINS:
         try:
             was = int(last.get(grain) or 0)
