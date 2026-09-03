@@ -418,6 +418,8 @@ class Scheduler:
         self._swept_roster: set[str] | None = None
         # (角色, 玩家) -> 上次打招呼的世界日。一天一次,不是每 tick 一次。
         self._hailed: dict[tuple[str, str], int] = {}
+        #: 这个进程上一次看到的 tick(`clock_cached` 读它)。**0 = 我还没看过。**
+        self._clock_seen: int = 0
         # 本世界日各人上了多久班(tick)。日切结算工资时清空。
         self._worked_ticks: dict[str, int] = {}
         # economy-v4: per-day sales counter feeding the price drift. Memory
@@ -1207,9 +1209,32 @@ class Scheduler:
     def clock(self) -> int:
         return self._clock_box().get()
 
+    @property
+    def clock_cached(self) -> int:
+        """**这个进程上一次看到的 tick** —— 一次内存读,零 I/O(3.11.1,platform 带回)。
+
+        🔴 **它不是 `clock` 的替代,而且名字必须让人看得出来。**
+        `RedisClock` 有意不缓存,理由写在它自己的 docstring 里:
+        「不缓存意味着**任何一个进程随时读到的都是真的现在**」——
+        两个进程各持一份"现在",世界就分叉了,而分叉之后两边都还在正常跑。
+
+        所以这一条**只给只读的、能容忍陈一点的路**用:健康检查、仪表盘、
+        `/health` 那种每秒被打好几次的门。platform 实测:`/health` 里那一次
+        `scheduler.clock` 是一次 Redis GET,而 tick 线程正吃满核 ——
+        **每次 I/O 放掉 GIL 之后要重新抢回来**,p99 被拖到 5 秒。
+
+        ⚠️ **任何要写世界的判断一律用 `clock`**:拿一个可能陈的 tick 去决定
+        "这一拍该不该响 / 这笔赌注到没到期",错的方向是安静的。
+        ⚠️ 这个进程从没推过 tick 时它答 `0` —— 那不是"世界在第 0 tick",
+        是"我还没看过"。要真答案就问 `clock`。
+        """
+        return int(self._clock_seen)
+
     @clock.setter
     def clock(self, value: int) -> None:
         self._clock_box().set(int(value))
+        # 进程内那份快照跟着走 —— **只有这一处写它**,而它只被只读路径读。
+        self._clock_seen = int(value)
 
     def _persist_clock(self) -> None:
         """时钟的持久化归 `RedisClock` 自己:每次 set 就是一次落盘。
@@ -3065,6 +3090,8 @@ class Scheduler:
                 "occupies": bool(affordance.occupies), "party": list(party),
                 "changed": {}, **self._spent(head),
                 "consumed": dict(head.consumed),
+                # 🆕 3.11.1(验收 C ③):**起了个头也得有一句话。**
+                **self._player_said(agent_id, verb, target, affordance, started=True),
             }
 
         if head.updates:
@@ -3990,6 +4017,8 @@ class Scheduler:
             "occupies": bool(affordance.occupies),
             "changed": {}, **self._spent(outcome),
             "consumed": dict(outcome.consumed),
+            # 🆕 3.11.1(验收 C ③):**起了个头也得有一句话。**
+            **self._player_said(agent_id, verb, target, affordance, started=True),
         }
 
     def _settle_engagements(self) -> None:
@@ -4707,7 +4736,9 @@ class Scheduler:
         # 于是那一拍"没叫成",而她**人已经站过去了**。世界里多出一次没有来由的
         # 位移,日志里一个字都没有(`agent_hail` 那条根本没发)。
         # **拒绝时一个字都不写**,这条纪律在这儿的落法。
-        if self.claim_hail(agent_id, player_id):
+        # 🆕 3.11.1(验收 A ②):编剧派的那一次走自己那本账。
+        source = str(op.get("source") or "")
+        if self.claim_hail(agent_id, player_id, source=source):
             # 今天已经叫过一次了。**说一句**,别静默 —— 作者会以为这一拍没写对。
             logger.info("beat hail:%s 今天已经叫过 %s 了,这一拍不再叫第二次",
                         agent_id, player_id)
@@ -4738,6 +4769,9 @@ class Scheduler:
                 # 这一条是**剧情安排的**,不是她闲着想找人 —— 宿主可以按它把弹窗
                 # 写成「他来找你」而不是「他来打招呼」。
                 "reason": "beat",
+                # 🆕 3.11.1:**编剧派的要记账**(验收 A ②)。运维台按它分得出
+                # 「她自己想找你」和「剧情安排的」,而那两件事的额度是两本账。
+                **({"source": source} if source else {}),
                 # 作者写了就用他的,没写就让 `chat_open` 现生成一句
                 # (**引擎不在这里编台词**:它手上只有 op 名)。
                 **({"line": str(op["line"])} if str(op.get("line") or "").strip() else {}),
@@ -6261,20 +6295,33 @@ class Scheduler:
         self._record_event(event)
 
     def _player_said(self, agent_id: str, verb: str, target: str,
-                     affordance: Any) -> dict[str, str]:
+                     affordance: Any, *, started: bool = False) -> dict[str, str]:
         """回执里那一格 `said` —— **只给玩家,而且只有一处算法**(3.10.0,批 1.1 ④)。
 
         ⚠️ **只给玩家**:角色那条路的回执进的是她的对话流,多一句「你…了…」
         会变成她自己念出来的一句旁白。
-        ⚠️ **两个成功出口都要挂上它。** 第一版只挂了「一起做的事」那一条,而玩家
-        点一下走的是「一个人、一样东西、一个瞬间」那一条 —— 拿真 CLI 敲一遍
-        才发现 `said` 是 `None`。写成一个方法,是为了让下一个人没法只改一半。
+        ⚠️ **成功出口有四个,四个都要挂上它。** 第一版只挂了「一起做的事」那一条;
+        第二版补了「一下子做完」那一条(拿真 CLI 敲出来的);
+        🔴 **3.11.1 补的是「起了个头」那两条** —— 一个带 `duration` 的动词
+        (真站上批 1.1 那个 `报到`)走的是**第三、第四个出口**,回执里
+        `{started, duration, ends_tick, occupies, changed:{}}` 一应俱全,
+        **而 `text` 是空的**:玩家按下去,屏幕纹丝不动。
+        **两次「只改了一半」之后,这个方法自己成了那句话的唯一出处** ——
+        而它此前只是"两处共用",不是"四处唯一"。
+
+        `started=True` 时说的是**另一句话**:那件事**开了个头**,不是做完了。
+        用同一句「你…了…」会撒谎 —— 他还没做完。
         """
         if not agent_id.startswith(self.PLAYER_PREFIX):
             return {}
-        said = interaction_line(
-            self.player_action_label(verb, affordance), self.entity_display_name(target),
-        )
+        label = self.player_action_label(verb, affordance)
+        name = self.entity_display_name(target)
+        if started:
+            # ⚠️ **别在这儿算"还要多久"**:那要读 tick_rate,而它是宿主那一侧的
+            # 换算(`_ask_ready_text` 那条教训)。回执里 `ends_tick` 已经给了。
+            said = f"你开始{label}{name}了。" if label and name else ""
+        else:
+            said = interaction_line(label, name)
         return {"said": said} if said else {}
 
     @staticmethod
@@ -6735,7 +6782,8 @@ class Scheduler:
                 },
             })
 
-    def claim_hail(self, agent_id: str, player_id: str) -> str:
+    def claim_hail(self, agent_id: str, player_id: str, *,
+                   source: str = "") -> str:
         """她这会儿能不能主动去跟这个玩家搭话 —— 能就当场记下水位并返回空串,
         不能就返回一句人话的理由。
 
@@ -6752,8 +6800,26 @@ class Scheduler:
         接着说的那句叫接话,不叫搭话。判据取 `contact_store.last_contact_tick`
         (`World.chat` / `record_chat_turn` 两扇门都写它),所以宿主走哪条门
         进来的对话都算数。
+
+        🔴 **编剧那条路(`source="director"`)不受这道闸管**(3.11.1,验收 A ②)。
+        这道闸防的是「**她自己**一天叫你十次」——那是她的主动性,该有节制;
+        而编剧是**世界的节奏**,它自己那把尺是每世界小时的上限
+        (`director.max_per_player_per_hour`),两者是**两本账**
+        (和 `contact.max_per_day` / `autonomy.max_per_day` 各记各的逐字同一条)。
+
+        不放开的下场是实测出来的:同一天编剧第二次派人,`claim_hail` 挡掉、
+        `_director_apply` 拿不到 `landed` 就返空串 —— **屏上零字**。
+        四次 approach 里三次是这样;而我 3a 那两条「零沉默」「≤6/世界小时」的判据
+        **正是被这道闸挡出来的假绿**:它们看着绿,是因为根本没派出去几次。
+
+        ⚠️ **放开要显式、要记账**:`agent_hail.payload.source = "director"`,
+        运维台按它分得出「她自己想找你」和「剧情安排的」。
         """
         day = self.world_time().day
+        if source == "director":
+            # **不记水位、不查水位** —— 编剧那本账在 `director.max_per_player_per_hour`
+            # 上,记在这儿会让两本账互相扣额度。
+            return ""
         if self._hailed.get((agent_id, player_id)) == day:
             return "今天已经跟他打过招呼了"
         store = getattr(self, "contact_store", None)

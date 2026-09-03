@@ -28,6 +28,7 @@ from anima_world.beats import (
 from anima_world.director import (
     MOVES as DIRECTOR_MOVES, PHASES as DIRECTOR_PHASES,
     STAKE_KINDS as DIRECTOR_STAKE_KINDS,
+    TARGET_CURVE_PHASES as DIRECTOR_TARGET_CURVE,
 )
 from anima_world.host import PLAYER_MOVE_EVENT_TYPES
 # `PackInstallError` 住在 `world_package` 而不是这儿 —— `python -m` 会把本文件
@@ -440,7 +441,8 @@ def _build_parser() -> argparse.ArgumentParser:
     player_host.add_argument("--player", required=True, help="他的 player_id")
     player_host.add_argument(
         "--ask", action="store_true",
-        help="他点了「我该干嘛」—— 第四个开口时刻,受 host.ask_cooldown_ticks 管",
+        help="他点了「我该干嘛」—— `ask` 那个开口时刻,受 host.ask_cooldown_ticks 管"
+             "(几个时刻以 `contract --json` 的 host.moments 为准)",
     )
     player_host.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
@@ -515,6 +517,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # ── pack(3.10.0,周更链路 2a-①)──────────────────────────────────────────
+    guidance_cmd = sub.add_parser(
+        "guidance",
+        help="给实时编剧的那份指导:这个世界照着什么写剧情(3.11.1)",
+    )
+    guidance_sub = guidance_cmd.add_subparsers(dest="guidance_command")
+    guidance_show = guidance_sub.add_parser(
+        "show",
+        help="这个世界此刻的指导:主题 / 人物池 / 禁区 / 语气 / 节奏 / 几个路口。"
+             "换一份走 `anima-world pack install`",
+    )
+    _add_world_args(guidance_show)
+    guidance_show.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
+
     pack_cmd = sub.add_parser(
         "pack",
         help="内容包:往一个「跑着的」世界投一份更新(install)、"
@@ -1159,6 +1176,18 @@ EDIT_PATH_NOTES: dict[str, str] = {
         "都把人的调整悄悄撤销一次)。改一个跑着的世界的开关有两条路:"
         "`anima-world config set`,或者把它写进一份内容包走 `pack install`"
     ),
+    # 🆕 3.11.1(验收 B ②):**第六段。**
+    # 🔴 `RedisGuidanceStore.seed()` 是「空的时候才播」——于是一个**已经有指导**的
+    # 世界,作者改了 `guidance` 再走 `--world-file` 重启,**一个字都不生效,
+    # 而且一句话都不说**。舰队每次开机都带 `--world-file`,所以这不是边角情形:
+    # 创作者改完指导重启,看到的是"没报错",而编剧照着上一周那份在写。
+    # **和另外五段逐字同一种病**,只是它晚生了一版。
+    "guidance": (
+        "这份文件里给编剧的指导「装不进一个已有的世界」:它和地图 / 规律同一条契约"
+        "——「空的时候才播」,而这个世界已经有一份了。改一个「跑着的」世界的指导用 "
+        "`anima-world pack install <文件>`(那条路上 `guidance` 是「整份覆盖」:"
+        "创作者这一周改了指导,那就是改了)"
+    ),
     "world_setting": (
         "这份文件里的世界观「装不进一个已有的世界」:它只在首启那一刻落进 `:prompts`。"
         "改一个跑着的世界的世界观用 `anima-world world setting --set`(3.8.0),"
@@ -1211,8 +1240,13 @@ def _same_authored_layer_as_before(world_seed: Any, meta: Any) -> bool:
         return False
     import hashlib
 
+    # 🔴 **看哪几段,由 `EDIT_PATH_NOTES` 说了算**(3.11.1,验收 B ② 顺手逮的)。
+    # 上一版这儿是一串**手抄的**段名,而 3.11.1 给那张表加 `guidance` 时它没跟 ——
+    # 于是「只改了指导」的一份文件被判成"同一份",那句本该说的话被这个开关按住了。
+    # **一个静默的开关比一句漏掉的话更难查**:屏幕上什么都没有,而且看起来正常。
+    # 绑在那张表上之后,加一段就自动进指纹。
     watched = {k: world_seed.get(k) for k in
-               ("beats", "config", "world_setting", "agents", "memories")}
+               (*EDIT_PATH_NOTES, "beats", "agents")}
     try:
         blob = json.dumps(watched, ensure_ascii=False, sort_keys=True, default=str)
     except (TypeError, ValueError):
@@ -1251,6 +1285,10 @@ def edit_path_silent_notes(
     setting = authored.get("world_setting")
     if isinstance(setting, str) and setting.strip():
         notes.append(EDIT_PATH_NOTES["world_setting"])
+    # 🆕 3.11.1(验收 B ②):指导那一段也会安静地什么都不做。
+    guide = authored.get("guidance")
+    if isinstance(guide, dict) and guide:
+        notes.append(EDIT_PATH_NOTES["guidance"])
 
     def _named(section: str, field: str) -> list[str]:
         out: list[str] = []
@@ -1292,7 +1330,57 @@ def _roster_note(key: str, who: list[str], on_roster: Any) -> str:
 
 #: 哪几样东西一出现,这份包就只有 3.10.0 以上装得进去。
 #: **按"文件里写了什么"判,不按版本号猜** —— 和消费方那条"按段探测"逐字同构。
-PACK_ENGINE_MIN = "3.10.0"
+#: **这份包里有什么 → 它最低要哪一版引擎。**
+#:
+#: 🔴 **它从一个常量变成一张表,是被同一个 bug 咬第二次逼的**(3.11.1,验收 B ①)。
+#: 上一版这儿是 `PACK_ENGINE_MIN = "3.10.0"` 一个数,于是 3.11.0 加了作者层第十六段
+#: `guidance` 之后:一份只带 `guidance`、封皮写 `3.10.0` 的包,`world check --edit`
+#: 答 **`loadable: true` rc 0** —— 而它在 3.10.x 上是**开不了机的硬失败**
+#: (不认识的作者层 `type`)。**和 2a-① 验收 C 逮的那条一模一样,只是换了一个段。**
+#:
+#: 一个常量答不了「哪一版」这个问题:它只答得出「比某一版新」。加一段就要改那个
+#: 常量,而改了它,**上一段的门槛会被一起抬高**(带 `pack` 的老包会被要求写 3.11.0,
+#: 而它在 3.10.0 上跑得好好的)—— 两种错都不报错。
+#:
+#: ⚠️ **加一个新的作者层段 / 新的顶层键,就在这张表里加一行。**
+#: `tests/test_packs.py` 那条闸拿 `AUTHOR_SECTIONS` 逐个对着它,漏了会喊。
+PACK_ENGINE_MIN_BY_NEED: dict[str, str] = {
+    "`pack` 段(作者层第十五个段)": "3.10.0",
+    "`trigger.at.since`": "3.10.0",
+    "一条拍上的 `narrate`": "3.10.0",
+    "`guidance` 段(作者层第十六个段)": "3.11.0",
+}
+#: 这张表里最低的那一版 —— 只在「没写 `engine_min`」那条警告里当兜底用。
+PACK_ENGINE_MIN = min(PACK_ENGINE_MIN_BY_NEED.values(),
+                      key=lambda v: tuple(int(x) for x in v.split(".")))
+
+
+def pack_engine_needs(authored: dict[str, Any] | None) -> list[str]:
+    """这份包里用到了哪几样「新引擎才有的东西」——**一份判断,两处用**。
+
+    🔴 **抽出来是被验收 B ① 逼的**:上一版这段逻辑在 `pack_engine_min_errors` 里
+    有一份、在 `pack_engine_min_warnings` 里**又抄了一份**(而且抄的那份写法还不同,
+    是个嵌在 `any(...)` 里的条件)。于是 3.11.0 加 `guidance` 时**两处都要改,
+    而两处都没改** —— 两份判断迟早给出不同答案,这一次它们一起答错。
+    """
+    if not authored:
+        return []
+    needs: list[str] = []
+    if isinstance(authored.get("pack"), dict):
+        needs.append("`pack` 段(作者层第十五个段)")
+    for beat in _seed_entry_dicts(authored, "beats"):
+        at = (beat.get("trigger") or {}).get("at")
+        if isinstance(at, dict) and at.get("since") is not None:
+            needs.append("`trigger.at.since`")
+            break
+    for beat in _seed_entry_dicts(authored, "beats"):
+        if beat.get("narrate") is not None:
+            needs.append("一条拍上的 `narrate`")
+            break
+    # 🆕 3.11.1(验收 B ①):作者层第十六段 —— 它要的是 3.11.0,不是 3.10.0。
+    if isinstance(authored.get("guidance"), dict):
+        needs.append("`guidance` 段(作者层第十六个段)")
+    return needs
 
 
 def pack_engine_min_errors(authored: dict[str, Any] | None, manifest: Any) -> list[str]:
@@ -1309,18 +1397,7 @@ def pack_engine_min_errors(authored: dict[str, Any] | None, manifest: Any) -> li
     """
     if not authored:
         return []
-    needs: list[str] = []
-    if isinstance(authored.get("pack"), dict):
-        needs.append("`pack` 段(作者层第十五个段)")
-    for beat in _seed_entry_dicts(authored, "beats"):
-        at = (beat.get("trigger") or {}).get("at")
-        if isinstance(at, dict) and at.get("since") is not None:
-            needs.append("`trigger.at.since`")
-            break
-    for beat in _seed_entry_dicts(authored, "beats"):
-        if beat.get("narrate") is not None:
-            needs.append("一条拍上的 `narrate`")
-            break
+    needs = pack_engine_needs(authored)
     if not needs:
         return []
     from anima_world.plugins import version_tuple
@@ -1333,13 +1410,21 @@ def pack_engine_min_errors(authored: dict[str, Any] | None, manifest: Any) -> li
     # 把没说也判成错,每一份手写的世界文件都会在这扇门上变红。
     if not declared:
         return []
-    if version_tuple(declared) >= version_tuple(PACK_ENGINE_MIN):
+    # **要哪一版 = 这份包用到的那几样里最高的那一版**(不是一个全局常量)。
+    wanted = max((PACK_ENGINE_MIN_BY_NEED[n] for n in needs if n in PACK_ENGINE_MIN_BY_NEED),
+                 key=version_tuple, default=PACK_ENGINE_MIN)
+    if version_tuple(declared) >= version_tuple(wanted):
         return []
+    # 只点名**真的超过封皮那一版**的那几样 —— 全列出来会让作者去改一个没错的地方
+    # (「拒绝语指错病灶,和没有拒绝语一样贵」)。
+    blame = sorted({n for n in needs
+                    if version_tuple(PACK_ENGINE_MIN_BY_NEED.get(n, wanted))
+                    > version_tuple(declared)})
     return [
         f"封皮上写着 `engine_min: {declared}`,而这份包里有 "
-        f"{'、'.join(sorted(set(needs)))} —— 那几样 {PACK_ENGINE_MIN} 才有,"
+        f"{'、'.join(blame or sorted(set(needs)))} —— 那几样 {wanted} 才有,"
         f"更老的引擎见到它们是「开不了机的硬失败」。把 `engine_min` 写成 "
-        f"`{PACK_ENGINE_MIN}`"
+        f"`{wanted}`"
     ]
 
 
@@ -1353,22 +1438,18 @@ def pack_engine_min_warnings(authored: dict[str, Any] | None, manifest: Any) -> 
         return []
     if str(getattr(manifest, "engine_min", "") or ""):
         return []
-    if pack_engine_min_errors(authored, _AnyEngineMin(PACK_ENGINE_MIN)) != []:
-        return []       # 逻辑上到不了,留着让下一个人改坏时当场看见
-    needs_new = bool(
-        isinstance(authored.get("pack"), dict)
-        or any((b.get("trigger") or {}).get("at", {}).get("since") is not None
-               or b.get("narrate") is not None
-               for b in _seed_entry_dicts(authored, "beats")
-               if isinstance((b.get("trigger") or {}).get("at"), dict)
-               or b.get("narrate") is not None)
-    )
-    if not needs_new:
+    from anima_world.plugins import version_tuple
+
+    # **和错误那一半同一份判断**(`pack_engine_needs`)—— 抄第二遍正是 B ① 那个 bug。
+    needs = pack_engine_needs(authored)
+    if not needs:
         return []
+    wanted = max((PACK_ENGINE_MIN_BY_NEED[n] for n in needs if n in PACK_ENGINE_MIN_BY_NEED),
+                 key=version_tuple, default=PACK_ENGINE_MIN)
     return [
-        f"封皮上没写 `engine_min`,而这份包里有只有 {PACK_ENGINE_MIN} 才认的东西 —— "
+        f"封皮上没写 `engine_min`,而这份包里有只有 {wanted} 才认的东西 —— "
         f"空着等于「谁都行」,而更老的引擎见到它们是「开不了机的硬失败」。"
-        f"写上 `engine_min: {PACK_ENGINE_MIN}`"
+        f"写上 `engine_min: {wanted}`"
     ]
 
 
@@ -1673,6 +1754,20 @@ def world_guidance_errors(authored: dict[str, Any] | None) -> list[str]:
                     f"guidance.pacing 里不认识的字段 {'、'.join(bad)} —— 只有 "
                     f"{'、'.join(PACING_KEYS)}。⚠️ `moves_per_day` 有意没有:"
                     "它和「每操作一次都有回应」直接打架,节制由每世界小时的上限管")
+            curve = pacing.get("target_curve")
+            if curve is not None:
+                if not isinstance(curve, dict):
+                    errors.append("guidance.pacing.target_curve 要是一个对象:"
+                                  f"{'、'.join(DIRECTOR_TARGET_CURVE)} 各一个世界日数")
+                else:
+                    bad_curve = sorted(set(curve) - set(DIRECTOR_TARGET_CURVE))
+                    if bad_curve:
+                        errors.append(
+                            f"guidance.pacing.target_curve 里不认识的相 "
+                            f"{'、'.join(bad_curve)} —— 只有 "
+                            f"{'、'.join(DIRECTOR_TARGET_CURVE)}。"
+                            "⚠️ `release` 有意不在里面:它是一条线走完之后的样子,"
+                            "没有时长")
             ceiling = pacing.get("ceiling")
             if ceiling is not None and (not isinstance(ceiling, (int, float))
                                         or not 0 < float(ceiling) <= 1):
@@ -8268,7 +8363,8 @@ def run_player(args: argparse.Namespace) -> int:
 
     command = getattr(args, "player_command", None)
     if command not in {"forget", "options", "erase", "host", "story"}:
-        print("[player] 只有 forget / options / erase / host 四个子命令", file=sys.stderr)
+        print("[player] 只有 forget / options / erase / host / story 五个子命令",
+              file=sys.stderr)
         return 2
 
     redis, world_id, mysql = _world_args(args)
@@ -8300,27 +8396,40 @@ def run_player(args: argparse.Namespace) -> int:
             print(json.dumps(story, ensure_ascii=False, indent=2))
             return 0
         # **渲染是赠品,`--json` 才是契约**(和 map / host 同一条)。
-        bands = ((0.25, "松弛"), (0.55, "有点绷"), (0.8, "紧"), (1.01, "顶到头了"))
-        word = next(w for cut, w in bands if story["tension"] < cut)
+        # 🔴 **这一屏是给玩家看的,所以三样东西不许上去**(3.11.1,验收 C ⑤):
+        # 闭集的**英文枚举名**(`〔breathe〕`「setup」)· 编剧的**理由** `why`
+        # (那是给创作者和运维看的 GM 笔记)· 内部 id(`和 柔` vs 日志里的 `沈亦柔`)。
+        from anima_world.director import MOVE_LABELS, STAKE_LABELS
+
+        # 🔴 **人话直接读那三格,不在这儿再译一遍**(3.11.1,player 带回)。
+        # 上一版这一屏自己带着一张分档表 —— 而站点也要一张,**两张迟早分叉**。
         print(onboarding.rule(f"{args.player} 的故事"))
-        print(f"  张力 {story['tension']:.2f}({word})· 这条线走到「{story['phase']}」"
+        print(f"  张力 {story['tension']:.2f}({story['tension_text']})"
+              f"· 这条线{story['phase_text']}"
               f"· 编剧一共写过 {story['moves']} 拍")
         if not story["threads"]:
             print("  还没有开着的线。")
         for thread in story["threads"]:
-            left = thread.get("hours_left")
-            when = f",还剩 {left:g} 个世界小时要有个交代" if left is not None else ""
+            when = (f",{thread['due_text']}要有个交代"
+                    if thread.get("due_text") else "")
             stake = thread.get("stake") or {}
-            what = f";押着{stake.get('what') or stake.get('kind')}" if stake else ""
+            kind = STAKE_LABELS.get(str(stake.get("kind") or ""), "")
+            what = f";押着{stake.get('what') or kind}" if stake else ""
+            # ⑨ **显示名和日志里那一栏用同一个**(线上 `和 柔` / 日志 `沈亦柔`)。
+            who = _display_name_of(world, str(thread.get("with") or ""))
             print(f"  · {thread.get('promise') or thread.get('id')}"
-                  f"(和 {thread.get('with') or '?'}{when}{what})")
+                  f"(和 {who or '?'}{when}{what})")
         if story["recent_log"]:
             print("  最近几拍:")
             for row in story["recent_log"][-5:]:
                 payload = row.get("payload") or {}
-                who = payload.get("target_name") or payload.get("target") or ""
-                why = payload.get("why") or ""
-                print(f"    〔{payload.get('move')}〕{who} {why}".rstrip())
+                who = (payload.get("target_name")
+                       or _display_name_of(world, str(payload.get("target") or "")))
+                move = MOVE_LABELS.get(str(payload.get("move") or ""),
+                                       str(payload.get("move") or ""))
+                # ⚠️ **`why` 不上屏** —— 它是编剧写给创作者的一句话
+                # (「为什么这么安排」),给玩家看等于把 GM 的笔记摊在桌上。
+                print(f"    〔{move}〕{who}".rstrip())
         return 0
     if command == "erase":
         try:
@@ -9178,8 +9287,22 @@ def contract_payload() -> dict[str, Any]:
             "guidance_keys": list(GUIDANCE_KEYS),
             "forbidden_keys": list(FORBIDDEN_KEYS),
             "pacing_keys": list(PACING_KEYS),
+            # 🆕 3.11.1(tool 带回):`target_curve` 那张表的三格。
+            # **不报它的话下游会拿 `phases` 四格去判,多放一格 `release`** ——
+            # 而 `release` 是线走完之后的样子,没有时长。
+            "target_curve_keys": list(DIRECTOR_TARGET_CURVE),
             "arc_keys": list(ARC_KEYS),
-            "cli": "anima-world player story --player <pid> [--json]",
+            "cli": "anima-world player story --player <pid> [--json] / "
+                   "anima-world guidance show",
+            # 🆕 3.11.1(player 带回):**给屏用的那几格人话**。
+            # `tension` 是浮点、`phase` 是枚举,而宿主按纪律两样都不上屏 ——
+            # 照 `host.ask_ready_text` 那条先例,引擎给人话,宿主照印。
+            "text_keys": ["tension_text", "phase_text"],
+            # 🆕 3.11.1(platform 带回):`known` 分开「查无此人」与「认识但还没
+            # 动过手」—— 别让壳自己去翻 `player_join`。
+            "story_keys": ["player_id", "known", "tension", "tension_text",
+                           "phase", "phase_text", "threads", "moves", "recent_log"],
+            "thread_text_keys": ["phase_text", "due_text"],
             "config_keys": ["director.enabled", "director.max_per_player_per_hour",
                             "director.pin_ticks", "director.due_hours"],
             "moment": "acted",
@@ -10086,6 +10209,61 @@ def contract_payload() -> dict[str, Any]:
     }
 
 
+def run_guidance(args: argparse.Namespace) -> int:
+    """`anima-world guidance show` —— 这个世界照着什么写剧情(3.11.1,验收 C ⑩)。
+
+    🔴 **指导此前零 CLI 出口**:`World.guidance()` 有、`contract.director.guidance_method`
+    报了它,而**命令行上问不出来** —— 而这个仓库对创作台那侧的判据是
+    「有没有 CLI 出口」(库里有而 CLI 上没有,对它等于不存在)。
+    换一份走 `pack install`,**这里只读**(和 `world setting` 不给开关就是只读同一条)。
+    """
+    from anima_world.api import World
+
+    redis, world_id, mysql = _world_args(args)
+    if getattr(args, "guidance_command", None) != "show":
+        print("[guidance] 只有 show 一个子命令", file=sys.stderr)
+        return 2
+    world = World.open(world_id, redis=redis, mysql=mysql, force_mock_llm=True)
+    try:
+        body = world.guidance()
+    finally:
+        world.close()
+    if getattr(args, "as_json", False):
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0
+    if not body:
+        print(f"{world_id} 还没有给编剧的指导。")
+        print(f"  {onboarding.dim('没有指导时编剧按保守默认跑(只喘口气 / 派个人来找你);')}")
+        print(f"  {onboarding.dim('写一份走 anima-world pack install <带 guidance 段的包>')}")
+        return 0
+    from anima_world.director import STAKE_LABELS  # noqa: F401 - 闭集的出处
+
+    print(onboarding.rule(f"{world_id} 给编剧的指导"))
+    themes = "、".join(str(t) for t in (body.get("themes") or ())) or "(没写)"
+    print(f"  讲的是:{themes}")
+    if body.get("tone"):
+        print(f"  语气:{body['tone']}")
+    pool = body.get("cast_pool") or []
+    print(f"  编剧调得动的人:{len(pool)} 个" + (f"({'、'.join(map(str, pool[:6]))}"
+          + ("…" if len(pool) > 6 else "") + ")" if pool else " —— 没写 = 全世界"))
+    forbidden = body.get("forbidden") or {}
+    for key, said in (("agents", "不许出现的人"), ("locations", "不许去的地方"),
+                      ("ops", "不许做的事")):
+        rows = forbidden.get(key) or []
+        if rows:
+            print(f"  {said}:{'、'.join(map(str, rows))}")
+    for line in (forbidden.get("text") or []):
+        print(f"  禁区:{line}")
+    pacing = body.get("pacing") or {}
+    if pacing:
+        curve = pacing.get("target_curve") or {}
+        print(f"  节奏:张力安全阀 {pacing.get('ceiling', '(没写)')}"
+              + (f";每一相停留 {curve}" if curve else ""))
+    for arc in (body.get("arcs") or []):
+        print(f"  路口 {arc.get('id')}:{arc.get('steer') or '(没写往哪儿使劲)'}")
+    return 0
+
+
 def run_pack(args: argparse.Namespace) -> int:
     """`anima-world pack install / list` —— 往一个**跑着的**世界投一份内容包。
 
@@ -10211,6 +10389,12 @@ def run_pack(args: argparse.Namespace) -> int:
             print(f"  · {len(receipt['config'])} 个开关:{'、'.join(receipt['config'])}")
         if receipt["world_setting"]:
             print("  · 世界观换了一段")
+        # 🆕 3.11.1(验收 C ⑦):**读到了指导就要说** —— 一份纯指导包装进去,
+        # 屏上一个字不提,而 `pack list` 那行写着「带了:(空)」。
+        if receipt.get("guidance"):
+            print("  · 给编剧的指导换了一份")
+        for problem in (receipt.get("guidance_warnings") or []):
+            print(f"  ⚠ {problem}")
         if receipt["agents"]:
             print(f"  · {len(receipt['agents'])} 个新角色进了这个世界:"
                   f"{'、'.join(receipt['agents'])}")
@@ -10260,6 +10444,22 @@ def run_pack(args: argparse.Namespace) -> int:
         return 0
     finally:
         world.close()
+
+
+def _display_name_of(world: Any, who: str) -> str:
+    """一个 id 给人读的名字 —— **和日志里那一栏用同一个来源**(3.11.1,验收 C ⑨)。
+
+    线上量到的是:`player story` 印 `和 柔`(内部 id),而同一件事在 `director_log`
+    里是 `沈亦柔`。**同一个人在两屏上两个名字**,而没有一处会报错。
+    """
+    if not who:
+        return ""
+    if who.startswith("player:"):
+        return who.split(":", 1)[-1]
+    try:
+        return world.scheduler.agent_display_name(who) or who
+    except Exception:  # noqa: BLE001 - 查不到就退回 id(照实说比编一个好)
+        return who
 
 
 def run_plugin(args: argparse.Namespace) -> int:
@@ -10760,7 +10960,14 @@ def run_doctor(args: argparse.Namespace) -> int:
                 director_mock += 1
             if payload.get("refused_by"):
                 director_refused += 1
-            if int(e.seq or 0) > run_since_seq:
+            # 🔴 **`run_since_seq` 是 `int | None`,而 `None` 是「答不上来」**
+            # (3.11.1,验收 C ③)。上一版这儿直接 `> run_since_seq`,于是一个
+            # **有 `director_log` 而没跑过 tick** 的世界(验包世界正是这样)
+            # 让 `anima-world doctor` 甩 Traceback 退 1。
+            # 隔壁那段老代码本来就带着 `is not None` 守卫 —— 我照抄时漏了它。
+            # ⚠️ **答不上来就不数这一格**,别拿 0 顶替:0 会把整条日志都算成
+            # 「本次开机以来」,而那是一句听起来很确定的假话。
+            if run_since_seq is not None and int(e.seq or 0) > run_since_seq:
                 director_this_run += 1
         if e.type == "agent_join" and e.who:
             joined.add(e.who)
@@ -10839,8 +11046,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     # 🆕 3.11.0:编剧那条链通没通。**账要全,判要新**(3.7.0 那条):
     # 屏幕上报这个世界的一生,而"需要处理"只看**本次开机以来**。
     if bool(store.get("director.enabled", default=False)):
+        this_run = (str(director_this_run) if run_since_seq is not None
+                    else "这一趟还没跑过 tick,答不出来")
         print(f"  {onboarding.green(onboarding.OK)} 编剧:一共写过 {director_moves} 拍"
-              f"(本次开机 {director_this_run});{director_mock} 拍退成模板句、"
+              f"(本次开机 {this_run});{director_mock} 拍退成模板句、"
               f"{director_refused} 拍被同意门或上限挡过、{director_collected} 条线到期收了账")
         if director_moves and director_mock == director_moves:
             problems += 1
@@ -11582,6 +11791,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_plugin(args)
     if args.command == "pack":
         return run_pack(args)
+    if args.command == "guidance":
+        return run_guidance(args)
     if args.command == "report":
         return run_report(args)
     if args.command == "validate":

@@ -97,6 +97,27 @@ _PARITY_IGNORED_EVENTS = ("narrative", "player_join", "pack_installed")
 #:
 #: ⚠️ **只滤这三格**,而且滤的是"派生的展示文本"这一类 —— 哪天有人想往这儿加
 #: 一个真的量,这条注释就是拦他的那句话。
+#: `debug_prompt()` 里**不进这道闸**的那几格:它们是**调试视图对自己的解释**,
+#: 不是提示词。
+#:
+#: 🔴 **`absent` 出去,是 3.11.1 加了一条缺席理由时逼出来的**:那一格答的是
+#: 「这一块**为什么**没出现」——一句写给改提示词的人看的话,而这道闸的名字叫
+#: 「提示词逐字节相同」。
+#:
+#: ⚠️ **这不削弱它**:一块真的没了,`blocks` / `order` 会当场变,闸照旧咬得住;
+#: `absent` 只是那件事的**说明文字**。
+#: 🔴 **而且这里同样是「滤掉」不是「重采基线」** —— 基线采自旧路那棵树,
+#: 重采一遍这道闸就变成 HEAD 和 HEAD 比,永远绿而且什么都不测。
+_PROMPT_DEBUG_ONLY_KEYS = ("absent",)
+
+
+def _prompt_only(view):
+    """`debug_prompt()` 去掉那几格调试说明之后的样子 —— 见 `_PROMPT_DEBUG_ONLY_KEYS`。"""
+    if not isinstance(view, dict):
+        return view
+    return {k: v for k, v in view.items() if k not in _PROMPT_DEBUG_ONLY_KEYS}
+
+
 _PARITY_PRESENTATION_KEYS = ("verb_label", "target_name", "item_name")
 
 
@@ -213,7 +234,8 @@ def _run(tmp_path):
             "needs": {a: world.needs(a) for a in agents},
             "stocks": {o: world.stocks(o) for o in sorted(world.stock_owners())},
             "prompt_sha": {
-                a: hashlib.sha256(json.dumps(world.debug_prompt(a), ensure_ascii=False,
+                a: hashlib.sha256(json.dumps(_prompt_only(world.debug_prompt(a)),
+                                             ensure_ascii=False,
                                              sort_keys=True).encode()).hexdigest()
                 for a in agents},
             # 🔴 **非叙事事件的多重集** —— 被验收 A 收回来的那一半(见模块 docstring)。

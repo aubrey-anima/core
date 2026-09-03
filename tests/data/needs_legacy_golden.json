@@ -1,491 +1,492 @@
 {
- "_采自": {
-  "上一份 golden": {
-   "① fa1507b(最初那一份)": {
-    "sha256": "72802224d9430cfa5f11196907a3e29a623bd6293199d610a4de60edaf5a0db2",
-    "怎么采的": "**旧路** + 判定**开**着;顶层**没有 `events` 键**"
-   },
-   "② 13d5078(重采之前躺在树上的那一份)": {
-    "sha256": "039214399aa7e69e304cf85a245bbc35c877c332aa0164763d3b8e6754e58b28",
-    "怎么采的": "**插件路** + 判定**开**着;`events` 是它加的(多重集那一轮)"
-   },
-   "🔴 更正": "第一版这一格只点了一份文件、底下那张对照表却是拿另一份比的 —— **两份不同的 golden 被写成了一份**(2026-08-26 复核评审逮的)。本仓这一轮自己刚立的那条:**能点名就别数数**,而这次错在没点清是哪一份。历史上这个文件有三版,下面两张表分别对着前两版。"
+  "_采自": {
+    "上一份 golden": {
+      "① fa1507b(最初那一份)": {
+        "sha256": "72802224d9430cfa5f11196907a3e29a623bd6293199d610a4de60edaf5a0db2",
+        "怎么采的": "**旧路** + 判定**开**着;顶层**没有 `events` 键**"
+      },
+      "② 13d5078(重采之前躺在树上的那一份)": {
+        "sha256": "039214399aa7e69e304cf85a245bbc35c877c332aa0164763d3b8e6754e58b28",
+        "怎么采的": "**插件路** + 判定**开**着;`events` 是它加的(多重集那一轮)"
+      },
+      "🔴 更正": "第一版这一格只点了一份文件、底下那张对照表却是拿另一份比的 —— **两份不同的 golden 被写成了一份**(2026-08-26 复核评审逮的)。本仓这一轮自己刚立的那条:**能点名就别数数**,而这次错在没点清是哪一份。历史上这个文件有三版,下面两张表分别对着前两版。"
+    },
+    "为什么两池都关": "它们的产物落在第几 tick 由这台机器忙不忙决定。上一份 golden 只关了叙事,于是这道闸时好时坏 —— 交叉重跑量过:base 9 趟红 5、head 9 趟红 9,而红的一条是 `test_基线自己是可复现的`(它比的是同一份代码对它自己)。**一条时好时坏的闸比没有更贵:它红的时候没人知道该不该信。**范式照 `test_economy_plugin_parity.py`:**先决定比什么,再采基线。**",
+    "关掉之后这道闸验不了什么": "「搬家有没有改到关系」—— needs 不碰四轴,所以这一格今天是空的;哪天它碰了,得另开一道闸,而不是把这两个池打开(打开就回到时好时坏)。",
+    "凭什么说它出自旧路": "实测:`anima_world.__file__` 落在那棵 worktree 上,而 `hasattr(anima_world.needs, 'factory_plugin')` 是 **False** —— **判据是正的**(那个函数不在),不是「grep 到 0 行」。⚠️ `PYTHONPATH` 单独放是不够的:本仓 editable 装的是一个 `__editable__` 的 meta_path finder,它比 `sys.path` 先说话。要先把它从 `sys.meta_path` 摘掉。",
+    "和 ① fa1507b 逐格对照(实测)": {
+      "events": "**没得比**:①那一份顶层根本没有这个键",
+      "needs / prompt_sha": "**逐字节相同**",
+      "state_sha": "变了(判定那两条事件盖住它)",
+      "stocks": "**逐字节相同**(两边 sha 都是 `09307c59ad5d…`)—— 它也是旧路采的,所以没有那三个 `needs.*` 键"
+    },
+    "和 ② 13d5078 逐格对照(实测)": {
+      "events": "103 → 99;少的 4 条**点得出名字**:2 条 `memory_seed` + 2 条 `state_change`,全是关系判定那一次的产物(夏/柔在咖啡店那段对话)",
+      "needs / prompt_sha": "**逐字节相同**",
+      "state_sha": "变了(它盖住上面那几样)",
+      "stocks": "只差三个 `needs.*` 键 —— 那就是**搬家本身**(②是插件路采的,这道闸本来就逐键白名单了它们)"
+    },
+    "怎么跑": "内置橱窗 · 288 tick · needs 开 · 规划与自主关 · **叙事与关系判定两个线程池都关**(scheduler.narrative = None / scheduler.relationship_judge = None)",
+    "改它之前先问一句": "**是行为该变,还是我把它改坏了。**",
+    "树": "a6b3da3(= fa1507b^,第 1 期地基已在、needs 还没搬的那一棵)",
+    "🔴 prompt_sha 窄化(3.11.1)": "这一格从「整个 `debug_prompt()` 的 sha」窄化成「刨掉 `absent` 之后的 sha」。起因:3.11.1 给缺席表加了一行 `director.intent`,而 `absent` 答的是「这一块**为什么**没出现」—— 一句写给改提示词的人看的话,不是提示词。这道闸的名字叫「提示词逐字节相同」,它此前量的比名字多。⚠️ **新值不是从 HEAD 采的** —— 那会让这道闸变成 HEAD 和 HEAD 比。它采自 `dd960f1`(3.11.0 那棵、这道闸对它全绿的树):在那棵树上就地把 sha 换成窄化算法再跑一次,得到这三个值;而 HEAD 上同一算法算出来**逐字节相同** —— **这正是「提示词一个字没变、只是缺席表多了一行」的证明**。复核:`git archive dd960f1` 解一棵树,把 `_run` 里那句 sha 换成 `{k: v for k, v in world.debug_prompt(a).items() if k != 'absent'}` 再跑。"
   },
-  "为什么两池都关": "它们的产物落在第几 tick 由这台机器忙不忙决定。上一份 golden 只关了叙事,于是这道闸时好时坏 —— 交叉重跑量过:base 9 趟红 5、head 9 趟红 9,而红的一条是 `test_基线自己是可复现的`(它比的是同一份代码对它自己)。**一条时好时坏的闸比没有更贵:它红的时候没人知道该不该信。**范式照 `test_economy_plugin_parity.py`:**先决定比什么,再采基线。**",
-  "关掉之后这道闸验不了什么": "「搬家有没有改到关系」—— needs 不碰四轴,所以这一格今天是空的;哪天它碰了,得另开一道闸,而不是把这两个池打开(打开就回到时好时坏)。",
-  "凭什么说它出自旧路": "实测:`anima_world.__file__` 落在那棵 worktree 上,而 `hasattr(anima_world.needs, 'factory_plugin')` 是 **False** —— **判据是正的**(那个函数不在),不是「grep 到 0 行」。⚠️ `PYTHONPATH` 单独放是不够的:本仓 editable 装的是一个 `__editable__` 的 meta_path finder,它比 `sys.path` 先说话。要先把它从 `sys.meta_path` 摘掉。",
-  "和 ① fa1507b 逐格对照(实测)": {
-   "events": "**没得比**:①那一份顶层根本没有这个键",
-   "needs / prompt_sha": "**逐字节相同**",
-   "state_sha": "变了(判定那两条事件盖住它)",
-   "stocks": "**逐字节相同**(两边 sha 都是 `09307c59ad5d…`)—— 它也是旧路采的,所以没有那三个 `needs.*` 键"
+  "events": [
+    [
+      "agent_action",
+      "{\"action\": \"chat\", \"target\": \"夏\"}"
+    ],
+    [
+      "agent_action",
+      "{\"action\": \"eat\"}"
+    ],
+    [
+      "agent_action",
+      "{\"action\": \"eat\"}"
+    ],
+    [
+      "agent_action",
+      "{\"action\": \"eat\"}"
+    ],
+    [
+      "agent_action",
+      "{\"action\": \"idle_wander\"}"
+    ],
+    [
+      "agent_action",
+      "{\"action\": \"idle_wander\"}"
+    ],
+    [
+      "agent_action",
+      "{\"action\": \"idle_wander\"}"
+    ],
+    [
+      "agent_join",
+      "{\"location\": \"cafe\", \"spec\": {\"card\": {\"billing\": \"lead\", \"portrait\": \"https://example.com/anima-demo-placeholder/su-wanxia.png\", \"tagline\": \"老港咖啡的店员,记得每个人爱喝什么\"}, \"name\": \"苏晚夏\", \"personality\": \"开朗热情，说话直接，是咖啡店里手脚麻利的店员，喜欢主动搭话、把气氛聊热\"}, \"state\": {}}"
+    ],
+    [
+      "agent_join",
+      "{\"location\": \"home\", \"spec\": {\"card\": {\"billing\": \"supporting\", \"tagline\": \"每天下午来店里坐两个钟头的画画的人\"}, \"name\": \"沈亦柔\", \"personality\": \"温柔细腻，情感丰富，喜欢窝在家里画画，说话温和、容易共情别人的心事\"}, \"state\": {}}"
+    ],
+    [
+      "agent_join",
+      "{\"location\": \"workshop\", \"spec\": {\"card\": {\"billing\": \"hidden\", \"tagline\": \"工作室的灯总亮到很晚,你还没见过他\"}, \"name\": \"陆知遥\", \"personality\": \"冷静知性，惜字如金，是独立设计工作室的建筑师，习惯理性分析、不轻易表露情绪\"}, \"state\": {}}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"与另一个 agent 对话\", \"id\": \"talk\", \"kind\": \"talk\", \"params_schema\": {\"target\": \"agent_id\"}}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"主动去找一个此刻在场的人开口(只有定时轮次里用得上)\", \"id\": \"reach_out\", \"kind\": \"hail\", \"params_schema\": {\"player_id\": {\"description\": \"找谁(在场名单里的那个 id)\", \"type\": \"string\"}, \"text\": {\"description\": \"开口第一句说什么\", \"type\": \"string\"}}, \"surface\": \"autonomy\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"以后不谈这个话题;对方再提就岔开\", \"id\": \"refuse_topic\", \"kind\": \"topic_ban\", \"params_schema\": {\"keyword\": {\"description\": \"不谈什么\", \"required\": true, \"type\": \"string\"}, \"minutes\": {\"description\": \"多久之后可以再谈(不填就一直)\", \"type\": \"number\"}}, \"surface\": \"chat,autonomy\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"吃东西。「付钱是副作用」:没货没钱就降级成吃随身干粮,不会卡住\", \"id\": \"eat\", \"kind\": \"eat\", \"params_schema\": {}, \"surface\": \"body\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"在此刻所在的地方干活\", \"id\": \"work\", \"kind\": \"work\", \"params_schema\": {}, \"surface\": \"body\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"对你这儿的一样东西做点什么(照料、收取产出、读……)。东西的 id 和它能被怎么做,都写在你感觉到的那几行里 —— 带方括号 id、后面跟着「可以……」的就是。标着「得有人一起」的那些,要用 with 点名跟你一起做的人\", \"id\": \"interact\", \"kind\": \"interact\", \"params_schema\": {\"target\": {\"description\": \"对哪样东西(options 里给的 id)\", \"required\": true, \"type\": \"string\"}, \"verb\": {\"description\": \"做什么(options 里给的动词;人话和 id 都认)\", \"required\": true, \"type\": \"string\"}, \"with\": {\"description\": \"跟你一起做这件事的人(名字或 id);只有标着「得有人一起」的才要填\", \"type\": \"array\"}}, \"surface\": \"body,autonomy,player\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"屏蔽这个人一段时间,期间他发来的消息一概不理\", \"id\": \"mute\", \"kind\": \"mute\", \"params_schema\": {\"minutes\": {\"description\": \"屏蔽多少分钟\", \"required\": true, \"type\": \"number\"}, \"reason\": {\"description\": \"为什么(只有作者与运维看得到)\", \"type\": \"string\"}}, \"surface\": \"chat,autonomy\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"当众说一句话,这会儿在你身边的人都听得见,而且会记住\", \"id\": \"broadcast\", \"kind\": \"broadcast\", \"params_schema\": {\"text\": {\"description\": \"说什么\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"chat,autonomy,player\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"待着,什么也不特意做\", \"id\": \"wander\", \"kind\": \"idle_wander\", \"params_schema\": {}, \"surface\": \"body\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"想找个人待着 —— 不指定是谁,看这会儿谁在\", \"id\": \"seek_company\", \"kind\": \"idle_social\", \"params_schema\": {}, \"surface\": \"body\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"我说完了,轮到你 —— 停下等对方开口\", \"id\": \"wait_for_user\", \"kind\": \"yield\", \"params_schema\": {}, \"surface\": \"chat\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"现在不方便说,等一会儿再回来找他\", \"id\": \"delay_reply\", \"kind\": \"delay\", \"params_schema\": {\"minutes\": {\"description\": \"多少分钟以后回来\", \"required\": true, \"type\": \"number\"}, \"reason\": {\"description\": \"为什么\", \"type\": \"string\"}}, \"surface\": \"chat\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"睡觉\", \"id\": \"sleep\", \"kind\": \"sleep\", \"params_schema\": {}, \"surface\": \"body\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"移动到另一个地点\", \"id\": \"move\", \"kind\": \"move\", \"params_schema\": {\"location\": \"location_id\"}}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"结束这次对话,但不屏蔽对方\", \"id\": \"end_conversation\", \"kind\": \"end\", \"params_schema\": {\"reason\": {\"description\": \"为什么\", \"type\": \"string\"}}, \"surface\": \"chat\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"话说到一半就走人:面对面就真的离开这里,隔着手机就是挂断\", \"id\": \"walk_away\", \"kind\": \"walk_away\", \"params_schema\": {\"to_location\": {\"description\": \"去哪儿(不填就随便走开)\", \"type\": \"string\"}}, \"surface\": \"chat\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"走到某个地方去。「要花时间」,途中人在路上(不是瞬移)\", \"id\": \"walk\", \"kind\": \"walk\", \"params_schema\": {\"location\": {\"description\": \"去哪儿\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"chat,body,player\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"跟同在这儿的另一个角色搭话(对方不在这儿就不成)\", \"id\": \"talk_to\", \"kind\": \"chat\", \"params_schema\": {\"target\": {\"description\": \"跟谁\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"body\"}"
+    ],
+    [
+      "entity_interaction",
+      "{\"changed\": {\"树高\": 3.254}, \"consumed\": {}, \"me_changed\": {\"体力\": 85.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
+    ],
+    [
+      "entity_interaction",
+      "{\"changed\": {\"树高\": 3.304}, \"consumed\": {}, \"me_changed\": {\"体力\": 70.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
+    ],
+    [
+      "entity_interaction",
+      "{\"changed\": {\"树高\": 3.3539999999999996}, \"consumed\": {}, \"me_changed\": {\"体力\": 55.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
+    ],
+    [
+      "entity_interaction",
+      "{\"changed\": {\"树高\": 3.4039999999999995}, \"consumed\": {}, \"me_changed\": {\"体力\": 40.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
+    ],
+    [
+      "item_transfer",
+      "{\"item_id\": \"fertilizer\", \"qty\": 8, \"reason\": \"genesis_inventory\", \"to\": \"夏\"}"
+    ],
+    [
+      "item_transfer",
+      "{\"item_id\": \"garden_shears\", \"note\": \"店门口那棵橡树是她在管\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"夏\"}"
+    ],
+    [
+      "item_transfer",
+      "{\"item_id\": \"old_watch\", \"note\": \"从不离身\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"夏\"}"
+    ],
+    [
+      "item_transfer",
+      "{\"item_id\": \"paint_set\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"柔\"}"
+    ],
+    [
+      "item_transfer",
+      "{\"item_id\": \"sketchbook\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"遥\"}"
+    ],
+    [
+      "location_join",
+      "{\"description\": \"旧港区深处的一间屋子，画架朝着窗，颜料味散不掉。\", \"id\": \"home\", \"name\": \"家\"}"
+    ],
+    [
+      "location_join",
+      "{\"description\": \"港街尽头的独立工作室，满桌纸质草图和模型。\", \"id\": \"workshop\", \"name\": \"建筑工作室\"}"
+    ],
+    [
+      "location_join",
+      "{\"description\": \"港街拐角的咖啡店，手冲，木头桌子，靠窗的位置最好。\", \"id\": \"cafe\", \"name\": \"咖啡店\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.3, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"雨小了\", \"summary\": \"雨小下去了,屋檐还在滴水。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.45, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"下大了\", \"summary\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"陆知遥每次来都坐靠窗那个位置,点美式,不加糖。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"夏\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"这家咖啡店是我盘下来的,第一天只卖出去三杯,雨下了一整天。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.3, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"雨小了\", \"summary\": \"雨小下去了,屋檐还在滴水。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.45, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"下大了\", \"summary\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"苏晚夏总说我脸色差,给我多加一份糖。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"柔\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"画了三年还是卖不掉,但停下来更难受。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"遥\", \"anchor\": false, \"importance\": 0.3, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"雨小了\", \"summary\": \"雨小下去了,屋檐还在滴水。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"遥\", \"anchor\": false, \"importance\": 0.45, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"下大了\", \"summary\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"遥\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"港街拐角那家咖啡店的手冲不错,店员话有点多。\"}"
+    ],
+    [
+      "memory_seed",
+      "{\"agent_id\": \"遥\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"我辞掉了大所的工作,自己开了这间工作室,到现在还没接到第二个像样的活。\"}"
+    ],
+    [
+      "payment",
+      "{\"amount\": 0.35, \"from\": \"__town__\", \"reason\": \"daily_wage\", \"to\": \"柔\", \"worked_ticks\": 5}"
+    ],
+    [
+      "payment",
+      "{\"amount\": 180.0, \"from\": \"__town__\", \"reason\": \"genesis_stipend\", \"to\": \"夏\"}"
+    ],
+    [
+      "payment",
+      "{\"amount\": 240.0, \"from\": \"__town__\", \"reason\": \"genesis_stipend\", \"to\": \"遥\"}"
+    ],
+    [
+      "payment",
+      "{\"amount\": 3.26, \"from\": \"__town__\", \"reason\": \"daily_wage\", \"to\": \"夏\", \"worked_ticks\": 47}"
+    ],
+    [
+      "payment",
+      "{\"amount\": 4.51, \"from\": \"__town__\", \"reason\": \"daily_wage\", \"to\": \"遥\", \"worked_ticks\": 65}"
+    ],
+    [
+      "payment",
+      "{\"amount\": 60.0, \"from\": \"__town__\", \"reason\": \"genesis_stipend\", \"to\": \"柔\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"夏\", \"kind\": \"r_type\", \"r_type\": \"住得近的朋友\", \"r_type_back\": \"总记得我口味的人\", \"target\": \"柔\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"夏\", \"kind\": \"r_type\", \"r_type\": \"常来店里的老客人\", \"r_type_back\": \"话多但让人放松的店员\", \"target\": \"遥\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"夏\", \"kind\": \"sentiment\", \"sentiment\": 0.35, \"target\": \"遥\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"夏\", \"kind\": \"sentiment\", \"sentiment\": 0.55, \"target\": \"柔\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"柔\", \"kind\": \"r_type\", \"r_type\": \"在咖啡店见过几次的人\", \"r_type_back\": \"点头之交\", \"target\": \"遥\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"柔\", \"kind\": \"r_type\", \"r_type\": \"总记得我口味的人\", \"r_type_back\": \"住得近的朋友\", \"target\": \"夏\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"柔\", \"kind\": \"sentiment\", \"sentiment\": 0.15, \"target\": \"遥\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"柔\", \"kind\": \"sentiment\", \"sentiment\": 0.55, \"target\": \"夏\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"遥\", \"kind\": \"r_type\", \"r_type\": \"点头之交\", \"r_type_back\": \"在咖啡店见过几次的人\", \"target\": \"柔\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"遥\", \"kind\": \"r_type\", \"r_type\": \"话多但让人放松的店员\", \"r_type_back\": \"常来店里的老客人\", \"target\": \"夏\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"遥\", \"kind\": \"sentiment\", \"sentiment\": 0.15, \"target\": \"柔\"}"
+    ],
+    [
+      "state_change",
+      "{\"as\": \"遥\", \"kind\": \"sentiment\", \"sentiment\": 0.35, \"target\": \"夏\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"location_join\", \"location\": \"cafe\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"location_join\", \"location\": \"cafe\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"location_join\", \"location\": \"home\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"location_join\", \"location\": \"home\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"location_join\", \"location\": \"home\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"location_join\", \"location\": \"workshop\"}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"persona_update\", \"spec\": {\"goals\": [\"把店撑过这个雨季\", \"让每个进门的人都愿意多坐一会儿\"]}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"persona_update\", \"spec\": {\"goals\": [\"接到一个真正想做的项目\", \"少说废话,把图画好\"]}}"
+    ],
+    [
+      "state_change",
+      "{\"kind\": \"persona_update\", \"spec\": {\"goals\": [\"画完手上这幅\", \"攒够下个月的颜料钱\"]}}"
+    ],
+    [
+      "travel",
+      "{\"arrive_at\": 188, \"from\": \"home\", \"minutes\": 37.9, \"to\": \"cafe\"}"
+    ],
+    [
+      "travel",
+      "{\"arrive_at\": 218, \"from\": \"cafe\", \"minutes\": 37.9, \"to\": \"home\"}"
+    ],
+    [
+      "travel",
+      "{\"arrive_at\": 230, \"from\": \"cafe\", \"minutes\": 37.9, \"to\": \"home\"}"
+    ],
+    [
+      "travel",
+      "{\"arrive_at\": 246, \"from\": \"workshop\", \"minutes\": 26.0, \"to\": \"home\"}"
+    ],
+    [
+      "travel",
+      "{\"arrive_at\": 386, \"from\": \"home\", \"minutes\": 37.9, \"to\": \"cafe\"}"
+    ],
+    [
+      "travel",
+      "{\"arrive_at\": 402, \"from\": \"home\", \"minutes\": 26.0, \"to\": \"workshop\"}"
+    ],
+    [
+      "下大了",
+      "{\"edge\": \"rise\", \"importance\": 0.45, \"owner\": \"world\", \"rule\": \"阵雨\", \"text\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\", \"雨势\": 0.8900468646695461}"
+    ],
+    [
+      "雨小了",
+      "{\"edge\": \"fall\", \"importance\": 0.3, \"owner\": \"world\", \"rule\": \"阵雨\", \"text\": \"雨小下去了,屋檐还在滴水。\", \"雨势\": 0.37738485243027164}"
+    ]
+  ],
+  "needs": {
+    "夏": {
+      "energy": 0.7083333333333344,
+      "hunger": 0.3666666666666617,
+      "mood": 0.4666666666666739,
+      "social": 0.33333333333334236
+    },
+    "柔": {
+      "energy": 0.8125000000000007,
+      "hunger": 0.3666666666666617,
+      "mood": 0.4933333333333294,
+      "social": 0.41666666666667607
+    },
+    "遥": {
+      "energy": 0.7708333333333341,
+      "hunger": 0.3666666666666617,
+      "mood": 0.4666666666666739,
+      "social": 0.33333333333334236
+    }
   },
-  "和 ② 13d5078 逐格对照(实测)": {
-   "events": "103 → 99;少的 4 条**点得出名字**:2 条 `memory_seed` + 2 条 `state_change`,全是关系判定那一次的产物(夏/柔在咖啡店那段对话)",
-   "needs / prompt_sha": "**逐字节相同**",
-   "state_sha": "变了(它盖住上面那几样)",
-   "stocks": "只差三个 `needs.*` 键 —— 那就是**搬家本身**(②是插件路采的,这道闸本来就逐键白名单了它们)"
+  "prompt_sha": {
+    "夏": "d5ffcb6c3017e4da066d86880d9dcdebd3e46b30c476a1af0600d7f6544c865b",
+    "柔": "f00342e39349422d29d2ffa2a24b0602be9348be90329087f66f43d56cb34ffc",
+    "遥": "b884e76d5c7c213be206caac424f5d5c64fe76865a615b4614a7109c43060612"
   },
-  "怎么跑": "内置橱窗 · 288 tick · needs 开 · 规划与自主关 · **叙事与关系判定两个线程池都关**(scheduler.narrative = None / scheduler.relationship_judge = None)",
-  "改它之前先问一句": "**是行为该变,还是我把它改坏了。**",
-  "树": "a6b3da3(= fa1507b^,第 1 期地基已在、needs 还没搬的那一棵)"
- },
- "events": [
-  [
-   "agent_action",
-   "{\"action\": \"chat\", \"target\": \"夏\"}"
-  ],
-  [
-   "agent_action",
-   "{\"action\": \"eat\"}"
-  ],
-  [
-   "agent_action",
-   "{\"action\": \"eat\"}"
-  ],
-  [
-   "agent_action",
-   "{\"action\": \"eat\"}"
-  ],
-  [
-   "agent_action",
-   "{\"action\": \"idle_wander\"}"
-  ],
-  [
-   "agent_action",
-   "{\"action\": \"idle_wander\"}"
-  ],
-  [
-   "agent_action",
-   "{\"action\": \"idle_wander\"}"
-  ],
-  [
-   "agent_join",
-   "{\"location\": \"cafe\", \"spec\": {\"card\": {\"billing\": \"lead\", \"portrait\": \"https://example.com/anima-demo-placeholder/su-wanxia.png\", \"tagline\": \"老港咖啡的店员,记得每个人爱喝什么\"}, \"name\": \"苏晚夏\", \"personality\": \"开朗热情，说话直接，是咖啡店里手脚麻利的店员，喜欢主动搭话、把气氛聊热\"}, \"state\": {}}"
-  ],
-  [
-   "agent_join",
-   "{\"location\": \"home\", \"spec\": {\"card\": {\"billing\": \"supporting\", \"tagline\": \"每天下午来店里坐两个钟头的画画的人\"}, \"name\": \"沈亦柔\", \"personality\": \"温柔细腻，情感丰富，喜欢窝在家里画画，说话温和、容易共情别人的心事\"}, \"state\": {}}"
-  ],
-  [
-   "agent_join",
-   "{\"location\": \"workshop\", \"spec\": {\"card\": {\"billing\": \"hidden\", \"tagline\": \"工作室的灯总亮到很晚,你还没见过他\"}, \"name\": \"陆知遥\", \"personality\": \"冷静知性，惜字如金，是独立设计工作室的建筑师，习惯理性分析、不轻易表露情绪\"}, \"state\": {}}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"与另一个 agent 对话\", \"id\": \"talk\", \"kind\": \"talk\", \"params_schema\": {\"target\": \"agent_id\"}}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"主动去找一个此刻在场的人开口(只有定时轮次里用得上)\", \"id\": \"reach_out\", \"kind\": \"hail\", \"params_schema\": {\"player_id\": {\"description\": \"找谁(在场名单里的那个 id)\", \"type\": \"string\"}, \"text\": {\"description\": \"开口第一句说什么\", \"type\": \"string\"}}, \"surface\": \"autonomy\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"以后不谈这个话题;对方再提就岔开\", \"id\": \"refuse_topic\", \"kind\": \"topic_ban\", \"params_schema\": {\"keyword\": {\"description\": \"不谈什么\", \"required\": true, \"type\": \"string\"}, \"minutes\": {\"description\": \"多久之后可以再谈(不填就一直)\", \"type\": \"number\"}}, \"surface\": \"chat,autonomy\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"吃东西。「付钱是副作用」:没货没钱就降级成吃随身干粮,不会卡住\", \"id\": \"eat\", \"kind\": \"eat\", \"params_schema\": {}, \"surface\": \"body\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"在此刻所在的地方干活\", \"id\": \"work\", \"kind\": \"work\", \"params_schema\": {}, \"surface\": \"body\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"对你这儿的一样东西做点什么(照料、收取产出、读……)。东西的 id 和它能被怎么做,都写在你感觉到的那几行里 —— 带方括号 id、后面跟着「可以……」的就是。标着「得有人一起」的那些,要用 with 点名跟你一起做的人\", \"id\": \"interact\", \"kind\": \"interact\", \"params_schema\": {\"target\": {\"description\": \"对哪样东西(options 里给的 id)\", \"required\": true, \"type\": \"string\"}, \"verb\": {\"description\": \"做什么(options 里给的动词;人话和 id 都认)\", \"required\": true, \"type\": \"string\"}, \"with\": {\"description\": \"跟你一起做这件事的人(名字或 id);只有标着「得有人一起」的才要填\", \"type\": \"array\"}}, \"surface\": \"body,autonomy,player\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"屏蔽这个人一段时间,期间他发来的消息一概不理\", \"id\": \"mute\", \"kind\": \"mute\", \"params_schema\": {\"minutes\": {\"description\": \"屏蔽多少分钟\", \"required\": true, \"type\": \"number\"}, \"reason\": {\"description\": \"为什么(只有作者与运维看得到)\", \"type\": \"string\"}}, \"surface\": \"chat,autonomy\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"当众说一句话,这会儿在你身边的人都听得见,而且会记住\", \"id\": \"broadcast\", \"kind\": \"broadcast\", \"params_schema\": {\"text\": {\"description\": \"说什么\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"chat,autonomy,player\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"待着,什么也不特意做\", \"id\": \"wander\", \"kind\": \"idle_wander\", \"params_schema\": {}, \"surface\": \"body\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"想找个人待着 —— 不指定是谁,看这会儿谁在\", \"id\": \"seek_company\", \"kind\": \"idle_social\", \"params_schema\": {}, \"surface\": \"body\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"我说完了,轮到你 —— 停下等对方开口\", \"id\": \"wait_for_user\", \"kind\": \"yield\", \"params_schema\": {}, \"surface\": \"chat\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"现在不方便说,等一会儿再回来找他\", \"id\": \"delay_reply\", \"kind\": \"delay\", \"params_schema\": {\"minutes\": {\"description\": \"多少分钟以后回来\", \"required\": true, \"type\": \"number\"}, \"reason\": {\"description\": \"为什么\", \"type\": \"string\"}}, \"surface\": \"chat\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"睡觉\", \"id\": \"sleep\", \"kind\": \"sleep\", \"params_schema\": {}, \"surface\": \"body\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"移动到另一个地点\", \"id\": \"move\", \"kind\": \"move\", \"params_schema\": {\"location\": \"location_id\"}}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"结束这次对话,但不屏蔽对方\", \"id\": \"end_conversation\", \"kind\": \"end\", \"params_schema\": {\"reason\": {\"description\": \"为什么\", \"type\": \"string\"}}, \"surface\": \"chat\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"话说到一半就走人:面对面就真的离开这里,隔着手机就是挂断\", \"id\": \"walk_away\", \"kind\": \"walk_away\", \"params_schema\": {\"to_location\": {\"description\": \"去哪儿(不填就随便走开)\", \"type\": \"string\"}}, \"surface\": \"chat\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"走到某个地方去。「要花时间」,途中人在路上(不是瞬移)\", \"id\": \"walk\", \"kind\": \"walk\", \"params_schema\": {\"location\": {\"description\": \"去哪儿\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"chat,body,player\"}"
-  ],
-  [
-   "capability_registered",
-   "{\"description\": \"跟同在这儿的另一个角色搭话(对方不在这儿就不成)\", \"id\": \"talk_to\", \"kind\": \"chat\", \"params_schema\": {\"target\": {\"description\": \"跟谁\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"body\"}"
-  ],
-  [
-   "entity_interaction",
-   "{\"changed\": {\"树高\": 3.254}, \"consumed\": {}, \"me_changed\": {\"体力\": 85.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
-  ],
-  [
-   "entity_interaction",
-   "{\"changed\": {\"树高\": 3.304}, \"consumed\": {}, \"me_changed\": {\"体力\": 70.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
-  ],
-  [
-   "entity_interaction",
-   "{\"changed\": {\"树高\": 3.3539999999999996}, \"consumed\": {}, \"me_changed\": {\"体力\": 55.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
-  ],
-  [
-   "entity_interaction",
-   "{\"changed\": {\"树高\": 3.4039999999999995}, \"consumed\": {}, \"me_changed\": {\"体力\": 40.0}, \"me_delta\": {\"体力\": -15.0}, \"target\": \"tree:harbor_oak\", \"verb\": \"tend\"}"
-  ],
-  [
-   "item_transfer",
-   "{\"item_id\": \"fertilizer\", \"qty\": 8, \"reason\": \"genesis_inventory\", \"to\": \"夏\"}"
-  ],
-  [
-   "item_transfer",
-   "{\"item_id\": \"garden_shears\", \"note\": \"店门口那棵橡树是她在管\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"夏\"}"
-  ],
-  [
-   "item_transfer",
-   "{\"item_id\": \"old_watch\", \"note\": \"从不离身\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"夏\"}"
-  ],
-  [
-   "item_transfer",
-   "{\"item_id\": \"paint_set\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"柔\"}"
-  ],
-  [
-   "item_transfer",
-   "{\"item_id\": \"sketchbook\", \"qty\": 1, \"reason\": \"genesis_inventory\", \"to\": \"遥\"}"
-  ],
-  [
-   "location_join",
-   "{\"description\": \"旧港区深处的一间屋子，画架朝着窗，颜料味散不掉。\", \"id\": \"home\", \"name\": \"家\"}"
-  ],
-  [
-   "location_join",
-   "{\"description\": \"港街尽头的独立工作室，满桌纸质草图和模型。\", \"id\": \"workshop\", \"name\": \"建筑工作室\"}"
-  ],
-  [
-   "location_join",
-   "{\"description\": \"港街拐角的咖啡店，手冲，木头桌子，靠窗的位置最好。\", \"id\": \"cafe\", \"name\": \"咖啡店\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.3, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"雨小了\", \"summary\": \"雨小下去了,屋檐还在滴水。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.45, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"下大了\", \"summary\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"夏\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"陆知遥每次来都坐靠窗那个位置,点美式,不加糖。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"夏\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"这家咖啡店是我盘下来的,第一天只卖出去三杯,雨下了一整天。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.3, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"雨小了\", \"summary\": \"雨小下去了,屋檐还在滴水。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.45, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"下大了\", \"summary\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"柔\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"苏晚夏总说我脸色差,给我多加一份糖。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"柔\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"画了三年还是卖不掉,但停下来更难受。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"遥\", \"anchor\": false, \"importance\": 0.3, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"雨小了\", \"summary\": \"雨小下去了,屋檐还在滴水。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"遥\", \"anchor\": false, \"importance\": 0.45, \"kind\": \"witness\", \"rule\": \"阵雨\", \"source_type\": \"下大了\", \"summary\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"遥\", \"anchor\": false, \"importance\": 0.5, \"kind\": \"seed\", \"summary\": \"港街拐角那家咖啡店的手冲不错,店员话有点多。\"}"
-  ],
-  [
-   "memory_seed",
-   "{\"agent_id\": \"遥\", \"anchor\": true, \"importance\": 0.7, \"kind\": \"seed\", \"summary\": \"我辞掉了大所的工作,自己开了这间工作室,到现在还没接到第二个像样的活。\"}"
-  ],
-  [
-   "payment",
-   "{\"amount\": 0.35, \"from\": \"__town__\", \"reason\": \"daily_wage\", \"to\": \"柔\", \"worked_ticks\": 5}"
-  ],
-  [
-   "payment",
-   "{\"amount\": 180.0, \"from\": \"__town__\", \"reason\": \"genesis_stipend\", \"to\": \"夏\"}"
-  ],
-  [
-   "payment",
-   "{\"amount\": 240.0, \"from\": \"__town__\", \"reason\": \"genesis_stipend\", \"to\": \"遥\"}"
-  ],
-  [
-   "payment",
-   "{\"amount\": 3.26, \"from\": \"__town__\", \"reason\": \"daily_wage\", \"to\": \"夏\", \"worked_ticks\": 47}"
-  ],
-  [
-   "payment",
-   "{\"amount\": 4.51, \"from\": \"__town__\", \"reason\": \"daily_wage\", \"to\": \"遥\", \"worked_ticks\": 65}"
-  ],
-  [
-   "payment",
-   "{\"amount\": 60.0, \"from\": \"__town__\", \"reason\": \"genesis_stipend\", \"to\": \"柔\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"夏\", \"kind\": \"r_type\", \"r_type\": \"住得近的朋友\", \"r_type_back\": \"总记得我口味的人\", \"target\": \"柔\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"夏\", \"kind\": \"r_type\", \"r_type\": \"常来店里的老客人\", \"r_type_back\": \"话多但让人放松的店员\", \"target\": \"遥\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"夏\", \"kind\": \"sentiment\", \"sentiment\": 0.35, \"target\": \"遥\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"夏\", \"kind\": \"sentiment\", \"sentiment\": 0.55, \"target\": \"柔\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"柔\", \"kind\": \"r_type\", \"r_type\": \"在咖啡店见过几次的人\", \"r_type_back\": \"点头之交\", \"target\": \"遥\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"柔\", \"kind\": \"r_type\", \"r_type\": \"总记得我口味的人\", \"r_type_back\": \"住得近的朋友\", \"target\": \"夏\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"柔\", \"kind\": \"sentiment\", \"sentiment\": 0.15, \"target\": \"遥\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"柔\", \"kind\": \"sentiment\", \"sentiment\": 0.55, \"target\": \"夏\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"遥\", \"kind\": \"r_type\", \"r_type\": \"点头之交\", \"r_type_back\": \"在咖啡店见过几次的人\", \"target\": \"柔\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"遥\", \"kind\": \"r_type\", \"r_type\": \"话多但让人放松的店员\", \"r_type_back\": \"常来店里的老客人\", \"target\": \"夏\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"遥\", \"kind\": \"sentiment\", \"sentiment\": 0.15, \"target\": \"柔\"}"
-  ],
-  [
-   "state_change",
-   "{\"as\": \"遥\", \"kind\": \"sentiment\", \"sentiment\": 0.35, \"target\": \"夏\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"sleeping\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"agent_state\", \"state\": {\"status\": \"working\"}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"location_join\", \"location\": \"cafe\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"location_join\", \"location\": \"cafe\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"location_join\", \"location\": \"home\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"location_join\", \"location\": \"home\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"location_join\", \"location\": \"home\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"location_join\", \"location\": \"workshop\"}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"persona_update\", \"spec\": {\"goals\": [\"把店撑过这个雨季\", \"让每个进门的人都愿意多坐一会儿\"]}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"persona_update\", \"spec\": {\"goals\": [\"接到一个真正想做的项目\", \"少说废话,把图画好\"]}}"
-  ],
-  [
-   "state_change",
-   "{\"kind\": \"persona_update\", \"spec\": {\"goals\": [\"画完手上这幅\", \"攒够下个月的颜料钱\"]}}"
-  ],
-  [
-   "travel",
-   "{\"arrive_at\": 188, \"from\": \"home\", \"minutes\": 37.9, \"to\": \"cafe\"}"
-  ],
-  [
-   "travel",
-   "{\"arrive_at\": 218, \"from\": \"cafe\", \"minutes\": 37.9, \"to\": \"home\"}"
-  ],
-  [
-   "travel",
-   "{\"arrive_at\": 230, \"from\": \"cafe\", \"minutes\": 37.9, \"to\": \"home\"}"
-  ],
-  [
-   "travel",
-   "{\"arrive_at\": 246, \"from\": \"workshop\", \"minutes\": 26.0, \"to\": \"home\"}"
-  ],
-  [
-   "travel",
-   "{\"arrive_at\": 386, \"from\": \"home\", \"minutes\": 37.9, \"to\": \"cafe\"}"
-  ],
-  [
-   "travel",
-   "{\"arrive_at\": 402, \"from\": \"home\", \"minutes\": 26.0, \"to\": \"workshop\"}"
-  ],
-  [
-   "下大了",
-   "{\"edge\": \"rise\", \"importance\": 0.45, \"owner\": \"world\", \"rule\": \"阵雨\", \"text\": \"雨忽然下大了,雨点砸在遮阳棚上,街上的人都往屋檐底下躲。\", \"雨势\": 0.8900468646695461}"
-  ],
-  [
-   "雨小了",
-   "{\"edge\": \"fall\", \"importance\": 0.3, \"owner\": \"world\", \"rule\": \"阵雨\", \"text\": \"雨小下去了,屋檐还在滴水。\", \"雨势\": 0.37738485243027164}"
-  ]
- ],
- "needs": {
-  "夏": {
-   "energy": 0.7083333333333344,
-   "hunger": 0.3666666666666617,
-   "mood": 0.4666666666666739,
-   "social": 0.33333333333334236
+  "state_sha": "5542c122735bbff14f1f32934b9b84da8f0e52c759cf03b97ea646eccb7308d3",
+  "stocks": {
+    "agent:夏": {
+      "主动": 1.4,
+      "体力": 100.0,
+      "手艺": 1.0,
+      "睡眠债": 0.0,
+      "随和": 1.4
+    },
+    "agent:柔": {
+      "主动": 1.0,
+      "体力": 100.0,
+      "手艺": 1.0,
+      "睡眠债": 0.0,
+      "随和": 1.0
+    },
+    "agent:遥": {
+      "主动": 0.4,
+      "体力": 100.0,
+      "手艺": 1.0,
+      "睡眠债": 0.0,
+      "随和": 0.35
+    },
+    "tree:harbor_oak": {
+      "最大树高": 12.0,
+      "树高": 3.4039999999999995,
+      "生长速度": 0.004
+    },
+    "world": {
+      "季节": 2.0,
+      "雨势": 0.12841760151793669,
+      "雨天数": 0.003472222222222222
+    }
   },
-  "柔": {
-   "energy": 0.8125000000000007,
-   "hunger": 0.3666666666666617,
-   "mood": 0.4933333333333294,
-   "social": 0.41666666666667607
-  },
-  "遥": {
-   "energy": 0.7708333333333341,
-   "hunger": 0.3666666666666617,
-   "mood": 0.4666666666666739,
-   "social": 0.33333333333334236
-  }
- },
- "prompt_sha": {
-  "夏": "9251caf6a74f33967ff5248808ef6d95c0977c7abdd3166695d02b613ead1c00",
-  "柔": "bd343ff6dcfff872c7fec067acd795707ad80ca459dfbbfd32d12f0bfed3fe85",
-  "遥": "9bbb6893c3334e0126de7ea2fb7de47bc31403ad9c9fb0e3b93c62c7464c650d"
- },
- "state_sha": "5542c122735bbff14f1f32934b9b84da8f0e52c759cf03b97ea646eccb7308d3",
- "stocks": {
-  "agent:夏": {
-   "主动": 1.4,
-   "体力": 100.0,
-   "手艺": 1.0,
-   "睡眠债": 0.0,
-   "随和": 1.4
-  },
-  "agent:柔": {
-   "主动": 1.0,
-   "体力": 100.0,
-   "手艺": 1.0,
-   "睡眠债": 0.0,
-   "随和": 1.0
-  },
-  "agent:遥": {
-   "主动": 0.4,
-   "体力": 100.0,
-   "手艺": 1.0,
-   "睡眠债": 0.0,
-   "随和": 0.35
-  },
-  "tree:harbor_oak": {
-   "最大树高": 12.0,
-   "树高": 3.4039999999999995,
-   "生长速度": 0.004
-  },
-  "world": {
-   "季节": 2.0,
-   "雨势": 0.12841760151793669,
-   "雨天数": 0.003472222222222222
-  }
- },
- "ticks": 288
+  "ticks": 288
 }

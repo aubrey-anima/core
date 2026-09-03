@@ -64,9 +64,82 @@ MOVE_TENSION: dict[str, float] = {
     "complicate": +0.25,  # 添乱 —— 必须带真赌注(见 `STAKE_KINDS`)
 }
 
+#: 那几个闭集**印在人屏上时该说什么**(3.11.1,验收 C ⑤)。
+#:
+#: 🔴 **`〔breathe〕`「setup」印在玩家屏上,而那是给机器读的名字。**
+#: 和主持人那张 `MOMENT_LABELS` 逐字同一条:**闭集加一项就要在这儿加一句人话**,
+#: 闸在 `tests/test_director.py`(不许纯 ASCII)。
+MOVE_LABELS: dict[str, str] = {
+    "breathe": "喘口气", "approach": "有人来找你", "invite": "有人约你",
+    "reveal": "你知道了一件事", "complicate": "出事了",
+    # 结算那一支不是编剧写的,但它也进同一份日志、同一屏。
+    "collect": "到期了",
+}
+PHASE_LABELS: dict[str, str] = {
+    "setup": "刚起头", "escalation": "越缠越紧", "climax": "到节骨眼了", "release": "松下来了",
+}
+STAKE_LABELS: dict[str, str] = {
+    "relation": "一段交情", "money": "一笔钱", "item": "一样东西", "deadline": "一个期限",
+}
+
+#: 张力的分档词。**边界写成"从几起",不写区间** —— 区间要维护两个数,
+#: 而两个数迟早对不上(`host._DAYPARTS` 逐字同一条)。
+_TENSION_BANDS: tuple[tuple[float, str], ...] = (
+    (0.0, "松弛"), (0.25, "有点绷"), (0.55, "紧"), (0.8, "顶到头了"),
+)
+
+
+def tension_text(value: float) -> str:
+    """这个张力读作哪个词 —— **引擎给人话,宿主不自己译**(3.11.1,player 带回)。
+
+    🔴 照 `_ask_ready_text` 那条先例:`tension` 是个浮点、`phase` 是个枚举,
+    而站点按纪律**两样都不上屏**(不自己译、不给玩家看数字)。于是这一格
+    在引擎里有、在屏上没有 —— **一个到不了消费方的读数,等于没有这个读数**。
+    分档表**只有一份**:CLI 那一屏和站点读的是同一句。
+    """
+    try:
+        got = max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return _TENSION_BANDS[0][1]
+    word = _TENSION_BANDS[0][1]
+    for start, name in _TENSION_BANDS:
+        if got >= start:
+            word = name
+    return word
+
+
+def due_text(hours_left: float | None) -> str:
+    """这条线还剩多久要有个交代 —— **按世界小时折成人话**,空着就是没期限。
+
+    ⚠️ **不说"还剩 0 小时"**:到点了就说「到期了」——一个念不通的读数
+    和一句错的一样贵。
+    """
+    if hours_left is None:
+        return ""
+    try:
+        left = float(hours_left)
+    except (TypeError, ValueError):
+        return ""
+    if left <= 0:
+        return "到期了"
+    if left < 24:
+        return f"还剩约 {max(1, round(left))} 个世界小时"
+    return f"还剩约 {round(left / 24, 1):g} 个世界日"
+
+
 #: 一条线走的四相。**这是「张力是目标曲线不是上限」那句口径的落点**(口径 4):
 #: 编剧挑的不是"张力够不够高",是"这条线此刻该往哪一相走"。
 PHASES = ("setup", "escalation", "climax", "release")
+
+#: `guidance.pacing.target_curve` 那张表认哪几个键 —— **是 `PHASES` 去掉最后一相**。
+#:
+#: 🔴 **`release` 有意不在里面**(3.11.1,tool 带回的一条):`target_curve` 说的是
+#: 「这一相**停留几个世界日**」,而 `release` 是一条线**走完之后**的样子 ——
+#: 它没有时长,写它没有意义。
+#: 拿 `phases` 那四格去判会**多放一格**,而多放的那一格作者写下去不报错、也不生效
+#: —— 正是这一层最贵的那种错。所以契约里单报一格 `target_curve_keys`,
+#: 别让下游去猜(`contract.director.target_curve_keys`,§3.66(b) 同句)。
+TARGET_CURVE_PHASES = PHASES[:-1]
 
 #: 每一相的目标张力。挑动作时按「离目标还差多少」选,而不是按一个全局上限。
 PHASE_TARGET: dict[str, float] = {
@@ -212,11 +285,13 @@ def cast_pool_warnings(cast_pool: Sequence[str], *, hidden: Sequence[str],
     for aid in cast_pool:
         aid = str(aid)
         if aid in hid:
-            said.append(f"`cast_pool` 里的 {aid!r} 是藏起来的人(`billing: \"hidden\"`)"
-                        "—— 他不会被派出来,而这一格不会报错")
+            # ⚠️ **别印 Python 的 `repr`**(`{aid!r}` 出来是 `'夏'` 带引号),
+            # 也**别写死「他」**(这个世界里的角色不都是他)—— 3.11.1,验收 C ⑧。
+            said.append(f"`cast_pool` 里的 {aid} 是藏起来的人(`billing: \"hidden\"`)"
+                        "—— TA 不会被派出来,而这一格不会报错")
         elif aid in forb:
-            said.append(f"`cast_pool` 里的 {aid!r} 同时写在 `forbidden.agents` 里"
-                        "—— 禁区赢,他不会被派出来")
+            said.append(f"`cast_pool` 里的 {aid} 同时写在 `forbidden.agents` 里"
+                        "—— 禁区赢,TA 不会被派出来")
     return said
 
 
@@ -375,6 +450,12 @@ def mock_move(recap: Sequence[str], *, place_name: str = "") -> dict[str, Any]:
         return {"move": "breathe", "who": "", "line": "这一下之后,四下安静了一瞬。",
                 "why": "没配 key:模板句", "promise": "", "stake": None,
                 "source": "mock"}
+    # ⚠️ **走到这儿说明他刚做的那件事没进回顾**(走路、答邀请那几种今天不在
+    # `RECAP_EVENT_TYPES` 上)—— 但那不等于"什么都没发生"(3.11.1,验收 A ⑤)。
+    # 上一版这句是「在咖啡店一时没什么动静。」,**把指向他刚做的事那半句丢了**,
+    # 而那是这一层唯一的立身之本(设计稿 §6 最后一条:输入里「他刚做了什么」
+    # 权重最高)。改成一句**指得回去**的话:他刚动过,只是世界还没回应。
     where = f"在{place_name}" if place_name else "这儿"
-    return {"move": "breathe", "who": "", "line": f"{where}一时没什么动静。",
+    return {"move": "breathe", "who": "",
+            "line": f"你这一下之后,{where}静了静,没人接话。",
             "why": "没配 key:模板句", "promise": "", "stake": None, "source": "mock"}

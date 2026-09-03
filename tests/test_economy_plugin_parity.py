@@ -135,6 +135,20 @@ _PARITY_IGNORED_EVENTS = ("narrative", "player_join", "pack_installed")
 #: name),一个字节的状态都不承载,old / new 两条路上完全相同。
 #: 🔴 **滤掉,而不是重采基线** —— 基线采自旧路那棵树,重采一遍这道闸就变成
 #: HEAD 和 HEAD 比,**永远绿而且什么都不测**。
+#: `debug_prompt()` 里**不进这道闸**的那几格:调试视图对自己的解释,不是提示词。
+#: 🔴 `absent` 答的是「这一块**为什么**没出现」——3.11.1 加了一条缺席理由时逼出来的。
+#: ⚠️ **这不削弱它**:一块真的没了,`blocks`/`order` 会当场变;`absent` 只是说明文字。
+#: 🔴 同样是**滤掉不是重采基线** —— 重采一遍这道闸就变成 HEAD 和 HEAD 比。
+_PROMPT_DEBUG_ONLY_KEYS = ("absent",)
+
+
+def _prompt_only(view):
+    """去掉那几格调试说明之后的 `debug_prompt()`。"""
+    if not isinstance(view, dict):
+        return view
+    return {k: v for k, v in view.items() if k not in _PROMPT_DEBUG_ONLY_KEYS}
+
+
 _PARITY_PRESENTATION_KEYS = ("verb_label", "target_name", "item_name")
 
 
@@ -264,7 +278,8 @@ def run(tmp_path) -> dict:
                       for loc in world.state()["locations"]},
             "player_shop": world.player_shop(PLAYER),
             "stocks": {o: world.stocks(o) for o in sorted(world.stock_owners())},
-            "prompt_sha": {a: _sha(world.debug_prompt(a)) for a in agents},
+            "prompt_sha": {a: _sha(_prompt_only(world.debug_prompt(a)))
+                           for a in agents},
             "state_sha": _sha(_comparable_state(world.state())),
             "events": sorted(
                 [e.type, json.dumps(_parity_payload(e.payload), ensure_ascii=False,
