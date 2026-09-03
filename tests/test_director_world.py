@@ -1090,3 +1090,47 @@ def test_钥匙那几格和source闭集_都要在契约里探得到():
     assert seg["sources"] == list(D.SOURCES)
     assert seg["source_labels"] == dict(D.SOURCE_LABELS)
     assert "story_text" in seg["text_keys"] and "story_text" in seg["story_keys"]
+
+
+def test_编剧派一个不在场的人_hail载荷自带名字(tmp_path):
+    """🔴 **真站第五轮 + player 带回**:编剧 `approach` 派来的诺诺,
+    `agent_hail.payload.agent_name` 是空的,而那个人**又不在 `/state.agents`** ——
+    站点两条路都取不到名,屏上是「一位还没报上名字的人」。
+    **一个人被派来找你,而屏幕说不出他是谁。**
+
+    判据:**派一个不在他跟前的人**(那正是 `approach` 存在的理由 ——
+    「她不在这儿」不是闸),payload 里那一格非空。
+    """
+    with open_world_at(tmp_path / "hn.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        here = {a: world.scheduler._where_is(a) for a in world.scheduler.agents}
+        away = [a for a, loc in here.items() if loc != "cafe"]
+        assert away, "这条用例要一个不在场的角色"
+        who = away[0]
+        world._director_apply(
+            "p1", {"move": "approach", "who": who, "line": "我找你有事",
+                   "why": "", "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.2, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=0, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        hails = [e for e in world.events() if e["type"] == "agent_hail"]
+        assert hails, "编剧派了人而一条 hail 都没有"
+        got = (hails[-1].get("payload") or {}).get("agent_name")
+        assert str(got or "").strip(), f"派来的人没名字:{hails[-1]['payload']}"
+
+
+def test_名字空着的角色_hail那一格也不许空():
+    """**兜底到 id,不留空**(纯函数那一半):读的一方手上没有名册,
+    而"事后回查"对一个已经不在名册里的人根本查不到 ——
+    照实说一个 id,好过让屏幕说「一位还没报上名字的人」。"""
+    from anima_world.scheduler import Scheduler
+
+    class _Blank:
+        """`agent_display_name` 答空的那种世界。"""
+        agent_display_name = staticmethod(lambda aid: "")
+        _relation_name = staticmethod(lambda aid: "")
+
+    got = Scheduler.hail_agent_name(_Blank(), "诺诺")
+    assert got == "诺诺", got

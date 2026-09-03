@@ -141,6 +141,18 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 动没动**。一次被拒的操作(在忙时再点同一个长动词)不留痕迹,它照旧答 `False`。
 措辞改真,并补一条用例把那个行为钉住 —— 见下面 Known。
 
+### 🔴 一个人被派来找你,而屏幕说不出他是谁
+
+真站第五轮 + player 带回:编剧 `approach` 派来的诺诺,`agent_hail.payload` 里
+`agent_name` **是空的**,而那个人**又不在 `/state.agents`**(站点名册)——
+站点两条路都取不到名,屏上印的是「一位还没报上名字的人」。
+
+`agent_hail` 有**三个发射点**(编剧/拍那条、约好的回话、她自己闲着想起你),
+从前各填各的 —— **各填各的就迟早有一条忘了**。现在那一格只由
+`Scheduler.hail_agent_name()` 一处给,并且**永不为空**:查不到名字就照实说 id。
+理由和 `_relation_name` 逐字相同 —— **名字随事件走**:读的一方(站点、收件箱、
+`return` 那一屏)手上没有名册,而"事后回查"对一个已经不在名册里的人根本查不到。
+
 ### Fixed(B+C 那一批)
 
 - REFERENCE 配置表里 `director.enabled` 仍写着 `false`(3.11.2 已翻成 `true`)

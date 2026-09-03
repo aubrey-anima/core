@@ -3754,6 +3754,29 @@ class Scheduler:
             return ""
         return brain.agent.blackboard.read("loc") or brain.agent.location or ""
 
+    def hail_agent_name(self, agent_id: str) -> str:
+        """`agent_hail.payload.agent_name` 那一格 —— **三条路一处填,而且永不为空**。
+
+        🔴 **真站第五轮 + player 带回**:编剧 `approach` 派来的诺诺,payload 里
+        `agent_name` 是空的,而那个人**又不在 `/state.agents`**(站点名册)——
+        于是站点两条路都取不到名,屏上是「一位还没报上名字的人」。
+        **一个人被派来找你,而屏幕说不出他是谁**,是这一层最难看的坏法。
+
+        `agent_hail` 有三个发射点(编剧/拍那条 `_beat_hail`、约好的回话
+        `_fire_followups`、她自己闲着想起你 `_maybe_hail_player`)——
+        **各填各的就迟早有一条忘了**,所以那一格只由这里给。
+
+        ⚠️ **兜底到 id,不留空**:名字随事件走(和 `_relation_name` 逐字同一条),
+        因为读的一方(站点、收件箱、`return` 那一屏)手上**没有名册**,
+        而"事后回查"对一个已经不在名册里的人根本查不到。
+        照实说一个 id,好过让屏幕说「一位还没报上名字的人」。
+        """
+        said = str(self.agent_display_name(agent_id) or "").strip()
+        if said:
+            return said
+        said = str(self._relation_name(agent_id) or "").strip()
+        return said or str(agent_id or "")
+
     def agent_display_name(self, agent_id: str) -> str:
         """角色 id → 人话名。名册里没有就退回 id。
 
@@ -4769,7 +4792,7 @@ class Scheduler:
             "loc": here,
             "payload": {
                 "agent_id": agent_id,
-                "agent_name": self.agent_display_name(agent_id),
+                "agent_name": self.hail_agent_name(agent_id),
                 "player_id": player_id,
                 # 🔴 **没名字就不带这一格**(3.11.2,真站 C 报的):
                 # 玩家的 pid 是一串 UUID,而这一格进的是站点的弹窗 ——
@@ -6787,7 +6810,7 @@ class Scheduler:
                 "payload": {
                     "agent_id": agent_id,
                     # 玩家收到的推送上写的就是这个。少了它,推送里是「bai 来找你了」。
-                    "agent_name": self.agent_display_name(agent_id),
+                    "agent_name": self.hail_agent_name(agent_id),
                     "player_id": player_id,
                     "player_name": (info or {}).get("display_name") or player_id,
                     "location": here,
@@ -6889,7 +6912,7 @@ class Scheduler:
                 "loc": here,
                 "payload": {
                     "agent_id": agent.id,
-                    "agent_name": self.agent_display_name(agent.id),
+                    "agent_name": self.hail_agent_name(agent.id),
                     "player_id": player_id,
                     # 🔴 **没名字就不带这一格**(3.11.2,真站 C 报的):
                 # 玩家的 pid 是一串 UUID,而这一格进的是站点的弹窗 ——
