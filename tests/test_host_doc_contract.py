@@ -87,3 +87,46 @@ def test_自由输入那一项的键序照着那张有序表():
     want = list(contract_payload()["host"]["option_keys"])
     got = list(free_option())
     assert got == [k for k in want if k in got], f"{got} ≠ 表序 {want}"
+
+
+def test_那两处五个时刻后面列的名字_和契约的moments逐格一致():
+    """🔴 **这道闸是赔出来的第二次,和上面那张键表逐字同一种病。**
+
+    3.10.0 加了第五个时刻 `return`,`contract.host.moments` 跟上了、代码跟上了,
+    而 REFERENCE 那两处写着「只在五个时刻开口」、后面**只列了四个**——
+    数字和名单在同一句话里互相打脸,而没有一处会红。
+
+    **一份没人验的名单,和一句没人验的话是同一种东西**;这一份的读者是宿主
+    (站点按 `trigger` 分支渲染这一屏怎么进场)。
+
+    ⚠️ 比的是**集合**不是顺序:那两处一处按契约序列、一处按「谁排最前」讲,
+    而后者的顺序恰恰是**优先级**、和契约里那张表的顺序不是一回事。
+    """
+    want = set(contract_payload()["host"]["moments"])
+    text = _REFERENCE.read_text(encoding="utf-8")
+    for marker in ("只在五个时刻开口", "只在六个时刻开口", "只在四个时刻开口"):
+        if marker not in text:
+            continue
+        for chunk in text.split(marker)[1:]:
+            window = chunk[:420]
+            named = {m for m in want if f"`{m}`" in window}
+            assert named == want, (
+                f"「{marker}」后面这一段里点到的时刻是 {sorted(named)},"
+                f"而 contract.host.moments 是 {sorted(want)} —— "
+                f"少的那几个:{sorted(want - named)}\n段落:{window[:200]}"
+            )
+
+
+def test_那句话里的数字_和契约里有几个时刻对得上():
+    """「五个」这个**数字**本身也要对 —— 名单补齐了而数字还写着四,
+    是同一句话的另一半在撒谎(而且它是读者第一眼看到的那半)。"""
+    want = len(contract_payload()["host"]["moments"])
+    digits = {4: "四", 5: "五", 6: "六", 7: "七"}
+    text = _REFERENCE.read_text(encoding="utf-8")
+    right = f"只在{digits[want]}个时刻开口"
+    assert right in text, f"REFERENCE 里找不到「{right}」—— 现在有 {want} 个时刻"
+    for n, word in digits.items():
+        if n == want:
+            continue
+        wrong = f"只在{word}个时刻开口"
+        assert wrong not in text, f"REFERENCE 里还写着「{wrong}」,而实际有 {want} 个"
