@@ -171,3 +171,28 @@ def test_提示里只有筛过的那几个名字():
     assert "苏晚夏" in blob
     assert "陈遥" not in blob and "遥" not in blob, blob
     assert "不许剧透" in blob
+
+
+# ── 闭集印在人屏上时的人话(3.11.1,验收 C ⑤)────────────────────────────────
+
+def test_每个闭集取值都有一句人话_而且不许是裸英文():
+    """🔴 **`〔breathe〕`「setup」印在玩家屏上** —— 那是给机器读的名字。
+
+    和主持人那张 `MOMENT_LABELS` 逐字同一条:**闭集加一项就要在这儿加一句人话**,
+    而这道闸让"忘了加"有人喊。
+    """
+    for table, names, what in ((D.MOVE_LABELS, D.MOVES, "动作"),
+                               (D.PHASE_LABELS, D.PHASES, "相"),
+                               (D.STAKE_LABELS, D.STAKE_KINDS, "赌注")):
+        missing = [n for n in names if not str(table.get(n) or "").strip()]
+        assert not missing, f"这几个{what}没有人话:{missing} —— 屏上会印裸英文"
+        for name, said in table.items():
+            assert not said.isascii(), f"{what} {name!r} 的人话是 {said!r} —— 那是裸英文"
+
+
+def test_target_curve那三格_有意不含release():
+    """`release` 是一条线**走完之后**的样子,没有时长 —— 拿 `phases` 四格去判
+    会**多放一格**,而作者写下去不报错、也不生效。契约里单报一格
+    `target_curve_keys`,别让下游去猜(tool 带回的那一条)。"""
+    assert list(D.TARGET_CURVE_PHASES) == list(D.PHASES[:-1])
+    assert "release" not in D.TARGET_CURVE_PHASES

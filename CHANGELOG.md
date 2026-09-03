@@ -73,6 +73,138 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.11.1] —— mock 路全绿,而真客户端上那个方法名不存在 (2026-09-03)
+
+三视角验收对 3.11.0 的账,一次出清。**其中一条值得单独记:**
+
+### 🔴 这一版最该记的一句:**闸要有一条真走客户端接口的**
+
+`_director_reply` 调的是 `client.complete_sync(messages)`,而
+`ConfigBackedLLMClient` **只有 `complete` / `stream`** —— 于是配了 key 的世界里
+**每一拍都 `AttributeError`**,被那句「编剧挂了绝不掀翻这一屏」的 `except` 吞成
+一条 WARNING,**每一拍都退成模板句、永远不派人**。
+
+**3.11.0 的主打功能在真部署上整个不成立,而 2355 条测试全绿** ——
+因为它们**全走 mock 那条路**,真客户端那条零覆盖。
+
+两条教训:
+1. **一个吞掉一切异常的降级路径,会把「方法名打错」和「模型这次没答上来」
+   变成同一个现象。** 降级要吞的是后者,而它连前者一起吞了。
+2. **假客户端只实现真接口。** 新增的两条端到端用例里那个 `_FakeDirectorLLM`
+   **有意不实现 `complete_sync`** —— 方法名对不上就当场炸,而不是安静降级。
+   ⚠️ 它们断的是 **`host_turn` 那一屏**,不是 `director_log`:日志里写着
+   `approach` 而屏上是模板句,两者都能"绿"。
+
+### Fixed
+
+- 🔴 **走一步,编剧一个字不写**(验收 A ①):守卫拿**时刻名**(`trigger == "acted"`)
+  当"他动过手没有"的判据,而那两件事不是一回事 —— 时刻名说的是**这一屏怎么进场**
+  (`arrive` 抢在 `acted` 前面),而"他动没动过手"是独立的事实;`travel` /
+  `state_change` 又不在回顾白名单上,于是 recap 也空。真站 20 次操作里 9 次走路,
+  `director_log` 只有 11 条。改判据为 `move_seq` 动没动。
+  🔴 **而我 3a 那条「二十次操作二十拍」的用例二十次全是动词、一次没走** ——
+  **它测的是我写对了的那一半。试牙也要试对地方**,这个仓库记第五次了。
+- 🔴 **同一天派第二次人 = 屏上零字**(验收 A ②):`claim_hail` 那道「一天一次」的闸
+  防的是**她自己**的主动性,而编剧是**世界的节奏** —— 两本账混成一本。
+  编剧那条路走自己的额度(`source="director"`,事件上记账),
+  且「她没来成」退**模板句**而不是空串。
+  🔴 **我 3a 那两条「零沉默」「≤6/世界小时」的判据,正是被这道闸挡出来的假绿。**
+- 🔴 **`doctor` Traceback rc 1**(验收 C ③):`run_since_seq` 是 `int | None`,
+  而我照抄隔壁那段时**漏了 `is not None` 守卫**。答不上来就不数那一格,别拿 0 顶。
+- 🔴 **`player story --player p1` 印 p2 的剧情**(验收 C ④):`recent_log` 没按
+  `player_id` 过滤 —— 跨玩家剧透,而且和同一屏上面那三格(按人取的)自相矛盾。
+- 🔴 **`guidance` 没接封皮那道闸**(验收 B ①):`PACK_ENGINE_MIN` 是**一个常量**,
+  于是只带 `guidance`、封皮写 `3.10.0` 的包 `world check --edit` 假绿 rc 0。
+  常量换成**一张表**(`PACK_ENGINE_MIN_BY_NEED`):一个常量答得出「比某一版新」,
+  答不出「哪一版」,而改它会**连带抬高上一段的门槛**。
+  ⚠️ 顺手发现错误那一半和警告那一半**各抄了一份**需求判断,3.11.0 加 `guidance`
+  时两处都要改、**两处都没改** —— 抽成 `pack_engine_needs` 一份。
+- 🔴 **`EDIT_PATH_NOTES` 缺 `guidance` 一格**(验收 B ②):作者改了指导、舰队重启,
+  **一个字不生效而且一句话不说**。⚠️ 顺手逮到我自己 3.11.0 那个指纹的
+  watched 段名是**手抄的**,加 `guidance` 时没跟 —— 改成从 `EDIT_PATH_NOTES` 派生。
+- 🔴 **一条要花时间的动词按下去没有回执文案**(真站 C ③):`_player_said` 挂在
+  两个出口上,而「起了个头」是**第三、第四个**出口。两次「只改了一半」之后,
+  这个方法自己成了那句话的唯一出处;`started=True` 时说的是**另一句话**
+  (开了个头 ≠ 做完了)。
+
+### 其余
+
+- `guidance.forbidden.locations` 运行时一处不查(A ④)—— **一道声明了却没人执行
+  的闸,和没有那道闸一样,只是更贵**:作者以为自己挡住了。
+- `api.py` 那句「`invite` 走邀请门」是假的(A ③):代码从来只发 `hail`。
+  **改注释**并把「真走邀请门」排进 3b —— 那要先决定"他不答怎么办"。
+- `player story` 三处裸英文枚举 + 编剧的 `why` 上屏(C ⑤):加
+  `MOVE_LABELS` / `PHASE_LABELS` / `STAKE_LABELS` 三张人话表 + 不许纯 ASCII 的闸;
+  **`why` 不给玩家**(那是 GM 的笔记)。显示名和日志那一栏统一(C ⑨)。
+- `player host --help` 「第四个开口时刻」、`player` 「四个子命令」(C ⑥)——
+  **那道闸此前一次都没扫 argparse 的 help 串**,而 help 是用户真的会读到的一屏。
+- 纯指导包装进去屏上一个字不提(C ⑦)· `{aid!r}` 印 Python 引号 + 写死「他」(C ⑧)·
+  `prompt` 那张「没出现的块」表补 `director.intent`(C ⑨)·
+  **新出口 `anima-world guidance show`**(C ⑩:此前指导零 CLI 出口,
+  而创作台那侧的判据就是「有没有 CLI 出口」)。
+- `contract.director` 补一格 **`target_curve_keys`**(tool 带回):
+  `release` 是线走完之后的样子、没有时长,拿 `phases` 四格去判会**多放一格**,
+  而作者写下去不报错也不生效。
+
+### platform 带回的两条
+
+- **`player_story()` 自己分「查无此人」与「认识但还没动过手」**:新增一格
+  `known`(形状照 `roster()` / `debug_prompt().asker` 那一格既有的)。
+  🔴 上一版两种都答一份空故事,于是壳只能自己去翻 `player_join` ——
+  **让消费方补一个只有引擎答得出的判断,就是让它持一份对名册的猜测**,
+  而猜错了不报错:一个打错的 pid 会得到一份看起来完全正常的空故事。
+- **`World.world_time_cached()` / `Scheduler.clock_cached`:时钟的内存读法。**
+  🔴 **它不是 `clock` 的替代,名字必须让人看得出来** —— `RedisClock` 有意不缓存,
+  理由写在它自己的 docstring 里:「不缓存意味着任何一个进程随时读到的都是真的
+  现在」,而两个进程各持一份"现在",世界就分叉了。
+  只给**每秒被打好几次、只是拿去显示**的门用(`/health`、仪表盘);
+  **任何要写世界的判断一律用 `clock`**。
+
+### 📐 量了一次:那根 tick 线程为什么吃满核(不修,先记账)
+
+platform 报线上晚潮 CPU 97%。**量法与数字**(fakeredis,橱窗世界,预热 20 tick
+之后连跑 200 tick,拦 `execute_command` 计数):
+
+    200 tick 共 25895 条 Redis 命令 → **每 tick 129.5 条**
+      HGET 54.7/tick · HSET 37.6 · HGETALL 13.7 · GET 13.5 · SMEMBERS 4.2 · HEXISTS 3.2
+
+`cProfile` 上 `tick` 累计 5.83 s 里有 **4.75 s 在 `redis.execute_command`** ——
+**八成的 tick 时间是 Redis 往返**。
+
+**所以两个猜测都不对**:既**不是每 tick 全量扫**(命令数不随事件数涨 ——
+晚潮 13.6 万条 AOF 与这里 200 tick 的量级无关),也**不是空转**;
+它就是**黑板每 tick 上百次读写**(`RedisClock` 那句老注释早写着「黑板是 80 次」,
+今天量到 92 次 hget+hset,同一个量级)。
+
+⚠️ **在真 Redis 上它比这里更贵**:每一次都是 socket 往返,而 CPython 每次 I/O
+**放掉 GIL 之后要重新抢回来** —— 这正是 `/health` 那条只读路径 p99 被拖到 5 秒的
+机制,也是这一版给它一条内存读法的理由。
+**真要治的是"每 tick 上百次往返"本身**(批读 / 进程内写回缓冲),而那是一次
+有半径的改动:黑板是**真状态不是缓存**,多进程共用一个世界正是它不缓存的理由。
+**先量、先记账,不在这一版改。**
+
+### 🔴 两道 prompt 金线窄化了一格,而**新值不是从 HEAD 采的**
+
+给缺席表加一行 `director.intent` 之后,`test_提示词逐字节相同` 两条当场红 ——
+而它们的 sha 盖的是**整个 `debug_prompt()`**,里头有 `absent`:那一格答的是
+「这一块**为什么**没出现」,是写给改提示词的人的话,**不是提示词**。
+**这道闸此前量的比它的名字多。**
+
+窄化成「刨掉 `absent` 之后的 sha」,而新值**采自 `dd960f1`**(3.11.0 那棵、
+这道闸对它全绿的树):在那棵树上就地换成窄化算法跑一遍得到三个值,
+而 HEAD 上同一算法算出来**逐字节相同** —— **那正是「提示词一个字没变、
+只是缺席表多了一行」的证明**,而不是一句"我觉得没变"。
+⚠️ **从 HEAD 采会让这道闸变成 HEAD 和 HEAD 比,永远绿而且什么都不测。**
+出处与复核命令写进两份 golden 的 `_采自`。
+
+### Known
+
+- **契约是加法**:`director.target_curve_keys` / `text_keys` /
+  `thread_text_keys` / `story_keys` 四格;`storage` 段一个字没动。
+- `player_story()` 多一格 `known`,`world.world_time_cached()` 是新方法 ——
+  **都是只加不改**,老调用方一个字不用动。
+- 作者层 schema 一个字没动;已发布世界的 `engine_min` 一格没抬。
+
 ## [3.11.0] —— 实时编剧:玩家玩出自己的故事,周更只是指导 (2026-09-03)
 
 老板 09-02:「原著里的所有人都是做吉祥物的,我们要做的是让玩家玩出自己的剧情和

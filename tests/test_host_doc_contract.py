@@ -186,3 +186,56 @@ def test_每个时刻都有一句人话_而且不许是裸英文():
     assert not extra, f"人话表里有 `HOST_MOMENTS` 之外的名字:{extra}"
     for name, said in MOMENT_LABELS.items():
         assert not said.isascii(), f"时刻 {name!r} 的人话是 {said!r} —— 那是裸英文"
+
+
+def test_argparse那几串help里不许有过期的时刻数与子命令表():
+    """🔴 **验收 C ⑥**:`player host --help` 写着「第四个开口时刻」(而 `ask` 是
+    第五个)、`player` 那句错误提示写着「四个子命令」(而 `story` 是第五个)。
+
+    ⚠️ **那道「几个时刻」的闸此前只扫 REFERENCE / api.py / host.py 三份源码,
+    一次都没扫 argparse 那几串 help** —— 而 help 是**用户真的会读到的那一屏**。
+    「别数源码里的星号,去问屏幕」那条判据,在这一格上同样适用。
+    """
+    import re
+
+    from anima_world.__main__ import _build_parser
+
+    def _all_help(parser, out):
+        for action in parser._actions:                     # noqa: SLF001
+            if action.help:
+                out.append(str(action.help))
+            # ⚠️ `choices` 对普通参数是**元组**(取值枚举),只有子命令那一格
+            # 才是 `{名字: parser}` —— 不分开会当场 AttributeError。
+            choices = getattr(action, "choices", None)
+            if isinstance(choices, dict):
+                for sub in choices.values():
+                    if hasattr(sub, "_actions"):
+                        _all_help(sub, out)
+        return out
+
+    blob = "\n".join(_all_help(_build_parser(), []))
+    want = len(contract_payload()["host"]["moments"])
+    digits = {"三": 3, "四": 4, "五": 5, "六": 6, "七": 7}
+    for word, n in digits.items():
+        if n == want:
+            continue
+        assert f"第{word}个开口时刻" not in blob, (
+            f"help 串里还写着「第{word}个开口时刻」,而实际有 {want} 个")
+    # `player` 那几个子命令:数字词要跟真的子命令表对得上
+    from anima_world.__main__ import _build_parser as _bp
+
+    real = None
+    for action in _bp()._actions:                          # noqa: SLF001
+        choices = getattr(action, "choices", None)
+        player = choices.get("player") if isinstance(choices, dict) else None
+        if player is not None:
+            for sub in player._actions:                    # noqa: SLF001
+                sub_choices = getattr(sub, "choices", None)
+                if isinstance(sub_choices, dict):
+                    real = len(sub_choices)
+    assert real, "找不到 player 的子命令表"
+    for word, n in digits.items():
+        if n == real:
+            continue
+        assert f"{word}个子命令" not in blob, (
+            f"help / 错误提示里写着「{word}个子命令」,而 player 真有 {real} 个")

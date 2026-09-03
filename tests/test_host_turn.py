@@ -832,3 +832,43 @@ def test_别的state_change不算他动手(tmp_path):
                               "player:p1", "player:p1") is True
     assert player_move_seq_of("state_change", {"kind": "sentiment_delta"},
                               "player:p1", "player:p1") is False
+
+
+def test_一条要花时间的动词_按下去也得有一句话(tmp_path):
+    """🔴 **验收 C ③(真站上量的)**:批 1.1 承诺「按下去世界会说一句」,而一个
+    带 `duration` 的动词(龙族那个 `报到`)回执里
+    `{started, duration, ends_tick, occupies, changed:{}}` 一应俱全,
+    **`text` 是空的** —— 玩家按下去,屏幕纹丝不动。
+
+    病根:`_player_said` 挂在两个出口上,而「起了个头」是**第三、第四个**出口。
+    ⚠️ **它说的必须是另一句话**:那件事开了个头,不是做完了 ——
+    用同一句「你…了…」是在撒谎。
+
+    ⚠️ **用真插件动词的形状**(带 `duration` 的自造动词),不是内置那几个:
+    C 量到的就是插件动词那条路。
+    """
+    from _worldfile import open_world_at, write_seed_file
+
+    seed = {
+        "agents": [{"id": "甲", "name": "甲", "location": "hall", "personality": "温和"}],
+        "locations": [{"id": "hall", "name": "大厅", "kind": "point", "x": 0, "y": 0,
+                       "description": "很高的穹顶"}],
+        "kinds": [{"id": "desk", "quantities": {"人气": {"default": 0.0,
+                                                        "visibility": "here"}},
+                   "affordances": {"报到": {"label": "报到", "duration": 6,
+                                            "occupies": True,
+                                            "set": {"人气": "人气 + 1"}}}}],
+        "entities": [{"id": "desk:lion", "name": "狮心会报到处", "location": "hall"}],
+    }
+    path = write_seed_file(tmp_path / "dur.cyberworld", seed)
+    with open_world_at(tmp_path / "dur.db", world_file=path) as world:
+        world.player_move("p1", "hall")
+        world.tick(2)
+        got = world.player_tool("p1", "interact",
+                                {"target": "desk:lion", "verb": "报到"})
+        assert got["ok"], got
+        assert got["detail"].get("started") is True, got["detail"]
+        assert got.get("text"), f"起了个头却一个字不说:{got}"
+        assert "报到" in got["text"] and "狮心会报到处" in got["text"], got["text"]
+        # **说的是"开始了",不是"做完了"** —— 他还没做完
+        assert got["text"] != "你报到了狮心会报到处。", got["text"]

@@ -1349,3 +1349,113 @@ def test_文件改过之后二开_那五段照说(tmp_path, caplog):
         World.open("w", redis=client, world_file=second, force_mock_llm=True).close()
     said = "\n".join(r.getMessage() for r in caplog.records)
     assert "世界观" in said, f"作者改了世界观,而引擎一个字没说:{said[:400]}"
+
+
+# ── 封皮那道闸:加一个作者层段就要在表里加一行(3.11.1,验收 B ①)──────────
+
+
+def test_只带guidance而封皮写3_10_0_当场拒(tmp_path):
+    """🔴 **和 2a-① 验收 C 逮的那条一模一样,只是换了一个段。**
+
+    3.11.0 加了作者层第十六段 `guidance`,而封皮那道闸的门槛是**一个常量**
+    `PACK_ENGINE_MIN = "3.10.0"` —— 于是一份只带 `guidance`、封皮写 `3.10.0`
+    的包,`world check --edit` 答 `loadable: true` rc 0,而它在 3.10.x 上是
+    **开不了机的硬失败**。
+
+    修法是把那个常量换成**一张表**:一个常量答得出「比某一版新」,答不出
+    「哪一版」;而改那个常量会**连带抬高上一段的门槛**(带 `pack` 的老包
+    突然被要求写 3.11.0)—— 两种错都不报错。
+    """
+    from anima_world.__main__ import pack_engine_min_errors, PACK_ENGINE_MIN_BY_NEED
+
+    class _M:
+        def __init__(self, v):
+            self.engine_min = v
+
+    only_guidance = {"guidance": {"themes": ["血统"]}}
+    said = pack_engine_min_errors(only_guidance, _M("3.10.0"))
+    assert said and "3.11.0" in said[0], said
+    assert pack_engine_min_errors(only_guidance, _M("3.11.0")) == []
+    # 🔴 **老包的门槛不许被一起抬高**:带 `pack` 的包在 3.10.0 上跑得好好的
+    assert pack_engine_min_errors({"pack": {"id": "a"}}, _M("3.10.0")) == []
+    assert PACK_ENGINE_MIN_BY_NEED["`guidance` 段(作者层第十六个段)"] == "3.11.0"
+
+
+def test_两扇门用的是同一份需求判断():
+    """错误那一半和警告那一半**曾经各抄一份**,而 3.11.0 加 `guidance` 时
+    两处都要改、两处都没改 —— **两份判断迟早给出不同答案,这一次它们一起答错**。"""
+    from anima_world.__main__ import (
+        pack_engine_min_errors, pack_engine_min_warnings, pack_engine_needs,
+    )
+
+    class _M:
+        engine_min = None
+
+    body = {"guidance": {"themes": ["x"]}}
+    assert pack_engine_needs(body) == ["`guidance` 段(作者层第十六个段)"]
+    # 没写封皮 → 警告,而且点名的是**同一版**
+    assert "3.11.0" in pack_engine_min_warnings(body, _M())[0]
+    # 写低了 → 错误,同样是那一版
+    _M.engine_min = "3.9.0"
+    assert "3.11.0" in pack_engine_min_errors(body, _M())[0]
+
+
+def test_每个作者层段_要么在engine_min表里要么明说不需要():
+    """🔴 **这道闸是为「下一个段」装的。**
+
+    `guidance` 是第二次栽在同一个地方(第一次是 `pack`)。加一个作者层段时,
+    这条会逼你回答一句话:**它要不要抬 `engine_min`?**
+    要 → 进 `PACK_ENGINE_MIN_BY_NEED`;不要 → 进下面那张豁免表**并说明理由**。
+    """
+    from anima_world.__main__ import PACK_ENGINE_MIN_BY_NEED
+    from anima_world.world_file import AUTHOR_OBJECT_TYPES, AUTHOR_SECTIONS
+
+    #: 这些段**老引擎也认得**,所以它们不抬 `engine_min`。
+    #: (它们全是 3.7.0 之前就有的段 —— 一个 1.x 的引擎见到它们不会硬失败。)
+    grandfathered = {
+        "agents", "locations", "kinds", "entities", "rules", "items", "stocks",
+        "relations", "memories", "stock_visibility", "stock_places",
+        "config", "mock_narration",
+        # 这三个各自抬过一次版,而它们的门槛写在**别处**(作者层 `type` 闭集本身):
+        # 带它们的包老引擎见到是硬失败,而那由 `world check` 的作者层校验拦下,
+        # 不由封皮这道闸拦 —— 封皮这道闸只管「作者声称的版本对不对」。
+        "beats", "plugins", "edges",
+    }
+    named = " ".join(PACK_ENGINE_MIN_BY_NEED)
+    for section in (*AUTHOR_SECTIONS.values(), *AUTHOR_OBJECT_TYPES.values()):
+        if section in grandfathered:
+            continue
+        assert section in named, (
+            f"作者层的 {section!r} 段既不在 `PACK_ENGINE_MIN_BY_NEED` 里,"
+            "也不在这条用例的豁免表里 —— **加一个段就要回答「它抬不抬 engine_min」**。"
+            "抬 → 进那张表;不抬 → 进豁免表并写清为什么"
+        )
+
+
+def test_改了指导再重启_引擎要说一句(tmp_path, caplog):
+    """🔴 **验收 B ②**:`RedisGuidanceStore.seed()` 是「空的时候才播」,于是一个
+    **已经有指导**的世界,作者改了 `guidance` 再走 `--world-file` 重启,
+    **一个字都不生效、而且一句话都不说**。
+
+    舰队每次开机都带 `--world-file`,所以这不是边角情形:创作者改完指导重启,
+    看到的是"没报错",而编剧照着上一周那份在写 —— **和另外五段逐字同一种病**,
+    只是它晚生了一版。
+    """
+    import logging
+    from anima_world.api import World
+
+    client = redis_for(tmp_path / "gd.db")
+    first = write_seed_file(tmp_path / "gd1.cyberworld",
+                            dict(BASE, guidance={"themes": ["第一版主题"]}))
+    World.open("w", redis=client, world_file=first, force_mock_llm=True).close()
+    second = write_seed_file(tmp_path / "gd2.cyberworld",
+                             dict(BASE, guidance={"themes": ["改过的主题"]}))
+    with caplog.at_level(logging.WARNING):
+        World.open("w", redis=client, world_file=second, force_mock_llm=True).close()
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "指导" in said, f"改了指导重启,引擎一个字没说:{said[:400]}"
+    assert "pack install" in said, "没告诉作者该走哪条路"
+
+    # 而且它确实没生效 —— 说了一句和真的装了是两件事
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        assert world.guidance()["themes"] == ["第一版主题"]
