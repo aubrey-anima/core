@@ -428,7 +428,7 @@ def mock_opening(agent_name: str, *, line: str = "", hook: str = "",
 SUGGESTION_LIMIT = 3
 
 
-def suggestion_seeds(*, hook: str = "", beat_note: str = "",
+def suggestion_seeds(*, hook: str = "", beat_note: str = "", line: str = "",
                      agent_name: str = "", stance: str = "") -> list[str]:
     """没有 LLM 时那几句建议 —— **纯算术,同一时刻挑两次逐字相同**。
 
@@ -443,8 +443,17 @@ def suggestion_seeds(*, hook: str = "", beat_note: str = "",
     # 每次都在同一个角色身上错)。
     who = name or "TA"
     out: list[str] = []
+    if line:
+        # 🔴 **「刚才说的那件事」只由她**真说过的那句话**把门**(3.11.2,真站 C 报的)。
+        # 上一版由 `beat_note` 把门 —— 而 `beat_note` 是**旁白**(拍上的 `narrate`,
+        # 「手机震了一下」),不是她开口说过的话。于是**第一次搭话**的输入框上方
+        # 就写着「问问她刚才说的那件事」,而她一个字都还没说过。
+        # ⚠️ 这和 `mock_opening` 那条分界逐字同一句:`line` 是她的台词,
+        # `beat_note` 是旁白,**别当成同一种用**。
+        out.append(f"问问{who}刚才说的那句话")
     if beat_note:
-        out.append(f"问问{who}刚才说的那件事")
+        # 旁白那一支说的是**发生过的事**,不是她说过的话。
+        out.append("问问刚才那件事")
     if hook:
         out.append(f"接着{who}手上那件事往下问")
     if stance in ("试探", "回避", "刺"):

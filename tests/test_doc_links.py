@@ -93,3 +93,33 @@ def test_指着仓库外的相对路径_都指得到东西():
         "这些跨仓库相对路径指不到东西 —— 读它的是另一个仓库:\n  "
         + "\n  ".join(sorted(set(broken)))
     )
+
+
+def test_每一节里的小节字母都是顺的():
+    """🔴 **这是第三次被报同一件事**(3.11.2,验收 B)——(c)(d)(e) 在文件里
+    乱序,读的人照目录找不到。前两次都是"就地调一下",而**一件被报三次的事,
+    该有一道闸**,不该有第四次。
+
+    ⚠️ 只查**同一节内**的字母序:小节属于哪一节由它上面最近的 `## ` 决定。
+    """
+    import re
+
+    text = (_ROOT / "docs" / "FOR-STUDIO.md").read_text(encoding="utf-8")
+    section = ""
+    letters: list[str] = []
+    bad: list[str] = []
+
+    def check() -> None:
+        if letters and letters != sorted(letters):
+            bad.append(f"{section}:{letters}")
+
+    for line in text.splitlines():
+        if line.startswith("## "):
+            check()
+            section, letters = line[3:40], []
+        elif line.startswith("### ("):
+            m = re.match(r"### \(([a-z])\)", line)
+            if m:
+                letters.append(m.group(1))
+    check()
+    assert not bad, "这几节的小节字母乱序了:\n  " + "\n  ".join(bad)

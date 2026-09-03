@@ -250,19 +250,47 @@ def test_升级裁剪掉声明里没了的事实(tmp_path):
         assert ("agent", "qi.杂念") not in world.scheduler.visibility_store.rules_map()
 
 
-def test_不降级(tmp_path):
+def test_不降级这道闸_只在pack_install那条路上(tmp_path, caplog):
+    """🔴 **这条用例的断言在 3.11.2 反过来了一半,而反得对**(线上事故)。
+
+    它原先钉的是「开机路上降级 = `WorldSeedError`」,而**舰队每次开机都带
+    `--world-file`**:创世文件里的插件版本会比库里旧(库里那份是后来
+    `pack install` 升上去的)—— 于是整支舰队起不来,**三版都有这道闸,
+    回滚救不了**。
+
+    分界照第 17 条那句「库里那份说了算」:
+    **开机跳过并说一句(rc 0);`pack install` 照旧当场拒。**
+    ⚠️ **两半都钉住** —— 只钉前一半的话,放宽会一路放宽到装包路上,
+    而那儿"拿旧声明去盖新数据"仍然是一次真的、不可逆的降级。
+    """
+    import logging
+
     with _world_with(tmp_path, {**QI, "version": "2.0.0"}, name="d"):
         pass
     path = write_seed_file(tmp_path / "d2.cyberworld",
                            {**BARE, "plugins": [{**QI, "version": "1.0.0"}]})
-    # ⚠️ 开机路上它被包成 `WorldSeedError` —— **和 `OntologyError` 同一类**:
-    # 作者写错了东西,而作者该看到的是那几行中文,不是一段 Python 堆栈
-    # (2026-08-26 验收 C:一次被拒的降级,屏幕先甩 `Traceback …` 才轮到中文)。
-    from anima_world.world_seed import WorldSeedError
 
-    with pytest.raises(WorldSeedError) as raised:
-        open_world_at(str(tmp_path / "d.db"), world_file=path, force_mock_llm=True)
-    assert "不降级" in str(raised.value)
+    # ① 开机路:**起得来**,而且说一句
+    with caplog.at_level(logging.INFO):
+        open_world_at(str(tmp_path / "d.db"), world_file=path,
+                      force_mock_llm=True).close()
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "库里那份说了算" in said, f"跳过了却一个字没说:{said[-400:]}"
+
+    # 而库里那份没有被旧声明盖回去
+    from anima_world.redis_state import RedisPluginStore
+    from _worldfile import redis_for
+
+    row = RedisPluginStore(redis_for(tmp_path / "d.db"), "w").get(QI["id"])
+    assert str(row.get("version")) == "2.0.0", row
+
+    # ② `pack install` 那条:**照旧当场拒**
+    from anima_world.plugins import plugin_version_errors, parse_plugins
+
+    parsed = parse_plugins([{**QI, "version": "1.0.0"}], ticks_per_day=288)
+    problems = plugin_version_errors(parsed, RedisPluginStore(
+        redis_for(tmp_path / "d.db"), "w"))
+    assert problems and "不降级" in problems[0], problems
 
 
 def test_version_tuple_读不懂的段按0算():

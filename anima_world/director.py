@@ -427,7 +427,24 @@ def parse_decision(text: str, *, allowed: Sequence[str],
     }
 
 
-def mock_move(recap: Sequence[str], *, place_name: str = "") -> dict[str, Any]:
+#: 一拍是**怎么来的**。🔴 **四种,而 3.11.1 把其中三种记成了同一种**
+#: (3.11.2,验收 A ③):有意 `breathe`(张力顶到安全阀)、模型答出闭集之外、
+#: 真的没配 key —— 三种都写着 `source: "mock"` + `why: "没配 key:模板句"`,
+#: 而 `doctor` 照它数「几拍退成模板句」。
+#: **一个把三种原因合成一句的读数,指不出任何一种修法**:
+#: 顶安全阀是**世界该这样**(不用管)· 答出闭集之外是**提示词要改** ·
+#: 没配 key 是**去配一把 key**。
+SOURCES = ("llm", "mock", "ceiling", "refused")
+SOURCE_LABELS: dict[str, str] = {
+    "llm": "模型写的",
+    "mock": "没配 key,模板句",
+    "ceiling": "张力顶到安全阀了,这一拍有意写小",
+    "refused": "模型答的不在闭集里,退成模板句",
+}
+
+
+def mock_move(recap: Sequence[str], *, place_name: str = "",
+              source: str = "mock") -> dict[str, Any]:
     """没 key / 读不懂 / 超上限时那一拍。**永远是 `breathe`,而且永远有一句话。**
 
     🔴 **没配 key 是这个引擎的默认状态**,所以这不是降级路上的边角料 ——
@@ -448,8 +465,8 @@ def mock_move(recap: Sequence[str], *, place_name: str = "") -> dict[str, Any]:
         # **同一句话连说两遍**,而没有一处会报错。
         # 这一句要接的是**那件事之后**,不是那件事本身。
         return {"move": "breathe", "who": "", "line": "这一下之后,四下安静了一瞬。",
-                "why": "没配 key:模板句", "promise": "", "stake": None,
-                "source": "mock"}
+                "why": SOURCE_LABELS.get(source, source), "promise": "", "stake": None,
+                "source": source}
     # ⚠️ **走到这儿说明他刚做的那件事没进回顾**(走路、答邀请那几种今天不在
     # `RECAP_EVENT_TYPES` 上)—— 但那不等于"什么都没发生"(3.11.1,验收 A ⑤)。
     # 上一版这句是「在咖啡店一时没什么动静。」,**把指向他刚做的事那半句丢了**,
@@ -458,4 +475,5 @@ def mock_move(recap: Sequence[str], *, place_name: str = "") -> dict[str, Any]:
     where = f"在{place_name}" if place_name else "这儿"
     return {"move": "breathe", "who": "",
             "line": f"你这一下之后,{where}静了静,没人接话。",
-            "why": "没配 key:模板句", "promise": "", "stake": None, "source": "mock"}
+            "why": SOURCE_LABELS.get(source, source), "promise": "", "stake": None,
+            "source": source}

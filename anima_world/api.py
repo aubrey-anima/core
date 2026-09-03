@@ -3346,6 +3346,12 @@ class World:
             stance = ""
         seeds = host_mod.suggestion_seeds(
             hook=doing, beat_note=beat_note,
+            # 🔴 **她真说过的那句话**(3.11.2,真站 C 报的)。
+            # 「问问她刚才说的那句话」只能由**这一格**把门 —— 上一版由
+            # `beat_note` 把门,而那是**旁白**(拍上的 `narrate`,「手机震了一下」),
+            # 不是她开口说过的话。于是第一次搭话的输入框上方就写着
+            # 「问问她刚才说的那件事」,而她一个字都还没说过。
+            line=self._recent_hail_line(agent_id, player_id),
             agent_name=self.scheduler.agent_display_name(agent_id), stance=stance,
         )
         client = getattr(self.chat_service, "_background_llm", None)
@@ -3380,6 +3386,30 @@ class World:
             if str(payload.get("player_id") or "") != player_id:
                 continue
             return str(payload.get("line") or "")
+        return ""
+
+    def _recent_hail_line(self, agent_id: str, player_id: str) -> str:
+        """她上一次**当面开口**说的那句话(`agent_hail.payload.line`)。
+
+        🔴 **和 `_recent_beat_note` 是两样东西,别当同一种用**(3.11.2):
+        那一条是**旁白**(拍上的 `narrate`),这一条是**她的台词**。
+        `mock_opening` 那一格早就写着这句分界,而建议句那一层没跟上。
+
+        没有就是空串 —— **她还没说过话**,那时「问问她刚才说的那句话」是一句
+        指着空气的建议。
+        """
+        log = self.scheduler.event_log
+        if log is None:
+            return ""
+        for event in reversed(log.replay()):
+            if event.type != "agent_hail":
+                continue
+            payload = event.payload or {}
+            if str(payload.get("agent_id") or "") != agent_id:
+                continue
+            if str(payload.get("player_id") or "") != player_id:
+                continue
+            return str(payload.get("line") or "").strip()
         return ""
 
     def _recent_beat_note(self, player_id: str) -> str:
@@ -9002,6 +9032,14 @@ class World:
             gated=self._director_gates(),
         )
         decision: dict[str, Any] | None = None
+        # 🔴 **这一拍是怎么来的,要分得开**(3.11.2,验收 A ③)。
+        # 上一版三种情形都记成 `source: "mock"` —— 而它们指向三种修法。
+        if move == "breathe" and tension >= ceiling and not capped and not beat_fired:
+            why_source = "ceiling"        # 世界该这样,不用管
+        elif not self._llm_key_configured_for_director():
+            why_source = "mock"           # 去配一把 key
+        else:
+            why_source = "refused"        # 提示词要改(模型答的不在闭集里)
         if move != "breathe" and cast:
             # 这一轮**最多**写到 `move`;模型只能在它及以下里挑。
             ladder = list(dmod.MOVES[:dmod.MOVES.index(move) + 1])
@@ -9014,7 +9052,8 @@ class World:
                 allowed=[m for m in ladder if m in allowed],
                 cast_ids=[c["id"] for c in cast])
         if decision is None:
-            decision = dmod.mock_move(recap, place_name=place_name)
+            decision = dmod.mock_move(recap, place_name=place_name,
+                                      source=why_source)
         decision.setdefault("source", "llm")
         return self._director_apply(
             pid, decision, tension_before=tension, phase=phase, tick=tick,
@@ -9130,6 +9169,11 @@ class World:
 
             return str(dmod.mock_move(recap, place_name=place_name)["line"])
         return f"{name}朝你走过来:「{line}」" if line else f"{name}朝你走过来。"
+
+    def _llm_key_configured_for_director(self) -> bool:
+        """这个世界有没有一把 key —— **按有没有 key 判,不按客户端类型判**
+        (和 `_host_scene_text` 那一格逐字同一句)。"""
+        return bool(str(self.config_get("llm.api_key", default="") or ""))
 
     def _director_reply(self, messages: list[dict[str, str]]) -> str:
         """那一次背景槽调用。**一次调用,失败即模板,不重试不合批** ——

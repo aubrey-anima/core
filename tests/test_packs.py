@@ -1459,3 +1459,82 @@ def test_改了指导再重启_引擎要说一句(tmp_path, caplog):
     # 而且它确实没生效 —— 说了一句和真的装了是两件事
     with World.open("w", redis=client, force_mock_llm=True) as world:
         assert world.guidance()["themes"] == ["第一版主题"]
+
+
+def test_创世文件声明旧版插件_装过升级包之后再开机_照旧起得来(tmp_path):
+    """🔴 **线上事故的形状(3.11.2)**:龙族创世文件声明 `kasaier` 2.1.0,
+    而库里已经是 2.2.0(批 1.1 那份包升上去的)。**舰队每次开机都带
+    `--world-file`** —— 于是「不降级」那道闸在开机路上抛 `WorldSeedError`,
+    容器 `Exited(1)`,而 **3.9.0 / 3.10.2 / 3.11.1 三版都有这道闸,回滚救不了**。
+
+    🔴 **和 3.10.1 那次「舰队每次开机都带 `--world-file`」逐字同一种病,
+    只是换了一段**:那次是拍,这次是插件版本。病根同样是**拿「一次编辑」的语义
+    去 judge「同一份文件又开了一次机」**。
+
+    ⚠️ 这条用例走的正是舰队那三步:创世 → 装升级插件的包 → **同一份创世文件
+    再开机**。少了第三步,那个洞照样测不出来。
+    """
+    from anima_world.api import World
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    def _plugin(version: str) -> dict:
+        return {"id": "kasaier", "version": version, "label": "卡塞尔",
+                "facts": {"评级": {"bearer": "agent", "shape": "number",
+                                   "default": 0.0, "visibility": "here"}}}
+
+    client = redis_for(tmp_path / "pv.db")
+    # ① 创世:文件里声明 2.1.0
+    genesis = write_seed_file(tmp_path / "pv-genesis.cyberworld",
+                              dict(BASE, plugins=[_plugin("2.1.0")]))
+    World.open("w", redis=client, world_file=genesis, force_mock_llm=True).close()
+
+    # ② 一份内容包把它升到 2.2.0
+    pack = tmp_path / "pv-week2.cyberworld"
+    write_world_file(
+        pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+        seed_to_author_records({"pack": {"id": "第二周", "version": "1.0.0"},
+                                "plugins": [_plugin("2.2.0")]}),
+        compress=False, checksum=False)
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        world.install_pack(str(pack))
+
+    # ③ **舰队重启:同一份创世文件**(它还写着 2.1.0)—— 这一步从前 Exited(1)
+    World.open("w", redis=client, world_file=genesis, force_mock_llm=True).close()
+
+    # 库里那份说了算 —— 没有被那份旧声明盖回去
+    from anima_world.redis_state import RedisPluginStore
+    row = RedisPluginStore(client, "w").get("kasaier")
+    assert str(row.get("version")) == "2.2.0", f"库里那份被文件盖回去了:{row}"
+
+
+def test_而pack_install那条路上_降级照旧当场拒(tmp_path):
+    """**分界是「谁在装」**:开机是舰队每天都在做的事,而 `pack install` 是
+    人按下的一次动作 —— 在那儿「拿旧声明去盖新数据」仍然是一次真的降级。
+    放宽开机路不许把这一条也放宽。"""
+    from anima_world.api import World
+    from anima_world.world_package import PackInstallError
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    def _plugin(version: str) -> dict:
+        return {"id": "kasaier", "version": version, "label": "卡塞尔",
+                "facts": {"评级": {"bearer": "agent", "shape": "number",
+                                   "default": 0.0, "visibility": "here"}}}
+
+    client = redis_for(tmp_path / "pv2.db")
+    genesis = write_seed_file(tmp_path / "pv2-g.cyberworld",
+                              dict(BASE, plugins=[_plugin("2.2.0")]))
+    World.open("w", redis=client, world_file=genesis, force_mock_llm=True).close()
+    old_pack = tmp_path / "pv2-old.cyberworld"
+    write_world_file(
+        old_pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+        seed_to_author_records({"pack": {"id": "退回去", "version": "1.0.0"},
+                                "plugins": [_plugin("2.1.0")]}),
+        compress=False, checksum=False)
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(str(old_pack))
+        assert "不降级" in str(raised.value), str(raised.value)

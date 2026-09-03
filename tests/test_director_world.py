@@ -451,7 +451,25 @@ def test_时钟的内存读法_零IO而且不冒充真答案(tmp_path):
     with open_world_at(tmp_path / "dc.db") as world:
         sch = world.scheduler
         world.tick(3)
-        assert sch.clock_cached == sch.clock
+        # 🔴 **真量一次 I/O,别只断相等**(3.11.2,验收 A ⑤)。
+        # 「零 I/O」是这条读法存在的**全部理由**,而"两个数相等"对一个
+        # 每次都打 Redis 的实现**也成立** —— 那样这条用例就什么都没验。
+        calls: list[str] = []
+        raw = sch.redis.execute_command
+
+        def _spy(*a, **k):
+            calls.append(str(a[0]).upper())
+            return raw(*a, **k)
+
+        sch.redis.execute_command = _spy
+        try:
+            cached = sch.clock_cached
+            assert not calls, f"内存读法打了 Redis:{calls}"
+            _ = sch.clock                       # 对照:真读法**必然**打一次
+            assert calls, "真读法一次 Redis 都没打 —— 那这条对照就没意义了"
+        finally:
+            sch.redis.execute_command = raw
+        assert cached == sch.clock
         assert world.world_time_cached().day == world.world_time().day
 
         # 🔴 **别人推的 tick,这个进程看不见** —— 而那正是它诚实的地方:
@@ -464,3 +482,84 @@ def test_时钟的内存读法_零IO而且不冒充真答案(tmp_path):
         # 而一次真的推进会把它带上
         world.tick(1)
         assert sch.clock_cached == sch.clock
+
+
+def test_两条只读出口的屏上_没有裸英文枚举也没有python字面量(tmp_path):
+    """🔴 **验收 B ③**:`guidance show` 印的是
+    `{'setup': 1, 'escalation': 3, 'climax': 5}` —— 花括号、引号、冒号全是给机器
+    看的,而 `setup` 是枚举名。
+
+    ⚠️ **别数源码,去问屏幕**(3.7.0 那条判据):这里真敲两条出口,
+    对**印出来的字**断言。
+    """
+    import io as _io
+    import contextlib
+
+    from anima_world.__main__ import main as _main
+
+    with open_world_at(tmp_path / "sc.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+
+    for argv in (["guidance", "show", "--world-id", "w"],
+                 ["player", "story", "--player", "p1", "--world-id", "w"]):
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _main(argv)
+        screen = buf.getvalue()
+        assert "**" not in screen, f"{argv} 印了裸星号:{screen[:200]}"
+        assert "{'" not in screen and "': " not in screen, (
+            f"{argv} 印了 Python 字面量:{screen[:200]}")
+        for enum in ("setup", "escalation", "climax", "release",
+                     "breathe", "approach", "complicate"):
+            assert enum not in screen, f"{argv} 印了裸英文枚举 {enum!r}:{screen[:200]}"
+
+
+def test_契约报三张人话表_而且和纯模块逐项相等():
+    """🔴 **分档表只有一份**(验收 B ⑤,tool 三处在等)—— 各译一遍的话,
+    同一个世界会在引擎屏 / 创作台 / 站点上说三种话,而没有一处会报错。"""
+    from anima_world import director as D
+    from anima_world.__main__ import contract_payload
+
+    seg = contract_payload()["director"]
+    assert seg["move_labels"] == dict(D.MOVE_LABELS)
+    assert seg["phase_labels"] == dict(D.PHASE_LABELS)
+    assert seg["stake_labels"] == dict(D.STAKE_LABELS)
+
+
+def test_那一屏的最近几拍_只给他自己的(tmp_path):
+    """🔴 **这一格 3.11.1 修了,而它零覆盖**(3.11.2,验收 A ①:把它改回
+    3.11.0 的写法,2371 条全绿)。
+
+    `recent_log` 不按人过滤的下场有两层:**跨玩家剧透**(别人的线、别人的赌注),
+    以及**和同一屏上面那三格自相矛盾**(张力 / 相位 / 开着的线都是按人取的)。
+    ⚠️ **取 200 条再筛,不是取 10 条再筛** —— 多人世界里最近 10 条可能一条都不是
+    他的,那会让这一格永远空着。
+    """
+    with open_world_at(tmp_path / "rl.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        for pid in ("p1", "p2"):
+            world.player_move(pid, "cafe")
+        world.tick(2)
+        now = int(world.scheduler.clock)
+        # p1 一拍,然后 p2 连写十几拍 —— 把 p1 那条挤出"最近 10 条"
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "只给 p1 的那一句",
+                   "why": "", "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.2, phase="setup", tick=now, place="cafe", thread=None,
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        for i in range(14):
+            world._director_apply(
+                "p2", {"move": "breathe", "who": "", "line": f"p2 的第 {i} 句",
+                       "why": "", "promise": "", "stake": None, "source": "mock"},
+                tension_before=0.2, phase="setup", tick=now, place="cafe",
+                thread=None, pin_ticks=12, due_ticks=0, capped=False,
+                forbidden_ops=set(), recap=[], place_name="咖啡店")
+
+        mine = world.player_story("p1")["recent_log"]
+        assert mine, "他自己那一拍被别人的挤没了 —— 取 10 条再筛就是这个下场"
+        for row in mine:
+            assert (row["payload"] or {}).get("player_id") == "p1", (
+                f"别人的剧情漏到他这一屏了:{row['payload']}")
+        assert any("只给 p1" in str((r["payload"] or {}).get("line")) for r in mine)

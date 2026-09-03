@@ -2419,6 +2419,7 @@ class InstallReport:
 def install_plugins(
     plugins: Iterable[Plugin], *, store: Any, stock_store: Any, visibility_store: Any,
     owners_of: Any, tick: int = 0, bodies: Mapping[str, Any] | None = None,
+    on_boot: bool = False,
 ) -> InstallReport:
     """把一组(已经排好序的)插件装进这个世界。**幂等。**
 
@@ -2435,11 +2436,49 @@ def install_plugins(
     **升级 = 同 id 更高 version**:声明里没了的事实**裁剪**(删值、删可见性行)并
     记进 `dropped_facts`;**低于已装版本当场拒绝** —— 一次"降级"在这一层不是回退,
     是拿旧声明去覆盖新数据,而那不可逆。
+
+    🔴 **`on_boot=True` 时那条拒绝换成「跳过并说一句」**(3.11.2,线上事故)。
+    舰队每次开机都带 `--world-file`,而那份文件里的插件版本**会比库里旧**
+    (库里那份是后来 `pack install` 升上去的)—— 拿"一次编辑"的语义去 judge
+    "同一份文件又开了一次机",下场是**整支舰队起不来**。
+    见函数体里那段注释,以及 3.10.1 拍那一层同一种病的病历。
     """
     report = InstallReport()
-    errors = plugin_version_errors(plugins, store)
-    if errors:
-        raise PluginError(errors)
+    # 🔴 **「不降级」这道闸只在 `pack install` 那条路上生效**(3.11.2,线上事故)。
+    #
+    # 事故的形状:龙族的创世文件声明 `kasaier` **2.1.0**,而库里已经是 **2.2.0**
+    # (批 1.1 那份包装上去的)。**舰队每次开机都带 `--world-file`** ——
+    # 于是这道闸在开机路上抛 `WorldSeedError`,容器 `Exited(1)`,
+    # 而 3.9.0 / 3.10.2 / 3.11.1 **三版都有这道闸,回滚救不了**。
+    #
+    # 🔴 **和 3.10.1 那次「舰队每次开机都带 --world-file」逐字同一种病,
+    # 只是换了一段**:那次是拍,这次是插件版本。病根同样是
+    # **拿「一次编辑」的语义去judge「同一份文件又开了一次机」**。
+    #
+    # 分界照第 17 条:**开机路上「库里那份说了算」** —— 库里更新就跳过它、
+    # 说一句,rc 0;只有**真正新增**的记录才谈得上拒绝。
+    # `pack install` 那条**照旧当场拒**:那是人按下的一次动作,而"拿旧声明去盖
+    # 新数据"在那儿仍然是一次真的降级。
+    if on_boot:
+        kept: list[str] = []
+        fresh: list[Any] = []
+        for plugin in plugins:
+            row = store.get(plugin.id) or None
+            was = str((row or {}).get("version") or "")
+            if row is not None and version_tuple(was) > version_tuple(plugin.version):
+                kept.append(f"{plugin.id}(库里 {was} > 文件 {plugin.version})")
+                continue
+            fresh.append(plugin)
+        if kept:
+            logger.info(
+                "这几个插件库里那份更新,这次开机不动它们:%s —— "
+                "「库里那份说了算」(要装新的一版走 `anima-world pack install`)",
+                "、".join(kept))
+        plugins = fresh
+    else:
+        errors = plugin_version_errors(plugins, store)
+        if errors:
+            raise PluginError(errors)
 
     for plugin in plugins:
         row = store.get(plugin.id) or None

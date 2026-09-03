@@ -26,6 +26,8 @@ from anima_world.beats import (
     BeatScript, BeatScriptError, coerce_goals, split_against_stored,
 )
 from anima_world.director import (
+    MOVE_LABELS as DIRECTOR_MOVE_LABELS, PHASE_LABELS as DIRECTOR_PHASE_LABELS,
+    STAKE_LABELS as DIRECTOR_STAKE_LABELS,
     MOVES as DIRECTOR_MOVES, PHASES as DIRECTOR_PHASES,
     STAKE_KINDS as DIRECTOR_STAKE_KINDS,
     TARGET_CURVE_PHASES as DIRECTOR_TARGET_CURVE,
@@ -2908,6 +2910,9 @@ def build_serve_scheduler(
             _install_plugins(
                 scheduler, plugin_store, stock_store, visibility_store, location_store,
                 world_seed if seed_author_layer else None,
+                # 🔴 **这是开机路**(3.11.2,线上事故):库里那份比文件新时
+                # 「库里那份说了算」,跳过并说一句 —— 而不是让整支舰队起不来。
+                on_boot=True,
             )
         except PluginError as exc:
             raise WorldSeedError(list(exc.errors)) from None
@@ -4170,7 +4175,8 @@ def refresh_plugins(scheduler: Any) -> None:
     if plugin_store is None or scheduler.stock_store is None:
         return
     _install_plugins(scheduler, plugin_store, scheduler.stock_store,
-                     scheduler.visibility_store, scheduler.location_store, None)
+                     scheduler.visibility_store, scheduler.location_store, None,
+                     on_boot=True)
     # 🔴 **重装之后要把物化视图也重建一遍**(2026-08-27 复核评审逮的)。
     #
     # `_install_plugins` 换掉的是**声明**(`projected_facts` 与 `fact_sources`
@@ -4194,6 +4200,7 @@ def refresh_plugins(scheduler: Any) -> None:
 def _install_plugins(
     scheduler: Any, plugin_store: Any, stock_store: Any, visibility_store: Any,
     location_store: Any, world_seed: dict[str, Any] | None,
+    on_boot: bool = False,
 ) -> None:
     """把插件装进这个世界,并把它的规律与触发器接到调度器上(3.8.0)。
 
@@ -4241,6 +4248,9 @@ def _install_plugins(
         plugins, store=plugin_store, stock_store=stock_store,
         visibility_store=visibility_store, owners_of=owners_of,
         tick=scheduler.clock, bodies={str(b.get("id")): b for b in bodies},
+        # 🔴 开机路上「库里那份说了算」(3.11.2,线上事故)——
+        # `pack install` 那条照旧当场拒。
+        on_boot=on_boot,
     )
     scheduler.plugins = list(plugins)
     # 🆕 **常数步长那条 lint 也覆盖插件的规律**(第二波 ④)。开机那一侧的开口
@@ -8404,6 +8414,13 @@ def run_player(args: argparse.Namespace) -> int:
         # 🔴 **人话直接读那三格,不在这儿再译一遍**(3.11.1,player 带回)。
         # 上一版这一屏自己带着一张分档表 —— 而站点也要一张,**两张迟早分叉**。
         print(onboarding.rule(f"{args.player} 的故事"))
+        # 🔴 **`known` 就是为这件事加的,而这一屏自己没读它**(3.11.2,验收 B ②)。
+        # 一个打错的 pid 会拿到一份**看起来完全正常的空故事** —— 而那正是加这一格
+        # 要挡的东西。**引擎答得出的判断,屏上却没问。**
+        if not story.get("known"):
+            print(f"  这个世界不认识 {args.player} —— 他没进来过"
+                  "(问问是不是 pid 打错了)。")
+            return 0
         print(f"  张力 {story['tension']:.2f}({story['tension_text']})"
               f"· 这条线{story['phase_text']}"
               f"· 编剧一共写过 {story['moves']} 拍")
@@ -9298,6 +9315,12 @@ def contract_payload() -> dict[str, Any]:
             # `tension` 是浮点、`phase` 是枚举,而宿主按纪律两样都不上屏 ——
             # 照 `host.ask_ready_text` 那条先例,引擎给人话,宿主照印。
             "text_keys": ["tension_text", "phase_text"],
+            # 🆕 3.11.2(验收 B ⑤,tool 三处在等):**三张人话表进契约。**
+            # 🔴 **分档表只有一份** —— 各译一遍的话,同一个世界会在
+            # 引擎屏 / 创作台 / 站点上说三种话,而没有一处会报错。
+            "move_labels": dict(DIRECTOR_MOVE_LABELS),
+            "phase_labels": dict(DIRECTOR_PHASE_LABELS),
+            "stake_labels": dict(DIRECTOR_STAKE_LABELS),
             # 🆕 3.11.1(platform 带回):`known` 分开「查无此人」与「认识但还没
             # 动过手」—— 别让壳自己去翻 `player_join`。
             "story_keys": ["player_id", "known", "tension", "tension_text",
@@ -10236,7 +10259,7 @@ def run_guidance(args: argparse.Namespace) -> int:
         print(f"  {onboarding.dim('没有指导时编剧按保守默认跑(只喘口气 / 派个人来找你);')}")
         print(f"  {onboarding.dim('写一份走 anima-world pack install <带 guidance 段的包>')}")
         return 0
-    from anima_world.director import STAKE_LABELS  # noqa: F401 - 闭集的出处
+    from anima_world.director import PHASE_LABELS
 
     print(onboarding.rule(f"{world_id} 给编剧的指导"))
     themes = "、".join(str(t) for t in (body.get("themes") or ())) or "(没写)"
@@ -10247,7 +10270,12 @@ def run_guidance(args: argparse.Namespace) -> int:
     print(f"  编剧调得动的人:{len(pool)} 个" + (f"({'、'.join(map(str, pool[:6]))}"
           + ("…" if len(pool) > 6 else "") + ")" if pool else " —— 没写 = 全世界"))
     forbidden = body.get("forbidden") or {}
-    for key, said in (("agents", "不许出现的人"), ("locations", "不许去的地方"),
+    # ⚠️ **措辞不许比闸大**(3.11.2,验收 A ⑤):`forbidden.locations` 今天挡的是
+    # 「**站在那儿的人**不进候选」,而**不是**「谁都不许去那儿」——
+    # 玩家照旧走得过去,编剧也照旧写得出别处发生的事。
+    # 一句比闸大的措辞,会让作者以为自己挡住了一件其实没挡住的事。
+    for key, said in (("agents", "不许出现的人"),
+                      ("locations", "站在这儿的人不会被派出来"),
                       ("ops", "不许做的事")):
         rows = forbidden.get(key) or []
         if rows:
@@ -10256,9 +10284,15 @@ def run_guidance(args: argparse.Namespace) -> int:
         print(f"  禁区:{line}")
     pacing = body.get("pacing") or {}
     if pacing:
+        # 🔴 **别印 Python 的 dict repr,别印英文相名**(3.11.2,验收 B ③):
+        # 上一版这一屏印的是 `{'setup': 1, 'escalation': 3, 'climax': 5}` ——
+        # 花括号、引号、冒号全是给机器看的,而 `setup` 是枚举名。
+        # 人话表**只有一份**(`director.PHASE_LABELS`),这儿读它。
         curve = pacing.get("target_curve") or {}
+        said = "、".join(f"{PHASE_LABELS.get(k, k)} {v} 天"
+                        for k, v in curve.items())
         print(f"  节奏:张力安全阀 {pacing.get('ceiling', '(没写)')}"
-              + (f";每一相停留 {curve}" if curve else ""))
+              + (f";{said}" if said else ""))
     for arc in (body.get("arcs") or []):
         print(f"  路口 {arc.get('id')}:{arc.get('steer') or '(没写往哪儿使劲)'}")
     return 0
@@ -10393,7 +10427,10 @@ def run_pack(args: argparse.Namespace) -> int:
         # 屏上一个字不提,而 `pack list` 那行写着「带了:(空)」。
         if receipt.get("guidance"):
             print("  · 给编剧的指导换了一份")
-        for problem in (receipt.get("guidance_warnings") or []):
+        # ⚠️ **去重**(3.11.2,验收 B ⑥):同一句话装包那一侧已经 `logger.warning`
+        # 过一次,而回执里也有一份 —— 屏上于是出现两遍一模一样的话,
+        # 读的人会以为有两个人写错了。
+        for problem in dict.fromkeys(receipt.get("guidance_warnings") or []):
             print(f"  ⚠ {problem}")
         if receipt["agents"]:
             print(f"  · {len(receipt['agents'])} 个新角色进了这个世界:"
@@ -10939,6 +10976,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     run_since_seq = _run_since_seq(redis, world_id)
     plugin_events: dict[str, int] = {}
     director_moves = director_collected = director_mock = 0
+    director_by_source: dict[str, int] = {}
     director_refused = director_this_run = 0
     for e in log.replay():
         payload = e.payload or {}
@@ -10956,7 +10994,12 @@ def run_doctor(args: argparse.Namespace) -> int:
             director_moves += 1
             if move == "collect":
                 director_collected += 1
-            elif str(payload.get("source") or "") == "mock":
+            elif str(payload.get("source") or "") in ("mock", "ceiling", "refused"):
+                # 🔴 **三种分开数**(3.11.2,验收 A ③):它们指向三种修法 ——
+                # 顶安全阀是世界该这样、答出闭集之外是提示词要改、
+                # 没配 key 是去配一把 key。合成一个数,一种都指不出来。
+                director_by_source[str(payload["source"])] = (
+                    director_by_source.get(str(payload["source"]), 0) + 1)
                 director_mock += 1
             if payload.get("refused_by"):
                 director_refused += 1
@@ -11049,8 +11092,15 @@ def run_doctor(args: argparse.Namespace) -> int:
         this_run = (str(director_this_run) if run_since_seq is not None
                     else "这一趟还没跑过 tick,答不出来")
         print(f"  {onboarding.green(onboarding.OK)} 编剧:一共写过 {director_moves} 拍"
-              f"(本次开机 {this_run});{director_mock} 拍退成模板句、"
-              f"{director_refused} 拍被同意门或上限挡过、{director_collected} 条线到期收了账")
+              f"(本次开机 {this_run});{director_refused} 拍被同意门或上限挡过、"
+              f"{director_collected} 条线到期收了账")
+        if director_by_source:
+            from anima_world.director import SOURCE_LABELS
+
+            said = "、".join(
+                f"{SOURCE_LABELS.get(k, k)} {n}"
+                for k, n in sorted(director_by_source.items()))
+            print(f"      {onboarding.dim('退成模板句的那几拍:' + said)}")
         if director_moves and director_mock == director_moves:
             problems += 1
             print(f"  {onboarding.yellow(onboarding.WARN)} 每一拍都是模板句 —— "
