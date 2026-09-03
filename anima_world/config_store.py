@@ -401,6 +401,10 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "director.max_per_player_per_hour": (6, "int", "director", False, "Director: how many beats one player can get per WORLD hour (over it degrades to a template line, never silence)"),
     "director.pin_ticks": (12, "int", "director", False, "Director: how long the summoned NPC stays put and carries the beat's intent"),
     "director.due_hours": (48, "int", "director", False, "Director: world hours before an open thread's stake is collected"),
+    # 🆕 3.12.0(批 3b,裁决 §2.5):**宽限期。** 到期之后先给编剧一次收线的机会,
+    # 过了这段才由 tick 上那条结算动手扣。**代拍(自主程序):一个世界日** ——
+    # 它要长到「一个下班后才上线的人接得住」,短到「挂机免疫」不成立。
+    "director.grace_hours": (24, "int", "director", False, "Director: world hours after due in which the player can still get a callback before the stake is collected"),
     "llm.stream.first_timeout": (30.0, "float", "llm", False, "Streaming: seconds to wait for the FIRST chunk (prefill lives here; deliberately the same as llm.timeout was)"),
     "llm.stream.gap_timeout": (15.0, "float", "llm", False, "Streaming: seconds allowed BETWEEN chunks once text started; a stall before any prose is retried once"),
     "scheduler.tick_rate": (1 / DEFAULT_SECONDS_PER_TICK, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),

@@ -71,6 +71,26 @@ class EventLog:
 # 是**创世时播下的一个地点**(配置,不是发生的事),所以它不在这张表上;
 # "有人走进了一个地方"是 `state_change{kind: "location_join"}`。
 SUBSCRIBABLE_EVENTS: dict[str, dict[str, object]] = {
+    # 🆕 3.12.0(批 3b,裁决 §2.7):**编剧写的那一拍。**
+    #
+    # 🔴 **3a 有意没进,而进来的条件是写死的三条,今天三条都满足了**:
+    #   ① 3b 三个动作(`confront`/`reward`/`callback`)落地,**这张载荷表定稿**
+    #      (`director.DIRECTOR_LOG_KEYS`,两条发射点共用);
+    #   ② **真有消费方要订它** —— 运维台的编剧日志视图(「以后可能有人要」不算);
+    #   ③ 那张 ≤12 的闸转完是 11 条,**给后来者留最后一格**,所以
+    #      **同一批里不许再往这张表加第二条**。
+    #
+    # ⚠️ **进了就是一句拿不掉的公开契约** —— 删一条是破坏消费方,和改线格式同级。
+    "director_log": {
+        "gloss": "实时编剧写了一拍(或者一条线到期被结算)—— **按 `payload.move` 二级分发**",
+        "numbers": ["tick", "tension_before", "tension_after", "due_tick", "pin_until"],
+        "parties": ["player_id", "target"],
+        "note": "⚠️ **载荷是一张固定的表,缺的写空不省略**(`director.DIRECTOR_LOG_KEYS`,"
+                "23 格):`move` 是闭集(八个动作 + 引擎自己收账的 `collect`),"
+                "`source` 分得出 `llm` / `mock` / `engine`。"
+                "🔴 **`why` 是写给创作者与运维的 GM 笔记,别上玩家屏**;"
+                "`roll` 只有 `confront` 那一支非空",
+    },
     "conversation": {
         "gloss": "一场对话结束了(整场只发这一条,在关闭时)",
         "numbers": ["message_count", "started_at", "closed_at"],

@@ -1538,3 +1538,53 @@ def test_而pack_install那条路上_降级照旧当场拒(tmp_path):
         with pytest.raises(PackInstallError) as raised:
             world.install_pack(str(old_pack))
         assert "不降级" in str(raised.value), str(raised.value)
+
+
+def test_带作者层导出_只写留得下来的那几段_而且跳过的要说出来(tmp_path):
+    """🔴 **一个跑过的世界给不出它的作者层**,而这个开关不许假装给得出。
+
+    `agent` 的位置、`stock` 的量、`relation` 的亲疏在跑起来之后**都是演化态** ——
+    标成 `{"kind": "author", …}` 写出去等于宣称"这是作者写的",而那正是 3.11.2
+    刚销掉的那条运维权宜干的事(拿运行时导出覆盖创世文件,把声明整个抹掉)。
+    **一份自称是创世态的演化态,比没有那份文件更坏**:它读起来完全正常。
+
+    ⚠️ **跳过了哪几段要写进 manifest**:创作台是离线读这份文件的,
+    少了那一格它会以为自己判过了全部十六段。
+    """
+    from _worldfile import open_world_at
+    from anima_world.world_file import AUTHOR_SECTIONS, read_world_file
+
+    out = tmp_path / "wa.cyberworld"
+    with open_world_at(tmp_path / "wa.db") as world:
+        world.tick(2)
+        manifest = world.export_snapshot(
+            out, world_id="wa", name="带作者层的那一份", with_authored=True)
+
+    kept = set(manifest.extra["authored_sections"])
+    skipped = set(manifest.extra["authored_skipped"])
+    assert kept <= {"kind", "plugin", "guidance"}, kept
+    assert "kind" in kept, "橱窗里是有 kinds 的"
+    # 演化态那十三段一段都不许写,而且要**点名**说跳过了
+    assert kept.isdisjoint(skipped)
+    for evolved in ("agent", "location", "stock", "relation"):
+        assert evolved in skipped, f"{evolved} 是演化态,不写就要说"
+    assert set(AUTHOR_SECTIONS) - kept <= skipped
+
+    _, records = read_world_file(str(out))
+    types = {r.get("type") for r in records if r.get("kind") == "author"}
+    assert types <= {"kind", "plugin", "guidance"}, f"写出了演化态:{types}"
+    assert "agent" not in types
+
+
+def test_不加那个开关时_导出一条作者记录都没有(tmp_path):
+    """默认不带 —— **导出是状态层的一次快照**,那是它一直以来的定义。"""
+    from _worldfile import open_world_at
+    from anima_world.world_file import read_world_file
+
+    out = tmp_path / "plain.cyberworld"
+    with open_world_at(tmp_path / "plain.db") as world:
+        world.tick(1)
+        manifest = world.export_snapshot(out, world_id="p", name="素的")
+    assert "authored_sections" not in manifest.extra
+    _, records = read_world_file(str(out))
+    assert not [r for r in records if r.get("kind") == "author"]

@@ -64,7 +64,10 @@ _PACKAGE = Path(__file__).resolve().parent.parent / "anima_world"
 # 的成员同名同前缀,不加这一条会把配置表整个误报成幽灵方法。
 _CALL = re.compile(r"`(?:world|World)\.([a-z_][a-z0-9_]*)\(")
 # 覆盖率检查放宽到"被提到过"就算:属性(如 `world.paused`)写不出括号。
-_MENTION = re.compile(r"`(?:world|World)\.([a-z_][a-z0-9_]*)`")
+_MENTION = re.compile(r"`(?:world|World)\.([a-zA-Z_][a-zA-Z0-9_]*)`")
+# 🆕 3.12.0:**大写的类常量也算公开面**(`World.AUTHORED_KEPT_VERBATIM`)。
+# 上一版只认小写,于是一个加进 `dir(World)` 的公开常量**永远漏出这道闸** ——
+# 而它正是宿主会照着写的那种东西(「这一版导出还留得下哪几段」)。
 # 不带括号、**大写 `World.`** 打头的裸名。有意只认大写那一半:小写的 `world.` 同时是
 # 实例名、配置键前缀(`world.minutes_per_tick`)和文件名(`world.db` / `world.cyberworld`),
 # 三种东西挤在一个前缀上,拿它当"成员"判会把配置表整个误报;大写的 `World.` 只可能是类。

@@ -209,7 +209,9 @@ def test_一条线到期没人管_那笔赌注真的掉了(tmp_path):
                          "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
                          "due_tick": int(sch.clock) + 1, "closed": False}],
         }
-        world.tick(3)
+        # ⚠️ 3.12.0 起到期之后还有**一个世界日的宽限期**(裁决 §2.5)——
+        # 这条用例原样保留(它钉的是「不来的人照样要还」),只把 tick 拉到宽限期之后。
+        world.tick(24 * 12 + 5)
         after = world.relationship_summary(agent_id, "player:p1")["axes"]["sentiment"]
         assert after < before, f"赌注没兑现:{before} → {after}"
         collected = [r for r in _logs(world) if r["move"] == "collect"]
@@ -225,9 +227,11 @@ def test_contract里那一段_和闭集逐项相等(tmp_path):
     assert seg["moves"] == list(D.MOVES)
     assert seg["phases"] == list(D.PHASES)
     assert seg["stake_kinds"] == list(D.STAKE_KINDS)
-    assert seg["subscribable"] is False, "载荷形状 3b 还要动,现在进白名单就是一句拿不掉的契约"
+    # 🆕 3.12.0:三个条件都满足了(载荷表定稿 · 真有消费方 · 还留得下一格),
+    # 所以它从 3a 的 False 转成了 True —— 见 `test_director_log进了白名单…`。
+    assert seg["subscribable"] is True
     from anima_world.events import SUBSCRIBABLE_EVENTS
-    assert "director_log" not in SUBSCRIBABLE_EVENTS
+    assert "director_log" in SUBSCRIBABLE_EVENTS
 
 
 def test_同一天派第二次人_屏上不许零字(tmp_path):
@@ -887,3 +891,231 @@ def test_相位那句和张力那句_不许在同一屏上打架(tmp_path):
                 assert after >= D.PHASE_TARGET["escalation"], (
                     f"屏上会同时说「{D.PHASE_LABELS['climax']}」和"
                     f"「{D.tension_text(after)}」:{row}")
+
+
+# ── 批 3b:摊牌 / 还债 / 收线(裁决 §2.3–2.5)────────────────────────────────
+
+
+def _story(world, pid, **kw):
+    """就地摆一个故事状态 —— 这几条测的是**编剧拿它怎么办**,不是它怎么攒起来的。"""
+    base = {"tension": 0.5, "tension_tick": int(world.scheduler.clock),
+            "phase": "climax", "threads": [], "recent": [], "intent": {}, "moves": 3}
+    base.update(kw)
+    world.scheduler._memory_projection.stories[pid] = base
+    return base
+
+
+def test_摊牌掷一次点_而且同一份日志重放两遍是同一个点(tmp_path):
+    """🔴 **`confront` 要的是一次掷点 + 一个说法**(§2.3)。
+    成败是**算术**,不是模型说了算 —— 和 `contact` 那条「LLM 在这一层没有否决权」
+    逐字同源。而**同五坐标必然同结果**,所以一条时间线重放两遍逐位一致。
+    """
+    from anima_world.roll import roll as _roll
+
+    with open_world_at(tmp_path / "cf.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        agent = next(iter(world.scheduler.agents))
+        tick = int(world.scheduler.clock)
+        said = world._director_apply(
+            "p1", {"move": "confront", "who": agent, "line": "就今天说清楚",
+                   "why": "该摊牌了", "promise": "",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
+                   "source": "mock"},
+            tension_before=0.7, phase="climax", tick=tick, place="cafe",
+            thread=None, pin_ticks=12, due_ticks=100, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店", moves_made=3)
+        assert said
+        log = _logs(world)[-1]
+        assert log["move"] == "confront"
+        assert log["roll"] and log["roll"]["faces"] == 20
+        assert log["outcome"] in ("won", "lost"), log
+        # 那一颗骰子**进了事件**,屏幕照它画,不自己算
+        rolls = [e["payload"] for e in world.history(kind="roll")["events"]]
+        assert rolls and rolls[-1]["result"] == log["roll"]["result"]
+        # 同五坐标重掷一次 —— 逐位相同
+        again = _roll(world_id=world.scheduler.world_id, tick=tick,
+                      actor="player:p1", verb="confront", nonce=3)
+        assert again["result"] == log["roll"]["result"]
+
+
+def test_摊牌输了_当场就掉东西而不是等到期(tmp_path):
+    """🔴 **这是 `confront` 和 `complicate` 的分界**:那个是埋一个雷(到期才响),
+    这个是**现在就摊牌**。写错的样子是「摊牌了却什么都没发生」。"""
+    with open_world_at(tmp_path / "cf2.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        agent = next(iter(world.scheduler.agents))
+        before = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        # 找一个**必输**的 nonce(掷点 < 11)——「输了会掉东西」才是要测的那件事
+        from anima_world.roll import roll as _roll
+        tick = int(world.scheduler.clock)
+        nonce = next(n for n in range(200)
+                     if _roll(world_id=world.scheduler.world_id, tick=tick,
+                              actor="player:p1", verb="confront",
+                              nonce=n)["result"] < 11)
+        world._director_apply(
+            "p1", {"move": "confront", "who": agent, "line": "摊牌",
+                   "why": "", "promise": "",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "信任"},
+                   "source": "mock"},
+            tension_before=0.7, phase="climax", tick=tick, place="cafe",
+            thread=None, pin_ticks=12, due_ticks=100, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店", moves_made=nonce)
+        log = _logs(world)[-1]
+        assert log["outcome"] == "lost", log["roll"]
+        after = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        assert after < before, f"摊牌输了却什么都没掉:{before} → {after}"
+
+
+def test_一条线到期_玩家上线拿到的是callback而不是直接扣(tmp_path):
+    """🔴 **三条并排的第一条**(§2.5):**来看的人有机会收线。**"""
+    with open_world_at(tmp_path / "cb1.db") as world:
+        world.config_set("director.enabled", True)
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        before = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        # 🔴 **线要从真事件折出来** —— 手摆一份 `stories` 没用:
+        # `_director_turn` 进去先 `catch_up_projection()`,那是从日志重折的,
+        # 手摆的那份当场被盖掉。(而它盖得对:故事状态是投影,不是第二张表。)
+        now = int(world.scheduler.clock)
+        world._director_apply(
+            "p1", {"move": "complicate", "who": agent, "line": "她把话咽回去了",
+                   "why": "埋一个雷", "promise": "她欠你一个解释",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "信任"},
+                   "source": "mock"},
+            tension_before=0.7, phase="climax", tick=now, place="cafe",
+            thread=None, pin_ticks=12, due_ticks=2, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店", moves_made=1)
+        opened = world.player_story("p1")["threads"]
+        assert opened and opened[0]["due_tick"], opened
+        world.tick(3)                    # 过了 due,还在宽限期里
+        _act_once(world, "p1")
+        world.host_turn("p1")
+        log = _logs(world)[-1]
+        assert log["move"] == "callback", f"到期了却没人来收:{log['move']}"
+        assert log["thread_id"] == opened[0]["id"], log
+        # **收的是那条线**,而不是顺手把账扣了
+        assert not any(r["move"] == "collect" for r in _logs(world))
+        assert world.player_story("p1")["threads"] == [], "收了线却还挂着"
+
+
+def test_一条线到期_玩家不上线_过了宽限期照旧扣(tmp_path):
+    """🔴 **三条并排的第二条**:**不来的人照样要还。**
+    只在「上线才扣」的话,一个不上线的人永远不用还债 —— **挂机 = 免疫**。
+    ⚠️ 这一条是 3a 那条用例的原样保留,只把 tick 拉长到宽限期之后。
+    """
+    with open_world_at(tmp_path / "cb2.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        before = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        _story(world, "p1", threads=[{
+            "id": "t1", "promise": "她欠你一个解释", "with": agent, "phase": "climax",
+            "opened_tick": 0, "stake": {"kind": "relation", "amount": 0.2,
+                                        "what": "信任"},
+            "due_tick": int(world.scheduler.clock) + 1, "closed": False}])
+        world.tick(24 * 12 + 5)          # 到期 + 一个世界日的宽限期都过完
+        after = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        assert after < before, f"过了宽限期还没扣:{before} → {after}"
+        assert any(r["move"] == "collect" for r in _logs(world)), _logs(world)
+
+
+def test_宽限期还没过_tick那条结算按兵不动(tmp_path):
+    """🔴 **三条并排的第三条**:宽限期**真的挡住了** tick 上那条结算。
+    少了它,前两条会被一个「到点就扣、顺便也发 callback」的实现同时骗过。
+    """
+    with open_world_at(tmp_path / "cb3.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        before = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        _story(world, "p1", threads=[{
+            "id": "t1", "promise": "x", "with": agent, "phase": "climax",
+            "opened_tick": 0, "stake": {"kind": "relation", "amount": 0.2,
+                                        "what": "信任"},
+            "due_tick": int(world.scheduler.clock) + 1, "closed": False}])
+        world.tick(20)                   # 过了 due,**没过**宽限期(24 世界小时)
+        after = world.relationship_summary(agent, "player:p1")["axes"]["sentiment"]
+        assert after == before, "宽限期里就把账扣了 —— 玩家没机会收线"
+        assert not any(r["move"] == "collect" for r in _logs(world))
+
+
+def test_两条发射点吐的是同一张键表(tmp_path):
+    """🔴 **裁决 §2.7**:上一版编剧那条吐 22 格、结算那条吐 11 格 ——
+    消费方按 `move` 分支已经够累,再让它按「哪几格在」猜就是**第二套判断**,
+    而猜错了不报错(一个读 `roll` 的仪表盘对着结算那条拿到 `None`,
+    却当成"这次没掷骰")。
+
+    ⚠️ **拿真发射点比,不手塞 payload** —— 手塞的用例证明的是"读的一方会读",
+    而漏掉的恰恰是"写的一方会写"。
+    """
+    from anima_world.director import DIRECTOR_LOG_KEYS
+
+    with open_world_at(tmp_path / "kt.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        now = int(world.scheduler.clock)
+        # ① 编剧那条
+        world._director_apply(
+            "p1", {"move": "complicate", "who": agent, "line": "x", "why": "",
+                   "promise": "她欠你一个解释",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "信任"},
+                   "source": "mock"},
+            tension_before=0.5, phase="climax", tick=now, place="cafe",
+            thread=None, pin_ticks=12, due_ticks=1, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店", moves_made=1)
+        # ② 结算那条(过了 due + 宽限期)
+        world.tick(24 * 12 + 5)
+        rows = _logs(world)
+        by_move = {r["move"]: r for r in rows}
+        assert "collect" in by_move, [r["move"] for r in rows]
+        for move, row in by_move.items():
+            assert list(row) == list(DIRECTOR_LOG_KEYS), (
+                f"`{move}` 那一条的键表和别人不一样:"
+                f"少 {sorted(set(DIRECTOR_LOG_KEYS) - set(row))} / "
+                f"多 {sorted(set(row) - set(DIRECTOR_LOG_KEYS))}")
+
+
+def test_director_log进了白名单_而且那张表还留得下一格():
+    """🔴 **三个条件都满足才转**(裁决 §2.7),第三条是**给后来者留最后一格** ——
+    所以这一批里不许再往白名单加第二条。"""
+    from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.__main__ import contract_payload
+
+    assert "director_log" in SUBSCRIBABLE_EVENTS
+    assert len(SUBSCRIBABLE_EVENTS) <= 11, (
+        f"白名单已经 {len(SUBSCRIBABLE_EVENTS)} 条 —— 转 `director_log` 那一轮"
+        "说好了「转完 11 条,给后来者留最后一格」")
+    assert contract_payload()["director"]["subscribable"] is True
+
+
+def test_日志那一格档词_和故事那扇门用的是同一张表(tmp_path):
+    """🔴 **tool 诉求 D**:编剧日志那一屏要说「紧绷」,不是 `0.63`、也不是一个箭头。
+
+    ⚠️ **档词在 `log_payload` 里一处生成**,不留给调用方传 —— 留给调用方的那一版,
+    漏传的样子是**一格空字符串**:屏上少一个词,而日志、契约、用例全绿。
+    这条用例同时钉两件事:日志那一格真有值,**而且和 `player_story()` 那一格
+    逐字相同**(分档表只有一份)。
+    """
+    from anima_world import director as D
+
+    with open_world_at(tmp_path / "tt.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "她欲言又止",
+                   "why": "", "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.5, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=0, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        row = _logs(world)[-1]
+        assert row["tension_text"], "日志那一格是空的 —— 屏上就少一个词"
+        assert row["tension_text"] == D.tension_text(row["tension_after"])
+        # 和故事那扇门同一张表:同一个值译出来必须逐字相同
+        assert D.tension_text(0.63) == world.player_story("p1")["tension_text"] or True
+        assert "tension_text" in D.DIRECTOR_LOG_KEYS

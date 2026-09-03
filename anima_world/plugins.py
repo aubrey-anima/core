@@ -542,6 +542,12 @@ def _parse_one(
 ) -> Plugin:
     errors: list[str] = []
     errors += unknown_keys(label, entry, PLUGIN_KEYS, "plugin_keys")
+    # 🆕 3.12.0:对人动词(裁决 §2.6)。判断住在 `person_verbs.py` ——
+    # 这儿只把它接上,不抄第二份。
+    from anima_world.person_verbs import verb_errors as _pv_errors
+
+    for i, row in enumerate(entry.get("person_verbs") or ()):
+        errors += _pv_errors(row, f"{label}.person_verbs[{i}]")
     version = str(entry.get("version") or "").strip()
     if not version:
         errors.append(
@@ -826,7 +832,12 @@ RULE_REQUIRED_KEYS = ("id", "for_each", "set")
 
 #: `plugin` 记录**顶层**写得到的键。
 PLUGIN_KEYS = ("id", "version", "engine_min", "label", "reads",
-               "facts", "edges", "kinds", "verbs", "rules", "triggers")
+               "facts", "edges", "kinds", "verbs", "rules", "triggers",
+               # 🆕 3.12.0(批 3b,裁决 §2.6):**对人动词。**
+               # ⚠️ 它**不进 `verbs`**,也**不进 `verb_target_forms`** ——
+               # 那两处是 affordance 那条路,而对人动词永不走 affordance
+               # (它要一道同意门,而 affordance 整条路上没有一处问过对方肯不肯)。
+               "person_verbs")
 
 #: 一条事实(节点上的、边上的、种类上的,**同一份**)写得到的键。
 #: ⚠️ `bearer` 在边与种类上由引擎替作者填,写不写都行;`sources` / `mode`

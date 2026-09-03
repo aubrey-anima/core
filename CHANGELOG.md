@@ -73,6 +73,29 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.12.0] —— 编剧 v2:摊牌、还债、收线 (2026-09-03)
+
+玩法层批 3b。裁决全文 `../../docs/任务单/2026-09-02-玩法层批3-判定与对人动词.md` §2
+(路径见该单;它是 3a 那一单的兄弟)。
+
+### 📐 §2.8 那笔账:量了,而**量出来的结论和预期的两种都不一样**
+
+裁决说「本单只做一件事:量一次 `subsystem_health.engagement_kept`,亮得少就
+继续挂着、亮得多就开自己的单」。量法与结果(橱窗世界,`--llm mock`,30 世界日
+= 8640 tick):
+
+    engagement_kept = null · entity_engage 0 次 · entity_disengage 0 次
+
+**但这不是「亮得少」** —— 是**这个夹具照不到它**:橱窗里三个带 `duration` 的
+动词(`tree.嫁接` 12 / `tree.育苗` 24 / `tree.树下小坐` 6)**一个都没写
+`occupies: true`**,而 `_occupying` 只认 `occupies` 那一格。所以即便它们被起了头,
+那条「walk 把长过程带走」的路径**根本走不到**。
+
+🔴 **所以真正该记的是这一句:批 4 要动那笔总账之前,得先有一个会起
+`occupies` 长过程的夹具 —— 否则改完了也没有判据。**
+一盏"从来没亮过"的灯,和一盏"照不到"的灯,在屏幕上长得一模一样,
+而它们指向的下一步完全不同。**照裁决,这一版一个字都不改那笔账。**
+
 ## [3.11.2] —— 舰队每次开机都带 `--world-file`(第二次,换了一段) (2026-09-03)
 
 ### 🔴 破坏性:开机路上的「不降级」闸拿掉了(而 `pack install` 那条留着)

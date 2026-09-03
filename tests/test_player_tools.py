@@ -35,7 +35,11 @@ def test_player_menu_is_the_same_registry(world):
     ids = {row["id"] for row in world.player_tools()}
     # 门槛是"在世界里真发生了什么":walk 真在途,broadcast 真进别人的记忆,
     # interact 真扣他的体力(`test_player_affordance.py` 守这条)。
-    assert ids == {"walk", "broadcast", "interact"}
+    # 🆕 3.12.0(批 3b):`person_verb` —— 玩家对**一个人**做一件事。
+    # 它过得了上面那道门槛(真落 `person_verb.*` 三种事件、`effects` 真走
+    # `_expand_beat_op`),而它和 `interact` **不是同一条路**:那一条整条路上
+    # 没有一处问过对方肯不肯,而这一条中间有一道同意门。
+    assert ids == {"walk", "broadcast", "interact", "person_verb"}
     # 这两条**刻意**不给人:对人没有意义 / 人本来就是主动方
     assert "wait_for_user" not in ids
     assert "reach_out" not in ids

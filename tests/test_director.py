@@ -213,3 +213,85 @@ def test_target_curve那三格_有意不含release():
     `target_curve_keys`,别让下游去猜(tool 带回的那一条)。"""
     assert list(D.TARGET_CURVE_PHASES) == list(D.PHASES[:-1])
     assert "release" not in D.TARGET_CURVE_PHASES
+
+
+# ── 批 3b:八个动作,而后三个各有各的前置(裁决 §2.3–2.5)────────────────────
+
+def test_没有开着的线_就写不出reward和callback():
+    """🔴 **这是「`reward` 缺的不是 op 是节制」那句话的落点**(§2.4)。
+
+    「给多少算数」交给判定或交给模型都是拍脑袋;而**「没有开着的线就没有奖赏」
+    是可验的**,而且它把 `reward` 和 `callback` 天然绑在一起 ——
+    **奖赏是承诺的兑现,不是天上掉的糖。**
+    """
+    bare = D.moves_for([], D.MOVES)
+    assert "reward" not in bare and "callback" not in bare
+    assert "complicate" in bare and "confront" in bare   # 别的照旧写得出
+
+
+def test_一条刚开的线_收得回来但还不给奖赏():
+    """`reward` 还要那条线**走到过节骨眼** —— 一条刚开的线上就发奖赏,
+    等于把「承诺」和「兑现」压进同一拍,而那样承诺就不是承诺了。"""
+    young = D.moves_for([{"phase": "setup"}], D.MOVES)
+    assert "callback" in young and "reward" not in young
+    ripe = D.moves_for([{"phase": "climax"}], D.MOVES)
+    assert "reward" in ripe and "callback" in ripe
+
+
+def test_关掉的线不算数():
+    assert "callback" not in D.moves_for([{"phase": "climax", "closed": True}], D.MOVES)
+
+
+# ── 承诺回收:三条并排(裁决 §2.5,少任何一条另外两条都能被骗过)──────────
+
+def test_到期且在宽限期里_挑得出那条线():
+    """**来看的人有机会收线** —— 这是三条里的第一条。"""
+    threads = [{"id": "t1", "due_tick": 100, "closed": False}]
+    assert D.overdue_thread(threads, now_tick=100, grace_ticks=12)["id"] == "t1"
+    assert D.overdue_thread(threads, now_tick=111, grace_ticks=12)["id"] == "t1"
+
+
+def test_还没到期_不算该收():
+    assert D.overdue_thread([{"id": "t1", "due_tick": 100, "closed": False}],
+                            now_tick=99, grace_ticks=12) is None
+
+
+def test_过了宽限期_编剧不再管它():
+    """**不来的人照样要还** —— 过了宽限期就不是编剧的活了,
+    是 tick 上那条结算的活。只在「上线才扣」的话,**挂机 = 免疫**。"""
+    threads = [{"id": "t1", "due_tick": 100, "closed": False}]
+    assert D.overdue_thread(threads, now_tick=112, grace_ticks=12) is None
+
+
+def test_两条同时过期_先收最早那条():
+    threads = [{"id": "晚", "due_tick": 105, "closed": False},
+               {"id": "早", "due_tick": 100, "closed": False}]
+    assert D.overdue_thread(threads, now_tick=106, grace_ticks=20)["id"] == "早"
+
+
+def test_该收线时_连喘口气都让位():
+    """🔴 **到期的线排在一切之前,而且不受上限管** ——
+    拿额度挡住还债,等于让一条线因为「这小时写太多了」而烂掉。"""
+    got = D.pick_move(tension=0.95, phase="setup", allowed=D.MOVES,
+                      capped=True, anchor_fired=True, ceiling=0.5,
+                      must_callback=True)
+    assert got == "callback"
+
+
+def test_摊牌只在节骨眼上():
+    """`confront` 是这条曲线的顶点,不是一个更大的 `complicate` ——
+    在 setup 上摊牌,玩家还不知道自己在跟谁较劲。"""
+    at_climax = D.pick_move(tension=0.1, phase="climax", allowed=D.MOVES,
+                            capped=False, anchor_fired=False, ceiling=0.95)
+    assert at_climax == "confront"
+    early = D.pick_move(tension=0.1, phase="setup", allowed=D.MOVES,
+                        capped=False, anchor_fired=False, ceiling=0.95)
+    assert early != "confront"
+
+
+def test_摊牌也必须带真赌注():
+    """和 `complicate` 同一条:写不出赌注的摊牌只是一句吓唬 —— 降级,不整条作废。"""
+    got = D.parse_decision('{"move":"confront","who":"a","line":"就今天"}',
+                           allowed=D.MOVES, cast_ids=["a"])
+    assert got["move"] != "confront" and got["line"] == "就今天"
+    assert "confront" in D.MOVES_REQUIRING_STAKE

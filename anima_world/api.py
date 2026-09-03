@@ -1101,6 +1101,15 @@ class _ToolRuntime:
             return {}
         return {e.id: (e.name or e.id) for e in ontology.entities.values()}
 
+    def person_verb(self, player_id: str, agent_id: str, verb: str) -> dict[str, Any]:
+        """对人动词那扇门在工具运行时上的样子 —— **判断一个字都不在这儿**。
+
+        全部住在 `World.player_person_verb`:宿主按按钮走的是工具目录这一条,
+        而引擎自己(以后 host 那一屏递选项)走的是那个方法 —— 各写一份判断的话,
+        同一次请求会有两种答案,而**两边都不报错**。
+        """
+        return self._world.player_person_verb(player_id, agent_id, verb)
+
     def give_item(self, player_id: str, agent_id: str, wanted: str) -> dict[str, Any]:
         """玩家把随身的一样东西交给一个角色。**只走账本,不凭空造物。**
 
@@ -2111,6 +2120,7 @@ class World:
         genre: str = "",
         setting: str = "",
         theme: str = "default",
+        with_authored: bool = False,
     ) -> Any:
         """活体导出:世界不停,当场打出一个 `.cyberworld`(v3,gzip JSONL)。
 
@@ -2122,6 +2132,30 @@ class World:
         (`is_secret` 的配置行在 dump 时剥除)、不带 `lock`(JSON 存不了 TTL,
         装回去就是一把死锁)、不带 `owner_pid`/`owner_host`(装进新世界等于让一个
         还没人跑过的世界自称"有人在跑")。
+
+        ## `with_authored`:**只写这个世界还逐字留着的那几段**(3.12.0)
+
+        创作台要的是**离线判撞**(第 N 周包的拍 id 撞不撞、新人撞不撞现役世界),
+        今天只能去问一个活着的世界。
+
+        🔴 **而「把作者层十六段写回去」这件事做不到,也不该假装做得到。**
+        一个跑过的世界里,`agent` 的位置、`stock` 的量、`relation` 的亲疏
+        **都已经是演化态**了 —— 把它们标成 `{"kind": "author", …}` 写出去,
+        等于宣称"这是作者写的",而那正是这一版刚销掉的那条运维权宜干的事
+        (拿运行时导出覆盖创世文件,把声明整个抹掉)。**一份自称是创世态的
+        演化态,比没有那份文件更坏**:它读起来完全正常。
+
+        所以这个开关只写**「法」那几段** —— 它们在这个引擎里本来就不随时间漂
+        (和 `merge_bodies` 那句「插件是法不是状态」逐字同源):
+
+        | 写 | 为什么 |
+        |---|---|
+        | `kind` / `plugin` / `guidance` | 库里留的就是**声明原文**,一个字没变过 |
+        | 其余十三段 | **是演化态** —— 写出去就是一句假话 |
+
+        ⚠️ **跳过了哪几段要说出来**,而不是让文件安静地少几段:`manifest` 上带
+        `authored_sections` / `authored_skipped` 两格,CLI 也照着印。
+        少了这一句,创作台会以为它离线判过了全部十六段。
         """
         import itertools
         from datetime import datetime, timezone
@@ -2150,6 +2184,15 @@ class World:
         # ⚠️ 一个**跑过**的世界里节拍已经在 `:beats` 键上(3.7.0 起),它跟着状态层
         # 走;这个参数管的是另一种:世界当初是靠命令行 `--beats` 跑起来的,库里没有。
         extra: list[dict[str, Any]] = []
+        self._authored_written: list[str] = []
+        self._authored_skipped: list[str] = []
+        if with_authored:
+            extra.extend(self._authored_records())
+            # 🔴 **写进 manifest,而不是只挂在返回值上** —— 创作台是**离线**读这份
+            # 文件的(`world inspect`),它够不着这次调用的返回值。
+            # 「跳过了哪几段」只有写在文件里,才在文件被传走之后还说得出口。
+            manifest.extra["authored_sections"] = list(self._authored_written)
+            manifest.extra["authored_skipped"] = list(self._authored_skipped)
         if beats_path is not None:
             from anima_world.beats import BeatScript
 
@@ -2170,6 +2213,62 @@ class World:
             if world_lock is not None:
                 world_lock.release()
         return manifest
+
+    #: 一个**跑过的**世界还逐字留着声明原文的那几段。其余十三段是演化态。
+    #: 🔴 加一段进来之前先问一句:**它在这个世界里会不会随时间漂?**
+    #: 会漂的那一段写出去就是把演化态标成作者写的,而那读起来完全正常。
+    AUTHORED_KEPT_VERBATIM = ("kind", "plugin", "guidance")
+
+    def _authored_records(self) -> list[dict[str, Any]]:
+        """导出里那几条**真是作者写的**记录(`with_authored`)。
+
+        ⚠️ 读不到的段**记进 `_authored_skipped`,不静默跳过** —— 一份少了几段
+        而不吭声的导出,会让创作台以为它离线判过了全部十六段。
+        """
+        from anima_world.world_file import AUTHOR_SECTIONS
+
+        out: list[dict[str, Any]] = []
+        sch = self.scheduler
+        kinds: list[dict[str, Any]] = []
+        store = getattr(sch, "ontology_store", None)
+        if store is not None:
+            try:
+                kinds = [dict(row) for row in (store.kind_definitions() or [])
+                         if isinstance(row, dict)]
+            except Exception:  # noqa: BLE001 - 读不到一段不该掀翻整次导出
+                logger.warning("导出:读 kind 声明失败", exc_info=True)
+        for body in kinds:
+            out.append({"kind": "author", "type": "kind", "body": body})
+
+        bodies: list[dict[str, Any]] = []
+        plugin_store = getattr(sch, "plugin_store", None)
+        if plugin_store is not None:
+            from anima_world.plugins import stored_bodies
+
+            try:
+                bodies = stored_bodies(plugin_store)
+            except Exception:  # noqa: BLE001
+                logger.warning("导出:读 plugin 声明失败", exc_info=True)
+        for body in bodies:
+            out.append({"kind": "author", "type": "plugin", "body": dict(body)})
+
+        guide = {}
+        try:
+            guide = self.guidance() or {}
+        except Exception:  # noqa: BLE001
+            logger.warning("导出:读 guidance 失败", exc_info=True)
+        if guide:
+            out.append({"kind": "author", "type": "guidance", "body": dict(guide)})
+
+        got = {"kind": bool(kinds), "plugin": bool(bodies), "guidance": bool(guide)}
+        self._authored_written = [k for k in self.AUTHORED_KEPT_VERBATIM if got.get(k)]
+        # 空着的那几段和**写不出来的那十三段**分开记:前者是"这个世界没写",
+        # 后者是"这个引擎给不出" —— 两件事,而合成一句的话创作台分不出该找谁。
+        self._authored_skipped = (
+            [k for k in self.AUTHORED_KEPT_VERBATIM if not got.get(k)]
+            + [k for k in AUTHOR_SECTIONS if k not in self.AUTHORED_KEPT_VERBATIM]
+        )
+        return out
 
     # ── 时钟 ────────────────────────────────────────────────────────────────
 
@@ -7971,6 +8070,117 @@ class World:
             for r in shelves
         ]
 
+    def person_verbs(self) -> dict[str, dict[str, Any]]:
+        """这个世界声明过哪些**对人动词**(3.12.0,批 3b · 裁决 §2.6)。
+
+        折自插件库里那几份声明原文,**没有第二张表** —— 和 `packs()` 折自
+        `pack_installed` 逐字同一条。
+        """
+        from anima_world import person_verbs as pv_mod
+        from anima_world.plugins import stored_bodies
+
+        store = getattr(self.scheduler, "plugin_store", None)
+        if store is None:
+            return {}
+        try:
+            return pv_mod.declared(stored_bodies(store))
+        except Exception:  # noqa: BLE001 - 读不到声明不该掀翻这一屏
+            logger.warning("读对人动词声明失败", exc_info=True)
+            return {}
+
+    def player_person_verb(self, player_id: str, agent_id: str,
+                           verb: str) -> dict[str, Any]:
+        """玩家对**一个人**做一件事:「拜师」「决斗」「说服」(3.12.0,批 3b)。
+
+        🔴 **这道同意门和编剧那道方向正相反,而这一条是写死的**(裁决 §2.6):
+
+        · 编剧派人来 —— 发起的是**世界**,只挡出戏的极端,`willingness` 有意不用
+          (GM 说 NPC 进门,NPC 就进门)。
+        · 这一条 —— 发起的是**玩家**,走 `willingness` / `judge_invite` 那条**真门**:
+          「我要拜师」是一次请求,她有真正的否决权。
+
+        **两道门语义相反,不合并;而世界那几条硬闸共用同一份**
+        (`together.GATE_LABELS`:睡着了 / 在赶路 / 不在这儿 / 手上有事 / 静音了)
+        —— 世界说不行的那几条对谁都一样。⚠️ 复用的是 `_ToolRuntime._consent`
+        **那一个实现**,不另写一份:各写一份的那天,「问的时候行、做的时候不行」
+        会只在真世界里现形。
+
+        形状:`{"ok", "verb", "verb_label", "agent_id", "agent_name",
+        "answer": "accepted|declined", "gate", "said", "error"}`。
+
+        🔴 **被回了就一个字都不写**(纪律 2,和 `apply_affordance` 逐字同一条):
+        没成的事不留痕 —— 只落一条 `person_verb.refused`,代价一分不扣。
+        """
+        from anima_world import person_verbs as pv_mod
+        from anima_world import together
+
+        pid = str(player_id or "").strip()
+        aid = str(agent_id or "").strip()
+        name = str(verb or "").strip()
+        blank = {"ok": False, "verb": name, "verb_label": name,
+                 "agent_id": aid, "agent_name": "", "answer": "declined",
+                 "gate": "", "said": "", "error": ""}
+        if not pid or not aid or not name:
+            blank["error"] = "player_person_verb 要 player_id / agent_id / verb 三个都给"
+            return blank
+        entry = self.person_verbs().get(name)
+        if entry is None:
+            # ⚠️ **照实说这个世界没声明过它**,别退成一句"她不肯" ——
+            # 那会让一个拼错动词名的宿主以为是角色的问题,而去调她的性格。
+            blank["error"] = f"这个世界没有声明过对人动词 {name}"
+            return blank
+        agent_name = self.scheduler.agent_display_name(aid)
+        blank["agent_name"] = agent_name
+        blank["verb_label"] = str(entry.get("label") or name)
+
+        gate, answer, note = "", "accepted", ""
+        if pv_mod.consent_needed(entry):
+            holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
+            # `target=""` —— 对人动词**永不走 affordance**(那正是这一层的定义):
+            # `joint_gate` 查不到能力就只留世界那五条硬闸,而那正是要的那一份。
+            accepted, refused, _pending = self._tool_runtime._consent(
+                holder, "", name, [aid], player_id=pid)
+            if refused:
+                row = refused[0]
+                gate = str(row.get("reason") or "")
+                answer, note = "declined", str(row.get("note") or "")
+            elif not accepted:
+                answer = "declined"
+        blank["gate"] = gate
+        blank["answer"] = answer
+        if answer != "accepted":
+            blank["said"] = pv_mod.refusal_line(
+                entry, agent_name=agent_name, gate=gate,
+                gate_label=together.GATE_LABELS.get(gate, ""))
+            with self.scheduler._lock:
+                self._record_and_fan(pv_mod.proposal_event(
+                    verb=name, entry=entry, actor=f"{Scheduler.PLAYER_PREFIX}{pid}",
+                    target=aid, agent_name=agent_name, answer=answer,
+                    gate=gate, note=note))
+            return blank
+
+        # 她点了头 —— 代价与效果照算。**效果走 `_expand_beat_op` 那个展开器**
+        # (和剧情拍、编剧那一拍同一个函数):不另写一份判断。
+        landed: list[str] = []
+        for op in (entry.get("effects") or ()):
+            if not isinstance(op, dict):
+                continue
+            try:
+                expanded = self.scheduler._expand_beat_op(dict(op))
+            except Exception:  # noqa: BLE001 - 一个 op 挂了不该掀翻这一次
+                logger.warning("对人动词 %r 的 op %r 没兑现", name, op, exc_info=True)
+                continue
+            if expanded:
+                landed.extend(str(e.get("op") or "") for e in expanded)
+        blank["ok"] = True
+        blank["said"] = ""
+        with self.scheduler._lock:
+            self._record_and_fan(pv_mod.proposal_event(
+                verb=name, entry=entry, actor=f"{Scheduler.PLAYER_PREFIX}{pid}",
+                target=aid, agent_name=agent_name, answer="accepted",
+                gate="", note="、".join(landed)))
+        return blank
+
     def player_topup(self, player_id: str, amount: float) -> float:
         """宿主给玩家钱包充值 —— 落成账本上的一笔 `payment`,返回充值后的余额。
 
@@ -9032,6 +9242,7 @@ class World:
         cap = int(self.config_get("director.max_per_player_per_hour", default=6) or 6)
         pin_ticks = int(self.config_get("director.pin_ticks", default=12) or 12)
         due_hours = int(self.config_get("director.due_hours", default=48) or 48)
+        grace_hours = int(self.config_get("director.grace_hours", default=24) or 24)
         ticks_per_hour = max(1.0, 60.0 / max(1, self.scheduler._minutes_per_tick()))
 
         with self.scheduler._lock:
@@ -9052,9 +9263,17 @@ class World:
         ceiling = float(pacing.get("ceiling") or (
             dmod.NO_GUIDANCE_CEILING if not guidance else 0.85))
         allowed = list(dmod.MOVES) if guidance else list(dmod.NO_GUIDANCE_MOVES)
+        # 🆕 3.12.0(§2.4 / §2.5):线的状态先砍一刀 —— **没有开着的线就没有奖赏**。
+        allowed = dmod.moves_for(story.get("threads") or [], allowed)
+        # 到期、还在宽限期里、还没收的那条线 —— **它排在一切之前**。
+        overdue = dmod.overdue_thread(
+            story.get("threads") or [], now_tick=tick,
+            grace_ticks=int(grace_hours * ticks_per_hour))
+        if overdue is not None:
+            thread = overdue          # 这一拍就是冲着它去的
         move = dmod.pick_move(tension=tension, phase=phase, allowed=allowed,
                               capped=capped, anchor_fired=beat_fired,
-                              ceiling=ceiling)
+                              ceiling=ceiling, must_callback=overdue is not None)
 
         forbidden = guidance.get("forbidden") or {}
         # 🔴 **禁区里的地点也要真的挡住**(3.11.1,验收 A ④)。
@@ -9079,16 +9298,10 @@ class World:
             recent=context["recent"], keep=self._director_keep(thread, tick),
         )
         decision: dict[str, Any] | None = None
-        # 🔴 **这一拍是怎么来的,要分得开**(3.11.2,验收 A ③)。
-        # 上一版三种情形都记成 `source: "mock"` —— 而它们指向三种修法。
-        if move == "breathe" and tension >= ceiling and not capped and not beat_fired:
-            why_source = "ceiling"        # 世界该这样,不用管
-        elif not self._llm_key_configured_for_director():
-            why_source = "mock"           # 去配一把 key
-        else:
-            why_source = "refused"        # 提示词要改(模型答的不在闭集里)
+        called = False
         if move != "breathe" and cast:
             # 这一轮**最多**写到 `move`;模型只能在它及以下里挑。
+            called = True
             ladder = list(dmod.MOVES[:dmod.MOVES.index(move) + 1])
             messages = dmod.decide_messages(
                 recap=recap, cast=cast, allowed=[m for m in ladder if m in allowed],
@@ -9099,9 +9312,41 @@ class World:
                 self._director_reply(messages),
                 allowed=[m for m in ladder if m in allowed],
                 cast_ids=[c["id"] for c in cast])
+        # 🔴 **这一拍是怎么来的,要分得开** —— 而**判据是「调没调过客户端」**
+        # (3.12.0,B+C ②)。3.11.2 那一版把它算在调用**之前**,于是 `else` 那一支
+        # 写着 `refused`,而算术选了 `breathe` / 没人可派 / 额度用完 / 撞上锚点
+        # **四种都没问过模型**,却全被记成「模型答的不在闭集里」:真站 12 拍里
+        # 10 条 `refused`,而假客户端只被调过 6 次。
+        # 🔴 **拆三合一时最容易犯的错,是拆出一个新的三合一。**
+        # ⚠️ 次序是承重的:算术那几种排在「没配 key」前面 —— 算术选了喘气时,
+        # 有没有 key 根本不影响这一拍,写成 `mock` 会让人去配一把不解决问题的 key。
+        if capped:
+            why_source = "capped"
+        elif move == "breathe" and beat_fired:
+            why_source = "anchor"
+        elif move == "breathe" and tension >= ceiling:
+            why_source = "ceiling"
+        elif move == "breathe":
+            why_source = "arith"
+        elif not cast:
+            why_source = "no_cast"
+        elif not self._llm_key_configured_for_director():
+            # ⚠️ 排在 `refused` 前面:没 key 时 `_director_reply` 答一句空的,
+            # 而"空的读不懂"记成「模型答废了」会让人去改提示词。
+            why_source = "mock"
+        else:
+            why_source = "refused" if called else "arith"
         if decision is None:
-            decision = dmod.mock_move(recap, place_name=place_name,
-                                      source=why_source)
+            # ⚠️ **把挑出来的动作带进去** —— 否则 mock 那条路会把「该收线了」
+            # 原样丢掉(它上一版永远返回 `breathe`),而没配 key 是默认状态。
+            # ⚠️ `source` 照旧照传(3.11.2,验收 A ③ 那条四分):**这一支在四种
+            # source 上都会走到**,写死 `"mock"` 会让顶到安全阀 / 模型答废了的世界
+            # 都被 `doctor` 记成没配 key,而那三种指向三种不同的修法。
+            decision = dmod.mock_move(
+                recap, place_name=place_name, source=why_source,
+                move=move if overdue is not None else "breathe",
+                who=str((thread or {}).get("with") or ""),
+                promise=str((thread or {}).get("promise") or ""))
         decision.setdefault("source", "llm")
         return self._director_apply(
             pid, decision, tension_before=tension, phase=phase, tick=tick,
@@ -9109,6 +9354,7 @@ class World:
             due_ticks=int(due_hours * ticks_per_hour), capped=capped,
             forbidden_ops=set((guidance.get("forbidden") or {}).get("ops") or ()),
             recap=recap, place_name=place_name,
+            moves_made=int(story.get("moves") or 0),
         )
 
     def _director_apply(self, pid: str, decision: dict[str, Any], *,
@@ -9116,7 +9362,8 @@ class World:
                         thread: dict[str, Any] | None, pin_ticks: int,
                         due_ticks: int, capped: bool,
                         forbidden_ops: set[str],
-                        recap: Sequence[str] = (), place_name: str = "") -> str:
+                        recap: Sequence[str] = (), place_name: str = "",
+                        moves_made: int = 0) -> str:
         """把编剧这一拍**当场兑现**,并落一条 `director_log`。返回给玩家看的那句话。
 
         🔴 **op 走 `Scheduler._expand_beat_op`**(和剧情拍同一个函数)——
@@ -9124,6 +9371,7 @@ class World:
         "编剧说她来了,而世界里她没动"。
         """
         from anima_world import director as dmod
+        from anima_world.roll import roll as _roll
 
         move = str(decision.get("move") or "breathe")
         who = str(decision.get("who") or "")
@@ -9131,6 +9379,24 @@ class World:
         holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
         ops: list[dict[str, Any]] = []
         refused = ""
+        rolled: dict[str, Any] | None = None
+        outcome = ""
+
+        # 🆕 3.12.0(§2.3):**摊牌要掷一次点。**
+        # 🔴 第五个坐标是 `moves_made` —— 每玩家单调、折自日志、天然可重放。
+        # 拿计数器或 uuid 都会让"同一份日志重放两遍"得到两副骰子。
+        if move == "confront":
+            rolled = _roll(world_id=self.scheduler.world_id, tick=tick,
+                           actor=holder, verb="confront", nonce=moves_made)
+            # **成败是算术,不是模型说了算**(和 `contact` 那条纪律逐字同源:
+            # LLM 在这一层没有否决权)。11 是 d20 的中位:掷得过就是赢。
+            outcome = "won" if rolled["result"] >= 11 else "lost"
+            with self.scheduler._lock:
+                self._record_and_fan({
+                    "type": "roll", "who": holder,
+                    "payload": {"actor": holder, "verb": "confront",
+                                "player_id": pid, **rolled},
+                })
 
         if move in ("approach", "invite", "reveal", "complicate") and who:
             # 🔴 **四个动作today共用同一条执行路:`hail`(她来找他)。**
@@ -9154,6 +9420,14 @@ class World:
         if move == "complicate" and stake and str(stake.get("kind")) == "relation" and who:
             ops.append({"op": "sentiment_delta", "as": who, "target": holder,
                         "delta": -abs(float(stake.get("amount") or 0.05))})
+        # 🔴 **摊牌输了当场兑现,不等 `due`**(§2.3):这是它和 `complicate` 的分界
+        # —— 那个是埋一个雷,这个是现在就摊牌。写错的样子是「摊牌了却什么都没发生」。
+        if move == "confront" and outcome == "lost" and stake:
+            ops.extend(self._stake_ops(holder, who, stake))
+        # 兑现一条线上的承诺(§2.4)。**它只能还债** —— 指不着线的 `reward`
+        # 在 `moves_for` 那一层就不在候选里了,这儿只管把它兑成 op。
+        if move == "reward" and stake:
+            ops.extend(self._stake_ops(holder, who, stake, reverse=True))
 
         landed: list[str] = []
         for op in ops:
@@ -9189,22 +9463,24 @@ class World:
         with self.scheduler._lock:
             self._record_and_fan({
                 "type": "director_log", "who": holder,
-                "payload": {
-                    "player_id": pid, "move": move, "tick": tick,
-                    "target": who,
-                    "target_name": self.scheduler.agent_display_name(who) if who else "",
-                    "line": line, "why": str(decision.get("why") or ""),
-                    "thread_id": thread_id, "promise": promise,
-                    "phase": new_phase,
-                    "tension_before": round(float(tension_before), 4),
-                    "tension_after": round(float(after), 4),
-                    "stake": stake, "ops_applied": landed,
-                    "due_tick": (tick + due_ticks) if (promise and move != "breathe") else 0,
-                    "pin_until": (tick + pin_ticks) if landed else 0,
-                    "capped": bool(capped), "refused_by": refused,
-                    "place": place,
-                    "source": str(decision.get("source") or "llm"),
-                },
+                # **一张表,两条路共用**(裁决 §2.7)—— 缺的写空,一格不省略。
+                "payload": dmod.log_payload(
+                    player_id=pid, move=move, tick=tick, place=place,
+                    source=str(decision.get("source") or "llm"),
+                    target=who,
+                    target_name=(self.scheduler.agent_display_name(who) if who else ""),
+                    line=line, why=str(decision.get("why") or ""),
+                    thread_id=thread_id, promise=promise, phase=new_phase,
+                    due_tick=((tick + due_ticks)
+                              if (promise and move != "breathe") else 0),
+                    closes_thread=bool(move == "callback" and thread_id),
+                    tension_before=round(float(tension_before), 4),
+                    tension_after=round(float(after), 4),
+                    stake=stake, ops_applied=landed,
+                    capped=bool(capped), refused_by=refused,
+                    pin_until=((tick + pin_ticks) if landed else 0),
+                    outcome=outcome, roll=rolled,
+                ),
             })
         # 给玩家看的那一句。**永远有一句** —— 没派成人时说 `breathe` 那句旁白。
         if move == "breathe" or not who:
@@ -9224,6 +9500,39 @@ class World:
         """这个世界有没有一把 key —— **按有没有 key 判,不按客户端类型判**
         (和 `_host_scene_text` 那一格逐字同一句)。"""
         return bool(str(self.config_get("llm.api_key", default="") or ""))
+
+    @staticmethod
+    def _stake_ops(holder: str, who: str, stake: dict[str, Any], *,
+                   reverse: bool = False) -> list[dict[str, Any]]:
+        """一笔赌注 → 若干 op。**一处判断,两处用**(裁决 §2.11 第 1 条)。
+
+        🔴 **「该扣什么」只能有一份算法**:摊牌当场兑现(`api`)和到期结算
+        (`Scheduler._settle_story_stakes`)是**两个调用点、同一个判断** ——
+        各写一份的那天,「当场输掉」和「到期没收」会扣掉不一样的东西,
+        而两边都不报错。
+
+        `reverse=True` = **还回去**(`reward`):同一笔账反向记一遍。
+        ⚠️ `deadline` 两个方向都不动数 —— 它押的是"这条线作废",而那是日志上
+        的一句话,不是账上的一笔。
+        """
+        kind = str(stake.get("kind") or "")
+        try:
+            amount = abs(float(stake.get("amount") or 0))
+        except (TypeError, ValueError):
+            amount = 0.0
+        if kind == "relation" and who and amount:
+            return [{"op": "sentiment_delta", "as": who, "target": holder,
+                     "delta": (+amount if reverse else -amount)}]
+        if kind == "money" and amount > 0:
+            src, dst = ("__town__", holder) if reverse else (holder, "__town__")
+            return [{"op": "pay", "from": src, "to": dst, "amount": amount,
+                     "reason": "story_stake"}]
+        if kind == "item" and str(stake.get("what") or ""):
+            qty = int(amount) or 1
+            return [{"op": "grant_item", "agent_id": holder,
+                     "item_id": str(stake["what"]),
+                     "qty": (qty if reverse else -qty)}]
+        return []
 
     def _director_reply(self, messages: list[dict[str, str]]) -> str:
         """那一次背景槽调用。**一次调用,失败即模板,不重试不合批** ——
@@ -9841,7 +10150,14 @@ class World:
             # ⚠️ **补在这儿而不是补在主持人那一屏**:两扇门对同一时刻必须说同一句话
             # (`test_在路上的人_两扇门说同一句话` 钉着),而补在上面那扇门里就是
             # 让它们分岔。
-            going = str((self.players.get(pid) or {}).get("transit", {}).get("to") or "")
+            # 🔴 **读 `_player_transit`,不是在场行**(3.12.0,B+C ①)。
+            # 在场行里那一格叫 `__transit__`(它和在场同住一个 hash),
+            # 于是 `.get("transit")` 恒为空 —— `location_name` 永远是「路上」,
+            # 拿不到目的地,而**同一屏的场景那句话却说得出「去家的路上」**
+            # (它读的是 `state()` 那份)。同一时刻两扇门又说了两句话。
+            # ⚠️ 这里读的是 `player_in_transit` 用的**同一个来源**:上一句刚问过
+            # 「他在不在路上」,下一句就该问同一个东西要目的地。
+            going = str((self._player_transit.get(pid) or {}).get("to") or "")
             from anima_world import host as host_mod
 
             blank["location_name"] = host_mod.transit_place_name(

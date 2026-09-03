@@ -326,3 +326,51 @@ def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
         },
     })
     return ToolResult(detail={"player_id": target, "text": text})
+
+
+@tool(
+    id="person_verb",
+    writes=("events:person_verb.proposed", "events:person_verb.accepted",
+            "events:person_verb.refused"),
+    kind="person_verb",
+    description=(
+        "对**一个人**做一件这个世界声明过的事(拜师 / 决斗 / 说服)。"
+        "🔴 这不是 interact —— 它要对方点头"
+    ),
+    # 写给**人**的那一半:哪些动词、对谁,由 `World.person_verbs()` 与在场名单答。
+    player_description=(
+        "对这儿的**一个人**做一件事(拜师 / 决斗 / 说服……)。"
+        "🔴 **这是一次请求,不是一次操作** —— 她可以不答应,"
+        "而她不答应时你这一下什么都没花掉"
+    ),
+    params={
+        "agent": {"type": "string", "required": True,
+                  "description": "对谁(在场名单里的那个 id)"},
+        "verb": {"type": "string", "required": True,
+                 "description": "做什么(这个世界声明过的对人动词 id)"},
+    },
+    # **只在玩家面上。** 3b 只做玩家发起的那一半:她自己对人用对人动词要经过
+    # 她自己的动机、频率与目标选择,而那三样都不在本单里 —— 摆进自主面等于
+    # 开一个没人管的入口(`interact` 那段注释里那一课)。
+    surfaces=(PLAYER,),
+    # 「一起做事得当面」逐字同一条:请求一个人,得在他跟前。
+    requires_colocation=True,
+)
+def person_verb(ctx: ToolContext, params: dict) -> ToolResult:
+    """玩家对一个人开口请求一件事。**同意门和编剧那道方向正相反**(裁决 §2.6)。
+
+    判断一律在 `World.player_person_verb` 里,这儿只是那扇门在工具目录上的样子
+    —— 各写一份的话,宿主按按钮和引擎自己走那条路会得到两种答案。
+    """
+    who = str(params.get("agent") or "").strip()
+    verb = str(params.get("verb") or "").strip()
+    if not who:
+        raise ToolCallError("没说对谁")
+    if not verb:
+        raise ToolCallError("没说做什么")
+    got = ctx.runtime.person_verb(ctx.actor_id, who, verb)
+    if got.get("error"):
+        raise ToolCallError(str(got["error"]))
+    # 🔴 **被回了那一句是她的话,进 `text`**(纪律 1);成了则一个字不编 ——
+    # 「做成了什么」由 `effects` 落的那几条事件自己说。
+    return ToolResult(text=str(got.get("said") or ""), detail=dict(got))

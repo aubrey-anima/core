@@ -477,6 +477,16 @@ def _apply_director_log(proj: Projection, e: Event) -> None:
     recent.append(tick)
     row["recent"] = recent[-STORY_RECENT_KEPT:]
 
+    # 🆕 3.12.0(批 3b):`callback` 把那条线收掉 —— **收线是这一拍的效果**。
+    # ⚠️ 它**照旧算一拍**(编剧真写了一拍),所以不能并进下面 `collect` 那一支:
+    # 那一支是"到点了,引擎自己动的手",不是编剧写的。
+    if move == "callback" and payload.get("closes_thread"):
+        closed = str(payload.get("thread_id") or "")
+        for thread in row["threads"]:
+            if str(thread.get("id")) == closed:
+                thread["closed"] = True
+                thread["outcome"] = "called_back"
+
     # ② 这一拍开了一条线吗。**`due` 那一格现在就得记** —— 开线那一刻不记,
     #    以后补不回来(推迟功能可以,推迟数据不行)。
     thread_id = str(payload.get("thread_id") or "")

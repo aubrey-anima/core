@@ -51,17 +51,27 @@ logger = logging.getLogger(__name__)
 #                   而三道闸那条写着:橱窗里展示不了的不是超前,是死代码。
 #
 # ⚠️ **闭集加一项是加法,减一项是破坏消费方**(`contract.director.moves` 报它)。
-MOVES = ("breathe", "approach", "invite", "reveal", "complicate")
+MOVES = ("breathe", "approach", "invite", "reveal", "complicate",
+         # 🆕 3.12.0(批 3b):3a 砍掉的那三个,各自的前置到位了。
+         # `confront` 等的是**一次掷点 + 一个说法**(`roll` + 成败判定,裁决 §2.3);
+         # `reward` 等的是**节制的落点**(它只能还债,§2.4);
+         # `callback` 等的是**线真的攒起来了**(承诺回收 + 宽限期,§2.5)。
+         "confront", "reward", "callback")
 
 #: 每个动作给这条线的张力加多少。**写死在引擎里,指导只调曲线的形状**
 #: —— 曲线通用归引擎、阈值不通用归作者,和 needs/economy 的曲线归引擎、
 #: 「树怎么长」归作者逐字同一条。
 MOVE_TENSION: dict[str, float] = {
-    "breathe": -0.15,     # 喘一口气:唯一往下压的
+    "breathe": -0.15,     # 喘一口气
     "approach": +0.05,    # 有人来找他
     "invite": +0.08,      # 有人约他
     "reveal": +0.15,      # 揭一角
     "complicate": +0.25,  # 添乱 —— 必须带真赌注(见 `STAKE_KINDS`)
+    "confront": +0.35,    # 摊牌 —— 必须带赌注,而且**当场兑现**
+    # 🔴 后两个是**往下压**的,而这不是"负的 complicate":
+    # 它们把一条线**收掉**,而张力落回来正是"收掉了"的样子。
+    "reward": -0.10,      # 兑现一条线上的承诺
+    "callback": -0.05,    # 回来收那条线
 }
 
 #: 那几个闭集**印在人屏上时该说什么**(3.11.1,验收 C ⑤)。
@@ -72,6 +82,7 @@ MOVE_TENSION: dict[str, float] = {
 MOVE_LABELS: dict[str, str] = {
     "breathe": "喘口气", "approach": "有人来找你", "invite": "有人约你",
     "reveal": "你知道了一件事", "complicate": "出事了",
+    "confront": "摊牌了", "reward": "有人还了你一份人情", "callback": "那件事回来找你了",
     # 结算那一支不是编剧写的,但它也进同一份日志、同一屏。
     "collect": "到期了",
 }
@@ -154,7 +165,24 @@ STAKE_KINDS = ("relation", "money", "item", "deadline")
 
 #: `complicate` **必须**带赌注。写不出赌注的 complicate 退成 `reveal` ——
 #: 「写下去、开得了机、什么都不发生」是这一层最贵的那种错。
-MOVES_REQUIRING_STAKE = ("complicate",)
+MOVES_REQUIRING_STAKE = ("complicate", "confront")
+
+#: 只能**指着一条已经开着的线**写的那几个动作(裁决 §2.4 / §2.5)。
+#:
+#: 🔴 **这是「`reward` 缺的不是 op 是节制」那句话的落点。**
+#: 「给多少算数」交给判定或交给模型都是拍脑袋;而**「没有开着的线就没有奖赏」
+#: 是可验的**,而且它把 `reward` 和 `callback` 天然绑在一起:
+#: **奖赏是承诺的兑现,不是天上掉的糖。**
+MOVES_NEEDING_THREAD = ("reward", "callback")
+
+#: `reward` 还要那条线**走到过节骨眼**才给 —— 一条刚开的线上就发奖赏,
+#: 等于把"承诺"和"兑现"压进同一拍,而那样承诺就不是承诺了。
+REWARD_MIN_PHASES = ("climax", "release")
+
+#: 🔴 **`confront` 输了当场兑现,不等 `due`** —— 这是它和 `complicate` 的分界:
+#: `complicate` 是**埋一个雷**(到期才响),`confront` 是**现在就摊牌**。
+#: 两个动作都带 stake 而结算时机不同,这一格写错的样子是「摊牌了却什么都没发生」。
+STAKE_SETTLED_NOW = ("confront",)
 
 #: 一条线开出来之后,默认多少个世界**小时**要有个交代。到点没收 → 结算。
 DEFAULT_DUE_HOURS = 48
@@ -168,6 +196,68 @@ TENSION_DECAY_PER_HOUR = 0.97
 #: 不是「有没有写 guidance」(裁决 §2.3)。
 NO_GUIDANCE_MOVES = ("breathe", "approach")
 NO_GUIDANCE_CEILING = 0.5
+
+
+#: `director_log` 的**那一张键表** —— 两条发射点(编剧写的 / 到期结算的)
+#: **都写全,缺的写空**(裁决 §2.7)。
+#:
+#: 🔴 **上一版两条路吐两张不同的表**(编剧 22 格 / 结算 11 格)。消费方按 `move`
+#: 分支已经够累,再让它按「哪几格在」猜就是**第二套判断** —— 而猜错了不报错:
+#: 一个读 `roll` 的仪表盘对着结算那条会拿到 `KeyError`,或者更糟,拿到 `None`
+#: 却当成"这次没掷骰"。
+DIRECTOR_LOG_KEYS: tuple[str, ...] = (
+    # 谁、做了什么、什么时候、哪儿、模型还是模板
+    "player_id", "move", "tick", "place", "source",
+    # 派了谁、说了什么、为什么(`why` 给创作者看,**不上玩家屏**)
+    "target", "target_name", "line", "why",
+    # 这一拍属于哪条线
+    "thread_id", "promise", "phase", "due_tick", "closes_thread",
+    # 张力两头
+    "tension_before", "tension_after", "tension_text",
+    # 押了什么、真兑现了哪几个 op
+    "stake", "ops_applied",
+    # 为什么写小了 / 被谁拦了 / 钉到几时
+    "capped", "refused_by", "pin_until",
+    # 🆕 3.12.0:结算与摊牌的结果、那一颗骰子
+    "outcome", "roll",
+)
+
+#: 缺席时填什么 —— **写空,不省略**(见 `DIRECTOR_LOG_KEYS`)。
+_LOG_BLANKS: dict[str, Any] = {
+    "ops_applied": (), "capped": False, "closes_thread": False,
+    "tension_before": 0.0, "tension_after": 0.0, "tick": 0, "due_tick": 0,
+    "pin_until": 0, "stake": None, "roll": None,
+}
+
+
+def log_payload(**fields: Any) -> dict[str, Any]:
+    """一条 `director_log` 的载荷 —— **一张表,两条路共用**(裁决 §2.7)。
+
+    没给的格子按 `_LOG_BLANKS` 填空(数是 0、开关是 False、对象是 `None`、
+    其余是空串),**一格都不省略**。
+    """
+    out: dict[str, Any] = {}
+    for key in DIRECTOR_LOG_KEYS:
+        if key in fields:
+            out[key] = fields[key]
+        elif key in _LOG_BLANKS:
+            blank = _LOG_BLANKS[key]
+            out[key] = list(blank) if isinstance(blank, tuple) else blank
+        else:
+            out[key] = ""
+    # 🆕 3.12.0(tool 诉求 D):**档词在这儿一处生成,调用方不必记得传。**
+    #
+    # 🔴 编剧日志那一屏要说的是「紧绷」,不是 `0.63`,也不是一个箭头 ——
+    # 而 `tension` 是浮点,站点与创作台按纪律都不自己译(`ask_ready_text` /
+    # `player story` 那两条先例逐字同源)。**分档表只有一份**:这一格和
+    # `player_story()` 那一格走的是同一个 `tension_text`,各译一遍的话
+    # 同一个世界会在引擎屏 / 创作台 / 运维台上说三种话,而没有一处会报错。
+    #
+    # ⚠️ **算出来而不是要求调用方传**:留给调用方传的那一版,漏传的样子是
+    # 一格空字符串 —— 屏上少一个词,而日志、契约、用例全绿。
+    if "tension_text" not in fields:
+        out["tension_text"] = tension_text(out.get("tension_after") or 0.0)
+    return out
 
 
 def tension_now(value: float, since_tick: int, now_tick: int,
@@ -219,8 +309,54 @@ def next_phase(phase: str, move: str, *, tension: float) -> str:
     return PHASES[min(i + 1, 3)]
 
 
+def moves_for(threads: Sequence[dict[str, Any]] | None,
+              allowed: Sequence[str]) -> list[str]:
+    """这一轮**结构上**写得出哪几个动作 —— 线的状态说了算(裁决 §2.4 / §2.5)。
+
+    🔴 **`reward` / `callback` 只能指着一条已经开着的线写。**
+    没有线就没有奖赏 —— 那是节制的落点,而它是**可验的**(不像"给多少算数")。
+    `reward` 还要那条线走到过节骨眼(`REWARD_MIN_PHASES`)。
+
+    ⚠️ 这一层只答"写得出吗",不答"该写哪个" —— 后者是 `pick_move`。
+    分开的理由和 `player_options` 那条一样:**能不能**和**要不要**是两个问题,
+    合成一个的话,"没有线"和"这会儿不该给"会给出同一句话。
+    """
+    open_threads = [t for t in (threads or ()) if not t.get("closed")]
+    out = [m for m in allowed if m not in MOVES_NEEDING_THREAD]
+    if open_threads:
+        if "callback" in allowed:
+            out.append("callback")
+        if "reward" in allowed and any(
+                str(t.get("phase") or "") in REWARD_MIN_PHASES for t in open_threads):
+            out.append("reward")
+    return [m for m in MOVES if m in set(out)]
+
+
+def overdue_thread(threads: Sequence[dict[str, Any]] | None, *, now_tick: int,
+                   grace_ticks: int) -> dict[str, Any] | None:
+    """到期了、还在宽限期里、而且还没收的那条线 —— **最早到期的那条优先**。
+
+    🔴 **宽限期让两句话同时成立**(裁决 §2.5):**来看的人有机会收线,
+    不来的人照样要还。** 只在"上线才扣"的话,一个不上线的人永远不用还债
+    (挂机 = 免疫);只在"到点就扣"的话,一个当天就回来的人根本没机会收。
+
+    `None` = 没有该收的线。**过了宽限期的不在这儿** —— 那是 tick 上那条结算的活
+    (`Scheduler._settle_story_stakes`),不是编剧的。
+    """
+    due_now = [
+        t for t in (threads or ())
+        if not t.get("closed") and int(t.get("due_tick") or 0)
+        and int(t.get("due_tick") or 0) <= int(now_tick)
+        < int(t.get("due_tick") or 0) + max(0, int(grace_ticks))
+    ]
+    if not due_now:
+        return None
+    return min(due_now, key=lambda t: int(t.get("due_tick") or 0))
+
+
 def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
-              capped: bool, anchor_fired: bool, ceiling: float) -> str:
+              capped: bool, anchor_fired: bool, ceiling: float,
+              must_callback: bool = False) -> str:
     """**算术那一半**:这一轮最多能写多大。LLM 在这之后才被叫到,而且只能在
     这个结果**及以下**里挑(见 `parse_decision` 的 `allowed`)。
 
@@ -229,23 +365,39 @@ def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
       · `anchor_fired` —— 这一 tick 有一条为他响的拍(口径 2:不和锚点撞车)
       · 张力已经顶到 `ceiling` —— 安全阀
     """
+    # 🔴 **到期的线排在一切之前,连 `breathe` 都让位**(裁决 §2.5)。
+    # 它不受上限管:**「有人来收线」不是编剧多写了一拍,是它在还债** ——
+    # 拿额度挡住还债,等于让一条线因为"这小时写太多了"而烂掉。
+    if must_callback and "callback" in allowed:
+        return "callback"
     if capped or anchor_fired or float(tension) >= float(ceiling):
         return "breathe"
     target = PHASE_TARGET.get(phase, 0.5)
     gap = float(target) - float(tension)
     # 离目标越远,写得越大 —— 这就是「张力是目标曲线」那句话的落点。
     if gap <= 0.02:
-        wanted = "breathe" if float(tension) > target + 0.15 else "approach"
+        # **这条线到顶了。** 到了节骨眼而且有债可还 → 还债;否则喘口气 / 找个人。
+        # 🔴 **奖赏只在这儿挑得出来** —— 一条还在往上爬的线上发奖赏,
+        # 等于在高潮之前先把观众送回家(而且 `reward` 是往下压张力的)。
+        if "reward" in allowed and phase in REWARD_MIN_PHASES:
+            wanted = "reward"
+        else:
+            wanted = "breathe" if float(tension) > target + 0.15 else "approach"
     elif gap < 0.15:
         wanted = "approach"
     elif gap < 0.30:
         wanted = "reveal"
+    elif phase == "climax" and "confront" in allowed:
+        # **到了节骨眼才摊牌** —— `confront` 是这条曲线的顶点,不是一个更大的
+        # `complicate`。在 setup 上摊牌,玩家还不知道自己在跟谁较劲。
+        wanted = "confront"
     else:
         wanted = "complicate"
     if wanted in allowed:
         return wanted
     # 退而求其次:按张力从大到小找一个允许的,最后一定落到 breathe
-    for fallback in ("complicate", "reveal", "invite", "approach", "breathe"):
+    for fallback in ("confront", "complicate", "reveal", "invite", "approach",
+                     "reward", "callback", "breathe"):
         if fallback in allowed and MOVE_TENSION[fallback] <= MOVE_TENSION.get(wanted, 0):
             return fallback
     return "breathe"
@@ -490,23 +642,56 @@ def parse_decision(text: str, *, allowed: Sequence[str],
 #: **一个把三种原因合成一句的读数,指不出任何一种修法**:
 #: 顶安全阀是**世界该这样**(不用管)· 答出闭集之外是**提示词要改** ·
 #: 没配 key 是**去配一把 key**。
-SOURCES = ("llm", "mock", "ceiling", "refused")
+#: ⚠️ **3.12.0(B+C ②)又抓到同一个形状,而这次是我自己刚做的那个桶。**
+#: 3.11.2 把「三合一」拆成四种,可拆完之后 `else` 那一支写着 `refused` ——
+#: 而**「模型答废了」和「压根没问过模型」是两件事**:算术就选了 `breathe`、
+#: 这会儿没人可派、这一小时额度用完了、撞上锚点 —— 四种都没调过客户端,
+#: 却全被记成「模型答的不在闭集里」。真站上 12 拍里 10 条 `refused`,
+#: 而假客户端只被调过 6 次 —— **读数自己就对不上,而没有一处报错**。
+#: 🔴 **拆三合一时最容易犯的错,是拆出一个新的三合一。**
+#: 判据换成一句能证伪的话:**这一拍到底调没调过客户端**(`called`)。
+SOURCES = ("llm", "mock", "ceiling", "refused",
+           "capped", "anchor", "no_cast", "arith")
 SOURCE_LABELS: dict[str, str] = {
     "llm": "模型写的",
     "mock": "没配 key,模板句",
     "ceiling": "张力顶到安全阀了,这一拍有意写小",
     "refused": "模型答的不在闭集里,退成模板句",
+    "capped": "这一小时的额度用完了,这一拍有意写小",
+    "anchor": "这一 tick 有一条为他响的拍,让给锚点",
+    "no_cast": "这会儿一个派得出的人都没有",
+    "arith": "算术就选了喘一口气(离目标很近)",
 }
+
+#: 这几种**根本没调过客户端** —— `doctor` 拿它分「该管的」和「不用管的」。
+#: 一个把它们和 `refused` 混着数的读数,会让人去改一个从来没被问过的提示词。
+SOURCES_WITHOUT_A_CALL = ("mock", "ceiling", "capped", "anchor", "no_cast", "arith")
 
 
 def mock_move(recap: Sequence[str], *, place_name: str = "",
-              source: str = "mock") -> dict[str, Any]:
+              source: str = "mock", move: str = "breathe",
+              who: str = "", promise: str = "") -> dict[str, Any]:
     """没 key / 读不懂 / 超上限时那一拍。**永远是 `breathe`,而且永远有一句话。**
 
     🔴 **没配 key 是这个引擎的默认状态**,所以这不是降级路上的边角料 ——
     它就是「每操作一次都有回应」这句承诺在默认状态下的兑现方式。
     一句**指着他刚做的那件事**的旁白,一次模型都不调。
     """
+    # 🔴 **`callback` 在没 key 的世界里也必须发生**(3.12.0,批 3b)。
+    # 上一版这个函数**永远返回 `breathe`**,于是 `pick_move` 挑出来的
+    # 「该收线了」在 mock 那条路上被原样丢掉 —— 而**没配 key 是这个引擎的默认
+    # 状态**,那等于「一个没配 key 的世界永远不还债」:线到期 → 编剧该收 →
+    # 退成喘口气 → 宽限期过完 → tick 上直接扣。玩家从头到尾没见过那条线回来。
+    # 收线这句话是**模板**(引擎手上有 `promise`),一次模型都不用调。
+    if move == "callback":
+        said = f"{promise}这件事,今天有人提起来了。" if promise else "那件事,今天有人提起来了。"
+        # ⚠️ `why` / `source` 走 `SOURCE_LABELS`(3.11.2 验收 A ③ 那条四分不许被
+        # 这一支绕过)—— 收线这一支在**四种 source 上都会走到**(顶到安全阀的世界
+        # 照样得还债),写死「没配 key」的话,一个配了 key 而模型答废了的世界
+        # 会被 `doctor` 记成没配 key,而那指向一种错的修法。
+        return {"move": "callback", "who": who, "line": said,
+                "why": f"{SOURCE_LABELS.get(source, source)};到期该收线了",
+                "promise": "", "stake": None, "source": source}
     last = ""
     for line in reversed(list(recap)):
         said = str(line or "").strip()

@@ -6634,26 +6634,29 @@ class Scheduler:
                 if thread.get("closed"):
                     continue
                 due = int(thread.get("due_tick") or 0)
-                if not due or now_tick < due:
+                # 🆕 3.12.0(裁决 §2.5):**到期之后还有一段宽限期** ——
+                # 那段时间里玩家一上线就会拿到一次 `callback`(编剧那条路)。
+                # **过了宽限期才轮到这儿动手**,而这让两句话同时成立:
+                # 来看的人有机会收线,不来的人照样要还。
+                grace = 0
+                if self.config_store is not None:
+                    try:
+                        hours = int(self.config_store.get(
+                            "director.grace_hours", default=24) or 0)
+                        grace = int(hours * max(1, 60 // max(1, self._minutes_per_tick())))
+                    except (TypeError, ValueError):
+                        grace = 0
+                if not due or now_tick < due + grace:
                     continue
                 stake = thread.get("stake") or {}
-                kind = str(stake.get("kind") or "")
                 holder = f"{self.PLAYER_PREFIX}{player_id}"
-                ops: list[dict[str, Any]] = []
-                try:
-                    amount = float(stake.get("amount") or 0)
-                except (TypeError, ValueError):
-                    amount = 0.0
-                if kind == "relation" and thread.get("with") and amount:
-                    ops.append({"op": "sentiment_delta", "as": str(thread["with"]),
-                                "target": holder, "delta": -abs(amount)})
-                elif kind == "money" and amount > 0:
-                    ops.append({"op": "pay", "from": holder, "to": "__town__",
-                                "amount": abs(amount), "reason": "story_stake"})
-                elif kind == "item" and str(stake.get("what") or ""):
-                    ops.append({"op": "grant_item", "agent_id": holder,
-                                "item_id": str(stake["what"]),
-                                "qty": -abs(int(amount) or 1)})
+                # 🔴 **「该扣什么」只有一份算法**(3.12.0,裁决 §2.11 第 1 条)。
+                # 摊牌当场兑现走的是同一个函数 —— 各写一份的那天,
+                # 「当场输掉」和「到期没收」会扣掉不一样的东西,而两边都不报错。
+                from anima_world.api import World as _W
+
+                ops: list[dict[str, Any]] = _W._stake_ops(
+                    holder, str(thread.get("with") or ""), stake)
                 landed: list[str] = []
                 for op in ops:
                     try:
@@ -6664,18 +6667,20 @@ class Scheduler:
                     for event in (expanded or ()):
                         self._record_and_deliver(event)
                         landed.append(str(op.get("op")))
+                from anima_world.director import log_payload
+
                 self._record_event({
                     "type": "director_log", "who": holder,
-                    "payload": {
-                        "player_id": player_id, "move": "collect",
-                        "thread_id": str(thread.get("id") or ""),
-                        "tick": now_tick,
-                        "outcome": "expired",
-                        "promise": str(thread.get("promise") or ""),
-                        "stake": stake or None,
-                        "ops_applied": landed,
-                        "source": "engine",
-                    },
+                    # **和编剧那条同一张表**(裁决 §2.7):上一版这儿只吐 11 格,
+                    # 于是消费方要按「哪几格在」猜自己拿到的是哪一条。
+                    "payload": log_payload(
+                        player_id=player_id, move="collect",
+                        thread_id=str(thread.get("id") or ""),
+                        tick=now_tick, outcome="expired",
+                        promise=str(thread.get("promise") or ""),
+                        stake=stake or None, ops_applied=landed,
+                        closes_thread=True, source="engine",
+                    ),
                 })
                 logger.info("这条线到期没人管,赌注兑现了:%s / %s(%s)",
                             player_id, thread.get("id"), landed or "只作废,不改数")

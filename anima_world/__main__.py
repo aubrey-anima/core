@@ -25,7 +25,13 @@ from anima_world.agent import Agent
 from anima_world.beats import (
     BeatScript, BeatScriptError, coerce_goals, split_against_stored,
 )
+from anima_world.roll import DEFAULT_BANDS as ROLL_DEFAULT_BANDS, FACES as ROLL_FACES
+from anima_world.person_verbs import (
+    ANSWERS as PERSON_VERB_ANSWERS, CONSENT_MODES as PERSON_VERB_CONSENT,
+    EVENTS as PERSON_VERB_EVENTS, PERSON_VERB_KEYS,
+)
 from anima_world.director import (
+    DIRECTOR_LOG_KEYS,
     MOVE_LABELS as DIRECTOR_MOVE_LABELS, PHASE_LABELS as DIRECTOR_PHASE_LABELS,
     STAKE_LABELS as DIRECTOR_STAKE_LABELS,
     MOVES as DIRECTOR_MOVES, PHASES as DIRECTOR_PHASES,
@@ -837,6 +843,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_world_args(world_export)
     world_export.add_argument("--beats", default=None,
                               help="可选:把配套的节拍脚本一起打进包里")
+    world_export.add_argument(
+        "--with-authored", action="store_true", dest="with_authored",
+        help="把这个世界还逐字留着的作者层段(kind / plugin / guidance)一起写进去 —— "
+             "给创作台离线判撞用。⚠️ 其余十三段是演化态,写出去就是假话,所以不写;"
+             "跳过了哪几段写在 manifest 里",
+    )
     world_export.add_argument("--output", required=True, help="写到哪个 .cyberworld 文件")
     world_export.add_argument("--package-id", required=True,
                               help="包的世系 id(小写;--world-id 是源世界在 Redis 上的名字)")
@@ -9295,9 +9307,12 @@ def contract_payload() -> dict[str, Any]:
             "phases": list(DIRECTOR_PHASES),
             "stake_kinds": list(DIRECTOR_STAKE_KINDS),
             "event": "director_log",
-            # **不进 `SUBSCRIBABLE_EVENTS`**(裁决 §2.4):那张表是策展的,
-            # 进了就是一句拿不掉的公开契约,而这一层的载荷形状 3b 必然要动。
-            "subscribable": False,
+            # 🆕 3.12.0:**转 `true`,而三个条件今天都满足了**(裁决 §2.7):
+            # 载荷表定稿 · 真有消费方(运维台的编剧日志视图)· 转完 11 条、
+            # 那张 ≤12 的闸还留得下最后一格。
+            "subscribable": True,
+            # 那张固定的载荷表 —— **两条发射点共用,缺的写空不省略**。
+            "log_keys": list(DIRECTOR_LOG_KEYS),
             "story_method": "player_story",
             "guidance_method": "guidance",
             "guidance_author_type": "guidance",
@@ -9344,6 +9359,67 @@ def contract_payload() -> dict[str, Any]:
                 "op 走剧情拍**同一个**展开函数当场兑现,一条新的写世界的路都不开。"
                 "故事状态**零新键**,折自 `director_log`;张力是**目标曲线**不是上限,"
                 "`complicate` 必须带真赌注(到期引擎自己动手扣)。"
+            ),
+        },
+        # 🆕 3.12.0(批 3b,裁决 §2.2):**骰子。**
+        # 🔴 **五个坐标缺一不可**,而这一段存在的理由就是别让下游各猜一份:
+        # 世界 / tick / 谁 / 做什么 / 第几次 —— 少了最后一格,同一个人在同一 tick
+        # 里摊两次牌会得到同一个点;少了 `verb`,摊牌和别的判定共用一副骰子。
+        # ⚠️ **它不读 `random`、不读时钟、不用内置 `hash()`**(那个每进程带盐),
+        # 所以「同一份日志重放两遍是同一副骰子」是结构性的,不是巧合。
+        "roll": {
+            "faces": ROLL_FACES,
+            "bands": [list(b) for b in ROLL_DEFAULT_BANDS],
+            "seed_coordinates": ["world_id", "tick", "actor", "verb", "nonce"],
+            "event": "roll",
+            "payload_keys": ["actor", "verb", "player_id",
+                             "faces", "result", "band", "seed"],
+            "used_by": ["confront"],
+            "gloss": (
+                "**一次判定掷的那个点**。`result` 是 1..`faces`,`band` 是它落在"
+                "哪一档的**人话**(别自己分档 —— 分档表只有一份,各译一遍的话"
+                "同一个点会在引擎屏 / 创作台 / 站点上说三种话)。"
+                "🔴 **成败是算术,不是模型说了算**:`confront` 拿 `result >= 11` "
+                "判输赢(d20 的中位),LLM 在这一层没有否决权。"
+                "⚠️ `seed` 带在载荷里是为了**可复算**:拿那五格重掷一次必须得到"
+                "同一个点,这也是「对账即重放」在这一层的落点。"
+            ),
+        },
+        # 🆕 3.12.0(批 3b,裁决 §2.6):**对人动词。**
+        # 🔴 **它和 `plugins.verb_target_forms` 是两条路,别混** ——
+        # 那一格是 affordance(一个人、一样东西、一个瞬间),而对人动词走工具路,
+        # 中间多一道**同意门**。`verb_target_forms` 里**永远不许出现 `agent`**。
+        "person_verbs": {
+            "author_key": "person_verbs",
+            "in_section": "plugin",
+            "keys": list(PERSON_VERB_KEYS),
+            "answers": list(PERSON_VERB_ANSWERS),
+            "consent_modes": list(PERSON_VERB_CONSENT),
+            "events": list(PERSON_VERB_EVENTS),
+            "door_method": "player_tool",
+            "tool_id": "person_verb",
+            # ⚠️ 引擎自己那条路是 `World.player_person_verb`,而工具那条只是它在
+            # 目录上的样子 —— **判断只有一份**。宿主按 `tool_id` 走就行。
+            "world_method": "player_person_verb",
+            "declared_method": "person_verbs",
+            "host_option_kind": "verb",
+            "gloss": (
+                "**玩家对一个人做一件事**(拜师 / 决斗 / 说服)。"
+                "🔴 **永不走 affordance** —— `interact` 的定义是「一个人、一样东西、"
+                "一个瞬间」,而它整条路上没有一处问过**对方肯不肯**;"
+                "把人塞进 `target` 等于让「拉着谁就一起吃饭」成立。"
+                "所以它走工具路(和 `walk_away` / `contact` 同一条),执行共用 "
+                "`apply_affordance` 那个求值器,中间多一道**同意门**。"
+                "🔴 **那道门的方向和编剧那道正相反**:编剧是**世界**发起的"
+                "(GM 说 NPC 进门,NPC 就进门,`willingness` 有意不用),"
+                "而这一条是**玩家**发起的 —— 「我要拜师」是一次请求,"
+                "她有真正的否决权,所以走 `willingness` / `judge_invite` 那条真门。"
+                "**两道门语义相反,不合并;但共用那张硬闸表**(睡着了 / 在赶路 / "
+                "不在这儿 —— 世界说不行的那几条对谁都一样)。"
+                "⚠️ **没有「关掉同意门」的写法**:默认要点头,`consent: \"none\"` "
+                "只给不需要对方配合的动词。"
+                "⚠️ 拒绝语**是她的话不是系统话**,而「她不肯」与「世界说不行」"
+                "由载荷里那格 `gate` 分开。"
             ),
         },
         "storage": {
@@ -11657,6 +11733,7 @@ def run_world_package(args: argparse.Namespace) -> int:
                     args.output, world_id=args.package_id, name=args.name,
                     beats_path=args.beats, summary=args.summary, genre=args.genre,
                     setting=args.setting, theme=args.theme,
+                    with_authored=bool(getattr(args, "with_authored", False)),
                 )
             finally:
                 world.close()
@@ -11666,6 +11743,11 @@ def run_world_package(args: argparse.Namespace) -> int:
                 "output": str(args.output),
                 "engine_min": manifest.engine_min,
             }
+            if getattr(args, "with_authored", False):
+                # ⚠️ **两格都报**:少了 `skipped` 那一格,创作台会以为它离线
+                # 判过了全部十六段,而它只判了留得下来的那三段。
+                result["authored_sections"] = manifest.extra.get("authored_sections") or []
+                result["authored_skipped"] = manifest.extra.get("authored_skipped") or []
         elif args.world_command == "migrate":
             # **一次性的桥**:1.x 的世界在 2.0 面前本来没有任何入口
             # (SQLite 退役了,而 v1 的包是 ZIP、v3 的读者只认 gzip JSONL)。
