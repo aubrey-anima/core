@@ -367,6 +367,19 @@ def opening_context(*, line: str = "", hook: str = "", beat_note: str = "",
     return out
 
 
+#: 一句自由文本收尾的标点。缺了就补一个句号 —— 而**已经有的不叠加**
+#: (「……停了一下。。」同样是一句念不通的话)。
+_SENTENCE_END = "。!?…」』.!?"
+
+
+def _as_clause(text: str) -> str:
+    """把一句自由文本收成能直接拼进段落的样子:去掉首尾空白,补一个句号。"""
+    said = str(text or "").strip()
+    if not said:
+        return ""
+    return said if said[-1] in _SENTENCE_END else said + "。"
+
+
 def mock_opening(agent_name: str, *, line: str = "", hook: str = "",
                  beat_note: str = "") -> str:
     """没配 key / LLM 挂了时她开的那一句。**没配 key 是默认状态**,所以这不是
@@ -384,7 +397,14 @@ def mock_opening(agent_name: str, *, line: str = "", hook: str = "",
     if beat_note:
         return f"{beat_note}{name}抬眼看见你。"
     if hook:
-        return f"{name}正{hook},看见你,停了一下。"
+        # 🔴 **`hook` 是一句自由文本,缝进句子中间永远不安全**(3.11.0,验收 A 实测:
+        # 「楚子航**正**他刚从楼梯口拐过来,看见你,看见你,停了一下。」)。
+        # 它由模型写、写的是「此刻看上去是什么样」,而那可能是一个词组
+        # (「低头擦一把长刀」)也可能是一整句带主语的话(「他刚从楼梯口拐过来」)
+        # —— 两种形状用同一个 `正{hook},` 的模子去套,后一种必然出病句。
+        # **要么标点隔开,要么单独成句**:这里用破折号隔开,两种形状都读得通,
+        # 而且不必去猜它是哪一种。
+        return f"{name}在那边 —— {_as_clause(hook)}"
     return f"{name}抬头看见你,朝你点了点头:「你来了。」"
 
 
