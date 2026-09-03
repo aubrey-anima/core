@@ -2395,6 +2395,51 @@ class RedisRulesStore:
         return [rows[k]["definition"] for k in sorted(rows)]
 
 
+class RedisGuidanceStore:
+    """给实时编剧的那份**指导**的家:`:guidance`,一个 JSON 字符串(3.11.0)。
+
+    **一个世界只有一份当下的指导**,所以是 string 不是 list/hash ——
+    创作者每周换一份,换掉就是换掉(和剧情拍那种"和历史配对"的东西不同:
+    指导不进事件、不和 `beat_fired` 配对,它就是"这一周照着什么写")。
+
+    ⚠️ **它是持久键,不进 `volatile_keys`** —— 于是 `contract.storage` 一个字
+    不动(那一段只报前缀与易失清单,不逐个列键),运维台那条只比 `.storage` 的
+    `deepStrictEqual` **不会红**。导出/导入走通用的 string 分支,自动带上。
+    """
+
+    __slots__ = ("_redis", "_key")
+
+    def __init__(self, redis: Any, world_id: str) -> None:
+        self._redis = redis
+        self._key = f"{KEY_PREFIX}:{world_id}:guidance"
+
+    def get(self) -> dict:
+        try:
+            raw = self._redis.get(self._key)
+        except Exception:  # noqa: BLE001 - 读不到就当没写过,别掀翻开机
+            logger.warning("读不了这个世界的编剧指导", exc_info=True)
+            return {}
+        if not raw:
+            return {}
+        try:
+            body = _loads(raw)
+        except Exception:  # noqa: BLE001
+            logger.warning("这个世界的编剧指导读不成 JSON —— 当作没写过", exc_info=True)
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    def seed(self, body: dict) -> bool:
+        """空的时候播一次 —— 和地图/规律/节拍同一条契约(**只填缺不覆盖**)。"""
+        if not body or self.get():
+            return False
+        self._redis.set(self._key, _dumps(dict(body)))
+        return True
+
+    def put(self, body: dict) -> None:
+        """整份换掉 —— 一次内容包安装(创作者这一周改了指导)。"""
+        self._redis.set(self._key, _dumps(dict(body)))
+
+
 class RedisBeatsStore:
     """作者写下的节拍脚本的家:`:beats`,**一个 list**(3.7.0,看板 D1)。
 

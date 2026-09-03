@@ -121,6 +121,27 @@ class Projection:
     **事件日志**,这一格只是它的投影。刷新一次页面就重生成一段的话,同一个时刻的
     世界会对同一个人说两种话,而两次都"对"。
     """
+    stories: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """每个玩家的**故事状态**,折自 `director_log`(3.11.0,批 3a)。
+
+    `{player_id: {"tension", "tension_tick", "phase", "threads": [...],
+                  "recent": [tick, …], "intent": {...}, "moves": int}}`
+
+    🔴 **零新键,折自事件** —— 判据是这个仓库自己写下的先例,逐字:
+    「**邀请是事件,不是易失态。**它落 `agent_invites`,折进投影;不开新的
+    Redis 键、不进 `volatile_keys` —— **存储契约一格不动**。于是它免费得到
+    跨进程一致(`catch_up_projection`)和可重放。」
+    连带的好处要说出来:`storage` 段一个字不动 → 运维台那条只比 `.storage` 的
+    `deepStrictEqual` **不会红**,这一批不需要同轮认账。
+
+    ⚠️ **`tension` 存的是「上一次那个值 + 那一刻的 tick」,不是此刻的值** ——
+    此刻的值由 `director.tension_now` 算出来。存一个会随时间变旧的数,
+    就多出一种和日志对不上的坏法(而这一层对不上的样子是"编剧以为他还紧张着,
+    而他已经三天没上线了")。
+
+    ⚠️ **有界**:`threads` 封顶 `STORY_THREADS_KEPT`、`recent` 只留最近一段 ——
+    它进得了提示词,所以它必须有界(和 `settled_invitations` 同一把尺子)。
+    """
     player_move_seq: dict[str, int] = field(default_factory=dict)
     """这个玩家**自己动手**的最后一条事件的 seq(3.11.0,批 3a)。
 

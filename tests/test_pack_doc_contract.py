@@ -115,6 +115,38 @@ def test_文档里那张回执键表_和真回执逐格一致():
         f"REFERENCE 那张回执键表:{sorted(named)}\n真回执:{sorted(real)}\n"
         f"少的:{sorted(real - named)},多的:{sorted(named - real)}"
     )
+    # 🔴 **连那个数字词一起比**(3.11.0,验收 B 对 3.10.2:上一版只比键名,
+    # 于是键补齐了而旁边那句「十四格」还留着 —— **自称权威的那一行反而是旧的**)。
+    digits = {10: "十", 12: "十二", 14: "十四", 16: "十六", 17: "十七", 18: "十八"}
+    right = f"{digits[len(real)]}格"
+    # ⚠️ **只在那张表自己那一段里比,不扫整份文档**(第一版扫全文,当场红在
+    # §4.9 抹除那张**另一份**回执的「十四格」上 —— **闸咬到了一句跟它无关的话**。
+    # 「一条规矩的例子和它禁止的那件事是同一段字节」这个坑,这是第三次了,
+    # 形状每次都一样:**闸的作用域比它要钉的那件事大**。)
+    scope = tail.split("\n\n\n", 1)[0][:1200]
+    # 🔴 **同一道闸扫两处**(3.11.0,验收 A):`api.py` 的 docstring 里也有一份
+    # 同样的十七格表,而它上一版**没上闸** —— REFERENCE 那张有闸、它没有,
+    # 于是"哪一份先烂"完全看运气。**一道只覆盖我记得去扫的地方的闸**,
+    # 这个仓库记过两次了。
+    from anima_world.api import World
+
+    doc = World.install_pack.__doc__ or ""
+    marker_doc = "返回一张回执"
+    assert marker_doc in doc, "`install_pack` 的 docstring 里没有那张回执表"
+    doc_scope = doc.split(marker_doc, 1)[1].split("\n\n", 2)
+    doc_named = set(re.findall(r"[a-z_]{3,}", "\n".join(doc_scope[:2])))
+    missing_in_doc = real - doc_named
+    assert not missing_in_doc, (
+        f"`api.py` 的 docstring 那张回执表少了 {sorted(missing_in_doc)} —— "
+        f"REFERENCE 那张有闸而它没有,「哪一份先烂」就成了运气")
+    assert right in scope, (
+        f"那张回执键表旁边找不到「{right}」—— 真回执是 {len(real)} 格。"
+        f"⚠️ 自称权威的那一行反而是旧的,正是验收 B 逮到的那一种")
+    for n, word in digits.items():
+        if n == len(real):
+            continue
+        assert f"{word}格" not in scope, (
+            f"那张回执键表旁边还写着「{word}格」,而真回执是 {len(real)} 格")
 
 
 def test_install_pack的docstring_不许再说那三件不做():

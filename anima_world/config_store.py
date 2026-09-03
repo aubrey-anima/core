@@ -388,6 +388,12 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     "host.max_options": (5, "int", "host", False, "Host: how many options to offer (the always-present free-input item does not count)"),
     "host.ask_cooldown_ticks": (12, "int", "host", False, "Host: ticks before the player's \"what should I do\" can regenerate a scene"),
     "host.away_ticks": (288, "int", "host", False, "Host: ticks away before the next screen is a \"welcome back\" (0 = never); one world day by default"),
+    # ── 实时编剧(3.11.0,批 3a)。**默认关** —— 引擎默认值 = 没人说话时的样子;
+    # 橱窗里打开它(内置种子是橱窗不是毛坯)。
+    "director.enabled": (False, "bool", "director", False, "Director: write a story beat after every player move (3a)"),
+    "director.max_per_player_per_hour": (6, "int", "director", False, "Director: how many beats one player can get per WORLD hour (over it degrades to a template line, never silence)"),
+    "director.pin_ticks": (12, "int", "director", False, "Director: how long the summoned NPC stays put and carries the beat's intent"),
+    "director.due_hours": (48, "int", "director", False, "Director: world hours before an open thread's stake is collected"),
     "llm.stream.first_timeout": (30.0, "float", "llm", False, "Streaming: seconds to wait for the FIRST chunk (prefill lives here; deliberately the same as llm.timeout was)"),
     "llm.stream.gap_timeout": (15.0, "float", "llm", False, "Streaming: seconds allowed BETWEEN chunks once text started; a stall before any prose is retried once"),
     "scheduler.tick_rate": (1 / DEFAULT_SECONDS_PER_TICK, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),

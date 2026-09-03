@@ -124,22 +124,29 @@ def test_那句话里的数字_和契约里有几个时刻对得上():
     digits = {4: "四", 5: "五", 6: "六", 7: "七"}
     # ⚠️ **不只扫 REFERENCE**(3.10.2,验收 B):同一句话在 `api.py` 的
     # docstring 里也有一份,而它停在「四个时刻」上停了整整一版 ——
-    # **一道只覆盖我记得去扫的地方的闸,和那道只认得自己语法的闸是同一个毛病**
-    # (这个仓库为裸星号那一族记过一次)。
-    text = "\n".join(
-        path.read_text(encoding="utf-8") for path in (
-            _REFERENCE,
-            _REFERENCE.parents[1] / "anima_world" / "api.py",
-            _REFERENCE.parents[1] / "anima_world" / "host.py",
-        )
-    )
+    # **一道只覆盖我记得去扫的地方的闸,和那道只认得自己语法的闸是同一个毛病**。
+    #
+    # 🔴 **逐份断言,不是 `join` 成一段再判**(3.11.0,验收 B 对 3.10.2):
+    # 拼成一段之后「对的那份」会替「烂的那份」把闸喂饱 —— 只要有**任意一份**
+    # 写对了,`right in text` 就成立,而另外两份可以一直烂着。
+    # **一道分不出是谁烂了的闸,离"什么都没查"只差一步。**
+    sources = {
+        "docs/REFERENCE.md": _REFERENCE,
+        "anima_world/api.py": _REFERENCE.parents[1] / "anima_world" / "api.py",
+        "anima_world/host.py": _REFERENCE.parents[1] / "anima_world" / "host.py",
+    }
     right = f"只在{digits[want]}个时刻开口"
-    assert right in text, f"REFERENCE 里找不到「{right}」—— 现在有 {want} 个时刻"
-    for n, word in digits.items():
-        if n == want:
-            continue
-        wrong = f"只在{word}个时刻开口"
-        assert wrong not in text, f"REFERENCE 里还写着「{wrong}」,而实际有 {want} 个"
+    seen_anywhere = False
+    for name, path in sources.items():
+        body = path.read_text(encoding="utf-8")
+        for n, word in digits.items():
+            if n == want:
+                continue
+            wrong = f"只在{word}个时刻开口"
+            assert wrong not in body, (
+                f"{name} 里还写着「{wrong}」,而实际有 {want} 个时刻")
+        seen_anywhere = seen_anywhere or right in body
+    assert seen_anywhere, f"三份里没有一份写着「{right}」—— 现在有 {want} 个时刻"
 
 
 def test_每个时刻都有一句人话_而且不许是裸英文():

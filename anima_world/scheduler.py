@@ -1724,6 +1724,11 @@ class Scheduler:
             #      日志重放出两份历史,而两边都不报错。纯算术,和上面同一类。
             self._settle_invitations()
 
+            # 3.68 到期没人管的那条线:**赌注真的兑现**(3.11.0,批 3a)。
+            #      纯算术、一次模型都不调,和 `_settle_invitations` 逐字同一类;
+            #      按世界时钟数,不按墙钟(墙钟会让同一份日志重放出两份历史)。
+            self._settle_story_stakes()
+
             # 3.7 定时轮次:问问她此刻要不要自己做点什么(autonomy)。
             self._maybe_run_autonomy(now)
 
@@ -5337,6 +5342,18 @@ class Scheduler:
                 else:
                     return False
 
+            # 🔴 **编剧把她叫来了,这几 tick 排班不许把她带走**(3.11.0,批 3a,
+            # 老板口径 5「NPC 要配合」)。
+            #
+            # ⚠️ **这一刀是有半径的,而半径量过了**:引擎里早就写着
+            # 「`emit_action` 的 walk 那一支从不查 `_occupying`」,而那条注释同时
+            # 说明「BT 与 `_occupying` 的总账不只是 walk 一支」。所以这一版
+            # **只拴 walk 那一支、只对编剧的 pin 生效**,不动 `occupies` 那笔总账
+            # —— 拴住的是「她刚被叫到你面前」这一件事,不是所有长过程。
+            # 到点自己松开(`pin_until` 是世界 tick),**没有第二处解锁的地方**。
+            if action.kind == "walk" and self._director_pinned(agent.id):
+                logger.debug("%s 这会儿被编剧钉在 %s,这一步不走", agent.id, agent.location)
+                return False
             if action.kind == "walk" and self._start_journey(agent, action):
                 return True  # under way; `location_join` follows on arrival
             if action.kind == "eat":
@@ -6490,6 +6507,114 @@ class Scheduler:
         return [
             owner for owner, kind in self.actions_now().items() if kind == action_kind
         ]
+
+    def _director_pinned(self, agent_id: str) -> bool:
+        """她这会儿被编剧钉着吗(3.11.0,批 3a)。
+
+        **钉子记在故事状态里**(`stories[pid].intent.until_tick`),不新开键 ——
+        它和那一拍是同一件事:编剧派了她来,于是接下来几 tick 她该在这儿。
+        到点自己松开:`until_tick` 是**世界 tick**,不是墙钟(墙钟会让同一份
+        日志重放出两份历史)。
+
+        ⚠️ **只有 walk 那一支查它**(见 `emit_action`)—— 她照旧能在原地做事、
+        照旧能被人搭话,拴住的只是「走开」。
+        """
+        now = int(self.clock)
+        for row in (self._memory_projection.stories or {}).values():
+            intent = row.get("intent") or {}
+            if str(intent.get("agent_id") or "") != agent_id:
+                continue
+            if now < int(intent.get("until_tick") or 0):
+                return True
+        return False
+
+    def director_intent_for(self, agent_id: str) -> dict[str, Any] | None:
+        """她这会儿身上挂着的**编剧意图** —— 提示词那一块读它(口径 5)。
+
+        `None` = 没有(或者已经过期)。**和 pin 同一个来源、同一个有效期**:
+        各存一份的话,她会在一个已经翻篇的意图上继续演,而 pin 早就松了。
+        """
+        now = int(self.clock)
+        for pid, row in (self._memory_projection.stories or {}).items():
+            intent = row.get("intent") or {}
+            if str(intent.get("agent_id") or "") != agent_id:
+                continue
+            if now >= int(intent.get("until_tick") or 0):
+                return None
+            return {"player_id": pid, "line": str(intent.get("line") or ""),
+                    "goal": str(intent.get("goal") or "")}
+        return None
+
+    def _settle_story_stakes(self) -> None:
+        """到期没人管的那条线 —— **引擎自己动手扣,不问模型**(3.11.0,批 3a)。
+
+        🔴 **这是「真赌注」那句口径的兑现**(老板:剧情要有张力)。
+        一个只写在 `threads[]` 里、到期没有人执行的赌注,**和没有赌注是同一件事**,
+        而屏幕上看不出差别 —— 玩家永远不知道自己其实什么都没输过。
+
+        四种赌注各自走**已有的那条 op**(`beats.expand_event_op`,不另写一份判断):
+        `relation` → `sentiment_delta` · `money` → `pay` · `item` → `grant_item`
+        负数 · `deadline` → 只留一条日志(这条线作废,不改数)。
+
+        ⚠️ **收线那一条也是 `director_log`**(`move: "collect"`),不新造事件类型:
+        故事状态是那一串日志的投影,而"这条线怎么完的"正是它的一部分。
+        """
+        if self.event_log is None:
+            return
+        stories = self._memory_projection.stories
+        if not stories:
+            return
+        now_tick = int(self.clock)
+        for player_id, row in list(stories.items()):
+            for thread in list(row.get("threads") or []):
+                if thread.get("closed"):
+                    continue
+                due = int(thread.get("due_tick") or 0)
+                if not due or now_tick < due:
+                    continue
+                stake = thread.get("stake") or {}
+                kind = str(stake.get("kind") or "")
+                holder = f"{self.PLAYER_PREFIX}{player_id}"
+                ops: list[dict[str, Any]] = []
+                try:
+                    amount = float(stake.get("amount") or 0)
+                except (TypeError, ValueError):
+                    amount = 0.0
+                if kind == "relation" and thread.get("with") and amount:
+                    ops.append({"op": "sentiment_delta", "as": str(thread["with"]),
+                                "target": holder, "delta": -abs(amount)})
+                elif kind == "money" and amount > 0:
+                    ops.append({"op": "pay", "from": holder, "to": "__town__",
+                                "amount": abs(amount), "reason": "story_stake"})
+                elif kind == "item" and str(stake.get("what") or ""):
+                    ops.append({"op": "grant_item", "agent_id": holder,
+                                "item_id": str(stake["what"]),
+                                "qty": -abs(int(amount) or 1)})
+                landed: list[str] = []
+                for op in ops:
+                    try:
+                        expanded = self._expand_beat_op(op)
+                    except Exception:  # noqa: BLE001 - 一笔结算不该掀翻 tick
+                        logger.warning("这条线的赌注结算不了:%r", thread, exc_info=True)
+                        continue
+                    for event in (expanded or ()):
+                        self._record_and_deliver(event)
+                        landed.append(str(op.get("op")))
+                self._record_event({
+                    "type": "director_log", "who": holder,
+                    "payload": {
+                        "player_id": player_id, "move": "collect",
+                        "thread_id": str(thread.get("id") or ""),
+                        "tick": now_tick,
+                        "outcome": "expired",
+                        "promise": str(thread.get("promise") or ""),
+                        "stake": stake or None,
+                        "ops_applied": landed,
+                        "source": "engine",
+                    },
+                })
+                logger.info("这条线到期没人管,赌注兑现了:%s / %s(%s)",
+                            player_id, thread.get("id"), landed or "只作废,不改数")
 
     def _maybe_run_autonomy(self, now: WorldTime) -> None:
         """到点了就喊一声"该问问她们了",然后**立刻返回**(autonomy)。

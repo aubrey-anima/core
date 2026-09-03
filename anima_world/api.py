@@ -1918,6 +1918,10 @@ class World:
             tool_runtime=self._tool_runtime,
             background_llm=background_llm,
         )
+        # 🆕 3.11.0(批 3a,口径 5):编剧派她来干什么,进她这一轮的提示词。
+        # **注入一个回调,和 `_present_players` / autonomy hook 同一个模式** ——
+        # `ChatService` 不认识投影,而"这会儿谁身上挂着意图"只有调度器答得出。
+        self.chat_service._director_intent_provider = scheduler.director_intent_for
         self.session_manager = ChatSessionManager(
             store=self.chat_store,
             llm=chat_llm,
@@ -2905,12 +2909,12 @@ class World:
         **作者动过的开关**、**世界观**。其余段照旧**只填缺不覆盖**,走的是开机
         那条路上同一批播种函数。
 
-        返回一张回执 —— **十六格,而这张表是 `docs/REFERENCE.md` §3 那一行的
+        返回一张回执 —— **十七格,而这张表是 `docs/REFERENCE.md` §3 那一行的
         权威**(`tests/test_pack_doc_contract.py` 拿真回执逐格比着它):
 
             pack · version · note · day · tick · beats · config · world_setting
-            · personality · memories · agents · locations · skipped · forced
-            · forced_beats · forced_personality
+            · guidance · personality · memories · agents · locations · skipped
+            · forced · forced_beats · forced_personality
 
         ⚠️ 后面那几个「只填缺」的段(`kinds` / `entities` / `plugins` / `rules`
         / `items`)**只在真装进去了什么的时候才出现**,所以它们不在这张固定表里 ——
@@ -2966,6 +2970,66 @@ class World:
         from anima_world.__main__ import enable_authored_pack
 
         return enable_authored_pack(self.scheduler, pack_id)
+
+    def guidance(self) -> dict[str, Any]:
+        """给实时编剧的那份**指导**(3.11.0,批 3a)—— 创作者每周改的那一份。
+
+        老板 2026-09-02:「这个周更只能算是指导」。它不是剧本:主题、人物池、
+        禁区、语气、节奏、几个路口 —— **主线由玩家自己走**。
+
+        `{}` = 这个世界没写过指导。**那不等于「编剧这一层缺席」**:开关是
+        `director.enabled`,没写指导时编剧按保守默认跑(只 `breathe` / `approach`,
+        人物池 = 全世界减去藏起来的和被硬闸拦下的)。这一条和 perception /
+        本体层那句「声明本身就是开关」**有意不同** —— 老板要的是每个世界都有编剧。
+
+        换一份走 `anima-world pack install`(整份覆盖 —— 创作者这一周改了指导,
+        那就是改了);`--world-file` 那条路上它**只填缺不覆盖**。
+        """
+        from anima_world.redis_state import RedisGuidanceStore
+
+        return RedisGuidanceStore(self.scheduler.redis, self.scheduler.world_id).get()
+
+    def player_story(self, player_id: str) -> dict[str, Any]:
+        """这个玩家的**故事状态**:张力、相位、开着的线、最近几拍(3.11.0,批 3a)。
+
+        `{"player_id", "tension", "phase", "threads": [...], "moves",
+          "recent_log": [...]}`
+
+        🔴 **零新键,折自 `director_log`** —— 和余额折自 `payment` 逐字同一种。
+        ⚠️ `tension` 是**算出来的**(`director.tension_now`),不是存下来的那个数:
+        存一个会随时间变旧的值,就多出一种和日志对不上的坏法,而这一层对不上的
+        样子是「编剧以为他还紧张着,而他已经三天没上线了」。
+
+        ⚠️ **只读门自己补课**(`catch_up_projection`):跑着的世界会在下一次追加时
+        自愈,暂停的不会 —— 而宿主正是在世界不动的时候来问这一屏的。
+
+        CLI 出口是 `anima-world player story --player <pid> [--json]`。
+        """
+        from anima_world import director as dmod
+
+        pid = str(player_id or "").strip()
+        if not pid:
+            raise ValueError("player_story 要一个 player_id")
+        tick = int(self.scheduler.clock)
+        ticks_per_hour = max(1.0, 60.0 / max(1, self.scheduler._minutes_per_tick()))
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            row = dict(self.scheduler._memory_projection.stories.get(pid) or {})
+        threads = [dict(t) for t in (row.get("threads") or []) if not t.get("closed")]
+        for thread in threads:
+            due = int(thread.get("due_tick") or 0)
+            thread["hours_left"] = (
+                round(max(0, due - tick) / ticks_per_hour, 1) if due else None)
+        return {
+            "player_id": pid,
+            "tension": dmod.tension_now(float(row.get("tension") or 0.0),
+                                        int(row.get("tension_tick") or 0), tick,
+                                        ticks_per_hour),
+            "phase": str(row.get("phase") or "setup"),
+            "threads": threads,
+            "moves": int(row.get("moves") or 0),
+            "recent_log": self.history(kind="director_log", limit=20)["events"][-10:],
+        }
 
     def packs(self) -> list[dict[str, Any]]:
         """这个世界装了哪几份内容包 —— **按落地先后**(3.10.0)。
@@ -8689,6 +8753,30 @@ class World:
         else:
             going = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
             recap = self._host_recap(pid, since_seq=int(last.get("seq") or 0)) if last else []
+            # 🔴 **编剧是这一屏的上半场**(3.11.0,批 3a,裁决 §2.1①)。
+            #
+            # 三条理由,每条单独成立:①「他刚做了什么」全仓只有 `_host_recap`
+            # 一处算得出来,另起一条玩家动作流就是第二份真相;② 新剧情要被他
+            # 看见,而唯一的出口就是这一屏;③ 这条路**本来就要等一次网络**
+            # (下面那次 `_host_scene_text`),把编剧折进来是在一条已经在等的
+            # 路上多等一次,而不是让玩家点「走」的时候干等三秒。
+            # ⚠️ `host_turn` 不在 tick 线程上,所以「时钟永不等网络」零风险。
+            # 🔴 **编剧的输入永远是「他刚做了什么」,所以没有"刚"就不写**
+            # (3.11.0,批 3a;`test_第一屏没有回顾` 当场逮住的)。
+            # 第一屏他还没动过手 —— 那时开口写出来的是「在咖啡店一时没什么动静。」,
+            # 一句**关于什么都没发生的旁白**,而且它顶在开场白前面。
+            # 判据是**他自己动没动过手**(`acted`),或者上一屏之后确实有事跟他
+            # 有关(`recap` 非空)—— 两者都没有,这一轮编剧不开口。
+            # ⚠️ 这**不是**"沉默":那条纪律管的是「他做了一件事而世界没回应」,
+            # 而这儿他一件事都还没做。
+            said = self._director_turn(
+                pid, recap=recap, place=place, place_name=place_name, day=day,
+                tick=tick, trigger=trigger, beat_fired=(trigger == "beat"),
+            ) if (trigger == "acted" or recap) else ""
+            if said:
+                # 编剧那一句排在回顾**最后**:回顾说的是"刚发生了什么",
+                # 而这一句是"于是世界现在做了什么" —— 顺序就是因果。
+                recap = list(recap) + [said]
             if trigger == "return":
                 # 🔴 **「你不在的时候……本周更新……」排在回顾的最前面**(2a-②)。
                 # 「本周更新」读的是 `pack_installed`,不是一份另攒的公告栏。
@@ -8765,6 +8853,233 @@ class World:
         if minutes < 60:
             return f"还要约 {minutes} 分钟"
         return f"还要约 {round(minutes / 60, 1):g} 小时"
+
+    def _director_turn(self, pid: str, *, recap: list[str], place: str,
+                       place_name: str, day: int, tick: int, trigger: str,
+                       beat_fired: bool) -> str:
+        """编剧的一回合 —— 返回**给玩家看的那一句**(没写就是空串)。
+
+        🔴 **输出不写 `:beats`**(裁决 §2.1④),三层理由每层单独成立:
+        `:beats` 是**创世态**而编剧写的是演化态(一次 `world export` 就把它当
+        作者写的东西发出去)· 它**无界**(只 rpush 没有淘汰,而 `due_beats`
+        每 tick 遍历每条拍 × 每个玩家)· **不需要**(拍那套机制的价值是**延迟**,
+        而这一拍的定义就是"现在就写")。
+
+        落法:若干 op 走 `Scheduler._expand_beat_op` **当场展开**(和剧情拍
+        同一个函数,不另写一份判断)+ 一条 `director_log`。
+
+        **不许沉默**:没 key / 读不懂 / 超上限 / 同意门拒了 —— 每一种都退成
+        一句 `breathe` 模板句。
+        """
+        from anima_world import director as dmod
+
+        if not self.config_get("director.enabled", default=False):
+            return ""
+        cap = int(self.config_get("director.max_per_player_per_hour", default=6) or 6)
+        pin_ticks = int(self.config_get("director.pin_ticks", default=12) or 12)
+        due_hours = int(self.config_get("director.due_hours", default=48) or 48)
+        ticks_per_hour = max(1.0, 60.0 / max(1, self.scheduler._minutes_per_tick()))
+
+        with self.scheduler._lock:
+            self.scheduler.catch_up_projection()
+            story = dict(self.scheduler._memory_projection.stories.get(pid) or {})
+        tension = dmod.tension_now(float(story.get("tension") or 0.0),
+                                   int(story.get("tension_tick") or 0), tick,
+                                   ticks_per_hour)
+        phase = str(story.get("phase") or "setup")
+        open_threads = [t for t in (story.get("threads") or []) if not t.get("closed")]
+        thread = open_threads[-1] if open_threads else None
+        # 每**世界小时**上限,不是墙钟 —— 墙钟会让同一份日志重放出两份历史。
+        window = tick - ticks_per_hour
+        capped = len([t for t in (story.get("recent") or []) if t > window]) >= cap
+
+        guidance = self.guidance() or {}
+        pacing = guidance.get("pacing") or {}
+        ceiling = float(pacing.get("ceiling") or (
+            dmod.NO_GUIDANCE_CEILING if not guidance else 0.85))
+        allowed = list(dmod.MOVES) if guidance else list(dmod.NO_GUIDANCE_MOVES)
+        move = dmod.pick_move(tension=tension, phase=phase, allowed=allowed,
+                              capped=capped, anchor_fired=beat_fired,
+                              ceiling=ceiling)
+
+        cast = dmod.select_cast(
+            self._director_candidates(pid, place),
+            cast_pool=guidance.get("cast_pool") or (),
+            forbidden=(guidance.get("forbidden") or {}).get("agents") or (),
+            hidden=self._host_hidden_agents(),
+            gated=self._director_gates(),
+        )
+        decision: dict[str, Any] | None = None
+        if move != "breathe" and cast:
+            # 这一轮**最多**写到 `move`;模型只能在它及以下里挑。
+            ladder = list(dmod.MOVES[:dmod.MOVES.index(move) + 1])
+            messages = dmod.decide_messages(
+                recap=recap, cast=cast, allowed=[m for m in ladder if m in allowed],
+                thread=thread, guidance=guidance, place_name=place_name, day=day,
+                tension=tension, phase=phase, anchor=self._director_anchor(guidance))
+            decision = dmod.parse_decision(
+                self._director_reply(messages),
+                allowed=[m for m in ladder if m in allowed],
+                cast_ids=[c["id"] for c in cast])
+        if decision is None:
+            decision = dmod.mock_move(recap, place_name=place_name)
+        decision.setdefault("source", "llm")
+        return self._director_apply(
+            pid, decision, tension_before=tension, phase=phase, tick=tick,
+            place=place, thread=thread, pin_ticks=pin_ticks,
+            due_ticks=int(due_hours * ticks_per_hour), capped=capped,
+            forbidden_ops=set((guidance.get("forbidden") or {}).get("ops") or ()),
+        )
+
+    def _director_apply(self, pid: str, decision: dict[str, Any], *,
+                        tension_before: float, phase: str, tick: int, place: str,
+                        thread: dict[str, Any] | None, pin_ticks: int,
+                        due_ticks: int, capped: bool,
+                        forbidden_ops: set[str]) -> str:
+        """把编剧这一拍**当场兑现**,并落一条 `director_log`。返回给玩家看的那句话。
+
+        🔴 **op 走 `Scheduler._expand_beat_op`**(和剧情拍同一个函数)——
+        不另写一份判断:两份判断迟早给出不同答案,而这一层不一致的样子是
+        "编剧说她来了,而世界里她没动"。
+        """
+        from anima_world import director as dmod
+
+        move = str(decision.get("move") or "breathe")
+        who = str(decision.get("who") or "")
+        line = str(decision.get("line") or "")
+        holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        ops: list[dict[str, Any]] = []
+        refused = ""
+
+        if move in ("approach", "invite", "reveal", "complicate") and who:
+            # `approach` / `reveal` / `complicate` 的执行路都是**她来找他**
+            # (`hail`,批 1.2 开的那条);`invite` 走邀请门那条。
+            # ⚠️ 两条都是**已有**的路,这一层一条新的写世界的路都不开。
+            ops.append({"op": "hail", "agent_id": who, "target": holder,
+                        **({"line": line} if line else {})})
+        stake = decision.get("stake") or None
+        if move == "complicate" and stake and str(stake.get("kind")) == "relation" and who:
+            ops.append({"op": "sentiment_delta", "as": who, "target": holder,
+                        "delta": -abs(float(stake.get("amount") or 0.05))})
+
+        landed: list[str] = []
+        for op in ops:
+            if str(op.get("op")) in forbidden_ops:
+                # 创作者的禁区**是闸,不是提示词里的一句话**。
+                refused = f"forbidden:{op['op']}"
+                continue
+            try:
+                with self.scheduler._lock:
+                    expanded = self.scheduler._expand_beat_op(op)
+                    for event in (expanded or ()):
+                        self.scheduler._record_and_deliver(event)
+                if not expanded:
+                    # `hail` 那条被 `claim_hail` 挡了(今天叫过了)—— 这**不是**
+                    # 沉默的理由:那句话照说,只是没人真的走过来。
+                    refused = refused or "gate"
+                    continue
+                landed.append(str(op.get("op")))
+            except Exception:  # noqa: BLE001 - 一个 op 挂了不该掀翻这一屏
+                logger.warning("编剧这一拍的 op %r 没兑现", op, exc_info=True)
+                refused = refused or "error"
+
+        after = max(0.0, min(1.0, tension_before + dmod.MOVE_TENSION.get(move, 0.0)))
+        new_phase = dmod.next_phase(phase, move)
+        promise = str(decision.get("promise") or "")
+        thread_id = str((thread or {}).get("id") or "")
+        if promise and move != "breathe":
+            # 开了一条新线。**`due` 那一格现在就得记** —— 开线那一刻不记,
+            # 以后补不回来(推迟功能可以,推迟数据不行)。
+            thread_id = f"th:{tick}:{pid}"
+        with self.scheduler._lock:
+            self._record_and_fan({
+                "type": "director_log", "who": holder,
+                "payload": {
+                    "player_id": pid, "move": move, "tick": tick,
+                    "target": who,
+                    "target_name": self.scheduler.agent_display_name(who) if who else "",
+                    "line": line, "why": str(decision.get("why") or ""),
+                    "thread_id": thread_id, "promise": promise,
+                    "phase": new_phase,
+                    "tension_before": round(float(tension_before), 4),
+                    "tension_after": round(float(after), 4),
+                    "stake": stake, "ops_applied": landed,
+                    "due_tick": (tick + due_ticks) if (promise and move != "breathe") else 0,
+                    "pin_until": (tick + pin_ticks) if landed else 0,
+                    "capped": bool(capped), "refused_by": refused,
+                    "place": place,
+                    "source": str(decision.get("source") or "llm"),
+                },
+            })
+        # 给玩家看的那一句。**永远有一句** —— 没派成人时说 `breathe` 那句旁白。
+        if move == "breathe" or not who:
+            return line
+        name = self.scheduler.agent_display_name(who) or who
+        if not landed:
+            # 她没真的来(闸挡了)—— **别说她来了**:一句和世界对不上的话,
+            # 比不说更坏。
+            return ""
+        return f"{name}朝你走过来:「{line}」" if line else f"{name}朝你走过来。"
+
+    def _director_reply(self, messages: list[dict[str, str]]) -> str:
+        """那一次背景槽调用。**一次调用,失败即模板,不重试不合批** ——
+        和主持人那一屏、和判定那一层同一条纪律。"""
+        # **按有没有 key 判,不按客户端类型判** —— 没 key 时 `_background_llm`
+        # 本来就是 Mock,而 Mock 会答一句「收到:…」,那不是一拍剧情
+        # (和 `_host_scene_text` 逐字同一条)。
+        if not str(self.config_get("llm.api_key", default="") or ""):
+            return ""
+        service = self.chat_service
+        client = getattr(service, "_background_llm", None) if service else None
+        if client is None:
+            return ""
+        try:
+            return str(client.complete_sync(messages) or "")
+        except Exception:  # noqa: BLE001 - 编剧挂了绝不掀翻这一屏
+            logger.warning("编剧那一次调用失败,这一拍退成模板句", exc_info=True)
+            return ""
+
+    def _director_candidates(self, pid: str, place: str) -> list[dict[str, Any]]:
+        """编剧**可能**派得动的人。筛在 `director.select_cast` 里,这里只取原料。
+
+        ⚠️ **不在这儿的人照旧算候选** —— `approach` 要解决的正是「她不在这儿」。
+        """
+        doing = self.scheduler.occupations_now()
+        out: list[dict[str, Any]] = []
+        for aid, brain in self.scheduler.agents.items():
+            here = str(getattr(brain.agent, "location", "") or "")
+            out.append({
+                "id": aid,
+                "name": self.scheduler.agent_display_name(aid),
+                "doing": doing.get(self.scheduler.stock_owner_of(aid), ""),
+                "where": "就在这儿" if here and here == place else "",
+            })
+        return out
+
+    def _director_gates(self) -> dict[str, str]:
+        """世界说不行的那几个人 —— **四项,`elsewhere` 有意不在内**。
+
+        用 `together.GATE_LABELS` 那张表的名字,不新写一份:另写一份的那天,
+        「她肯不肯跟你吃饭」和「她肯不肯来找你」会给出两个答案。
+        """
+        gates: dict[str, str] = {}
+        for aid, brain in self.scheduler.agents.items():
+            if aid in self.scheduler._transit:
+                gates[aid] = "in_transit"
+            elif self.scheduler._occupying(aid) is not None:
+                gates[aid] = "busy"
+            elif str(brain.agent.blackboard.read("activity") or "") == "sleep":
+                gates[aid] = "asleep"
+        return gates
+
+    def _director_anchor(self, guidance: dict[str, Any]) -> dict[str, Any] | None:
+        """创作者预设的下一个路口 —— **只读**(口径 2)。
+
+        🔴 **锚点是读数,不是第二套会响的东西**:真正会响的永远是创作者那条
+        per-player 拍,照今天的机制。两套东西都会响 = 第二套真相。
+        """
+        arcs = guidance.get("arcs") or []
+        return dict(arcs[0]) if arcs else None
 
     def _host_hidden_agents(self) -> set[str]:
         """`card.billing == "hidden"` 的那些人 —— 主持人一个字都不许提到他们。

@@ -1279,3 +1279,50 @@ def test_装包回执里_种类和实例真的记了(tmp_path):
         for name in ("kinds", "entities"):
             missing = set(declared.get(name) or ()) - set(sections.get(name) or ())
             assert not missing, f"{name} 里这几样被指着说没装进去,而它们装进去了:{missing}"
+
+
+@pytest.mark.parametrize("with_beats", [True, False])
+def test_同一份文件连开两次_那五段一句都不说(tmp_path, caplog, with_beats):
+    """🔴 **判据是「同一份文件又开了一次机」,不是「它带不带拍」**
+    (3.11.0,验收 A 逮的)。
+
+    3.10.2 那一版把这个开关写在 `if world_seed.get("beats")` 分支里,于是一份
+    **没有 `beats` 段**的文件(demo、晚潮、灯塔湾……)二开照旧吼五段
+    「装不进去」。⚠️ **这和「只给带拍的包补门」是同一种漏法,而且隔了一个
+    commit 又犯了一次** —— 病根都是**拿一个恰好在手边的条件当判据**。
+
+    所以这条用例**带拍与不带拍各跑一遍**:少了后者,那个洞照样测不出来。
+    """
+    import logging
+    from anima_world.api import World
+
+    client = redis_for(tmp_path / f"twice{int(with_beats)}.db")
+    seed = dict(BASE)
+    if with_beats:
+        seed["beats"] = [_beat("第一幕", 0)]
+    path = write_seed_file(tmp_path / f"twice{int(with_beats)}.cyberworld", seed)
+
+    World.open("w", redis=client, world_file=path, force_mock_llm=True).close()
+    with caplog.at_level(logging.WARNING):
+        World.open("w", redis=client, world_file=path, force_mock_llm=True).close()
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    for needle in ("装不进去", "没有装进去", "装不进一个"):
+        assert needle not in said, (
+            f"同一份文件二开还在吼那五段(带拍={with_beats}):{said[:400]}")
+
+
+def test_文件改过之后二开_那五段照说(tmp_path, caplog):
+    """**闭嘴只对「一模一样的那一份」成立** —— 作者真改了一格,那句话还得说,
+    否则这个开关就从"别吵"变成了"永远不说"。"""
+    import logging
+    from anima_world.api import World
+
+    client = redis_for(tmp_path / "chg2.db")
+    first = write_seed_file(tmp_path / "c1.cyberworld", BASE)
+    World.open("w", redis=client, world_file=first, force_mock_llm=True).close()
+    second = write_seed_file(tmp_path / "c2.cyberworld",
+                             dict(BASE, world_setting="换了一段世界观。"))
+    with caplog.at_level(logging.WARNING):
+        World.open("w", redis=client, world_file=second, force_mock_llm=True).close()
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "世界观" in said, f"作者改了世界观,而引擎一个字没说:{said[:400]}"

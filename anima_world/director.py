@@ -366,8 +366,13 @@ def mock_move(recap: Sequence[str], *, place_name: str = "") -> dict[str, Any]:
             last = said
             break
     if last:
-        # 他刚做的那一句已经是人话了(`host.recap_lines` 拼的),接一句就够。
-        return {"move": "breathe", "who": "", "line": f"{last}这一下之后,四下安静了一瞬。",
+        # 🔴 **别把他刚做的那句话再抄一遍**(3.11.0,端到端实跑逮的)。
+        # 编剧这一句是**排在回顾后面**的,而回顾第一行就是「你端详了门口那棵
+        # 老橡树。」—— 第一版把 `last` 缝进自己这句里,于是屏上是
+        # 「你端详了门口那棵老橡树。你端详了门口那棵老橡树。这一下之后……」
+        # **同一句话连说两遍**,而没有一处会报错。
+        # 这一句要接的是**那件事之后**,不是那件事本身。
+        return {"move": "breathe", "who": "", "line": "这一下之后,四下安静了一瞬。",
                 "why": "没配 key:模板句", "promise": "", "stake": None,
                 "source": "mock"}
     where = f"在{place_name}" if place_name else "这儿"

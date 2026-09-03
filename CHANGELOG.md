@@ -73,6 +73,68 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.11.0] —— 实时编剧:玩家玩出自己的故事,周更只是指导 (2026-09-03)
+
+老板 09-02:「原著里的所有人都是做吉祥物的,我们要做的是让玩家玩出自己的剧情和
+精彩的故事……我觉得应该是实时编剧,这个周更只能算是指导」。
+裁决全文 `../../docs/任务单/2026-09-02-玩法层批3-实时编剧.md` §2。
+
+**抬版号的理由和 3.8.0 / 3.9.0 / 3.10.0 逐字相同**:`contract --json` 加了一段
+(`director`)、作者层加了一个段(`guidance`),而消费方正是拿它做能力探测。
+
+### 加了什么
+
+- **第六个开口时刻 `acted`**,以及时刻钥匙的**第四格** `move_seq`。
+  🔴 **老板那句「每操作一次就有新剧情」此前结构性地做不到**,而缺的不是一次模型
+  调用:钥匙是 `(place, day, beat_seq)`,一个在同一个地方、同一天里连点十次动词
+  的玩家,十次都拿到 `scene.source == "cached"` —— **屏幕一动不动,而世界里真的
+  发生了十件事**。判断收在纯函数 `host.player_move_seq_of`,而那张策展表
+  (`PLAYER_MOVE_EVENT_TYPES`)和 `RECAP_EVENT_TYPES` **有意不合并**:一件事进不进
+  回顾、算不算他的操作,是两个问题。
+- **`anima_world/director.py`**:闭集五动作(`breathe`/`approach`/`invite`/
+  `reveal`/`complicate`)、候选池四道闸、张力**目标曲线**、回包三道闸、mock 路。
+  纯函数,不认识 Redis / `World` / 不掷骰子。
+- **编剧跑在主持人那一屏的上半场** —— 「他刚做了什么」全仓只有 `_host_recap`
+  一处算得出来,而这条路**本来就要等一次网络**。输出**不写 `:beats`**
+  (那是创世态而这是演化态,而且它无界),op 走剧情拍**同一个**展开函数当场兑现。
+- **故事状态零新键**,折自 `director_log`:张力(**算出来的,不存**)、相位、
+  开着的线、`stake` 与 `due`。**赌注到期引擎自己动手扣**(`relation`/`money`/
+  `item`/`deadline`)——「一个到期没人执行的赌注,和没有赌注是同一件事」。
+- **NPC 配合**(口径 5):`director.intent` 提示词块(排在 `persona.anchor`
+  **之前**,让锚点最后落锤)+ **pin**(拍响后几 tick 排班的 `walk` 带不走她)。
+  ⚠️ pin **只拴 walk 那一支、只对编剧生效**,不动 `occupies` 那笔总账 ——
+  引擎里那条「BT 与 `_occupying` 的总账不只是 walk 一支」的注释仍然成立。
+- **作者层第十六个段 `guidance`** + `World.guidance()`;
+  **`World.player_story()`** + `anima-world player story`;
+  `contract` 新顶层段 `director`;四个 `director.*` 配置;`doctor` 那一格;
+  **橱窗里打开了它并带一份指导**。
+
+### 🔴 破坏性
+
+- 带 `guidance` 记录的包 **`engine_min` 必须写 `3.11.0`** —— 老引擎见到不认识的
+  作者层 `type` 是**开不了机的硬失败**(和 `beat`/`plugin`/`edge`/`pack` 同一种)。
+- `contract.host.moments` 从五个变六个;`host_scene` 载荷多一格 `move_seq`
+  (老事件没有它,读作 0 —— 升级那一刻一个手上已有操作记录的老玩家会被判成
+  `acted` **多开一次口**,那是对的:他确实做过事而屏幕没说)。
+- **`storage` 段一个字没动** —— 运维台那条只比 `.storage` 的 deepEqual 不会红。
+
+### 顺带修完的(验收 A / B 对 3.10.2)
+
+- 🔴 **`quiet_edit_notes` 只修了一半**:3.10.2 把它写在 `if world_seed.get("beats")`
+  分支里,于是**没有 `beats` 段**的文件(demo / 晚潮 / 灯塔湾)二开照旧吼五段。
+  ⚠️ **这和「只给带拍的包补门」是同一种漏法,而且隔了一个 commit 又犯了一次** ——
+  病根都是**拿一个恰好在手边的条件当判据**。判据抬成它本来要问的那句话:
+  「这份作者层,和库里已经有的那份是同一份吗」(存一个指纹,不存内容)。
+  用例**带拍与不带拍各一条** —— 少了后者那个洞照样测不出来。
+- 🟡 `skipped` 那两格 3.10.2 翻了语义,而屏上还印着 `⚠ 没装进去:…` ——
+  **会把一份装得好好的包报成出了事**;两格同时非空时那句 `reason` 只解释一半。
+  两格分开说,而且不带 ⚠(它们本来就不是警告)。回执说明进 FOR-STUDIO §3.65(e)。
+- 🟡 `skipped_persona` 死变量;REFERENCE 两处「十四格」与「只放行一件事」
+  (**自称权威的那一行反而是旧的**)。
+- 🟡 三道闸补强:回执键表**连数字词一起比**、**同一道闸扫 `api.py` 与 REFERENCE
+  两处**、「几个时刻」那条**逐份断言**(此前三份 `join` 成一段,
+  **对的那份会替烂的那份把闸喂饱**)。
+
 ## [3.10.2] —— 一扇造好了的门,契约里一个字没提 (2026-09-02)
 
 3.10.1 把 `pack enable` 造出来了 —— 代码、CLI、REFERENCE 都有。

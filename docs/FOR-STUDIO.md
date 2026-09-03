@@ -6008,7 +6008,7 @@ anima-world pack list --world-id <世界> --json
 |---|---|
 | 封皮 `engine_min` **真的被查了** | 带 `pack` 段 / `trigger.at.since` / `narrate` 的包,`engine_min` 写 **`3.10.0`**。写一个更低的数是**当场拒**(三扇门同一句);**没写**是一句警告 —— 「没说」和「说错」是两件事 |
 | `pack list` 的 `sections` 记的是**真的落地了什么** | 文件里写了什么另起一格 **`declared`**。两者之差 = 这份包里有几样没装进去,那是你们最该看的一格 |
-| 在册的人的 `personality` / `memory` **回执里点名说了** | 回执多一格 `skipped: {personality: […], memories: N, reason}`,并印一句 warning。**别再靠"没报错"当装进去了** |
+| 在册的人的 `personality` / `memory` **回执里点名说了** | 回执有一格 `skipped: {personality: […], memories: N, reason}`,并印一句 warning。**别再靠"没报错"当装进去了**。⚠️ **3.10.2 起这一格的语义翻了面**:它记的是「**不必写**」(想写的那句世界里已经是了)与「**她已经记着了**」,**不是**「被拒的那几个」—— 照旧语义印字会把一份**装得好好的**包报成「有东西没装上」。见 §3.65(e) |
 | 只带一部分段的包**不再灌内置默认值** | 从前一份只带一拍的包会往世界里塞 `cafe`/`home`/`workshop` 三个地点 + 三条撤不回的事件;不带 `agents` 会塞 `chat_with_夏/柔/遥`。现在**缺席 = 不动** |
 | `since: "world"` 的过期拍**默认拒绝** | 一份 `day: 0..6` 且写了 `since: "world"` 的包装进第 40 天的世界,那几拍会在下一 tick 一起烧掉 —— 现在当场拒并逐条列出,`--force` 才装。**去掉 `since` 就好**(缺省 `pack` = 从这份包落地那天算起) |
 | 同一个 pack 升级**不再打回上一版那几拍的零点** | 发 v1.1.0 补一拍时,上一版那几拍照旧从它们各自落地那天算。⚠️ **但 v1.1.0 里只放「新增的记录」** ——把上一版那几拍原样带上会 **rc 2**(拍 id 撞车,`beat_fired` 按 id 配对)。准确写法见 §3.65(d) |
@@ -6108,7 +6108,7 @@ anima-world pack install 第二周.cyberworld --world-id w --force  # 我确实�
 **在册的人的记忆**同轮开了:**只增不改**,按 `(agent_id, summary)` 去重
 (同一份包装两遍不会让她记得两次)。已有的一条一个字不动 —— 记忆是演化态。
 
-回执多两格:`personality: [谁]` / `memories: N`;拒掉的那几个在 `skipped.personality`。
+回执多两格:`personality: [谁]` / `memories: N`。⚠️ **`skipped.personality` 不是「被拒的那几个」**(3.10.2 起语义翻了面,见 §3.65(e))—— 被拒时不带 `--force` 是**整份 rc 2**、带了就照写,两种都不会留在那张表上。
 
 ### (b) 停用:`pack disable`
 
@@ -6231,6 +6231,36 @@ anima-world contract --json | jq '.packs.disable_method, .host.moments, .host.aw
 ⚠️ 同一条对 `--world-file` 那条路也成立,而且更严:**同 id 同内容**静默跳过、
 **同 id 改过**说一句而照常开机、**新增**的 rc 2(见 (a))。
 
+### (e) 🔴 回执两格的语义翻了面,而你们照它印字(3.10.2)
+
+**这一条是 tool 那侧会印错字的一条,单列出来。**
+
+**① `skipped` 那两格**。3.10.1 之前它记的是「**被拒的那几个**」,而那个语义
+**结构上永远为空**:人设 CAS 冲突时不带 `--force` 是**整份 rc 2**(回执根本不返回),
+带了 `--force` 就照写(也不算跳过)。一格永远为空的读数,和没有这一格是同一件事。
+
+3.10.2 起它记的是**真的没写下去的那几样**:
+
+| 格 | 现在记的是 | 不是 |
+|---|---|---|
+| `skipped.personality` | 「**不必写**」—— 这份包想写的那句,世界里已经是了 | ~~被拒的那几个~~ |
+| `skipped.memories` | 「**她已经记着了**」—— 记忆只增不改,按 `(谁, 那句话)` 去重 | ~~被拒的条数~~ |
+
+🔴 **照旧语义印字,会把一份装得好好的包报成「有东西没装上」** ——
+`skipped.personality` 非空**不是**警告,它说的是「这几个人本来就已经是这样了」。
+
+**② `--force` 拆成两格**。`forced` 只说「这一趟强来过」,而 `--force` 放行的是
+**两件**事(过期的拍 / 人设 CAS 冲突)。新增两格说**强的是哪一件**:
+
+- `forced_beats: [拍 id…]` —— 那几拍写着 `since: "world"` 且已过期,装上去下一 tick 一起响
+- `forced_personality: [谁…]` —— 那几个人的人设不是这份包上一版写下去的那一句
+
+⚠️ 只读 `forced` 一格的话,一份**只为改人设**而 `--force` 的包会被你们解释成
+「有几拍要一起烧掉」—— 而它里头一条 `since` 都没有。
+
+**③ 回执一共十七格**,那张表**只有一处**:`docs/REFERENCE.md` §4.11「回执键表」
+(引擎侧有一道闸拿**真回执**逐格比着它,连那个数字词一起比)。别在别处再抄一份。
+
 ### (d) 度量单位那条,值得你们也记一笔
 
 3.10.0 的 CHANGELOG 里写着「`storage` 段一个字没动(六格)—— 运维台那条 deepEqual
@@ -6241,3 +6271,76 @@ anima-world contract --json | jq '.packs.disable_method, .host.moments, .host.aw
 **一句话同时用两把尺(数格子 / 逐字节),就必然有一把在撒谎。**
 判据:**把两支引擎的 `storage` 段 `diff` 一遍**,别数格子。
 
+
+## 3.66 实时编剧:周更从「剧本」变成「指导」(玩法层批 3a,3.11.0,已交付)
+
+> 老板 2026-09-02:「原著里的所有人都是做吉祥物的,我们要做的是让玩家玩出自己的
+> 剧情和精彩的故事……我觉得应该是实时编剧,这个周更只能算是指导」;补的五条口径:
+> **每操作一次就有新剧情** · 张力决定写多大 · 预设的拍是**锚点** · 主线由玩家写 ·
+> 剧情要有张力、NPC 要配合。
+> 裁决全文 `../../../docs/任务单/2026-09-02-玩法层批3-实时编剧.md` §2。
+
+### (a) 你们那侧最要紧的一句:周更包**从此可以一条拍都不写**
+
+一份指导包 = `pack` 段 + **`guidance` 段**(作者层**第十六个段**),里面没有剧情,
+只有「这个世界讲什么 / 谁能被叫出来 / 哪几件绝对不许发生 / 多快 / 几个路口」。
+编剧在玩家玩的时候照着它即兴写下一拍 —— **主线由玩家自己走**。
+
+⚠️ **带 `guidance` 记录的包 `engine_min` 必须写 `3.11.0`** ——
+老引擎见到不认识的作者层 `type` 是**开不了机的硬失败**(和 `beat` / `plugin` /
+`edge` / `pack` 逐字同一种,响的)。
+**探测按段**:`contract --json` 的 `director.guidance_author_type` 在不在。
+
+### (b) `guidance` 那六格,以及**哪几格是闸**
+
+```jsonc
+{"kind": "author", "type": "guidance", "body": {
+  "themes": ["血统与归属", "谁是自己人"],
+  "cast_pool": ["lu-mingfei", "chu-zihang", …],
+  "forbidden": {
+    "agents":    ["xiami", "fuluosite"],     // 闸:这几个人永远不会被派出来
+    "locations": [],                          // 闸
+    "ops":       ["persona_update", "agent_leave"],  // 闸(闭集,写错当场拒)
+    "text":      ["不许提前揭穿老唐的身份", …]        // 只进提示词
+  },
+  "tone": "少年在一所把人分成三六九等的学校里找位置:自嘲、克制……",
+  "pacing": {"ceiling": 0.7, "target_curve": {"setup": 1, "escalation": 3, "climax": 5}},
+  "arcs": [{"id": "3E", "milestone": [{"pred": "r_type", "as": "gu-de-li-an",
+                                       "target": "player", "contains": "新生"}],
+            "steer": "把压力堆在「考不过会怎样」上……"}]
+}}
+```
+
+| 格 | 是不是闸 | 写错了会怎样 |
+|---|---|---|
+| `forbidden.agents` / `.locations` / `.ops` | 🔴 **是** | `ops` 是**闭集,写错当场拒**;前两个只警告(一份指导可以先带新人进来再写他) |
+| `forbidden.text` | ❌ 不是 | 它只进提示词,而**一句写在提示词里的禁令不是闸** —— 真要挡住谁,写进 `agents` |
+| `cast_pool` | 是(筛人) | **不写 = 全世界**(减去藏起来的与被硬闸拦下的);写了就只许用池子里的 |
+| `pacing.ceiling` | 安全阀 | 张力是**目标曲线**不是上限,`ceiling` 只在顶到时把这一轮压成 `breathe` |
+| `arcs[].milestone` | 只读 | 用**拍那一套谓词**(同一个校验器),而它**不会自己响** —— 会响的永远是你们写的 per-player 拍 |
+
+⚠️ **`pacing.moves_per_day` 有意没有**:它和「每操作一次都有回应」直接打架。
+节制由 `director.max_per_player_per_hour`(默认 6)管,而**超上限退成一句模板旁白,
+不是沉默**。
+
+⚠️ **把一个 `billing: "hidden"` 的人写进 `cast_pool`**:他照旧不会出场,
+而 `pack install` 的回执上会**有一行说这件事**(`guidance_warnings`)——
+静默满足一个作者写下的要求,是这一层最贵的错。
+
+### (c) 换一份指导 = 一次 `pack install`
+
+`guidance` 是**整份覆盖**(创作者这一周改了指导,那就是改了),和 `config` /
+`world_setting` 同类;`--world-file` 那条路上它**只填缺不覆盖**。
+回执多一格 `guidance: true`(**回执现在十七格**,那张表见 REFERENCE §4.11)。
+
+### (d) 你们读得到「编剧为谁写了什么」
+
+- `anima-world player story --player <pid> --json` → 张力 / 相位 / 开着的线
+  (每条带 `promise` / `with` / `stake` / `hours_left`)/ 最近几拍。
+- 全量日志:`director_log` 事件(**不在 `SUBSCRIBABLE_EVENTS` 上** —— 它的载荷形状
+  3b 还要动,现在进那张策展表就是一句拿不掉的公开契约)。
+
+### (e) 三件今天**不做**的,别照着写
+
+`confront` / `reward` / `callback` 三个动作、承诺的**叙事回收**、多玩家的线互相
+进入 —— 都在 3b/3c。**结算是做了的**:一条线到期没人管,引擎自己动手扣那笔赌注。

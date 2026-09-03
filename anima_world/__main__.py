@@ -22,6 +22,11 @@ from anima_world.agent import Agent
 from anima_world.beats import (
     BeatScript, BeatScriptError, coerce_goals, split_against_stored,
 )
+from anima_world.director import (
+    MOVES as DIRECTOR_MOVES, PHASES as DIRECTOR_PHASES,
+    STAKE_KINDS as DIRECTOR_STAKE_KINDS,
+)
+from anima_world.host import PLAYER_MOVE_EVENT_TYPES
 # `PackInstallError` 住在 `world_package` 而不是这儿 —— `python -m` 会把本文件
 # 加载两遍(`__main__` 与 `anima_world.__main__`),同一个 class 语句于是产生
 # 两个不相等的类,`except` 抓不住另一条路抛的那个(验收 A ⑫)。
@@ -435,6 +440,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="他点了「我该干嘛」—— 第四个开口时刻,受 host.ask_cooldown_ticks 管",
     )
     player_host.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
+    )
+    player_story = player_commands.add_parser(
+        "story",
+        help="他的故事走到哪儿了(3.11.0):张力、相位、开着的线、最近几拍编剧写了什么",
+    )
+    _add_world_args(player_story)
+    player_story.add_argument("--player", required=True, help="他的 player_id")
+    player_story.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(契约)"
     )
     player_erase = player_commands.add_parser(
@@ -1176,6 +1190,42 @@ EDIT_PATH_NOTES: dict[str, str] = {
 }
 
 
+def _same_authored_layer_as_before(world_seed: Any, meta: Any) -> bool:
+    """这一趟是不是**同一份文件又开了一次机**(3.11.0,验收 A)。
+
+    🔴 **舰队每次开机都带同一份 `--world-file`**,而那五段「装不进去」说的是
+    「一次**编辑**没生效」—— 二开根本不是编辑。判据必须问**那句话本身**
+    (「这份作者层和上一趟是同一份吗」),不能挂在某个恰好在手边的段上:
+    3.10.2 把它挂在 `beats` 上,于是没有 `beats` 的文件照旧每次重启吼五段。
+
+    做法:把这份作者层里**那五段**规范化成一段字节,和 `:meta` 上存的那一份比。
+    一样 → 二开,闭嘴;不一样(或者头一回) → 照说,并记下这一份。
+
+    ⚠️ **只存一个指纹,不存内容**:存内容就是把作者层抄了第二份,而两份真相
+    迟早对不上;指纹只回答"变没变"这一个问题,而那正是这里要问的。
+    """
+    if not world_seed:
+        return False
+    import hashlib
+
+    watched = {k: world_seed.get(k) for k in
+               ("beats", "config", "world_setting", "agents", "memories")}
+    try:
+        blob = json.dumps(watched, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return False
+    fingerprint = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+    if meta is None:
+        return False
+    try:
+        before = meta.get("authored_edit_fp")
+        meta.put("authored_edit_fp", fingerprint)
+    except Exception:  # noqa: BLE001 - 记不下指纹不该掀翻开机,只是话会多说一遍
+        logger.debug("作者层指纹存不下", exc_info=True)
+        return False
+    return bool(before) and str(before) == fingerprint
+
+
 def edit_path_silent_notes(
     authored: dict[str, Any] | None, *, on_roster: Any = None,
 ) -> list[str]:
@@ -1537,7 +1587,116 @@ def _register_authored_layer_checks() -> None:
         world_plugin_errors,
         world_edge_errors,
         world_pack_errors,
+        world_guidance_errors,
     )
+
+
+#: 一份 `guidance` 认哪几个键。闭集,和 `PACK_KEYS` / `BEAT_KEYS` 同一条纪律:
+#: 不认识的键**当场说**,而不是照收然后丢掉(那一族这个仓库收了五轮)。
+GUIDANCE_KEYS = ("themes", "cast_pool", "forbidden", "tone", "pacing", "arcs")
+#: `forbidden` 里那四格。🔴 **前三格是闸,第四格只进提示词** ——
+#: 而这个分界是承重的:一句写在提示词里的禁令**不是闸**,模型可以不听它。
+FORBIDDEN_KEYS = ("agents", "locations", "ops", "text")
+PACING_KEYS = ("ceiling", "target_curve")
+ARC_KEYS = ("id", "milestone", "steer")
+
+
+def world_guidance_errors(authored: dict[str, Any] | None) -> list[str]:
+    """给编剧的那份**指导**(3.11.0,作者层第十六个段)。
+
+    分界和 `beat_script_warnings` 逐字同一条:**是闸的当场拒,不是闸的只警告。**
+    - `forbidden.ops` 是**闸**(引擎按它拦 op),写错一个字母 = 这道禁令永远
+      不生效、零报错 → **当场拒**。
+    - `cast_pool` / `forbidden.agents` / `forbidden.locations` 指着谁,离线这一层
+      答不出来(一份指导完全可以先带一个新人进来再把他写进池子)→ 只警告
+      (`director.cast_pool_warnings` 在装包那一刻说)。
+    - `arcs[].milestone` 用**拍那一套谓词**,不新发明一门表达式:作者已经在
+      同一份文件里写过它,而 `expressions.py` 那套是**算术**,里程碑问的是
+      「关系到没到、有没有那样东西」—— 那正是谓词那张表。
+    """
+    from anima_world.beats import _validate_predicate
+    from anima_world.director import MOVES, STAKE_KINDS  # noqa: F401 - 闭集的出处
+
+    body = (authored or {}).get("guidance")
+    if body is None:
+        return []
+    if not isinstance(body, dict):
+        return ["`guidance` 要是一个对象(一个世界只有一份当下的指导)"]
+    errors: list[str] = []
+    unknown = sorted(set(body) - set(GUIDANCE_KEYS))
+    if unknown:
+        errors.append(
+            f"guidance 里不认识的字段 {'、'.join(unknown)} —— 只有 "
+            f"{'、'.join(GUIDANCE_KEYS)}")
+    for key in ("themes", "cast_pool"):
+        value = body.get(key)
+        if value is not None and (not isinstance(value, list)
+                                  or not all(isinstance(x, str) for x in value)):
+            errors.append(f"guidance.{key} 要是一列字符串")
+    if body.get("tone") is not None and not isinstance(body.get("tone"), str):
+        errors.append("guidance.tone 要是一段文本")
+    forbidden = body.get("forbidden")
+    if forbidden is not None:
+        if not isinstance(forbidden, dict):
+            errors.append("guidance.forbidden 要是一个对象 —— 四格:"
+                          f"{'、'.join(FORBIDDEN_KEYS)}(前三格是闸,text 只进提示词)")
+        else:
+            bad = sorted(set(forbidden) - set(FORBIDDEN_KEYS))
+            if bad:
+                errors.append(f"guidance.forbidden 里不认识的字段 {'、'.join(bad)}")
+            for key in FORBIDDEN_KEYS:
+                value = forbidden.get(key)
+                if value is not None and (not isinstance(value, list)
+                                          or not all(isinstance(x, str) for x in value)):
+                    errors.append(f"guidance.forbidden.{key} 要是一列字符串")
+            # 🔴 **`ops` 是闸,所以它是闭集** —— 拼错一个字母,那道禁令永远
+            # 不生效而且不报错。
+            from anima_world.beats import VALID_OPS
+            unknown_ops = sorted(
+                {str(o) for o in (forbidden.get("ops") or ())} - set(VALID_OPS))
+            if unknown_ops:
+                errors.append(
+                    f"guidance.forbidden.ops 里不认识的 op {'、'.join(unknown_ops)}"
+                    f" —— 只有 {'、'.join(sorted(VALID_OPS))}。「它是闸」:"
+                    "拼错一个字母,这道禁令就永远不生效,而且不报错")
+    pacing = body.get("pacing")
+    if pacing is not None:
+        if not isinstance(pacing, dict):
+            errors.append(f"guidance.pacing 要是一个对象({'、'.join(PACING_KEYS)})")
+        else:
+            bad = sorted(set(pacing) - set(PACING_KEYS))
+            if bad:
+                errors.append(
+                    f"guidance.pacing 里不认识的字段 {'、'.join(bad)} —— 只有 "
+                    f"{'、'.join(PACING_KEYS)}。⚠️ `moves_per_day` 有意没有:"
+                    "它和「每操作一次都有回应」直接打架,节制由每世界小时的上限管")
+            ceiling = pacing.get("ceiling")
+            if ceiling is not None and (not isinstance(ceiling, (int, float))
+                                        or not 0 < float(ceiling) <= 1):
+                errors.append("guidance.pacing.ceiling 要是 (0, 1] 里的一个数"
+                              "(它是「安全阀」,不是目标 —— 目标是 target_curve)")
+    arcs = body.get("arcs")
+    if arcs is not None:
+        if not isinstance(arcs, list):
+            errors.append("guidance.arcs 要是一列路口")
+        else:
+            for i, arc in enumerate(arcs):
+                label = f"guidance.arcs[{i}]"
+                if not isinstance(arc, dict):
+                    errors.append(f"{label}: 不是一个对象")
+                    continue
+                bad = sorted(set(arc) - set(ARC_KEYS))
+                if bad:
+                    errors.append(f"{label}: 不认识的字段 {'、'.join(bad)}")
+                if not str(arc.get("id") or "").strip():
+                    errors.append(f"{label}: 少了 'id'")
+                if not str(arc.get("steer") or "").strip():
+                    errors.append(
+                        f"{label}: 少了 'steer' —— 到了这个路口编剧该往哪儿使劲,"
+                        "空着的话它不知道")
+                for pred in (arc.get("milestone") or ()):
+                    errors.extend(_validate_predicate(pred, label))
+    return errors
 
 
 def _authored_media_warnings(authored: dict[str, Any] | None) -> list[str]:
@@ -2347,10 +2506,18 @@ def build_serve_scheduler(
     # **`--beats` 赢这一趟,但不写库。** 命令行上指名的那个文件是一次**明示的
     # 覆盖**(试炼、调试都靠它),而库里那份是这个世界自己的剧情。让它写回去的话,
     # 一次试炼就会把作者的剧情换掉,而且不报错。
-    # 🆕 3.10.2(验收 C ⑤):这一趟是不是「同一份文件又开了一次机」。
-    # 是的话,那五段「装不进去」的话一句都不说 —— 它们说的是「一次编辑没生效」,
-    # 而这一趟根本不是编辑。**每次重启都吼五段,读的人第一反应是出事了。**
-    quiet_edit_notes = False
+    # 🆕 3.10.2(验收 C ⑤)/ 3.11.0(验收 A 修正):这一趟是不是「同一份文件又
+    # 开了一次机」。是的话,那五段「装不进去」的话一句都不说 —— 它们说的是
+    # 「一次编辑没生效」,而这一趟根本不是编辑。
+    # **每次重启都吼五段,读的人第一反应是出事了,而世界好好的。**
+    #
+    # 🔴 **判据不能挂在 `beats` 上**(3.11.0,验收 A 逮的):3.10.2 那一版把它写在
+    # `if world_seed.get("beats")` 分支里,于是**一份没有 `beats` 段的文件**
+    # (demo、晚潮、灯塔湾……)二开照旧吼五段。
+    # ⚠️ **这和 A① 那条「只给带拍的包补门」是同一种漏法,而且隔了一个 commit
+    # 又犯了一次** —— 病根都是「拿一个恰好在手边的条件当判据」。
+    # 所以判据抬成它本来要问的那句话:**这份作者层,和库里已经有的那份是同一份吗。**
+    quiet_edit_notes = _same_authored_layer_as_before(world_seed, meta)
     if seed_author_layer and world_seed and world_seed.get("beats"):
         # 验一遍再落库(`from_data` 会抛 `BeatScriptError`,和坏 `kinds` 同一条路),
         # 并且**拿它验过的那一份去播**。
@@ -2405,8 +2572,15 @@ def build_serve_scheduler(
                 # **一次编辑没生效**;可这一趟根本不是编辑,是同一份文件又开了
                 # 一次机。**每次重启都吼五段"装不进去"**,读的人第一反应是出事了,
                 # 而世界好好的 —— 一句在错的时机说的真话,和一句假话一样贵。
-                quiet_edit_notes = True
+                quiet_edit_notes = True   # 拍这一段也一样(判据在上面已经算过)
             # 走到这儿 = 没有新增的拍 → **开机继续**,rc 0。
+    # 🆕 3.11.0(批 3a):给编剧的那份指导。**只填缺不覆盖**,和地图/规律同一条契约
+    # (换一份指导走 `pack install`,那条路是明示的覆盖)。
+    if seed_author_layer and world_seed and world_seed.get("guidance"):
+        from anima_world.redis_state import RedisGuidanceStore
+        if RedisGuidanceStore(redis, world_id).seed(world_seed["guidance"]):
+            logger.info("装进一份给编剧的指导")
+
     if beat_script is None and len(beats_store):
         # **首启自动带** —— 这一条就是 D1 的另一半。没有它,节拍进得了世界文件
         # 却仍然要靠 `--beats` 才响,而舰队上没有任何一条路会去传那个参数:
@@ -4474,6 +4648,16 @@ def disable_authored_pack(scheduler: Any, pack_id: str) -> dict[str, Any]:
     return receipt
 
 
+def _hidden_agent_ids(scheduler: Any) -> set[str]:
+    """`card.billing == "hidden"` 的那几个人 —— 装包这一侧要拿它去点名。"""
+    out: set[str] = set()
+    for aid, state in (scheduler._memory_projection.agents or {}).items():
+        card = (getattr(state, "spec", None) or {}).get("card") or {}
+        if isinstance(card, dict) and str(card.get("billing") or "") == "hidden":
+            out.add(str(aid))
+    return out
+
+
 def enable_authored_pack(scheduler: Any, pack_id: str) -> dict[str, Any]:
     """把一份停用的内容包**重新启用**(3.10.1,验收 A ③)—— `disable` 的逆。
 
@@ -4886,7 +5070,6 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             "覆盖它等于把这中间发生的事抹掉,而账面上什么都看不出来 —— "
             "确实要覆盖就加 `--force`"
         ])
-    skipped_persona = sorted(persona_conflict)
     # 🔴 **在册的人的记忆:只增不改**(2a-②)。记忆是**演化态** —— 改一条既有的
     # 等于伪造历史;而"这一周发生过一件事"是新的一条,加得进去。
     # 按 `(agent_id, summary)` 去重:同一份包装两遍不该让她记得两次。
@@ -4904,6 +5087,7 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         "beats": [str(b.get("id")) for b in new_beats],
         "config": [],
         "world_setting": False,
+        "guidance": False,
         "agents": [],
         "locations": [],
         # **装不进去的那几段也要有一格。** 一张只列"装了什么"的回执,读起来像
@@ -5061,6 +5245,26 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
                 receipt["config"].append(str(key))
                 wrote_config[str(key)] = repr(config_store.world_value(str(key), None))
                 config_before[str(key)] = "" if had is None else repr(had)
+        # 🆕 3.11.0:指导**整份换掉** —— 创作者这一周改了指导,那就是改了。
+        # 和 `world_setting` / `config` 同一类(它们都是"这一周照着什么跑"),
+        # 而不是 `beat` 那种"和历史配对、只增不改"的东西。
+        guide = authored.get("guidance")
+        if isinstance(guide, dict) and guide:
+            from anima_world.redis_state import RedisGuidanceStore
+            RedisGuidanceStore(redis, world_id).put(guide)
+            receipt["guidance"] = True
+            # **静默满足一个作者写下的要求,是这一层最贵的错**:他把一个藏起来的
+            # 人写进池子,那个人永远不出场而屏幕上什么都不少。
+            from anima_world.director import cast_pool_warnings
+            hidden = {
+                str(r.get("agent_id") or "")
+                for r in (scheduler._memory_projection.agents and [] or [])
+            }
+            for problem in cast_pool_warnings(
+                    guide.get("cast_pool") or (), hidden=_hidden_agent_ids(scheduler),
+                    forbidden=(guide.get("forbidden") or {}).get("agents") or ()):
+                logger.warning("内容包 %s 的指导:%s", pack_id, problem)
+                receipt.setdefault("guidance_warnings", []).append(problem)
         setting = authored.get("world_setting")
         if isinstance(setting, str) and setting.strip() and prompt_store is not None:
             prompt_store.set("world.setting", setting.strip())
@@ -8048,7 +8252,7 @@ def run_player(args: argparse.Namespace) -> int:
     from anima_world.api import World
 
     command = getattr(args, "player_command", None)
-    if command not in {"forget", "options", "erase", "host"}:
+    if command not in {"forget", "options", "erase", "host", "story"}:
         print("[player] 只有 forget / options / erase / host 四个子命令", file=sys.stderr)
         return 2
 
@@ -8072,6 +8276,37 @@ def run_player(args: argparse.Namespace) -> int:
         finally:
             world.close()
         return _print_host_turn(args, turn)
+    if command == "story":
+        try:
+            story = world.player_story(args.player)
+        finally:
+            world.close()
+        if args.as_json:
+            print(json.dumps(story, ensure_ascii=False, indent=2))
+            return 0
+        # **渲染是赠品,`--json` 才是契约**(和 map / host 同一条)。
+        bands = ((0.25, "松弛"), (0.55, "有点绷"), (0.8, "紧"), (1.01, "顶到头了"))
+        word = next(w for cut, w in bands if story["tension"] < cut)
+        print(onboarding.rule(f"{args.player} 的故事"))
+        print(f"  张力 {story['tension']:.2f}({word})· 这条线走到「{story['phase']}」"
+              f"· 编剧一共写过 {story['moves']} 拍")
+        if not story["threads"]:
+            print("  还没有开着的线。")
+        for thread in story["threads"]:
+            left = thread.get("hours_left")
+            when = f",还剩 {left:g} 个世界小时要有个交代" if left is not None else ""
+            stake = thread.get("stake") or {}
+            what = f";押着{stake.get('what') or stake.get('kind')}" if stake else ""
+            print(f"  · {thread.get('promise') or thread.get('id')}"
+                  f"(和 {thread.get('with') or '?'}{when}{what})")
+        if story["recent_log"]:
+            print("  最近几拍:")
+            for row in story["recent_log"][-5:]:
+                payload = row.get("payload") or {}
+                who = payload.get("target_name") or payload.get("target") or ""
+                why = payload.get("why") or ""
+                print(f"    〔{payload.get('move')}〕{who} {why}".rstrip())
+        return 0
     if command == "erase":
         try:
             receipt = world.erase_player(
@@ -8908,6 +9143,48 @@ def contract_payload() -> dict[str, Any]:
         "engine_version": anima_world.__version__,
         # world.db 退役(2.0):世界住 Redis,键前缀就是"格式"。镜像端此前读
         # `db.*` —— 那一节没有了,读到缺键就该知道要对齐这一版。
+        # 🆕 3.11.0(玩法层批 3a):**实时编剧。**
+        #
+        # 老板 2026-09-02:「用户每操作一次应该就有新的剧情触发」「剧情要有张力,
+        # NPC 要配合」「两个玩家走出两条不一样的线」。
+        # 🔴 **消费方按这一段在不在做能力探测,不比版本号。**
+        "director": {
+            "enabled_key": "director.enabled",
+            "moves": list(DIRECTOR_MOVES),
+            "phases": list(DIRECTOR_PHASES),
+            "stake_kinds": list(DIRECTOR_STAKE_KINDS),
+            "event": "director_log",
+            # **不进 `SUBSCRIBABLE_EVENTS`**(裁决 §2.4):那张表是策展的,
+            # 进了就是一句拿不掉的公开契约,而这一层的载荷形状 3b 必然要动。
+            "subscribable": False,
+            "story_method": "player_story",
+            "guidance_method": "guidance",
+            "guidance_author_type": "guidance",
+            "guidance_keys": list(GUIDANCE_KEYS),
+            "forbidden_keys": list(FORBIDDEN_KEYS),
+            "pacing_keys": list(PACING_KEYS),
+            "arc_keys": list(ARC_KEYS),
+            "cli": "anima-world player story --player <pid> [--json]",
+            "config_keys": ["director.enabled", "director.max_per_player_per_hour",
+                            "director.pin_ticks", "director.due_hours"],
+            "moment": "acted",
+            "move_event_types": list(PLAYER_MOVE_EVENT_TYPES),
+            "gloss": (
+                "**实时编剧**:世界里一个不上场的角色,在玩家玩的时候即兴写下一拍。"
+                "触发是**玩家的每一次操作**(`host.moments` 里那个 `acted`,"
+                "钥匙的第四格 `move_seq`),而编剧跑在**主持人那一屏的上半场** ——"
+                "它读的正是那一屏的回顾(「他刚做了什么」全仓只有一处算得出来)。"
+                "🔴 **不许沉默**:超上限 / 同意门拒了 / 锚点刚响过,都退成一句 "
+                "`breathe`(指着他刚做的事的模板句),而不是什么都不发生;"
+                "没配 key 时整条 mock 路照跑。"
+                "🔴 **LLM 只挑闭集里的一项、挑一个已经筛过的人、写字** ——"
+                "合法性由引擎验:藏起来的人和禁区里的人**根本不进那份提示**。"
+                "🔴 **输出不写 `:beats`**:那是创世态而这是演化态,而且它无界;"
+                "op 走剧情拍**同一个**展开函数当场兑现,一条新的写世界的路都不开。"
+                "故事状态**零新键**,折自 `director_log`;张力是**目标曲线**不是上限,"
+                "`complicate` 必须带真赌注(到期引擎自己动手扣)。"
+            ),
+        },
         "storage": {
             "backend": "redis",
             "key_prefix": "anima:{world_id}:",
@@ -9941,10 +10218,17 @@ def run_pack(args: argparse.Namespace) -> int:
             got = receipt.get(name) or []
             if got:
                 print(f"  · {len(got)} {said}进了这个世界:{'、'.join(map(str, got))}")
+        # 🔴 **`skipped` 那两格 3.10.2 起语义翻了面**,而这一屏还在照旧语义印字
+        # (3.11.0,验收 A):它记的是「**不必写**」与「**她已经记着了**」,
+        # **不是**「被拒的」—— 印成「⚠ 没装进去」会把一份**装得好好的**包
+        # 报成出了事。而且两格同时非空时,那一句 `reason` 只解释得了其中一半。
+        # **两格分开说,而且不带 ⚠** —— 它们本来就不是警告。
         skipped = receipt.get("skipped") or {}
-        if skipped.get("personality") or skipped.get("memories"):
-            print(f"  ⚠ 没装进去:{len(skipped.get('personality') or [])} 个人的人设、"
-                  f"{skipped.get('memories') or 0} 条记忆 —— {skipped.get('reason') or ''}")
+        if skipped.get("personality"):
+            print(f"  · {len(skipped['personality'])} 个人的人设不必写"
+                  f"(世界里已经是这一句了):{'、'.join(skipped['personality'])}")
+        if skipped.get("memories"):
+            print(f"  · {skipped['memories']} 条记忆她已经记着了,没有重复补")
         if receipt.get("forced"):
             # 🔴 **按真原因说**(3.10.2,验收 C ②)。`forced` 是
             # `force and (expired or persona_conflict)` —— 两种原因,而上一版
@@ -10439,6 +10723,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     # (`Scheduler.RUN_SINCE_SEQ`)。**戳不在 ≠ 没问题**,见 `_report_engagements_kept`。
     run_since_seq = _run_since_seq(redis, world_id)
     plugin_events: dict[str, int] = {}
+    director_moves = director_collected = director_mock = 0
+    director_refused = director_this_run = 0
     for e in log.replay():
         payload = e.payload or {}
         # 插件发的事件叫 `<插件>.<type>` —— 顺着这趟 replay 数,零额外成本
@@ -10446,6 +10732,21 @@ def run_doctor(args: argparse.Namespace) -> int:
         if "." in e.type:
             plugin_events[e.type.split(".", 1)[0]] = \
                 plugin_events.get(e.type.split(".", 1)[0], 0) + 1
+        # 🆕 3.11.0(批 3a):编剧写了几拍、几拍退成模板、几条线到期收了账。
+        # **顺这一趟 replay 数,零额外成本** —— 这条日志十几万条是常态,
+        # 为它单开一趟就是按项数线性涨的代价。
+        if e.type == "director_log":
+            payload = e.payload or {}
+            move = str(payload.get("move") or "")
+            director_moves += 1
+            if move == "collect":
+                director_collected += 1
+            elif str(payload.get("source") or "") == "mock":
+                director_mock += 1
+            if payload.get("refused_by"):
+                director_refused += 1
+            if int(e.seq or 0) > run_since_seq:
+                director_this_run += 1
         if e.type == "agent_join" and e.who:
             joined.add(e.who)
         elif e.type == "entity_engage":
@@ -10520,6 +10821,17 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"  {onboarding.green(onboarding.OK)} 时钟 {onboarding.human_tick_rate(rate, mpt)}")
 
     _report_plugins(redis, world_id, plugin_events)
+    # 🆕 3.11.0:编剧那条链通没通。**账要全,判要新**(3.7.0 那条):
+    # 屏幕上报这个世界的一生,而"需要处理"只看**本次开机以来**。
+    if bool(store.get("director.enabled", default=False)):
+        print(f"  {onboarding.green(onboarding.OK)} 编剧:一共写过 {director_moves} 拍"
+              f"(本次开机 {director_this_run});{director_mock} 拍退成模板句、"
+              f"{director_refused} 拍被同意门或上限挡过、{director_collected} 条线到期收了账")
+        if director_moves and director_mock == director_moves:
+            problems += 1
+            print(f"  {onboarding.yellow(onboarding.WARN)} 每一拍都是模板句 —— "
+                  "多半是没配 LLM 密钥,或者背景槽一直失败。"
+                  "「不许沉默」这条还成立,但玩家读到的全是模板")
     problems += _report_autonomy_chain(redis, world_id, store)
     problems += _report_engagements_kept(
         engaged, dropped, finished=finished, gone=gone,

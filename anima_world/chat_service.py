@@ -238,6 +238,13 @@ PROMPT_BLOCK_ORDER = (
     "overrides",          # 这位玩家教过她的对话规则
     "identity",           # 认证对话身份(最高优先级事实)
     "extra",              # 本轮临时插入(拒谈话题、loop 的续说/插话提示)
+    # 🆕 3.11.0(批 3a,老板口径 5「NPC 要配合」):编剧派她来的**那个意图**。
+    #
+    # 🔴 **位置是承重的:排在 `persona.anchor` 之前。** 那一块存在的全部理由就是
+    # 「她是谁,再说一遍」,紧挨着"你要不要做点什么"之前 —— 把编剧意图排在它
+    # **之后**,等于让一句临时指令压过她是谁,而那正是口径 5 里「出戏」的样子。
+    # 排在前面,锚点仍然最后落锤:**她追这一拍的意图,但用她自己的方式追。**
+    "director.intent",
     "persona.anchor",     # 她是谁 —— 再说一遍(R1),紧挨着"你要不要做点什么"之前
     "stance",             # 关系性意图
     "tools",              # 她可以做的事
@@ -913,6 +920,13 @@ class ChatService:
         for block in extra_system or ():
             if block:
                 blocks.append(PromptBlock("extra", block))
+        # 🆕 3.11.0:编剧派她来干什么。**走这一个拼装点,不往 system 里另拼一句**
+        # —— 「调试视图另写一遍拼装就会撒谎」,而改提示词的人正是靠
+        # `anima-world prompt` 逐块看它。**有效期跟 pin 同一个来源**(见
+        # `Scheduler.director_intent_for`):过期自己消失,不另存一份"该不该拼"。
+        intent = self._director_intent(agent_id)
+        if intent:
+            blocks.append(PromptBlock("director.intent", intent))
         # R1:先把"你是谁"再压一遍,紧接着才问"你要不要做点什么"。
         #
         # **为什么不是压在最末。** 末尾只有一个位置,而 stance / 能力菜单坐在那里是
@@ -926,6 +940,32 @@ class ChatService:
             blocks.append(PromptBlock("persona.anchor", anchor_block))
         blocks.extend(self._choice_blocks(agent_id, interlocutor_id))
         return blocks
+
+    def _director_intent(self, agent_id: str) -> str:
+        """编剧这一拍派她来干什么 —— 一句话,没有就是空串(3.11.0,批 3a)。
+
+        🔴 **它是"意图",不是台词稿**:告诉她**为什么**在这儿,让她用自己的方式
+        演。塞一句"你必须说这句话"进去,出来的是一个念台词的人偶 ——
+        而这一层的全部立场是角色自己做决定。
+        """
+        provider = getattr(self, "_director_intent_provider", None)
+        if provider is None:
+            return ""
+        try:
+            intent = provider(agent_id)
+        except Exception:  # noqa: BLE001 - 读不到意图不该掀翻一轮对话
+            logger.warning("读编剧意图失败 agent=%s", agent_id, exc_info=True)
+            return ""
+        if not intent:
+            return ""
+        goal = str(intent.get("goal") or "").strip()
+        line = str(intent.get("line") or "").strip()
+        said = "你现在会在这儿,是因为你有话要跟他说。"
+        if goal:
+            said += f"你来找他的由头:{goal}。"
+        if line:
+            said += f"你心里想说的大意是「{line}」——**用你自己的话说**,别照念。"
+        return said + "把这件事推进一步,而不是绕开它。"
 
     def _persona_anchor_block(self, agent_id: str) -> str:
         """R1:把"她是谁"再压一份在最尾。**默认关**(`chat.persona_anchor.enabled`)。

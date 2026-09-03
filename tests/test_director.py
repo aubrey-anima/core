@@ -147,7 +147,10 @@ def test_没配key也一定有一句话_而且指着他刚做的事():
     它就是「每操作一次都有回应」在默认状态下的兑现方式。"""
     got = D.mock_move(["你端详了门口那棵老橡树。"])
     assert got["move"] == "breathe" and got["source"] == "mock"
-    assert "老橡树" in got["line"], got
+    assert got["line"], got
+    # 🔴 **别把他刚做的那句再抄一遍**(端到端实跑逮的):这一句排在回顾**后面**,
+    # 而回顾第一行就是那句话 —— 缝进来就是屏上连说两遍。
+    assert "老橡树" not in got["line"], f"把回顾那句抄进来了:{got['line']}"
     # 他还没做过什么时也得有话说,而且不能是空串
     blank = D.mock_move([], place_name="咖啡店")
     assert blank["line"] and "咖啡店" in blank["line"]

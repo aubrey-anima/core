@@ -77,6 +77,8 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_pack_disabled(proj, e)
     elif e.type == "pack_enabled":
         _apply_pack_enabled(proj, e)
+    elif e.type == "director_log":
+        _apply_director_log(proj, e)
     elif e.type == "agent_invites":
         _apply_agent_invites(proj, e)
     elif e.type == "invitation_settled":
@@ -424,6 +426,92 @@ def _apply_pack_installed(proj: Projection, e: Event) -> None:
         "seq": int(e.seq or 0),
     }
     proj.packs[pack_id] = row
+
+
+#: 一个玩家身上留几条线。**有界** —— 它进得了提示词,所以它必须有界
+#: (和 `SETTLED_INVITATIONS_KEPT` 同一把尺子)。掉出去的老线不再被回收,
+#: 而那是对的:一条三十天没人管的线,收它比不收更出戏。
+STORY_THREADS_KEPT = 6
+#: 每小时上限那把尺要数最近几拍。留 `24` 条足够算任何一个小时的窗口。
+STORY_RECENT_KEPT = 24
+
+
+def _apply_director_log(proj: Projection, e: Event) -> None:
+    """编剧写了一拍(3.11.0,批 3a)。**故事状态是它的投影,没有第二张表。**
+
+    和余额折自 `payment` 逐字同一种。存一份直接写的"他的故事走到哪儿了",
+    就多出一种和日志对不上的坏法,而这一层对不上的样子是**编剧对着一个错的
+    张力值决定写多大** —— 没有一处会报错,只是剧情忽然变吵或者忽然死掉。
+    """
+    payload = e.payload or {}
+    player_id = str(payload.get("player_id") or "")
+    if not player_id:
+        return
+    row = proj.stories.setdefault(player_id, {
+        "tension": 0.0, "tension_tick": 0, "phase": "setup",
+        "threads": [], "recent": [], "intent": {}, "moves": 0,
+    })
+    try:
+        tick = int(payload.get("tick", 0) or 0)
+    except (TypeError, ValueError):
+        tick = 0
+    move = str(payload.get("move") or "")
+
+    # ① 结算那一支只收线,不动张力也不算一拍 —— 它不是编剧写的,是到点了。
+    if move == "collect":
+        closed = str(payload.get("thread_id") or "")
+        for thread in row["threads"]:
+            if str(thread.get("id")) == closed:
+                thread["closed"] = True
+                thread["outcome"] = str(payload.get("outcome") or "expired")
+        return
+
+    row["moves"] = int(row.get("moves") or 0) + 1
+    try:
+        row["tension"] = max(0.0, min(1.0, float(payload.get("tension_after", 0.0))))
+    except (TypeError, ValueError):
+        row["tension"] = 0.0
+    row["tension_tick"] = tick
+    row["phase"] = str(payload.get("phase") or row.get("phase") or "setup")
+    recent = list(row.get("recent") or [])
+    recent.append(tick)
+    row["recent"] = recent[-STORY_RECENT_KEPT:]
+
+    # ② 这一拍开了一条线吗。**`due` 那一格现在就得记** —— 开线那一刻不记,
+    #    以后补不回来(推迟功能可以,推迟数据不行)。
+    thread_id = str(payload.get("thread_id") or "")
+    if thread_id and not any(str(t.get("id")) == thread_id for t in row["threads"]):
+        row["threads"].append({
+            "id": thread_id,
+            "promise": str(payload.get("promise") or ""),
+            "with": str(payload.get("target") or ""),
+            "phase": row["phase"],
+            "opened_tick": tick,
+            "stake": payload.get("stake") or None,
+            "due_tick": int(payload.get("due_tick", 0) or 0),
+            "closed": False,
+            "outcome": "",
+        })
+        row["threads"] = row["threads"][-STORY_THREADS_KEPT:]
+    else:
+        for thread in row["threads"]:
+            if str(thread.get("id")) == thread_id:
+                thread["phase"] = row["phase"]
+
+    # ③ 编剧意图:NPC 配合那一块的来源(口径 5)。**带有效期** ——
+    #    过期自己消失,不另存一份"该不该拼这一块"。
+    who = str(payload.get("target") or "")
+    if move != "breathe" and who:
+        row["intent"] = {
+            "agent_id": who,
+            "line": str(payload.get("line") or ""),
+            "goal": str(payload.get("why") or ""),
+            "until_tick": int(payload.get("pin_until", 0) or 0),
+        }
+    elif move == "breathe":
+        # 喘一口气 = 这一拍没派人。**上一拍那个意图到此为止** ——
+        # 留着的话她会在一个已经翻篇的意图上继续演。
+        row["intent"] = {}
 
 
 def _apply_pack_enabled(proj: Projection, e: Event) -> None:
