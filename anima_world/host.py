@@ -84,6 +84,11 @@ def daypart(hour: int) -> str:
 # 事件,而其中绝大多数与他无关(别人走路、别人吃饭)。把全部倒给他等于没有这一段。
 RECAP_EVENT_TYPES = (
     "beat_fired", "payment", "item_transfer", "agent_invites", "entity_interaction",
+    # 🆕 3.10.1(验收 C ⑰):**他不在的时候有人来找过他。**
+    # `agent_hail` 从前只进收件箱,于是「你回来了」那一屏对着两条 hail
+    # 一个字不提 —— 而那正是 `return` 这个时刻最该说的一件事。
+    # ⚠️ 它照旧过 `hidden_agents` 那道闸(下面 `who()`)。
+    "agent_hail",
 )
 #: 一屏最多回顾几条。**截断了必须吭声**(和 perception 的 `overflow` 同一条):
 #: 不说的话他在一个"只发生过三件事"的世界里做决定,而他永远不会知道自己被瞒了。
@@ -228,6 +233,15 @@ def recap_lines(
             what = f"一起{verb}{target}" if verb else "一起做件事"
             lines.append(f"{asker}问你要不要{what}。")
             continue
+        if kind == "agent_hail":
+            if str(payload.get("player_id") or "") != player_key.split(":", 1)[-1]:
+                continue
+            # 藏起来的人照旧只叫「有人」——`who()` 那道闸在这儿也要过。
+            caller = who(str(payload.get("agent_id") or "")) or HIDDEN_WHO
+            said = str(payload.get("line") or "").strip()
+            lines.append(f"{caller}来找过你,说「{said}」。" if said
+                         else f"{caller}来找过你。")
+            continue
         if kind == "entity_interaction":
             if str(event.get("who") or "") != player_key:
                 continue
@@ -318,14 +332,20 @@ def suggestion_seeds(*, hook: str = "", beat_note: str = "",
     有 key 时这几句是给模型的**由头**,没 key 时它们直接就是那几句。
     """
     name = str(agent_name or "").strip()
+    # 🔴 **一屏之内人称不许混**(3.10.1,验收 C ⑱)。上一版这几句写死「他」,
+    # 只有最后一句用名字 —— 于是同一个输入框上方并排着「问问**他**刚才说的那件事」
+    # 和「问问**沈亦柔**最近怎么样」,读起来像在说两个人。
+    # 名字知道就一律用名字,不知道就一律用「TA」(不猜性别 —— 猜错的那一半
+    # 每次都在同一个角色身上错)。
+    who = name or "TA"
     out: list[str] = []
     if beat_note:
-        out.append("问问他刚才说的那件事")
+        out.append(f"问问{who}刚才说的那件事")
     if hook:
-        out.append("接着他手上那件事往下问")
+        out.append(f"接着{who}手上那件事往下问")
     if stance in ("试探", "回避", "刺"):
-        out.append("直接问他怎么了")
-    out.append(f"问问{name}最近怎么样" if name else "问问他最近怎么样")
+        out.append(f"直接问{who}怎么了")
+    out.append(f"问问{who}最近怎么样")
     out.append("说说你自己")
     seen: list[str] = []
     for line in out:

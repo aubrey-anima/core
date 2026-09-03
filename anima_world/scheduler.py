@@ -4667,7 +4667,16 @@ class Scheduler:
         那才是真的推送)。
 
         ⚠️ **玩家不在场也照发**:那正是「他不在的时候」那一段的来源
-        (`return` 时刻会提)。她走到他**上一次在**的地方,事件照旧落进日志。
+        (`return` 时刻会提,3.10.1 起 `agent_hail` 也进那一段的白名单)。
+
+        🔴 **但她不会「走到他上一次在的地方」——这句话上一版写错了**
+        (3.10.1,验收 A ⑩ 实测:NPC 没挪,事件 `location` 是空串)。
+        病根不是漏实现,是**引擎答不出那个问题**:在场表带 TTL(这是它有意的
+        设计,见 `storage.presence`),人一离线那一行就没了,「他上一次在哪」
+        这一层**手上没有**。硬要答就得另存一份"最后位置",而那是第二份真相。
+        所以这一版**照实说**:他不在线时她待在原地,事件里 `location` 是空串,
+        并多一格 `player_present: false` 让宿主分得出「她在他跟前叫的」和
+        「她隔空留了句话」——**一句写错的 docstring 会让人去查一个不存在的 bug**。
         """
         agent_id = str(op.get("agent_id") or "")
         subject = str(op.get("target") or "")
@@ -4688,17 +4697,24 @@ class Scheduler:
                 logger.warning("beat hail:读在场玩家名册失败", exc_info=True)
         info = roster.get(player_id) or {}
         here = str(info.get("location") or "")
-        # 她走过去 —— **真的挪**,不是一句散文(「她的选择必须在世界里兑现」)。
-        if here:
-            brain = self.agents.get(agent_id)
-            if brain is not None:
-                brain.agent.blackboard.write("loc", here)
-                brain.agent.location = here
+        # 🔴 **先判闸,再挪人**(3.10.1,验收 A ⑪)。
+        # 上一版顺序反了:她已经被挪到他跟前,`claim_hail` 才说「今天叫过了」——
+        # 于是那一拍"没叫成",而她**人已经站过去了**。世界里多出一次没有来由的
+        # 位移,日志里一个字都没有(`agent_hail` 那条根本没发)。
+        # **拒绝时一个字都不写**,这条纪律在这儿的落法。
         if self.claim_hail(agent_id, player_id):
             # 今天已经叫过一次了。**说一句**,别静默 —— 作者会以为这一拍没写对。
             logger.info("beat hail:%s 今天已经叫过 %s 了,这一拍不再叫第二次",
                         agent_id, player_id)
             return []
+        # 她走过去 —— **真的挪**,不是一句散文(「她的选择必须在世界里兑现」)。
+        # ⚠️ 他不在线时 `here` 是空串,这儿就不挪(见 docstring:「他上一次在哪」
+        # 这一层答不出来,而猜一个位置是第二份真相)。
+        if here:
+            brain = self.agents.get(agent_id)
+            if brain is not None:
+                brain.agent.blackboard.write("loc", here)
+                brain.agent.location = here
         return [{
             "type": "agent_hail",
             "who": agent_id,
@@ -4709,7 +4725,11 @@ class Scheduler:
                 "player_id": player_id,
                 "player_name": info.get("display_name") or player_id,
                 "location": here,
-                "location_name": self.place_name(here or ""),
+                "location_name": self.place_name(here) if here else "",
+                # 🆕 3.10.1:她是在他跟前叫的,还是隔空留了句话。
+                # 少了这一格,宿主对着一条 `location: ""` 的 hail 分不出
+                # 「引擎没答上来」和「他当时不在」。
+                "player_present": bool(here),
                 # 这一条是**剧情安排的**,不是她闲着想找人 —— 宿主可以按它把弹窗
                 # 写成「他来找你」而不是「他来打招呼」。
                 "reason": "beat",

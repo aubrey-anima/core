@@ -1490,3 +1490,51 @@ def test_订invitation_expired的触发器_真响一次(open_world, tmp_path):
     world.tick(together.DEFAULT_INVITE_TTL_TICKS + 2)
     assert world.stocks("agent:夏")["miss.次数"] == 1.0, \
         "订它的触发器一次都没响 —— 这是一条死事件"
+
+
+# ── hail:先判闸再挪人(3.10.1,验收 A ⑩⑪)──────────────────────────────────
+
+
+def test_hail_今天叫过了_她就不该被挪过去(tmp_path):
+    """🔴 **拒绝时一个字都不写。**
+
+    上一版顺序反了:她先被挪到他跟前,`claim_hail` 才说「今天叫过了」——
+    于是那一拍"没叫成",而她**人已经站过去了**:世界里多出一次没有来由的位移,
+    而日志里一个字都没有(`agent_hail` 那条根本没发)。
+    """
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "hail.db") as world:
+        sch = world.scheduler
+        agent = next(iter(sch.agents))
+        world.player_move("p1", "cafe")
+        # 先叫一次,把当天那个额度用掉
+        assert sch._beat_hail({"op": "hail", "agent_id": agent, "target": "player:p1"})
+        moved_to = sch.agents[agent].agent.location
+        # 把她挪回别处,再叫第二次 —— 这一次该被闸挡住,而且**不许挪她**
+        sch.agents[agent].agent.location = "workshop"
+        sch.agents[agent].agent.blackboard.write("loc", "workshop")
+        assert sch._beat_hail({"op": "hail", "agent_id": agent, "target": "player:p1"}) == []
+        assert sch.agents[agent].agent.location == "workshop", (
+            f"闸挡住了却还是把她挪去了 {sch.agents[agent].agent.location}"
+            f"(第一次叫成时她去的是 {moved_to})"
+        )
+
+
+def test_hail_他不在线_她待在原地而且事件说得出来(tmp_path):
+    """docstring 上一版写着「她走到他**上一次在**的地方」,而实测她没挪、
+    事件 `location` 是空串 —— **一句写错的 docstring 会让人去查一个不存在的
+    bug**。现在照实说,并多一格 `player_present` 让宿主分得出
+    「引擎没答上来」和「他当时不在」。"""
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "hail2.db") as world:
+        sch = world.scheduler
+        agent = next(iter(sch.agents))
+        before = sch.agents[agent].agent.location
+        events = sch._beat_hail({"op": "hail", "agent_id": agent, "target": "player:未登场"})
+        assert events, "他不在线也该照发"
+        payload = events[0]["payload"]
+        assert payload["location"] == "" and payload["location_name"] == ""
+        assert payload["player_present"] is False
+        assert sch.agents[agent].agent.location == before, "他不在线,不该挪她"
