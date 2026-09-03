@@ -8834,6 +8834,9 @@ class World:
         place_name = str(menu.get("location_name") or place)
         transit = (state.get("players") or {}).get(pid) or {}
         in_transit = bool(transit.get("in_transit"))
+        # 在路上时 `place_name` 那一格由 `player_options` 给(真站第四轮 ⑤),
+        # 这一屏原样读它 —— **两扇门说同一句话**。
+        going_now = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
         options = host_mod.select_options(
             self._host_candidates(pid, place, places, menu, in_transit=in_transit),
             limit=int(self.config_get("host.max_options", default=5) or 5),
@@ -8856,7 +8859,7 @@ class World:
         # 接的是**转录那一侧本来就在写的水位**(`contact_store.last_contact_tick`,
         # `World.chat` / `record_chat_turn` 两扇门都写它,`claim_hail` 的 docstring
         # 早就写着这句)。它是 tick 不是 seq,所以**单独一格**,不和 `move_seq` 混。
-        chat_tick = self._last_chat_tick(pid)
+        chat_tick, chat_with = self._last_chat(pid)
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
                                      move_seq=move_seq, chat_tick=chat_tick,
                                      tick=tick, ask=bool(ask),
@@ -8865,8 +8868,17 @@ class World:
             scene = {"text": str(last.get("text") or ""), "source": "cached",
                      "seq": int(last.get("seq") or 0)}
         else:
-            going = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
+            going = going_now
             recap = self._host_recap(pid, since_seq=int(last.get("seq") or 0)) if last else []
+            # 🔴 **聊过的那一句要进回顾**(3.11.2,真站第四轮 ①)。回顾折自日志,
+            # 而这条路**不进日志** —— 于是聊完一轮那一屏虽然重开了,内容和上一屏
+            # 一字不差。**一屏没变化和一屏没开口,在玩家眼里是同一件事**,
+            # 而真站上量到的正是「同一句台词连出三屏」。
+            # 读的是开屏用的**同一个水位**,不另攒一份。
+            if last and chat_tick != int(last.get("chat_tick") or 0) and chat_with:
+                said = host_mod.chat_line(self.scheduler.agent_display_name(chat_with))
+                if said:
+                    recap = list(recap) + [said]
             # 🔴 **编剧是这一屏的上半场**(3.11.0,批 3a,裁决 §2.1①)。
             #
             # 三条理由,每条单独成立:①「他刚做了什么」全仓只有 `_host_recap`
@@ -9051,12 +9063,20 @@ class World:
         # 站在那儿的人照样被派出来。**一道声明了却没人执行的闸,和没有那道闸
         # 一样,只是更贵** —— 作者以为自己挡住了。
         banned_places = {str(x) for x in (forbidden.get("locations") or ())}
+        # 🆕 3.11.2(真站第四轮 ②):**他这一路走过什么 + 最近派过谁**,一次回扫。
+        context = self._director_context(pid)
         cast = dmod.select_cast(
             self._director_candidates(pid, place, banned_places=banned_places),
             cast_pool=guidance.get("cast_pool") or (),
             forbidden=forbidden.get("agents") or (),
             hidden=self._host_hidden_agents(),
             gated=self._director_gates(),
+            # 连着几拍别再派同一张脸 —— **除非那条线该收了**(收线得是同一个人)。
+            # ⚠️ 判据是「到期没有」,不是「有没有开着的线」:后者的下场正是真站
+            # 第四轮量到的那个 —— 第一拍开了一条线在芬格尔身上,于是**往后每一拍
+            # 都保他**,四次 approach 全指同一个人,而池子里有十三个。
+            # **一个永远成立的例外不是例外,是把闸关了。**
+            recent=context["recent"], keep=self._director_keep(thread, tick),
         )
         decision: dict[str, Any] | None = None
         # 🔴 **这一拍是怎么来的,要分得开**(3.11.2,验收 A ③)。
@@ -9073,7 +9093,8 @@ class World:
             messages = dmod.decide_messages(
                 recap=recap, cast=cast, allowed=[m for m in ladder if m in allowed],
                 thread=thread, guidance=guidance, place_name=place_name, day=day,
-                tension=tension, phase=phase, anchor=self._director_anchor(guidance))
+                tension=tension, phase=phase, anchor=self._director_anchor(guidance),
+                history=context["history"])
             decision = dmod.parse_decision(
                 self._director_reply(messages),
                 allowed=[m for m in ladder if m in allowed],
@@ -9156,7 +9177,9 @@ class World:
                 refused = refused or "error"
 
         after = max(0.0, min(1.0, tension_before + dmod.MOVE_TENSION.get(move, 0.0)))
-        new_phase = dmod.next_phase(phase, move)
+        # **相位跟着这一拍之后的张力走**,不是数拍数(真站第四轮 ④):
+        # 屏上「到节骨眼了」和「松弛」并排印过。
+        new_phase = dmod.next_phase(phase, move, tension=after)
         promise = str(decision.get("promise") or "")
         thread_id = str((thread or {}).get("id") or "")
         if promise and move != "breathe":
@@ -9495,27 +9518,103 @@ class World:
                 return "ask"
         return None
 
-    def _last_chat_tick(self, pid: str) -> int:
-        """他上一次跟**任何人**说话是第几 tick —— 转录那一侧本来就在写的水位。
+    def _last_chat(self, pid: str) -> tuple[int, str]:
+        """他上一次跟**谁**说话、是第几 tick —— 转录那一侧本来就在写的水位。
 
         🔴 **它不是事件**,而那是有意的:「整场会话只在关闭时发一个事件」是这个
         仓库的硬不变量(chat 子系统与事件核解耦)。所以主持人那把钥匙上,
         「他说过话没有」只能读这个水位,而不能等一条不会来的事件。
+
+        ⚠️ **「谁」和「第几 tick」一次问出来**(3.11.2,真站第四轮 ①):
+        这一屏两样都要 —— tick 决定开不开口,名字决定屏上那句「你刚跟谁说过话」。
+        只取 tick 的那一版下场是:聊完一轮屏是换了,而**换出来的和上一屏一字不差**
+        (回顾折自日志,而这条路不进日志)。**一屏没变化和一屏没开口,
+        在玩家眼里是同一件事。**
         """
         store = getattr(self.scheduler, "contact_store", None)
         if store is None:
-            return 0
-        latest = 0
+            return 0, ""
+        latest, who = 0, ""
         for agent_id in list(self.scheduler.agents):
             try:
                 row = store.get(agent_id, pid) or {}
             except Exception:  # noqa: BLE001 - 读不到水位不该掀翻这一屏
                 continue
             try:
-                latest = max(latest, int(row.get("last_contact_tick") or 0))
+                seen = int(row.get("last_contact_tick") or 0)
             except (TypeError, ValueError):
                 continue
-        return latest
+            if seen > latest:
+                latest, who = seen, agent_id
+        return latest, who
+
+    @staticmethod
+    def _director_keep(thread: dict[str, Any] | None, tick: int) -> str:
+        """让位那道软闸下,**哪个人这一拍仍然必须在场** —— 该收线的那条线上的人。
+
+        线开在谁身上,收线就得是谁:换个人来在这一格上不是新鲜,是失约。
+        ⚠️ 而**只在到期时**保他 —— 「有一条开着的线」这个条件几乎永远成立,
+        拿它当例外等于把闸关了(真站第四轮:四次 approach 全指同一个人)。
+        """
+        due = int((thread or {}).get("due_tick") or 0)
+        return str((thread or {}).get("with") or "") if due and int(tick) >= due else ""
+
+    def _director_context(self, pid: str) -> dict[str, list[str]]:
+        """编剧的两格额外输入,**一次回扫同时答出来**:
+
+        · `history` —— 他最近这几步(走到哪、跟谁说过话、做过什么动词)
+        · `recent`  —— 最近几拍派过谁(让位用,`select_cast` 的软闸)
+
+        🔴 **一次扫描答两个问题,不是两次。** 这一句挂在每一屏上,而两个答案的
+        窗口是同一段尾巴 —— 各扫一遍就是把这一屏的代价乘二,换不来任何东西。
+        ⚠️ 窗口封顶见 `director.HISTORY_SCAN`。
+        """
+        from anima_world import director, host as host_mod
+
+        log = self.scheduler.event_log
+        if log is None:
+            return {"history": [], "recent": []}
+        try:
+            top = int(log.max_seq() or 0)
+        except Exception:  # noqa: BLE001 - 读不到日志长度不该掀翻这一屏
+            return {"history": [], "recent": []}
+        since = max(0, top - int(director.HISTORY_SCAN))
+        try:
+            rows = list(log.replay(since))
+        except Exception:  # noqa: BLE001
+            return {"history": [], "recent": []}
+        player_key = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        mine: list[dict[str, Any]] = []
+        cast_recent: list[str] = []
+        for e in rows:
+            payload = e.payload or {}
+            if e.type == "director_log":
+                if str(payload.get("player_id") or "") != pid:
+                    continue
+                who = str(payload.get("target") or "")
+                if who:
+                    cast_recent.append(who)
+                continue
+            if host_mod.player_move_seq_of(e.type, payload, str(e.who or ""), player_key):
+                mine.append({"type": e.type, "who": e.who, "payload": payload})
+        mine = mine[-int(director.HISTORY_MOVES):]
+        proj = self.scheduler._memory_projection
+        agent_names = {
+            aid: str((getattr(a, "spec", None) or {}).get("name") or aid)
+            for aid, a in proj.agents.items()
+        }
+        places = {}
+        try:
+            places = {str(loc["id"]): str(loc.get("name") or loc["id"])
+                      for loc in (self.state().get("locations") or [])}
+        except Exception:  # noqa: BLE001 - 少一个地名不该掀翻这一屏
+            places = {}
+        return {
+            "history": host_mod.move_lines(
+                mine, player_key=player_key, agent_names=agent_names,
+                place_names=places),
+            "recent": cast_recent[-int(director.CAST_RECENT_BLOCKED):],
+        }
 
     def _host_recap(self, pid: str, *, since_seq: int) -> list[str]:
         """上一屏之后**跟这个玩家有关**的那几件事(3.10.0,批 1.1 ①)。
@@ -9735,6 +9834,18 @@ class World:
         if self.player_in_transit(pid):
             # 在途不是"还在出发地":算成出发地的话,他一边在路上一边擦着咖啡店
             # 的窗 —— 和 `perform_affordance` 的 `_where_is` 同一条。
+            # 🆕 3.11.2(真站第四轮 ⑤):**`location` 照旧空,`location_name` 给人话。**
+            # 那两格问的是两件事:前者是"他在哪个地点里"(在路上就是不在),
+            # 后者是"屏上写什么"。两格一起空的下场是同一屏上「你正走在去建筑
+            # 工作室的路上」说得出,而地名那一格说不出。
+            # ⚠️ **补在这儿而不是补在主持人那一屏**:两扇门对同一时刻必须说同一句话
+            # (`test_在路上的人_两扇门说同一句话` 钉着),而补在上面那扇门里就是
+            # 让它们分岔。
+            going = str((self.players.get(pid) or {}).get("transit", {}).get("to") or "")
+            from anima_world import host as host_mod
+
+            blank["location_name"] = host_mod.transit_place_name(
+                self.scheduler.place_name(going) or going)
             return blocked("in_transit")
         here = self._player_here(pid)
         if not here:

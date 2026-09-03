@@ -25,7 +25,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 # 四个时刻。**这不是一份说明,是引擎里那道闸的取值** —— `World.host_turn` 只在
 # 时刻钥匙变了的时候开口,别处没有第二条生成场景的路。
@@ -111,6 +111,10 @@ def daypart(hour: int) -> str:
 # 事件,而其中绝大多数与他无关(别人走路、别人吃饭)。把全部倒给他等于没有这一段。
 RECAP_EVENT_TYPES = (
     "beat_fired", "payment", "item_transfer", "agent_invites", "entity_interaction",
+    # 🆕 3.11.2(真站第四轮 ①/③):**长动词起了个头也要说一句。**
+    # 不说的话,一个刚点了「报到狮心会」(一小时)的玩家,那一屏复述的是入场
+    # 那一拍 —— 屏上讲的是三小时前的事,而他刚做的那件一个字没有。
+    "entity_engage",
     # 🆕 3.10.1(验收 C ⑰):**他不在的时候有人来找过他。**
     # `agent_hail` 从前只进收件箱,于是「你回来了」那一屏对着两条 hail
     # 一个字不提 —— 而那正是 `return` 这个时刻最该说的一件事。
@@ -137,7 +141,14 @@ RECAP_LIMIT = 6
 PLAYER_MOVE_EVENT_TYPES = (
     "travel",              # 他起程
     "state_change",        # 他到站(`kind == "location_join"`,到达那一刻补发的)
-    "entity_interaction",  # 他点了一个动词
+    "entity_interaction",  # 他点了一个动词(**短动词当场一条,长动词是收尾那条**)
+    # 🔴 3.11.2(真站第四轮 ①):**长动词起头那一条。**
+    # 有 `duration` 的动词点下去**只发 `entity_engage`** —— 那条
+    # `entity_interaction` 要等一小时后收尾才发。于是真站上玩家点了「拉票」,
+    # `move_seq` 一格没动、屏 `cached`、**同一句 LLM 台词连出三屏**。
+    # ⚠️ 收尾那条 `entity_interaction` 照旧也算,而那不是重复计数:
+    # 起头和做完是**他这一屏该读到的两件不同的事**。
+    "entity_engage",
     "conversation",        # 一轮聊完(整场只在关闭时发这一条)
     "invitation_settled",  # 他答了一份邀请
     "player_action",       # 宿主自己报的那条
@@ -239,6 +250,113 @@ def interaction_line(verb_label: str, target_name: str) -> str:
     if not verb or not target:
         return ""
     return f"你{verb}了{target}。"
+
+
+def engage_line(verb_label: str, target_name: str) -> str:
+    """「你着手<动词><东西>,这得花上一会儿。」—— **长动词起了个头**那一句。
+
+    和 `interaction_line` 分开写,因为它们说的是两件事:那一句是"做完了",
+    这一句是"开始了、还没完"。用同一句的话,一个点了「嫁接」的玩家会在屏幕上
+    读到「你嫁接了那棵老橡树」—— 而那棵树还要一个小时才嫁接得完,
+    **一句说早了的话和一句假话在屏幕上没有区别**。
+    """
+    verb, target = str(verb_label or "").strip(), str(target_name or "").strip()
+    if not verb or not target:
+        return ""
+    return f"你着手{verb}{target},这得花上一会儿。"
+
+
+def transit_place_name(going_to: str) -> str:
+    """他在路上时,`place_name` 那一格给什么(3.11.2,真站第四轮 ⑤)。
+
+    🔴 **空着不是"照实说",是漏了一格。** 在路上的人 `location` 确实是空的
+    (他不在任何一个地点里),而 `place_name` 是**给人看的那一格** ——
+    屏上那句「你正走在去建筑工作室的路上」早就说得出他在哪儿,
+    于是同一屏上一句话说得出、另一格空着。
+    """
+    dest = str(going_to or "").strip()
+    return f"去{dest}的路上" if dest else "路上"
+
+
+def chat_line(agent_name: str) -> str:
+    """「你刚跟<她>说过话。」—— **一处措辞,两个读者。**
+
+    编剧那份「他这一路」折自 `conversation` 事件,而主持人那一屏只有一个水位
+    (`contact_store.last_contact_tick`)—— 会话不关就没有那条事件。
+    两处各写一句的话,同一件事在屏上和在编剧手里是两种说法。
+    """
+    name = str(agent_name or "").strip()
+    return f"你刚跟{name}说过话。" if name else ""
+
+
+#: 编剧那份「他最近这几步」里,一步渲染不出人话时**不编**,整条丢掉。
+#: (`recap_lines` 那边同理:说不出口的事宁可不说,也不说一句半成品。)
+def move_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
+               agent_names: dict[str, str] | None = None,
+               place_names: dict[str, str] | None = None) -> list[str]:
+    """**他最近这几步**,一步一句 —— 编剧的输入,不是玩家屏上那一段。
+
+    🔴 **和 `recap_lines` 有意分开,理由和那两张白名单分开逐字相同**:那一段
+    回答「这一屏该跟他说哪几件事」(所以它不说"你走去了咖啡店" —— 屏幕上第一句
+    就写着他在咖啡店),这一段回答「他最近都干了什么」(所以走到哪、跟谁说过话
+    **恰恰是最要紧的两格**)。
+
+    真站第四轮量出来的下场:两个玩家做了完全不同的六件事,而编剧手上只有
+    「上一屏之后」那**一条** —— 于是它给两个人写出同一条线、同一个对手、
+    同一句 `why`「玩家刚入场还没做什么」,而那时他已经走过报刊亭、聊过路明非。
+    **喂进去的输入一样,写出来的故事当然一样** —— 这不是模型不聪明。
+
+    动词那两句借的是 `interaction_line` / `engage_line`(同一件事一处措辞)。
+    """
+    names = dict(agent_names or {})
+    places = dict(place_names or {})
+    bare = player_key.split(":", 1)[-1]
+    out: list[str] = []
+    for event in rows:
+        kind = str(event.get("type") or "")
+        payload = event.get("payload") or {}
+        who = str(event.get("who") or "")
+        if kind == "travel" and who == player_key:
+            to = str(payload.get("to") or "")
+            said = places.get(to, to)
+            if said:
+                out.append(f"你去了{said}。")
+            continue
+        if kind == "state_change" and who == player_key:
+            # 到站那一条。**起程那条已经说过一次了**,所以这儿只在没有起程记录
+            # 时说话 —— 两条都说会变成「你去了咖啡店。你到了咖啡店。」
+            continue
+        if kind in ("entity_interaction", "entity_engage") and who == player_key:
+            verb = str(payload.get("verb_label") or payload.get("verb") or "")
+            target = str(payload.get("target_name") or payload.get("target") or "")
+            said = (engage_line(verb, target) if kind == "entity_engage"
+                    else interaction_line(verb, target))
+            if said:
+                out.append(said)
+            continue
+        if kind == "conversation":
+            other = ""
+            for person in payload.get("participants") or []:
+                if not isinstance(person, dict):
+                    continue
+                if str(person.get("kind") or "") != "user":
+                    other = str(person.get("id") or "") or other
+            if other:
+                out.append(chat_line(names.get(other, other)))
+            continue
+        if kind == "player_action" and who == player_key:
+            said = str(payload.get("text") or payload.get("action") or "").strip()
+            if said:
+                out.append(_as_clause(said))
+            continue
+        if kind == "invitation_settled" and str(payload.get("player_id") or "") == bare:
+            other = str(payload.get("agent_id") or "")
+            outcome = str(payload.get("outcome") or "")
+            word = {"accepted": "答应了", "declined": "回绝了"}.get(outcome, "")
+            if word:
+                out.append(f"你{word}{names.get(other, other)}的邀约。")
+            continue
+    return out
 
 
 #: 回顾里提到一个**藏起来的人**时,用来顶替名字的那三个字。
@@ -377,9 +495,24 @@ def recap_lines(
             if said:
                 lines.append(said)
             continue
+        if kind == "entity_engage":
+            if str(event.get("who") or "") != player_key:
+                continue
+            verb = str(payload.get("verb_label") or payload.get("verb") or "")
+            target = str(payload.get("target_name") or payload.get("target") or "")
+            said = engage_line(verb, target)
+            if said:
+                lines.append(said)
+            continue
     if len(lines) > RECAP_LIMIT:
+        # 🔴 **截掉的是老的那几条,不是新的**(3.11.2,真站第四轮 ③)。
+        # 上一版留 `lines[:RECAP_LIMIT]` —— 留最老的六条,**把他刚做的那件事扔了**。
+        # 真站上量到的正是这个:入场那一拍一口气写了三四条(录取通知、一部手机、
+        # 800 块),把名额占满,于是他刚点的「报到狮心会」一个字都没上屏,
+        # 而屏幕上一本正经地复述三小时前的事。
+        # **这一段的名字就叫「刚发生了什么」,而它当时留的是最不刚的那几条。**
         extra = len(lines) - RECAP_LIMIT
-        lines = lines[:RECAP_LIMIT] + [f"还有 {extra} 件事没细说。"]
+        lines = [f"更早还有 {extra} 件事没细说。"] + lines[-RECAP_LIMIT:]
     return lines
 
 

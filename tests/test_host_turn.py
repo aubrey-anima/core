@@ -897,3 +897,26 @@ def test_闭嘴那一趟_抬头是上一屏的而source说了实话(tmp_path):
         again = world.host_turn("p1")               # 什么都没发生
         assert again["scene"]["source"] == "cached", again["scene"]["source"]
         assert again["trigger"] == "return", "抬头该是上一屏那个"
+
+
+def test_回顾截断留的是最新那几条_不是最老的(tmp_path):
+    """🔴 真站第四轮 ③:玩家点了「报到狮心会」,而那一屏复述的是**入场那一拍**
+    (录取通知、一部手机、800 块)—— 他刚做的那件事一个字没上屏。
+
+    根不在编剧,在这一行:截断留的是 `lines[:RECAP_LIMIT]`,**最老的六条**。
+    入场那一拍一口气写四条就把名额占满了。
+    **这一段的名字就叫「刚发生了什么」,而它当时留的是最不刚的那几条。**
+    """
+    from anima_world import host as host_mod
+
+    rows = [
+        {"type": "item_transfer", "who": "player:p1",
+         "payload": {"item": f"it{i}", "qty": 1, "to": "player:p1"}}
+        for i in range(host_mod.RECAP_LIMIT + 2)
+    ]
+    rows.append({"type": "entity_interaction", "who": "player:p1",
+                 "payload": {"verb_label": "报到", "target_name": "狮心会"}})
+    lines = host_mod.recap_lines(rows, player_key="player:p1")
+    assert len(lines) == host_mod.RECAP_LIMIT + 1, lines
+    assert "报到" in lines[-1], f"他刚做的那件事被截掉了:{lines}"
+    assert "更早还有" in lines[0], lines[0]

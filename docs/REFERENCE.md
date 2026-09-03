@@ -5381,7 +5381,10 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
    查错了一整轮。**问「变了没有」只有 `scene.source` 一个读数**,不加第二个布尔。
 
    ⚠️ **`acted` 那一格的钥匙有两格,而第二格不是事件。** 第四格 `move_seq` 数
-   已发生的动作(`host.PLAYER_MOVE_EVENT_TYPES` 那张策展表说哪几种事件算);
+   已发生的动作(`host.PLAYER_MOVE_EVENT_TYPES` 那张策展表说哪几种事件算 ——
+   ⚠️ 3.11.2 起**长动词起头那条 `entity_engage` 也在表上**:有 `duration` 的
+   动词点下去只发它,那条 `entity_interaction` 要等收尾才发,于是从前点完
+   「拉票」到一小时后收尾之间,这一屏一动不动);
    第五格 `chat_tick`(3.11.2)—— 🔴 **聊天也算"做了一件事",而它不发事件**:
    `conversation` 只在**会话关闭那一刻**发一条,站点却把会话一直开着,于是一个
    聊了十轮的人 `move_seq` 一格不动、整屏纹丝不动。这一格读的是转录那侧本来就在

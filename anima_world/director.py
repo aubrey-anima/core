@@ -189,12 +189,24 @@ def tension_now(value: float, since_tick: int, now_tick: int,
     return round(base * (TENSION_DECAY_PER_HOUR ** hours), 4)
 
 
-def next_phase(phase: str, move: str) -> str:
-    """这一拍之后,这条线走到哪一相。**升级是默认行为**(口径 4)。
+def next_phase(phase: str, move: str, *, tension: float) -> str:
+    """这一拍之后,这条线走到哪一相。**升级是默认行为**(口径 4),但**要带着张力走**。
 
     `breathe` 是唯一把线往回带的动作(climax 之后的 release),别的都往前推。
     ⚠️ **到了 `release` 就停住** —— 再往前是"这条线该收了",而收线是 3b 的
     `callback`;这一版让它停在那儿并由 `due` 那条结算兜底。
+
+    🔴 **一相不是数出来的,是攒出来的**(3.11.2,真站第四轮 ④)。上一版只数拍:
+    三拍之后必到 `climax` —— 而真站上量到的是 `phase=climax`(屏上「到节骨眼了」)
+    和 `tension=0.1`(屏上「松弛」)**并排印在同一屏上**。两句话都是引擎说的,
+    而它们互相打脸。
+
+    现在的判据是**这一相的目标张力到没到**(`PHASE_TARGET`):没到就原地待着,
+    这一拍照样写、照样加张力,只是不"翻篇"。
+    ⚠️ 这**不是**给编剧踩刹车 —— 口径 4 说的是"每次操作都有新剧情",
+    而剧情有没有发生和这条线走到第几幕是两件事。
+
+    `tension` 传的是**这一拍之后**那个值:相位是这一拍的结果,不是它的前提。
     """
     if phase not in PHASES:
         phase = PHASES[0]
@@ -202,6 +214,8 @@ def next_phase(phase: str, move: str) -> str:
     if move == "breathe":
         # 已经到 climax 的线,喘一口气就是 release;还没到的原地不动。
         return PHASES[3] if i >= 2 else phase
+    if float(tension) < PHASE_TARGET.get(phase, 0.0):
+        return phase
     return PHASES[min(i + 1, 3)]
 
 
@@ -237,9 +251,28 @@ def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
     return "breathe"
 
 
+#: 编剧那份「他这一路走过来」最多带几步,以及**往回翻多少条原始事件封顶**。
+#:
+#: 🔴 **两个数都是闸,不是调参。** 步数多了提示词会被历史淹掉(这一拍最重要的输入
+#: 仍然是"他刚做了什么");翻的条数不封顶的话,这一句在一个跑了三个月的世界上
+#: 是一次全日志扫描 —— 而它挂在**每一屏**上。
+#: 翻不到六步就少给几步:**少给几步是对的,慢一屏不是。**
+HISTORY_MOVES = 6
+HISTORY_SCAN = 400
+
+#: 连着几拍不许再派同一个人。
+#:
+#: 🔴 真站第四轮量出来的:池子里 13 个人,**4 次 approach 全指同一个** ——
+#: 四道闸一道没错(那个人确实可派),错在**筛完就交给模型,而模型没有理由
+#: 换人**。于是这个世界只有一个对手,而作者写了十三个。
+#: ⚠️ 2 不是 1:排 1 只挡"连着两拍同一个人",而三拍里出现两次照样是同一张脸。
+CAST_RECENT_BLOCKED = 2
+
+
 def select_cast(candidates: Iterable[dict[str, Any]], *, cast_pool: Sequence[str] = (),
                 forbidden: Sequence[str] = (), hidden: Sequence[str] = (),
-                gated: dict[str, str] | None = None) -> list[dict[str, Any]]:
+                gated: dict[str, str] | None = None,
+                recent: Sequence[str] = (), keep: str = "") -> list[dict[str, Any]]:
     """编剧这一轮**能派谁**。**筛在前** —— 筛掉的人根本不进提示词。
 
     四道闸,顺序是承重的(裁决 §2.1⑤):
@@ -254,6 +287,17 @@ def select_cast(candidates: Iterable[dict[str, Any]], *, cast_pool: Sequence[str
     ⚠️ 一份把 hidden 的人写进 `cast_pool` 的指导:他照旧不出现,**而且要吭声**
     —— 静默满足一个作者写下的要求是这一层最贵的错。这里返回筛掉的理由,
     调用方负责把它说出来。
+
+    🆕 第五道**软**闸(3.11.2,真站第四轮 ②):`recent` 是这个玩家最近几拍派过的人,
+    默认让位。三条线划得很清:
+
+    · **软**:筛空了就整份还回去 —— **一个空 cast 会让编剧沉默**,而「不许沉默」
+      是这一层的硬纪律。少一点新鲜面孔,好过这一拍什么都不发生。
+    · `keep` 是**该收线了的那条线上的人**:线开在谁身上,收线就得是谁 ——
+      "换个人来"在这一格上不是新鲜,是失约。⚠️ 只在**到期**时保他:
+      拿「有一条开着的线」当例外的话,那个条件几乎永远成立,而
+      **一个永远成立的例外不是例外,是把闸关了**。
+    · 它**不是**「这个人不能出现」,是「这一拍先让别人来」。
     """
     blocked = {str(a) for a in hidden} | {str(a) for a in forbidden}
     pool = {str(a) for a in cast_pool}
@@ -270,6 +314,12 @@ def select_cast(candidates: Iterable[dict[str, Any]], *, cast_pool: Sequence[str
         out.append(dict(row))
     # **确定**:同一个世界同一时刻挑两次逐项相同(和 `host.select_options` 同一条)。
     out.sort(key=lambda r: str(r.get("id") or ""))
+    stale = {str(a) for a in recent if str(a) and str(a) != str(keep)}
+    if stale:
+        fresh = [r for r in out if str(r.get("id") or "") not in stale]
+        # **筛空了就不筛** —— 见上面那条"软"。
+        if fresh:
+            return fresh
     return out
 
 
@@ -309,7 +359,8 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
                     allowed: Sequence[str], thread: dict[str, Any] | None,
                     guidance: dict[str, Any] | None, place_name: str,
                     day: int, tension: float, phase: str,
-                    anchor: dict[str, Any] | None = None) -> list[dict[str, str]]:
+                    anchor: dict[str, Any] | None = None,
+                    history: Sequence[str] = ()) -> list[dict[str, str]]:
     """交给背景槽的那一次调用。**一次调用同时挑动作、挑人、写台词**。
 
     🔴 **这份提示里没有第二个名字来源** —— 它只由**已经筛过**的 `cast` 拼出来
@@ -324,6 +375,11 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
         for c in cast
     ) or "(这会儿没有人可以被派出来)"
     did = "".join(f"- {line}\n" for line in recap) or "- (他刚进来,还没做什么)\n"
+    # 🆕 3.11.2(真站第四轮 ②):**他这一路都走过什么。**
+    # 只给"上一屏之后那一条"的话,两个做了完全不同六件事的玩家,喂进去的输入
+    # 一模一样 —— 于是写出同一条线、同一个对手。**故事的分岔在输入里,不在模型里。**
+    been = "".join(f"- {line}\n" for line in history)
+    line_history = f"\n他这一路走过来做过的事(**别重复它们,顺着它们写**):\n{been}" if been else ""
     themes = "、".join(str(t) for t in (guide.get("themes") or ())) or "(没写)"
     tone = str(guide.get("tone") or "").strip()
     forbid = "".join(f"- {t}\n" for t in (guide.get("forbidden") or {}).get("text") or ())
@@ -343,7 +399,7 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
     user = (
         f"玩家在{place_name or '某个地方'},第 {day} 天。\n"
         f"**他刚做了这些**(这是你这一拍最重要的输入,必须冲着它来):\n{did}"
-        + line_thread + line_anchor
+        + line_history + line_thread + line_anchor
         + f"\n这个世界讲的是:{themes}\n"
         + (f"语气:{tone}\n" if tone else "")
         + (f"**绝对不许发生的**:\n{forbid}" if forbid else "")

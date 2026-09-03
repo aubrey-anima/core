@@ -4013,6 +4013,11 @@ class Scheduler:
             "payload": {
                 "target": target, "verb": verb, "duration": int(affordance.duration),
                 "ends_tick": ends, "occupies": bool(affordance.occupies),
+                # 🆕 3.11.2(真站第四轮 ①):**起头这一条也要带那两格人话。**
+                # 主持人那一屏的回顾从 3.11.2 起也读这一条(玩家点一个长动词
+                # 之后到收尾之前,日志里只有它),而读的一方手上没有本体层 ——
+                # 不带的话屏幕上会印「你着手嫁接tree:harbor_oak」。
+                **self.interaction_words(verb, affordance, target),
                 # 起头就把代价记进历史。到点才记的话,一件做了十个月的事在账上
                 # 前十个月完全不存在 —— 而她那十个月的力气确实是这时候没的。
                 **self._spent(outcome), "consumed": dict(outcome.consumed),
