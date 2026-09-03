@@ -4482,9 +4482,10 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 ```
 
 **不连 Redis、不建世界**(跑不了世界也要答得出,和 `world inspect` 同一类)。
-顶层**十五**段:`beats` · `character_card` · `chat_tools` · **`config`** ·
-`engine_version` · `erasure` · **`host`** · `invitations` · `operation` ·
-`package` · **`packs`** · **`plugins`** · `report` · `seed` · `storage`。
+顶层**十六**段:`beats` · `character_card` · `chat_tools` · **`config`** ·
+**`director`** · `engine_version` · `erasure` · **`host`** · `invitations` ·
+`operation` · `package` · **`packs`** · **`plugins`** · `report` · `seed` ·
+`storage`。
 ⚠️ **这份清单是"顶层有什么"的权威**,照它写探测器 —— 上一版漏了 `plugins`
 (2026-08-26 验收 C 挑的),而一份漏了一段的清单会让读它的人以为那一段不存在。
 判据敲得动:`anima-world contract --json | jq 'keys'`。
@@ -5399,7 +5400,7 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 
 **引擎里没有「金币」「灵力」「心动」这些词。** 它只有节点、事实、时钟、事件、
 效果、感知 —— 而「需求」「经济」「关系」这些出厂系统,长期目标是用**同一种形状**
-写出来(设计稿 `docs/设计-插件系统.md`)。这一节是第 1 期落地的那一半。
+写出来(设计稿 `../../../docs/设计-插件系统.md`)。这一节是第 1 期落地的那一半。
 
 ### 10.1 一个插件 = 作者层第十三个段(边是第十四个,见 §10.16)
 

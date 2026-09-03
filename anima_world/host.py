@@ -662,7 +662,10 @@ def suggestion_messages(*, agent_name: str, beat_note: str, doing: str,
     )
     user = (
         f"对方是{agent_name}。"
-        + (f"他此刻{doing}。\n" if doing else "\n")
+        # ⚠️ **不猜性别**(3.11.0,验收 C 🟢):这份提示里其余各处都用名字,
+        # 只有这一句写死「他」—— 而这个引擎里的角色不都是他。
+        # 和 `suggestion_seeds` 那条同一句口径:名字知道就用名字。
+        + (f"{agent_name}此刻{doing}。\n" if doing else "\n")
         + (f"刚发生的事:{beat_note}\n" if beat_note else "")
         + f"请把下面每一条改写成一句玩家能直接说的话,一行一条,顺序不变:\n{listed}"
     )

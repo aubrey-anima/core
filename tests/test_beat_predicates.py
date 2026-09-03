@@ -93,7 +93,7 @@ def test_a_predicate_with_nothing_to_read_is_not_met_rather_than_true():
 
 @pytest.mark.parametrize("pred,expected_fragment", [
     ({"pred": "need", "agent": "夏", "need": "不存在的需求", "op": "lte", "value": 0.1},
-     "unknown need"),
+     "不认识的需求"),
     ({"pred": "need", "agent": "夏", "need": "hunger", "op": "eq", "value": 0.1},
      "must be 'gte' or 'lte'"),
     ({"pred": "money", "agent": "夏", "op": "gte"}, "'value'"),

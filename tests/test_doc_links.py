@@ -19,7 +19,11 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 #: 只查指着仓库**外面**的那些(`../../` 打头)—— 仓库内的相对链接由别处管,
 #: 而跨仓库那几条正是最容易少退一级、又最没人会去点的。
-_OUTWARD = re.compile(r"(?<![\w/.])(\.\./(?:\.\./)+[^\s)`\"'|]+)")
+#: `../../…` 打头的,和 **`docs/…` 打头**的(3.11.0,验收 C ⑥:两条死链就长这样
+#: —— 从 `src/core/docs/` 出发写 `docs/x.md`,指的是 `src/core/docs/docs/x.md`,
+#: 一个不存在的地方。**它们看上去比 `../../` 还像对的**,所以更该上闸)。
+_OUTWARD = re.compile(
+    r"(?<![\w/.:])((?:\.\./(?:\.\./)+|docs/)[^\s)\]`\"'|]+)")
 
 
 def _docs():
@@ -57,10 +61,34 @@ def test_指着仓库外的相对路径_都指得到东西():
             target = target.split("#", 1)[0]
             if not target:
                 continue
-            resolved = (path.parent / target).resolve()
-            if not resolved.exists():
+            if target.startswith(("http://", "https://")) or "…" in target:
+                continue
+            # `docs/…` 那一类要小心:**它有两种合法读法,还有一种不是链接**。
+            #   · 从仓库根写它(`CHANGELOG.md` / `README.md` 就在根上)→ 指
+            #     `src/core/docs/…`,对的;
+            #   · 从 `docs/` 目录里写它 → 指 `docs/docs/…`,几乎总是错的;
+            #   · **而它也可能根本不是链接**,是一句讲别的仓库的话
+            #     (「诉求写进**你们自己**的 `docs/引擎接口诉求-….md`」)。
+            #
+            # 🔴 **一道分不出"链接"和"讲别人家的路径"的闸,会被人关掉。**
+            # 所以 `docs/` 这一半只在**能证明它是错前缀**时才报:同一条路径在
+            # **父仓库**里真的存在 —— 那才说明作者想指的是那一份,只是少退了两级。
+            candidates = [(path.parent / target).resolve()]
+            if target.startswith("docs/"):
+                candidates.append((_ROOT / target).resolve())
+            if any(c.exists() for c in candidates):
+                continue
+            if target.startswith("docs/"):
+                parent_copy = (_SIBLING_DOCS.parent / target).resolve()
+                if not parent_copy.exists():
+                    continue      # 讲的是别的仓库的 docs/,不是这儿的死链
                 broken.append(
-                    f"{path.relative_to(_ROOT)}:{target} → {resolved}(不存在)")
+                    f"{path.relative_to(_ROOT)}:{target} —— 少退了两级,"
+                    f"它真正指的是 {parent_copy}")
+                continue
+            resolved = candidates[0]
+            broken.append(
+                f"{path.relative_to(_ROOT)}:{target} → {resolved}(不存在)")
     assert not broken, (
         "这些跨仓库相对路径指不到东西 —— 读它的是另一个仓库:\n  "
         + "\n  ".join(sorted(set(broken)))

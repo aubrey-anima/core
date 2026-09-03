@@ -212,12 +212,17 @@ def test_REFERENCE_里那份顶层段清单_和真门逐格相等():
 
     reference = Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md"
     text = reference.read_text(encoding="utf-8")
-    marker = "顶层**十五**段:"
-    assert marker in text, (
+    # 🔴 **定位不许写死那个数字**(3.11.0):上一版把 marker 写成
+    # `顶层**十五**段:`,于是**加一段的那一轮,这道闸先于文档坏掉** ——
+    # 它报的是「那句话不见了」,而真相是「那句话的数字该改了」。
+    # **一道靠会变的东西定位的闸,每次真该它响的时候都先自己瞎掉。**
+    found = re.search(r"顶层\*\*([一二三四五六七八九十]+)\*\*段:", text)
+    assert found, (
         "REFERENCE §4.8 那句「顶层**N**段」不见了或者换了写法 —— "
         "这道闸靠它定位;改写法就顺手改这里,别把闸留成一句永远找不到东西的话"
     )
-    start = text.index(marker) + len(marker)
+    marker = found.group(0)
+    start = found.end()
     # 那一句到句号为止(它跨几行,所以按句号截,不按行)。
     listed = set(re.findall(r"`([a-z_]+)`", text[start:text.index("。", start)]))
 
@@ -228,6 +233,6 @@ def test_REFERENCE_里那份顶层段清单_和真门逐格相等():
     )
     # 数字那一半也钉住:句子里写着"十五"而列了十四个名字,同样是一句假话。
     chinese = {13: "十三", 14: "十四", 15: "十五", 16: "十六", 17: "十七", 18: "十八"}
-    assert chinese.get(len(payload)) == marker[2:-2].rstrip("段:").strip("*"), (
+    assert chinese.get(len(payload)) == found.group(1), (
         f"那一行写的数字和真门的段数对不上:真门 {len(payload)} 段"
     )

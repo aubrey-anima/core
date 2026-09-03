@@ -2084,7 +2084,7 @@ null`),而 `--edit` 那两扇离线门也会点名"这次的图装不进去";
 {"kind":"author","type":"location","body":{
     "id": "cafe", "name": "拐角那家咖啡馆", "description": "……",
     // 两条都可选;URL 的形状由**网站的图床**定(内容寻址,见 player 的
-    // `docs/图床契约.md`),引擎只看"它是不是一条绝对 URI、有多长"。
+    // `../../player/docs/图床契约.md`),引擎只看"它是不是一条绝对 URI、有多长"。
     "map_image":   "https://animametaverse.com/media/sha256/b2c721ab…67b1.webp",
     "scene_image": "https://animametaverse.com/media/sha256/4f9ad013…02ce.webp"}}
 ```
@@ -3727,7 +3727,7 @@ item_consume  item_transfer  payment  state_change  travel
 
 **这是你们等的那件事的第一半。** 老板原话:「怎么做机制我们都是做不完机制的」·
 「tool 只能写机制:什么大模型通过什么判定条件能修改什么数值,不是手动改数值」。
-设计稿整份在 `docs/设计-插件系统.md`;这一节只讲**这一版引擎收什么**。
+设计稿整份在 `../../../docs/设计-插件系统.md`;这一节只讲**这一版引擎收什么**。
 
 🔴 **读这一节之前先记住一句**:设计稿说的是这套架构**装得下**什么,`contract --json`
 说的是**这一版引擎收不收**。两者差着好几期。**照设计稿给作者画界面 = 替他许愿。**
@@ -3891,7 +3891,7 @@ $ anima-world plugin list --world-id w --json \
 §3.37 交的是「作者能给世界加一个**量**」;这一节交的是**图**:东西之间的关系
 (边)、插件自己声明的一族东西(种类)、以及**他按一下就发生的事**(动词)。
 
-🔴 **照旧先记一句**:设计稿(`docs/设计-插件系统.md`)说的是这套架构装得下什么,
+🔴 **照旧先记一句**:设计稿(`../../../docs/设计-插件系统.md`)说的是这套架构装得下什么,
 `contract --json` 的 `plugins` 段说的是**这一版引擎收不收**。差着好几期,
 **照设计稿给作者画界面 = 替他许愿。**
 
@@ -4740,7 +4740,7 @@ Python 侧对应 `World.world_setting()` / `World.set_world_setting(text, clear=
 
 ## 3.49 「插件写到别人命名空间上,`validate world` 答什么」—— 答案是**和开机同一句话**,而且从今天起逐条钉着(3.8.0,2026-08-27)
 
-这一节回的是你们 `docs/引擎接口诉求-插件.md` **欠的第一条**。
+这一节回的是你们 `../../tool/docs/引擎接口诉求-插件.md` **欠的第一条**。
 
 **答案:答 `valid: false`,退出码 2,`errors` 里就是开机会说的那几句话。**
 `world check` 同一份判断(它只在退出码的**含义**上不同:0 = 我答上来了,
@@ -5540,7 +5540,7 @@ if not seen:
 
 ⚠️ **这一节的时态改过一次,留着当记号**:2026-09-02 上午写它时 (b)(c) 还是「裁决」,
 当天下午 3.9.0 交了活 —— **现在整节都是现状**(实现 commit 见 CHANGELOG 的 `[3.9.0]`)。
-任务单 `docs/任务单/2026-09-02-玩法层批1-点进去有的玩.md` §2 是裁决全文。
+任务单 `../../../docs/任务单/2026-09-02-玩法层批1-点进去有的玩.md` §2 是裁决全文。
 老板 D52 拍的四条里有一条是「主持人提前到批 1」。
 
 ### (a) ✅ 今天就有:**「玩家的身份档」不用等引擎,一条 `plugin` 记录就写得出来**
@@ -5675,7 +5675,7 @@ id · kind · label · who · hook · tone · available · reason · refusal · 
 | `door.method` | `params` 的键 |
 |---|---|
 | `answer_invitation` | `invite_seq`(int)· `accept`(bool,**没有默认值**) |
-| `chat` | `agent_id`(· `text` 可选) |
+| `chat` | `agent_id`(· `text` 可选 · `opening?` 可选)——⚠️ **`opening` 是 3.10.0 批 1.2 加的第三格**,`true` 表示这一次是**她先开口**(`chat_open` 那条路);以 `contract --json` 的 `host.door_params.chat` 为准,别照这张表数 |
 | `player_walk` | `location` |
 | `player_tool` | `tool_id` · `params` |
 | `free` | 空 |
@@ -5873,7 +5873,7 @@ anima-world simulate --world-id w --ticks 0 --world-file <pack>
 ### (h) K8 日历钟:**不在这一批**,而这一条是改判
 
 设计稿把「拍子按现实日期触发」当成第 4 期「两个钟」里能先切下来的一小片。**切不下来。**
-`docs/设计-插件系统.md` §12.1 那一行写死了两个钟的分界:夜聊语气与 `autonomy.ctx.hour` 切 `calendar`,
+`../../../docs/设计-插件系统.md` §12.1 那一行写死了两个钟的分界:夜聊语气与 `autonomy.ctx.hour` 切 `calendar`,
 而 **`TimeWindow` / `beats.trigger_ready` / `stocks dt` 留 tick** —— 拍子恰好是它明说要留在 tick 上的那一格。
 
 而真正的拦路石不是那句话,是**快进**:`simulate --ticks 288` 推的是 tick,墙钟不动。
@@ -6011,7 +6011,7 @@ anima-world pack list --world-id <世界> --json
 | 在册的人的 `personality` / `memory` **回执里点名说了** | 回执有一格 `skipped: {personality: […], memories: N, reason}`,并印一句 warning。**别再靠"没报错"当装进去了**。⚠️ **3.10.2 起这一格的语义翻了面**:它记的是「**不必写**」(想写的那句世界里已经是了)与「**她已经记着了**」,**不是**「被拒的那几个」—— 照旧语义印字会把一份**装得好好的**包报成「有东西没装上」。见 §3.65(e) |
 | 只带一部分段的包**不再灌内置默认值** | 从前一份只带一拍的包会往世界里塞 `cafe`/`home`/`workshop` 三个地点 + 三条撤不回的事件;不带 `agents` 会塞 `chat_with_夏/柔/遥`。现在**缺席 = 不动** |
 | `since: "world"` 的过期拍**默认拒绝** | 一份 `day: 0..6` 且写了 `since: "world"` 的包装进第 40 天的世界,那几拍会在下一 tick 一起烧掉 —— 现在当场拒并逐条列出,`--force` 才装。**去掉 `since` 就好**(缺省 `pack` = 从这份包落地那天算起) |
-| 同一个 pack 升级**不再打回上一版那几拍的零点** | 发 v1.1.0 补一拍时,上一版那几拍照旧从它们各自落地那天算。⚠️ **但 v1.1.0 里只放「新增的记录」** ——把上一版那几拍原样带上会 **rc 2**(拍 id 撞车,`beat_fired` 按 id 配对)。准确写法见 §3.65(d) |
+| 同一个 pack 升级**不再打回上一版那几拍的零点** | 发 v1.1.0 补一拍时,上一版那几拍照旧从它们各自落地那天算。⚠️ **但 v1.1.0 里只放「新增的记录」** ——把上一版那几拍原样带上会 **rc 2**(拍 id 撞车,`beat_fired` 按 id 配对)。准确写法见 §3.65(c) |
 | 插件降级在**写第一个字节之前**就被拒 | 从前那种包会留下半个装进去的世界(地点已进地图、`packs()` 是空的) |
 
 ⚠️ **`day` 那张表补一句 per-player 的注意**:`since: "world"` 对写了
@@ -6129,7 +6129,7 @@ anima-world pack disable 第二周 --world-id w [--json]
 
 **再装一次同一个包 = 重新启用**,不用先「取消停用」。
 
-⚠️ **3.10.1 更正**:上面那句「再装一次同一个包 = 重新启用」**对带拍的包是假的** —— `install` 会因为拍 id 撞车 rc 2。回来那条路是 `anima-world pack enable <包 id>`,见 §3.65(d)。
+⚠️ **3.10.1 更正**:上面那句「再装一次同一个包 = 重新启用」**对带拍的包是假的** —— `install` 会因为拍 id 撞车 rc 2。回来那条路是 `anima-world pack enable <包 id>`,见 §3.65(c)。
 
 ### (c) 主持人第五个时刻:`return`
 

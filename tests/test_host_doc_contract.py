@@ -149,6 +149,28 @@ def test_那句话里的数字_和契约里有几个时刻对得上():
     assert seen_anywhere, f"三份里没有一份写着「{right}」—— 现在有 {want} 个时刻"
 
 
+def test_host_turn那段docstring里的形状_也和契约对得上():
+    """🔴 **同一道闸扫两处**(3.11.0,验收 C ⑤)。
+
+    `api.py` 里 `host_turn` 的 docstring 也画着那两张表,而它**三处同时过期**:
+    `trigger` 缺 `return`、顶层缺 `ask_ready*`、一项缺 `who` ——
+    而 `who` 正是 3.9.0 漏到站点三处去的那一格。
+    REFERENCE 那一行有闸而它没有,于是「哪一份先烂」全看运气。
+    """
+    from anima_world.api import World
+
+    doc = World.host_turn.__doc__ or ""
+    payload = contract_payload()["host"]
+    for moment in payload["moments"]:
+        assert moment in doc, f"docstring 的 trigger 那一行缺 {moment!r}"
+    for key in payload["turn_keys"]:
+        assert f'"{key}"' in doc, f"docstring 的顶层形状缺 {key!r}"
+    for key in payload["option_keys"]:
+        if key == "id":
+            continue      # `"id"` 太短,别拿它当判据
+        assert f'"{key}"' in doc, f"docstring 的「一项」形状缺 {key!r}"
+
+
 def test_每个时刻都有一句人话_而且不许是裸英文():
     """🔴 **`〔return · 模板〕`** —— 一个裸英文枚举名印在给玩家看的那一屏上
     (3.10.2,验收 C ①)。2a-② 加了第五个时刻,而那张人话表没跟,

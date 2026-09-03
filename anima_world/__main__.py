@@ -18,6 +18,9 @@ from typing import Any, Iterable
 
 from anima_world import onboarding
 from anima_world.actions import ActionTable
+# `WorldFileError` 要一个模块级名字:`run_simulate` 的 `except` 子句用得上,
+# 而函数体内的 import 进不了那个子句的作用域(3.11.0,验收 C 🟢)。
+from anima_world.world_file import WorldFileError as _WORLD_FILE_ERROR
 from anima_world.agent import Agent
 from anima_world.beats import (
     BeatScript, BeatScriptError, coerce_goals, split_against_stored,
@@ -2346,10 +2349,11 @@ def build_serve_scheduler(
     beat_script = BeatScript.load(beats_path) if beats_path is not None else None
     shared_lock = threading.RLock()
 
-    warning = durability_warning(redis)
-    if warning:
-        logger.warning(warning)
-
+    # ⚠️ **这句话由 `World.open` 那一处印,这儿不再印第二遍**(3.11.0,验收 C 🟢)。
+    # 两处都印的下场是舰队每次开机屏上**同一句 AOF 警告出现两次**,而第二次
+    # 还带着「世界跑在 Redis 上,但 」这个前缀 —— 读的人会以为是两件事。
+    # 留下的是带前缀那一句(它说得出上下文),而这一条路上的调用方最终都经过
+    # `World.open`。
     mysql_conn = None
     mysql_prefix = ""
     if mysql is not None:
@@ -2841,7 +2845,7 @@ def build_serve_scheduler(
             # 丢了(以后说不清那几拍是哪一周加的),而**事后补不回来**。
             logger.warning(
                 "这份文件带着内容包的身份(pack %r)—— 而 `--world-file` 是"
-                "创世 / 离线编辑那条路,**它不按内容包装**:身份不会登记、"
+                "创世 / 离线编辑那条路,「它不按内容包装」:身份不会登记、"
                 "拍的零点还是世界第 0 天。要把它当第几周的更新投进这个世界,"
                 "用 `anima-world pack install <文件>`(或宿主的 `install_pack`)。",
                 str((world_seed.get("pack") or {}).get("id") or "?"),
@@ -5360,6 +5364,17 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
                 ("locations", receipt["locations"]),
                 ("config", receipt["config"]),
                 ("world_setting", ["world.setting"] if receipt["world_setting"] else []),
+                # 🔴 **改在册的人的人设 / 补记忆也是"落地了什么"**(3.11.0,验收 C ①)。
+                # 少了这两格,一份**只改人设 + 补记忆**的包 `sections` 是 `{}`、
+                # 而 `declared` 有 `agents` —— 消费方照 §3.62(m) 读两者之差,
+                # **把一份装得好好的包报成「什么都没装进去」**。
+                # ⚠️ 这和 A② 那条(缺 kinds/entities/plugins/rules/items)是**同一个
+                # 形状**,只是少的格子不同 —— 病根都是「这张表是手抄的」。
+                # 闸补在下面:**回执里有的段,必须进得了 `sections`**。
+                ("personality", receipt.get("personality") or []),
+                ("memories", ([f"×{receipt['memories']}"]
+                              if receipt.get("memories") else [])),
+                ("guidance", ["guidance"] if receipt.get("guidance") else []),
                 # 🆕 3.10.1:那几个「只填缺」的段也要记 —— 少了它们,
                 # `declared` 比 `sections` 多出来的那几格是**假警报**。
                 ("kinds", receipt.get("kinds") or []),
@@ -10970,6 +10985,15 @@ def run_simulate(args: argparse.Namespace) -> int:
         )
     except (BeatScriptError, WorldSeedError) as exc:
         print(f"[simulate] {exc}", file=sys.stderr)
+        return 2
+    except _WORLD_FILE_ERROR as exc:
+        # 🟢 **一个打错的路径不该甩一段 Python 堆栈**(3.11.0,验收 C)。
+        # `--world-file /tmp/打错了.cyberworld` 从前是 Traceback + rc 1;
+        # 而 `WorldFileError` 自己带着一摞中文行,把它 `str()` 成
+        # 「invalid world file:」打头的英文同样不对(那一课 2a-① 记过)。
+        print("[simulate] 这份世界文件读不了:", file=sys.stderr)
+        for line in (getattr(exc, "errors", None) or [str(exc)]):
+            print(f"  ✗ {line}", file=sys.stderr)
         return 2
     scheduler = world.scheduler
 

@@ -449,7 +449,8 @@ def _validate_predicate(pred: Any, label: str, *, per_player: bool = False) -> l
         return [f"{label}: predicate is not an object"]
     kind = pred.get("pred")
     if kind not in _VALID_PREDICATES:
-        return [f"{label}: unknown predicate {kind!r} (supported: {sorted(_VALID_PREDICATES)})"]
+        return [f"{label}: 不认识的谓词 {kind!r} —— 只有 "
+                f"{'、'.join(sorted(_VALID_PREDICATES))}"]
     errors: list[str] = []
     for field in _needs_fields(kind):
         if field not in pred:
@@ -464,7 +465,8 @@ def _validate_predicate(pred: Any, label: str, *, per_player: bool = False) -> l
         errors.append(f"{label}: {kind} predicate needs a numeric 'value'")
     if kind == "need" and pred.get("need") not in (None, *NEED_NAMES):
         errors.append(
-            f"{label}: unknown need {pred.get('need')!r} (supported: {sorted(NEED_NAMES)})"
+            f"{label}: 不认识的需求 {pred.get('need')!r} —— 只有 "
+            f"{'、'.join(sorted(NEED_NAMES))}"
         )
     if kind == "co_located":
         agents = pred.get("agents")
@@ -544,7 +546,9 @@ def _validate_payload(payload: Any, label: str, *, per_player: bool = False) -> 
             continue
         kind = op.get("op")
         if kind not in VALID_OPS:
-            errors.append(f"{op_label}: unknown op {kind!r} (supported: {sorted(VALID_OPS)})")
+            errors.append(
+                f"{op_label}: 不认识的 op {kind!r} —— 只有 "
+                f"{'、'.join(sorted(VALID_OPS))}")
             continue
         for field in _OP_REQUIRED_FIELDS.get(kind, ()):
             if field not in op:

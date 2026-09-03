@@ -567,6 +567,29 @@ def test_那五句话里不许有裸markdown星号(tmp_path):
                  beats=[_beat("社团", 0)],
                  config={"narrative.player.enabled": True},
                  world_setting="第二周。")
+    # 🔴 **舰队每次重启走的是 `simulate --world-file`,而上一版这条用例
+    # 一次都没敲它**(3.11.0,验收 C ②)——「别数源码里的星号,去问屏幕」
+    # 这条判据,只覆盖我记得去敲的那几条出口时,和那道只认得自己语法的 AST 闸
+    # 是同一个毛病。那句带 `pack` 段的包走创世路的 warning 就漏在这儿。
+    import logging as _logging
+
+    with_pack = _pack(tmp_path, "stars-wf", pack={"id": "第三周", "version": "1.0.0"})
+    records: list[str] = []
+
+    class _Grab(_logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Grab()
+    _logging.getLogger("anima_world.__main__").addHandler(handler)
+    try:
+        run_cli("simulate", "--world-id", "w", "--ticks", "0",
+                "--world-file", with_pack, "--llm", "mock")
+    finally:
+        _logging.getLogger("anima_world.__main__").removeHandler(handler)
+    for line in records:
+        assert "**" not in line, f"`simulate --world-file` 那条路上印了裸星号:{line}"
+
     for argv in (("pack", "--help"), ("pack", "install", "--help"),
                  ("pack", "list", "--help"),
                  ("pack", "install", good, "--world-id", "w"),

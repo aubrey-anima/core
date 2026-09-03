@@ -204,3 +204,61 @@ def test_两份文档里不许再写那几件已经做完的事还没做():
         "这几处还写着那几件已经做完的事没做 —— 而创作台照它抄:\n  "
         + "\n  ".join(hits)
     )
+
+
+def test_回执里报了落地的段_都进得了sections():
+    """🔴 **`declared - sections` 是消费方判「有东西没装上」的那把尺**
+    (FOR-STUDIO §3.62(m) 就是这么教的),所以**回执说装了什么,`sections`
+    就必须有那一格** —— 少一格就是指着一样装得好好的东西说它没装进去。
+
+    这个坑踩过两次,**形状一模一样、只是少的格子不同**:
+    A② 少了 kinds/entities/plugins/rules/items;C① 少了 personality/memories。
+    病根都是**那张表是手抄的**。这道闸让"又漏了一格"有人喊。
+    """
+    import tempfile
+    from pathlib import Path as _P
+    import fakeredis
+    from anima_world.api import World
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = _P(tmp) / "b.cyberworld"
+        write_world_file(
+            base, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+            seed_to_author_records({
+                "agents": [{"id": "夏", "name": "夏", "location": "cafe",
+                            "personality": "温和"}],
+                "locations": [{"id": "cafe", "name": "咖啡店", "kind": "point",
+                               "x": 0, "y": 0, "description": "海边"}],
+            }), compress=False, checksum=False)
+        World.open("w", redis=client, world_file=str(base),
+                   force_mock_llm=True).close()
+        # 一份**只改人设 + 补记忆**的包 —— C① 就是在它身上量到 `sections: {}` 的
+        pack = _P(tmp) / "p.cyberworld"
+        write_world_file(
+            pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+            seed_to_author_records({
+                "pack": {"id": "第二周", "version": "1.0.0"},
+                "agents": [{"id": "夏", "name": "夏", "location": "cafe",
+                            "personality": "这一周她话多了些"}],
+                "memories": [{"agent_id": "夏", "kind": "seed",
+                              "summary": "第二周开头下了场雨"}],
+            }), compress=False, checksum=False)
+        with World.open("w", redis=client, force_mock_llm=True) as world:
+            # `--force`:这一句是创世写的、不是这份包上一版写的,CAS 照规矩拒 ——
+            # 而这条用例要测的是**装进去之后回执与 sections 对不对得上**。
+            receipt = world.install_pack(str(pack), force=True)
+            assert receipt["forced_personality"] == ["夏"], receipt
+            sections = world.packs()[0]["sections"]
+            assert receipt["personality"] == ["夏"], receipt
+            assert receipt["memories"] == 1, receipt
+            assert sections.get("personality") == ["夏"], sections
+            assert sections.get("memories"), sections
+            # 而 `declared - sections` 不该再指着它们说"没装进去"
+            declared = world.packs()[0].get("declared") or {}
+            ghost = set(declared.get("agents") or ()) - set(
+                (sections.get("agents") or []) + (sections.get("personality") or []))
+            assert not ghost, f"这几样装进去了却被报成没装:{ghost}"

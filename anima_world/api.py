@@ -8689,13 +8689,20 @@ class World:
         形状(契约,`contract --json` 的 `host` 段报它):
 
             {"player_id", "tick", "day", "place", "place_name",
-             "trigger": "arrive|new_day|beat|ask",
+             "trigger": "arrive|new_day|beat|acted|ask|return",
              "scene": {"text", "source": "llm|mock|cached", "seq"},
              "options": [ … ],
+             "ask_ready_tick", "ask_ready", "ask_ready_text",
              "blocked", "blocked_text"}
 
-        一项:`{"id", "kind", "label", "hook", "tone", "available", "reason",
+        一项:`{"id", "kind", "label", "who", "hook", "tone", "available", "reason",
         "refusal", "cost", "door": {"method", "params"}}`。
+
+        ⚠️ **这两张表以 `contract --json` 的 `host.turn_keys` / `host.option_keys`
+        为准**(`tests/test_host_doc_contract.py` 逐格比着 REFERENCE 那一行,
+        3.11.0 起**同一道闸也扫这里**)—— 这段 docstring 曾经三处同时过期:
+        `trigger` 缺 `return`、顶层缺 `ask_ready*` 三格、一项缺 `who`,
+        而 `who` 那一格正是 3.9.0 漏到站点三处去的那一格。
         `available` / `reason` / `refusal` / `cost` **从 `player_options` 原样透传**,
         一个字不另算(另算一份就是第二套判断)。
 
