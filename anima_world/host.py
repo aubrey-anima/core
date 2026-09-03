@@ -33,7 +33,18 @@ from typing import Any, Iterable
 # 离线超过 `host.away_ticks`,或者他上一屏之后有新的内容包落地。
 # **零新状态**:`host_scene` 事件载荷里已经有 `tick`、投影里每个玩家一条,
 # 而 `pack_installed` 也在同一条日志上 —— 两个判据都是减法。
-HOST_MOMENTS = ("arrive", "new_day", "beat", "ask", "return")
+# 🆕 3.11.0(玩法层批 3a):第六个时刻 **`acted`** ——「他刚做了一件事」。
+#
+# 🔴 **这一格是「实时编剧」的前提,而缺的不是一次模型调用,是钥匙上的一格。**
+# 老板 09-02:「用户每操作一次应该就有新的剧情触发」。而在这一格之前,钥匙是
+# `(place, day, beat_seq)` —— 一个玩家在**同一个地方、同一天**里点十次动词,
+# `_host_trigger` 十次都答 `None`、`scene.source` 十次都是 `cached`:
+# 屏幕一动不动,而世界里真的发生了十件事。
+#
+# 排在 `beat` **之后**是有意的:一条为他响的拍是「剧情安排的事」,比「他自己
+# 刚做的事」更该决定这一屏怎么进场;而两样同时变时报最强的那个,是这张表
+# 从 3.9.0 起就写着的次序纪律。
+HOST_MOMENTS = ("arrive", "new_day", "beat", "acted", "ask", "return")
 OPTION_KINDS = ("invitation", "beat", "talk", "verb", "travel", "free")
 # 点下去走哪条**今天已经有**的门。闭集 —— 多一种就是多一条写世界的路。
 DOOR_METHODS = ("answer_invitation", "chat", "player_walk", "player_tool", "free")
@@ -93,6 +104,63 @@ RECAP_EVENT_TYPES = (
 #: 一屏最多回顾几条。**截断了必须吭声**(和 perception 的 `overflow` 同一条):
 #: 不说的话他在一个"只发生过三件事"的世界里做决定,而他永远不会知道自己被瞒了。
 RECAP_LIMIT = 6
+
+# ── 「他刚做了一件事」是哪几种事件(3.11.0,批 3a)─────────────────────────────
+#
+# **和 `RECAP_EVENT_TYPES` 并排住,有意不合并。** 两张表回答的是**两个不同的
+# 问题**:那一张是「这一屏该跟他说哪几件事」,这一张是「他自己动没动过手」。
+# `payment` / `grant_item` 进得了回顾(他的钱包确实变了),但那是**世界对他做的**,
+# 不是他做的 —— 合成一张表的话,一条剧情拍打进来的钱会被当成「他操作了一次」,
+# 于是编剧对着一件他没做过的事写下一拍。
+#
+# 🔴 **`who` 不是通用判据,这一格是这一层最容易写错的地方**(裁决 §2.10 ①):
+#   `travel` / `entity_interaction` / `player_action` / `state_change` —— `who` 是 `player:<id>`
+#   `conversation` —— `who` 是**她**,人在 `payload.participants` 里
+#   `invitation_settled` —— `who` 也是**她**,人在 `payload.player_id` 里
+# 照 `who` 筛的话后两种**永远筛不出来**,而下场是「聊完一轮屏幕不动」,零报错。
+PLAYER_MOVE_EVENT_TYPES = (
+    "travel",              # 他起程
+    "state_change",        # 他到站(`kind == "location_join"`,到达那一刻补发的)
+    "entity_interaction",  # 他点了一个动词
+    "conversation",        # 一轮聊完(整场只在关闭时发这一条)
+    "invitation_settled",  # 他答了一份邀请
+    "player_action",       # 宿主自己报的那条
+)
+#: 邀请的四种结局里,**只有他真的答了的那两种算「他做了一件事」**。
+#: `expired` 是他没来得及(手机上的人放下手机去吃了顿饭),`cancelled` 是她把话
+#: 收回去了 —— 两样都不是他动的手,而这条分界正是邀请那一层写死的
+#: 「『拒绝』和『过期』必须分得开」。
+PLAYER_MOVE_INVITE_OUTCOMES = ("accepted", "declined")
+
+
+def player_move_seq_of(event_type: str, payload: dict[str, Any], who: str,
+                       player_key: str) -> bool:
+    """这一条事件算不算**这个玩家**的一次操作。**纯函数,一处判断两处用**
+    (投影折叠 + 任何想问同一个问题的地方)。
+
+    `player_key` 是 `player:<id>`(账本、库存、事件顶层 `who`、在场位置一律
+    是这个形状);邀请那一条里躺着的是**裸 id**,所以两种都要认得。
+    """
+    kind = str(event_type or "")
+    if kind not in PLAYER_MOVE_EVENT_TYPES:
+        return False
+    bare = player_key.split(":", 1)[-1]
+    if kind == "state_change":
+        # 到站那一条。**别的 `state_change` 一概不算** —— 关系变了、人设被改写
+        # 都是世界对他做的,不是他做的。
+        return (str(payload.get("kind") or "") == "location_join"
+                and str(who or "") == player_key)
+    if kind == "conversation":
+        for person in payload.get("participants") or []:
+            if not isinstance(person, dict):
+                continue
+            if str(person.get("kind") or "") == "user" and str(person.get("id") or "") == bare:
+                return True
+        return False
+    if kind == "invitation_settled":
+        return (str(payload.get("player_id") or "") == bare
+                and str(payload.get("outcome") or "") in PLAYER_MOVE_INVITE_OUTCOMES)
+    return str(who or "") == player_key
 
 FREE_OPTION_ID = "opt:free"
 FREE_LABEL = "自己说点什么……"

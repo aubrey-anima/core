@@ -666,7 +666,7 @@ def test_return进了contract的moments(tmp_path):
     from anima_world.__main__ import contract_payload
 
     assert contract_payload()["host"]["moments"] == [
-        "arrive", "new_day", "beat", "ask", "return"]
+        "arrive", "new_day", "beat", "acted", "ask", "return"]
 
 
 def test_藏起来的人在回顾里只叫有人_而事情照说(world):
@@ -760,3 +760,75 @@ def test_回顾里的动词和东西是人话_不是英文id(world):
     assert said, "回顾一个字都没说"
     assert target["id"] not in said and verb["verb"] not in said, f"裸 id / 英文动词:{said}"
     assert target["name"] in said, said
+
+
+# ── 第六个时刻:他自己刚做了一件事(3.11.0,批 3a)──────────────────────────
+
+
+def test_同地同日点一个动词_屏也要换(tmp_path):
+    """🔴 **这一条是「每操作一次就有新剧情」的判据本身。**
+
+    在这一格之前,钥匙是 `(place, day, beat_seq)` —— 同一个地方、同一天里
+    做一件事,`_host_trigger` 答 `None`、`scene.source` 是 `cached`:
+    屏幕一动不动,而世界里真的发生了一件事。
+    """
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "acted.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert world.host_turn("p1")["trigger"] == "arrive"
+        # 同地同日,再问一次 —— 没动手,就该闭嘴。
+        assert world.host_turn("p1")["scene"]["source"] == "cached"
+        world.player_action("p1", "看了看布告栏")
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "acted", turn["trigger"]
+        assert turn["scene"]["source"] != "cached"
+        # 而做完那一下之后不再动手,它照旧闭嘴 —— `acted` 是一次跃迁不是一盏常亮的灯。
+        assert world.host_turn("p1")["scene"]["source"] == "cached"
+
+
+def test_邀请过期不算他动手_他答了才算(tmp_path):
+    """**「拒绝」和「过期」必须分得开** —— 这条邀请那一层写死的分界,在这一层
+    的落法是:他没来得及答,屏幕不该因此重开一屏说「你刚做了什么」。
+
+    ⚠️ 这一条试的是 `player_move_seq_of` 那个纯函数**被真的接上了**:
+    两种结局走的是同一条 `invitation_settled`,只差 `payload.outcome` 一格。
+    """
+    from anima_world.host import player_move_seq_of
+
+    for outcome, expected in (("expired", False), ("cancelled", False),
+                              ("accepted", True), ("declined", True)):
+        assert player_move_seq_of(
+            "invitation_settled", {"player_id": "p1", "outcome": outcome},
+            "xia", "player:p1") is expected, outcome
+
+
+def test_那两条who是她的事件_按payload筛才筛得出来(tmp_path):
+    """🔴 **这一格是这一层最容易写错的地方**(裁决 §2.10 ①)。
+
+    `conversation` / `invitation_settled` 的 `who` 是**她**,不是他 ——
+    照 `who` 筛的话这两种**永远筛不出来**,而下场是「聊完一轮屏幕不动」,
+    零报错。试牙:把 `who` 换成她的 id,两条照样要答 True。
+    """
+    from anima_world.host import player_move_seq_of
+
+    assert player_move_seq_of(
+        "conversation", {"participants": [{"id": "p1", "kind": "user"}]},
+        "苏晚夏", "player:p1") is True
+    # 别人的会话不算他的操作
+    assert player_move_seq_of(
+        "conversation", {"participants": [{"id": "p2", "kind": "user"}]},
+        "苏晚夏", "player:p1") is False
+
+
+def test_别的state_change不算他动手(tmp_path):
+    """到站那一条走的是 `state_change{kind: "location_join"}`,而**关系变了、
+    人设被改写**走的是同一种事件 —— 只认 `type` 不认 `kind` 的话,一次好感度
+    变化会被当成「他操作了一次」,于是编剧对着一件他没做过的事写下一拍。"""
+    from anima_world.host import player_move_seq_of
+
+    assert player_move_seq_of("state_change", {"kind": "location_join"},
+                              "player:p1", "player:p1") is True
+    assert player_move_seq_of("state_change", {"kind": "sentiment_delta"},
+                              "player:p1", "player:p1") is False

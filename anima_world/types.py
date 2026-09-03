@@ -121,6 +121,20 @@ class Projection:
     **事件日志**,这一格只是它的投影。刷新一次页面就重生成一段的话,同一个时刻的
     世界会对同一个人说两种话,而两次都"对"。
     """
+    player_move_seq: dict[str, int] = field(default_factory=dict)
+    """这个玩家**自己动手**的最后一条事件的 seq(3.11.0,批 3a)。
+
+    它是主持人那把时刻钥匙的**第四格**,和 `player_beat_seq` 逐字同构 —— 那一格
+    答「剧情安排的事发生了没有」,这一格答「他自己动没动过手」。
+
+    🔴 **没有这一格,「每操作一次就有新剧情」结构性地做不到**:钥匙从前是
+    `(place, day, beat_seq)`,一个在同一个地方、同一天里连点十次动词的玩家,
+    十次都拿到 `scene.source == "cached"` —— 屏幕一动不动,而世界里真发生了十件事。
+
+    哪几种事件算数由 `host.player_move_seq_of` 判(**一处判断**),
+    而那张表和 `RECAP_EVENT_TYPES` **有意不合并**:一件事进不进回顾、算不算
+    他的操作,是两个问题。
+    """
     player_beat_seq: dict[str, int] = field(default_factory=dict)
     """指着这个玩家的最后一条 `beat_fired` 的 seq(3.9.0)。
 

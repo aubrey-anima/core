@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from anima_world import host as host_mod
 from anima_world.types import AgentState, Capability, Event, Projection, Relation
 
 #: 投影式插件事实的事件后缀:`<插件>.<事实>.delta`(3.8.0 第 2 期 2b)。
@@ -82,6 +83,12 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_invitation_settled(proj, e)
     elif e.type.endswith(FACT_DELTA_SUFFIX):
         _apply_fact_delta(proj, e)
+    # 🆕 3.11.0(批 3a):**不是 elif** —— 同一条事件可能既被上面某个分支折
+    # (`state_change` 折关系、`payment` 折余额),又算「这个玩家动了一次手」。
+    # 挂进上面那条 if/elif 链的任何一格都会漏掉另外几格,而漏了不报错:
+    # 屏幕安静地不再更新。
+    if e.type in host_mod.PLAYER_MOVE_EVENT_TYPES:
+        _apply_player_move(proj, e)
     if proj.fact_sources and e.type in proj.fact_sources:
         # ⚠️ **不是 elif**:一条内核事件可能既被别的分支折(`payment` 折 `balances`),
         # 又被某个插件认成自己的 delta。两件事互不相干,都要做。
@@ -268,6 +275,25 @@ def _apply_host_scene(proj: Projection, e: Event) -> None:
     if not player_id:
         return
     proj.host_scenes[player_id] = {**payload, "seq": int(e.seq or 0)}
+
+
+def _apply_player_move(proj: Projection, e: Event) -> None:
+    """他自己动手的最后一条 —— 主持人时刻钥匙的第四格(3.11.0,批 3a)。
+
+    **谁算数由 `host.player_move_seq_of` 判,这里一个字都不另写。** 那张表里
+    有两条的 `who` 是**她**不是他(`conversation` / `invitation_settled`),
+    照 `who` 筛的话它们永远筛不出来,而下场是「聊完一轮屏幕不动」、零报错。
+
+    ⚠️ **一条事件可能同时属于好几个玩家**(一场会话只有一个 user,但将来
+    未必),所以这里逐个玩家问,而不是从事件里反解出"他是谁"。名单取
+    `players_joined` —— 一个从没进过这个世界的人不会有操作。
+    """
+    payload = e.payload or {}
+    who = str(e.who or "")
+    seq = int(e.seq or 0)
+    for player_id in proj.players_joined:
+        if host_mod.player_move_seq_of(e.type, payload, who, f"player:{player_id}"):
+            proj.player_move_seq[player_id] = seq
 
 
 def _apply_beat_fired(proj: Projection, e: Event) -> None:

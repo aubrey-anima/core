@@ -8661,7 +8661,10 @@ class World:
             self.scheduler.catch_up_projection()
             last = dict(self.scheduler._memory_projection.host_scenes.get(pid) or {})
             beat_seq = int(self.scheduler._memory_projection.player_beat_seq.get(pid, 0))
+            # 🆕 3.11.0(批 3a):钥匙的第四格 —— 「他自己刚动过手没有」。
+            move_seq = int(self.scheduler._memory_projection.player_move_seq.get(pid, 0))
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
+                                     move_seq=move_seq,
                                      tick=tick, ask=bool(ask),
                                      was_present=was_present)
         if trigger is None:
@@ -8684,7 +8687,8 @@ class World:
             self._record_and_fan({
                 "type": "host_scene", "who": f"player:{pid}",
                 "payload": {"player_id": pid, "place": place, "day": day, "tick": tick,
-                            "beat_seq": beat_seq, "trigger": trigger,
+                            "beat_seq": beat_seq, "move_seq": move_seq,
+                            "trigger": trigger,
                             "text": text, "source": source,
                             "options": [o["id"] for o in options]},
             })
@@ -8908,6 +8912,7 @@ class World:
 
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
                       beat_seq: int, tick: int, ask: bool,
+                      move_seq: int = 0,
                       was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是四个时刻里的哪一个。`None` = 闭嘴,用上一屏。
 
@@ -8927,6 +8932,17 @@ class World:
             return "arrive"
         if int(last.get("beat_seq") or 0) != beat_seq:
             return "beat"
+        # 🆕 3.11.0(批 3a):**他自己刚做了一件事。**
+        #
+        # 排在 `beat` 之后、`new_day` 之前:一条为他响的拍比「他自己动了手」更该
+        # 决定这一屏怎么进场,而「他动了手」比「天亮了」更该。
+        #
+        # ⚠️ **老 `host_scene` 事件上没有这一格**,读作 0。于是升级那一刻,
+        # 一个手上已经有操作记录的老玩家会被判成 `acted` 开一次口 —— 那是对的
+        # (他确实做过事而屏幕没说),而且**只多开一次**:这一屏落库时就带上
+        # 这一格了。少了这一句注释,下一个人会以为它是个 bug 去"修"掉。
+        if int(last.get("move_seq") or 0) != move_seq:
+            return "acted"
         if int(last.get("day") or 0) != day:
             return "new_day"
         if ask:
