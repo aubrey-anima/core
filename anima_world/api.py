@@ -8600,7 +8600,8 @@ class World:
         而这种不一致一处都不报错。「回应」不新造(动词的 `emit.text` / `ToolResult` /
         `narrative` 事件已经是三条路),「导演」不在这一版里。
 
-        **只在五个时刻开口**(`HOST_MOMENTS`:`arrive`/`new_day`/`beat`/`ask`/`return`),
+        **只在六个时刻开口**(`HOST_MOMENTS`:`arrive`/`new_day`/`beat`/`acted`/`ask`/
+        `return`),
         而这道闸就在这个函数里:它算一把
         **时刻钥匙** `(place, day, 指着我的最后一条 beat_fired 的 seq)`,和上一条
         `host_scene` 事件上的那把不同才开口,否则原样返回上一屏
