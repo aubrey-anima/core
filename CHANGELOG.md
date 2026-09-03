@@ -108,6 +108,34 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
   `spawn.kind` **绕过预检**,到 `_load_ontology` 才炸,而那时表已经写过几张了
   ——「半装进去的包比装不进去坏得多」。
 
+- **`pack enable`:一份停用的内容包回得来了。**「再装一次同一个包 = 重新启用」
+  这句话**对带拍的包从来就是假的** —— `disable` 有意不删 `:beats`(停用不是
+  删除),而 `install` 有意拒绝重用已有的拍 id(`beat_fired` 那份历史按 id 配对):
+  两条规矩各自都对,而它们中间**少一扇门**,于是那份包永远回不来。
+  新出口 `World.enable_pack` / `anima-world pack enable`,落一条 `pack_enabled`。
+  ⚠️ 「人回来」这一支正是重装那条路答不出来的:重装时名册里含已 `agent_leave`
+  的人,他被当成「已在册」跳过,于是 `disabled` 翻回 false 而人还站在场外。
+
+### 🔴 破坏性:吃过 `narrate` / `hail` 的世界回不去老引擎
+
+**这一条是给回滚断路用的**(platform 会照它扩 preflight)。
+
+3.10.0 给一条拍加了顶层键 `narrate` 与一个新 op `hail`。而开机时对**库里存量**
+那几拍的宽容(`BeatScript.from_data(stored=True)`)**只覆盖 `trigger` 与
+`trigger.at` 两层** —— 顶层 `BEAT_KEYS` 与 op 集**不在宽容范围内**,它们照旧
+当场拒。
+
+所以:**一个装过带 `narrate` / `hail` 的包的世界,回滚到 3.9.0 会 `BOOT FAILED`**
+(不认识的字段 / 不认识的 op),而不是"少一个特性"。
+
+- 带这两样的包,`engine_min` 抬到 **`3.10.0`**。
+- **要回滚,先 `anima-world pack disable <那份包>`** —— 但注意 `disable` 不删
+  `:beats`,那几拍**还在库里**,老引擎照样读得到它们。所以真正的判据是:
+  **吃过这两样的世界,不要回滚**;要回滚就得先把那几拍从 `:beats` 里拿掉,
+  而今天没有那个出口(`pack disable` 管的是"响不响",不是"在不在库里")。
+- 判据**按能力探测**,不是版本号:`contract --json` 的 `beats.ops` 里有没有
+  `hail`、`beats.player_selector.beat_keys` 里有没有 `narrate`。
+
 ### Known
 
 - 这一版**只改判据,没改契约**:`contract --json` 逐字未动(`storage` 段尤其),

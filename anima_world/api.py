@@ -2937,6 +2937,23 @@ class World:
 
         return disable_authored_pack(self.scheduler, pack_id)
 
+    def enable_pack(self, pack_id: str) -> dict[str, Any]:
+        """把一份**停用的**内容包重新启用(3.10.1)—— `disable_pack` 的逆。
+
+        🔴 **它必须是一扇独立的门**:一份带拍的包停用之后,「再装一次」会被
+        「这几拍的 id 这个世界里已经有了」拒掉(`beat_fired` 那份历史按 id 配对),
+        而 `disable` 又有意不删 `:beats`(停用不是删除)—— 两条规矩各自都对,
+        而它们中间少一扇门,于是那份包**永远回不来**。
+
+        只翻朝前看的那一半:那几拍又会响、它带来的人回来(走 `agent_return`)、
+        它写下的开关重写。**一个字节的历史都不动。**
+
+        CLI 出口是 `anima-world pack enable <包 id>`。
+        """
+        from anima_world.__main__ import enable_authored_pack
+
+        return enable_authored_pack(self.scheduler, pack_id)
+
     def packs(self) -> list[dict[str, Any]]:
         """这个世界装了哪几份内容包 —— **按落地先后**(3.10.0)。
 

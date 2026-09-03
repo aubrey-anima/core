@@ -1082,3 +1082,88 @@ def test_cli停用_那一屏念得通(tmp_path):
     assert "不是删除" in r.stdout and "**" not in r.stdout, r.stdout
     r = run_cli("pack", "disable", "第二周", "--world-id", "w")
     assert r.returncode == 2 and "已经是停用的" in r.stderr
+
+
+# ── 停用之后回得来吗(3.10.1,验收 A ③)────────────────────────────────────
+
+
+def test_带拍带人的包_停用之后启用得回来(tmp_path):
+    """🔴 **「再装一次 = 重新启用」对带拍的包是假的,而两条规矩各自都对。**
+
+    `disable` 有意**不删** `:beats`(停用不是删除);`install` 有意**拒绝重用
+    已有的拍 id**(`beat_fired` 那份历史按 id 配对)。于是一份带拍的包停用之后
+    `install` 说「这几拍的 id 已经有了」,而没有第三条路 —— 它永远回不来。
+    少的不是一条规矩,是**它们中间的一扇门**。
+
+    这一条两半都带:**带拍**(拍要解封)与**带人**(人要回来 —— 那正是重装
+    那条路答不出来的:`known` 含已 `agent_leave` 的人,于是他被当成"已在册"
+    跳过,`disabled` 翻回 false 而人还站在场外)。
+    """
+    from anima_world.api import World
+    from anima_world.world_package import PackInstallError
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    client = redis_for(tmp_path / "en.db")
+    base = write_seed_file(tmp_path / "en-base.cyberworld", BASE)
+    World.open("w", redis=client, world_file=base, force_mock_llm=True).close()
+
+    pack = tmp_path / "wk.cyberworld"
+    write_world_file(
+        pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+        seed_to_author_records({
+            "pack": {"id": "第二周", "version": "1.0.0"},
+            "beats": [_beat("社团", 0)],
+            "agents": [{"id": "乙", "name": "乙", "location": "cafe",
+                        "personality": "新来的"}],
+        }),
+        compress=False, checksum=False)
+
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        world.install_pack(str(pack))
+        assert "乙" in world.scheduler.agents
+        world.disable_pack("第二周")
+        assert "乙" not in world.scheduler.agents, "停用了,人该退场"
+        assert world.packs()[0]["disabled"] is True
+
+        # 「再装一次」这条路对带拍的包是走不通的 —— 这正是这扇门存在的理由。
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(str(pack))
+        assert "社团" in str(raised.value)
+
+        receipt = world.enable_pack("第二周")
+        assert receipt["beats"] == ["社团"]
+        assert receipt["agents"] == ["乙"], f"人没回来:{receipt}"
+        assert "乙" in world.scheduler.agents, "启用了,人该回来"
+        assert world.packs()[0]["disabled"] is False
+        # 那几拍又进候选了
+        from anima_world.beats import disabled_beats_from
+        assert "社团" not in disabled_beats_from(world.scheduler._memory_projection)
+
+
+def test_启用一份本来就启用着的包_当场说不做(tmp_path):
+    """**没有什么要做的**,而这句话要说出来 —— 静默成功会让人以为它做了点什么。"""
+    from anima_world.api import World
+    from anima_world.world_package import PackInstallError
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    client = redis_for(tmp_path / "en2.db")
+    base = write_seed_file(tmp_path / "en2-base.cyberworld", BASE)
+    World.open("w", redis=client, world_file=base, force_mock_llm=True).close()
+    pack = tmp_path / "wk2.cyberworld"
+    write_world_file(
+        pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+        seed_to_author_records({"pack": {"id": "周", "version": "1.0.0"},
+                                "world_setting": "换一段"}),
+        compress=False, checksum=False)
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        world.install_pack(str(pack))
+        with pytest.raises(PackInstallError) as raised:
+            world.enable_pack("周")
+        assert "本来就是启用的" in str(raised.value)
+        with pytest.raises(PackInstallError) as raised:
+            world.enable_pack("没装过的")
+        assert "没有装过" in str(raised.value)

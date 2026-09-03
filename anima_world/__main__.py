@@ -501,7 +501,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pack_cmd = sub.add_parser(
         "pack",
         help="内容包:往一个「跑着的」世界投一份更新(install)、"
-             "看装了哪几周(list)、停用一份(disable)",
+             "看装了哪几周(list)、停用一份(disable)、再把它启用回来(enable)",
     )
     pack_commands = pack_cmd.add_subparsers(dest="pack_command")
     pack_install = pack_commands.add_parser(
@@ -527,6 +527,16 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_world_args(pack_disable)
     pack_disable.add_argument("pack", help="要停用的内容包 id")
     pack_disable.add_argument(
+        "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
+    )
+    pack_enable = pack_commands.add_parser(
+        "enable",
+        help="把一份停用的内容包重新启用:那几拍又会响、它带来的人回来、"
+             "它写下的开关重写。「一个字节的历史都不动」",
+    )
+    _add_world_args(pack_enable)
+    pack_enable.add_argument("pack", help="要启用的内容包 id")
+    pack_enable.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
     )
     pack_list = pack_commands.add_parser(
@@ -4447,6 +4457,139 @@ def disable_authored_pack(scheduler: Any, pack_id: str) -> dict[str, Any]:
         pack_id, day, len(receipt["beats"]), len(receipt["agents"]),
         len(receipt["config"]),
         f";{len(receipt['kept'])} 个开关装完之后被人调过,留着没动" if receipt["kept"] else "",
+    )
+    return receipt
+
+
+def enable_authored_pack(scheduler: Any, pack_id: str) -> dict[str, Any]:
+    """把一份停用的内容包**重新启用**(3.10.1,验收 A ③)—— `disable` 的逆。
+
+    🔴 **这一条存在的理由是「再装一次 = 重新启用」不成立。**
+    `_apply_pack_disabled` 的 docstring 上一版写着「再装一次同一个包会把它重新
+    启用」,而那句话对**带拍的包**是假的,病根是两条各自正确的规矩撞在一起:
+
+    - `disable` **不删 `:beats`**(停用不是删除 —— 删了历史就指向不存在的东西);
+    - `pack install` **拒绝重用已有的拍 id**(`beat_fired` 那份历史按 id 配对)。
+
+    于是一份带拍的包停用之后,`pack install` 说「这几拍的 id 这个世界里已经有了」,
+    而**没有第三条路** —— 它永远回不来。两条规矩都对,而它们中间少一扇门。
+
+    这就是那扇门。它**只翻朝前看的那一半**,一个字节的历史都不动:
+
+    - **拍解封**:那几拍从"不再响"里划掉(它们一直在 `:beats` 里,没删过)。
+      ⚠️ 已经响过的照旧响过 —— `beat_fired` 是历史,`mark_fired` 不因启用而撤销。
+    - **人回来**:走 `agent_return` 那条已有的路,和 `disable` 走 `agent_leave`
+      逐字对称。⚠️ **这一支正是 `install` 那条路答不出来的**:重装时
+      `known` 含已 `agent_leave` 的人,于是那几个人被当成"已在册"跳过,
+      `disabled` 翻回 false 而人还站在场外(验收 A ③ 的后半)。
+    - **开关重写**:回到这个包写下去的那几个值。
+
+    **落一条 `pack_enabled` 事实,不改任何旧事件** —— 和 `pack_disabled`
+    逐字同一个形状。
+    """
+    from anima_world.beats import BeatDirector, BeatScript
+    from anima_world.redis_state import RedisBeatsStore, RedisBlackboard, agent_key
+
+    event_log = scheduler.event_log
+    if event_log is None:
+        raise PackInstallError(["这个世界没有事件日志,启用不了内容包"])
+    pack_id = str(pack_id or "").strip()
+    with scheduler._lock:
+        scheduler.catch_up_projection()
+        row = dict(scheduler._memory_projection.packs.get(pack_id) or {})
+    if not row:
+        raise PackInstallError([
+            f"这个世界没有装过 {pack_id!r} 这份内容包。"
+            "装了哪几周问 `anima-world pack list`"
+        ])
+    if not row.get("disabled"):
+        raise PackInstallError([
+            f"内容包 {pack_id!r} 本来就是启用的 —— 没有什么要做的。"
+        ])
+
+    sections = row.get("sections") or {}
+    wrote = row.get("wrote") or {}
+    tick = int(scheduler.clock)
+    day = int(scheduler.world_time(tick).day)
+    receipt: dict[str, Any] = {
+        "pack": pack_id, "version": str(row.get("version") or ""),
+        "day": day, "tick": tick,
+        "beats": sorted(str(b) for b in (sections.get("beats") or ())),
+        "agents": [], "config": [],
+    }
+
+    with scheduler._lock:
+        # ① 人回来 —— 和 `disable` 那条 `agent_leave` 逐字对称。
+        for aid in (sections.get("agents") or ()):
+            aid = str(aid)
+            if aid in scheduler.agents:
+                continue                       # 他没走(或者已经被别的路带回来了)
+            spec = (scheduler._memory_projection.agents.get(aid))
+            if spec is None:
+                logger.warning("内容包 %s 要带回 %s,而名册里没有他 —— 跳过",
+                               pack_id, aid)
+                continue
+            here = str(getattr(spec, "location", "") or "")
+            entry = {
+                "id": aid,
+                "name": str((getattr(spec, "spec", None) or {}).get("name") or aid),
+                "location": here,
+                "personality": str(
+                    (getattr(spec, "spec", None) or {}).get("personality") or ""),
+            }
+            try:
+                scheduler.register(scheduler._beat_agent_factory(entry))
+            except Exception as exc:  # noqa: BLE001 - 一个人回不来不该掀翻整趟
+                logger.warning("内容包 %s 带不回 %s:%s", pack_id, aid, exc)
+                continue
+            brain = scheduler.agents[aid]
+            board = RedisBlackboard(scheduler.redis, agent_key(scheduler.world_id, aid))
+            board.seed_missing(brain.agent.blackboard.snapshot())
+            brain.agent.blackboard = board
+            event_log.append({
+                "ts": tick, "who": aid, "loc": here, "type": "agent_return",
+                "payload": {"agent_id": aid, "location": here,
+                            "reason": "pack_enabled", "pack": pack_id},
+            })
+            receipt["agents"].append(aid)
+
+        # ② 开关重写 —— 回到这个包写下去的那几个值。
+        store = scheduler.config_store
+        for key, written in sorted((wrote.get("config") or {}).items()):
+            if store is None:
+                break
+            try:
+                store.set(key, ast.literal_eval(written))
+            except Exception as exc:  # noqa: BLE001 - 一个键写不回不该掀翻整趟
+                logger.warning("内容包 %s 的开关 %s 写不回:%s", pack_id, key, exc)
+                continue
+            receipt["config"].append(key)
+
+        # ③ 落一条事实,然后重折。
+        event_log.append({
+            "ts": tick, "type": "pack_enabled",
+            "payload": {"pack_id": pack_id, "day": day, "tick": tick,
+                        "beats": receipt["beats"], "agents": receipt["agents"]},
+        })
+        persisted = event_log.replay()
+        scheduler.reset_projection(persisted)
+        scheduler.load_persisted_events(persisted)
+
+        # ④ 导演重建 —— 解封的那几拍从此又进候选。
+        script_rows = RedisBeatsStore(scheduler.redis, scheduler.world_id).definitions()
+        if script_rows:
+            fired = {
+                (e.payload.get("beat_id"), str(e.payload.get("for") or ""))
+                for e in persisted
+                if e.type == "beat_fired" and e.payload.get("beat_id")
+            }
+            scheduler.beat_director = BeatDirector(
+                BeatScript.from_data({"beats": script_rows}, stored=True), fired=fired)
+
+    logger.info(
+        "内容包 %r 重新启用了(世界第 %d 天):%d 拍又会响 · %d 个人回来 · %d 个开关重写",
+        pack_id, day, len(receipt["beats"]), len(receipt["agents"]),
+        len(receipt["config"]),
     )
     return receipt
 
@@ -9582,7 +9725,7 @@ def run_pack(args: argparse.Namespace) -> int:
     """
     redis, world_id, mysql = _world_args(args)
     command = getattr(args, "pack_command", None)
-    if command not in {"install", "list", "disable"}:
+    if command not in {"install", "list", "disable", "enable"}:
         print("[pack] 只有 install / list / disable 三个子命令", file=sys.stderr)
         return 2
     if not _world_exists(redis, world_id):
@@ -9621,6 +9764,29 @@ def run_pack(args: argparse.Namespace) -> int:
                 print(f"  · {row['id']} v{row.get('version') or '?'}"
                       f"(第 {row.get('day', 0)} 天落地){mark}{note}")
                 print(f"      带了:{what}")
+            return 0
+
+        if command == "enable":
+            try:
+                receipt = world.enable_pack(args.pack)
+            except PackInstallError as exc:
+                print(f"[pack] 启用不了 {args.pack!r}:", file=sys.stderr)
+                for line in exc.errors:
+                    print(f"  ✗ {line}", file=sys.stderr)
+                return 2
+            if getattr(args, "as_json", False):
+                print(json.dumps(receipt, ensure_ascii=False, indent=2))
+                return 0
+            print(f"内容包 {receipt['pack']} 又启用了(世界第 {receipt['day']} 天)。")
+            if receipt["beats"]:
+                print(f"  · {len(receipt['beats'])} 拍从此又会响 —— "
+                      "已经响过的照旧响过(`beat_fired` 是历史)")
+            if receipt["agents"]:
+                print(f"  · {len(receipt['agents'])} 个人回来了:"
+                      f"{'、'.join(receipt['agents'])}")
+            if receipt["config"]:
+                print(f"  · {len(receipt['config'])} 个开关写回去了:"
+                      f"{'、'.join(receipt['config'])}")
             return 0
 
         if command == "disable":

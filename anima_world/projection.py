@@ -74,6 +74,8 @@ def _apply_event(proj: Projection, e: Event) -> None:
         _apply_pack_installed(proj, e)
     elif e.type == "pack_disabled":
         _apply_pack_disabled(proj, e)
+    elif e.type == "pack_enabled":
+        _apply_pack_enabled(proj, e)
     elif e.type == "agent_invites":
         _apply_agent_invites(proj, e)
     elif e.type == "invitation_settled":
@@ -389,6 +391,21 @@ def _apply_pack_installed(proj: Projection, e: Event) -> None:
         "seq": int(e.seq or 0),
     }
     proj.packs[pack_id] = row
+
+
+def _apply_pack_enabled(proj: Projection, e: Event) -> None:
+    """一份内容包重新启用了(3.10.1)—— `pack_disabled` 的逆,**只翻一格**。
+
+    🔴 **它是一扇独立的门,不是"再装一次"**:一份带拍的包停用之后,
+    `pack install` 会被「这几拍的 id 已经有了」拒掉(`beat_fired` 那份历史按 id
+    配对),而 `disable` 又有意不删 `:beats` —— 两条规矩都对,中间少一扇门。
+    """
+    payload = e.payload or {}
+    pack_id = str(payload.get("pack_id") or "")
+    row = proj.packs.get(pack_id)
+    if row is None:
+        return
+    row["disabled"] = False
 
 
 def _apply_pack_disabled(proj: Projection, e: Event) -> None:
