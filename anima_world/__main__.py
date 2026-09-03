@@ -19,7 +19,9 @@ from typing import Any, Iterable
 from anima_world import onboarding
 from anima_world.actions import ActionTable
 from anima_world.agent import Agent
-from anima_world.beats import BeatScript, BeatScriptError, coerce_goals
+from anima_world.beats import (
+    BeatScript, BeatScriptError, coerce_goals, split_against_stored,
+)
 from anima_world.brain import Brain
 from anima_world.bt_nodes import Action, Condition, NeedAction, Selector, Sequence, Status, default_bt
 from anima_world.config_store import ConfigStore
@@ -1105,12 +1107,17 @@ PACK_KEYS = ("id", "version", "note")
 # ⚠️ 强调用「」不用 `**`:这几句会**原样印在终端上**,而屏幕上 `**` 就是两个星号
 # (`test_屏幕上不许出现裸markdown星号` 看不见它们 —— 它只扫 `print()` 实参与 `help=`)。
 EDIT_PATH_NOTES: dict[str, str] = {
+    # ⚠️ **措辞在 3.10.1 收窄过一次,而那次是被一句「太强的真话」逼的**:
+    # 这里原先写「`--world-file` 装不进一个已经有剧情的世界」,而 3.10.1 之后
+    # 它只对**新增**的拍成立 —— 同一份文件重开机是舰队上的常态,照常开机。
+    # 一句过强的话和一句错的一样贵:照它去改的人会以为自己必须重建世界。
     "beats": (
-        "`--world-file` 装不进一个「已经有剧情」的世界:节拍和 `beat_fired` 那份历史"
+        "「新增」的拍装不进一个已经有剧情的世界:节拍和 `beat_fired` 那份历史"
         "配对,而一份写着 `day: 0..6` 的包装进一个跑了很久的世界,那几拍会在同一 tick 里"
         "全部烧掉。要给一个「跑着的」世界加剧情,用 "
         "`anima-world pack install <文件>` —— 那条路按内容包记账,拍的零点是"
-        "「这个包落地那天」"
+        "「这个包落地那天」。(同一份文件重开机不受影响:同 id 且内容相同的拍"
+        "静默跳过)"
     ),
     "config": (
         "这份文件里作者动过的开关「装不进一个已有的世界」:`config` 只在创世那一刻"
@@ -2322,20 +2329,42 @@ def build_serve_scheduler(
         if planted:
             logger.info("装进 %d 拍作者写的节拍", planted)
         else:
-            # 🆕 3.10.0(周更 2a-①):**当场拒绝,不再是一句 warning + 退 0。**
+            # 🆕 3.10.1:**逐拍比,不是「播下去了没有」。**
             #
-            # 上一版这里是 `logger.warning`,而**机器读的是退出码**:一份带着第 2 周
-            # 剧情的包 `simulate --world-file` 退 **0**,而那几拍一条都没进去。
-            # 这和收件箱 D32 治过的那条(`world import` 对纯作者层包 rc 0 → 2)
-            # 是同一种病、同一种治法:**一句写在日志上的真话,和一盏假绿灯是同一件事。**
+            # 🔴 上一版这里的判据是 `planted == 0`,而 `seed()` 的语义是「空的
+            # 时候才播」—— 于是**「同一份文件第二次开机」和「一份带着新剧情的包」
+            # 在它眼里长得一模一样**。而舰队每次开机都带 `--world-file`:
+            # 一个装过剧情的世界**第二次开机起再也起不来了**(2026-09-02 线上
+            # 龙族撞上,platform 已回滚)。
             #
-            # ⚠️ **拒绝在这里,是因为这里还什么都没写**(`beats_store.seed` 刚刚
-            # 返回 0,而地图 / 规律 / 本体都排在它后面)—— 「坏声明一个字都不写」
-            # 那条纪律在这一格的落法。
-            raise WorldSeedError([
-                f"这个世界已经有 {len(beats_store)} 拍剧情,而这份文件带着 "
-                f"{len(authored_script.beats)} 拍。" + EDIT_PATH_NOTES["beats"]
-            ])
+            # **拒绝那条本身是对的,错的是它问的问题。** 3.10.0 立它的理由逐字
+            # 仍然成立:一句写在日志上的真话,和一盏假绿灯是同一件事,而**机器读
+            # 的是退出码**。所以"新增的拍"照旧 rc 2,只是问法换成了逐拍比。
+            #
+            # ⚠️ **拒绝仍然在这里,因为这里还什么都没写**(地图 / 规律 / 本体都排
+            # 在它后面)—— 「坏声明一个字都不写」那条纪律在这一格的落法。
+            same, changed, added = split_against_stored(
+                authored_script.beats, beats_store.definitions())
+            if added:
+                raise WorldSeedError([
+                    f"这个世界已经有 {len(beats_store)} 拍剧情,而这份文件里有 "
+                    f"{len(added)} 拍是新的({'、'.join(added[:5])}"
+                    f"{' 等' if len(added) > 5 else ''})。" + EDIT_PATH_NOTES["beats"]
+                ])
+            if changed:
+                # **说一句,但不拒绝开机**:库里那份说了算(`:beats` 那条「之后
+                # 这里的行说了算」的契约),而作者需要知道他的改动没生效 ——
+                # 一次静默的"改了没生效"正是这一族最贵的错法。
+                logger.warning(
+                    "这份文件里有 %d 拍和库里同 id 而内容不同(%s):"
+                    "「库里那份说了算」,这次开机不改它们。要改已经发出去的那一拍,"
+                    "今天还没有出口 —— 剧情和 `beat_fired` 那份历史是按 id 配对的",
+                    len(changed), "、".join(changed[:5]) + (" 等" if len(changed) > 5 else ""),
+                )
+            elif same:
+                # 舰队上的常态:同一份文件又开了一次机。**一句话,而且不像出了事。**
+                logger.info("这份文件的 %d 拍剧情已经在库里了,这次开机不重复装", len(same))
+            # 走到这儿 = 没有新增的拍 → **开机继续**,rc 0。
     if beat_script is None and len(beats_store):
         # **首启自动带** —— 这一条就是 D1 的另一半。没有它,节拍进得了世界文件
         # 却仍然要靠 `--beats` 才响,而舰队上没有任何一条路会去传那个参数:
@@ -8401,8 +8430,9 @@ def run_validate(args: argparse.Namespace) -> int:
                     warnings.append(
                         f"这份文件带着 {len(authored['beats'])} 拍剧情。"
                         + EDIT_PATH_NOTES["beats"]
-                        + "(目标世界有没有剧情,离线这一格答不出来 —— 有的话开机"
-                          "是「当场拒绝」,退出码 2)"
+                        + "(目标世界有哪几拍,离线这一格答不出来 —— 开机是"
+                          "「逐拍比」:同 id 且内容相同的静默跳过,同 id 改过的"
+                          "说一句而照常开机,「新增」的才当场拒绝、退出码 2)"
                     )
                 warnings += edit_path_silent_notes(authored)
                 # 🆕 3.10.0(2a-① 验收 C):封皮和内容对不对得上 —— **三扇门同一句**。
@@ -10592,8 +10622,9 @@ def run_world_check(args: argparse.Namespace) -> int:
                     warnings.append(
                         f"这份文件带着 {len(authored['beats'])} 拍剧情。"
                         + EDIT_PATH_NOTES["beats"]
-                        + "(目标世界有没有剧情,离线这一格答不出来 —— 有的话开机"
-                          "是「当场拒绝」,退出码 2)"
+                        + "(目标世界有哪几拍,离线这一格答不出来 —— 开机是"
+                          "「逐拍比」:同 id 且内容相同的静默跳过,同 id 改过的"
+                          "说一句而照常开机,「新增」的才当场拒绝、退出码 2)"
                     )
                 warnings += edit_path_silent_notes(authored)
                 # 🆕 3.10.0(2a-① 验收 C):封皮和内容对不对得上 —— **三扇门同一句**。

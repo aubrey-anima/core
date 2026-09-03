@@ -378,6 +378,121 @@ def test_带剧情的包走world_file装进一个已经有剧情的世界_退出
     assert "pack install" in r.stderr
 
 
+# ── 五之二、舰队每次开机都带 `--world-file`(3.10.1,2026-09-02 线上撞上)──────
+#
+# 🔴 上面那条 rc 2 的**理由是对的,判据错了**:它问的是 `beats_store.seed()` 有没有
+# 播下去,而 `seed()` 的语义是「空的时候才播」—— 于是**「同一份文件第二次开机」和
+# 「一份带着新剧情的包」在它眼里长得一模一样**。舰队每次开机都带 `--world-file`,
+# 所以一个装过剧情的世界**第二次开机起再也起不来了**(龙族,platform 已回滚)。
+
+
+def test_同一份文件再开一次机_退0而且拍不重响(tmp_path):
+    """**舰队上的常态**:每次开机都带同一份 `--world-file`。
+
+    它一个字都不该说得像出了事,更不该拒绝开机 —— 而且那几拍**不许重复装**
+    (`:beats` 是个只 rpush 的 list,重复装一次就是同 id 两行,而
+    `beat_fired` 那份历史按 id 配对)。
+    """
+    redis_for(tmp_path / "again.db")
+    path = write_seed_file(tmp_path / "again.cyberworld",
+                           dict(BASE, beats=[_beat("第一幕", 0)]))
+    for _ in range(3):
+        r = run_cli("simulate", "--world-id", "w", "--ticks", "1",
+                    "--world-file", path, "--llm", "mock")
+        assert r.returncode == 0, f"第二次开机就起不来了:{r.stderr[-800:]}"
+
+    from anima_world.redis_state import RedisBeatsStore
+    rows = RedisBeatsStore(redis_for(tmp_path / "again.db"), "w").definitions()
+    assert [b["id"] for b in rows] == ["第一幕"], f"拍被重复装了:{rows}"
+
+
+def test_改过一拍再开机_说一句而且照常开机(tmp_path, caplog):
+    """同 id 内容不同 —— **说一句,但不拒绝开机**。
+
+    库里那份说了算(`:beats` 那条「之后这里的行说了算」的契约),而作者需要知道
+    他的改动没生效:一次静默的「改了没生效」正是这一族最贵的错法。
+    """
+    import logging
+
+    client = redis_for(tmp_path / "chg.db")
+    first = write_seed_file(tmp_path / "chg-1.cyberworld",
+                            dict(BASE, beats=[_beat("第一幕", 0)]))
+    from anima_world.api import World
+    World.open("w", redis=client, world_file=first, force_mock_llm=True).close()
+
+    second = write_seed_file(tmp_path / "chg-2.cyberworld",
+                             dict(BASE, beats=[_beat("第一幕", 5)]))
+    with caplog.at_level(logging.WARNING):
+        World.open("w", redis=client, world_file=second,
+                   force_mock_llm=True).close()
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "第一幕" in said and "库里那份说了算" in said, said[:400]
+
+    # 而且库里那份没被改掉 —— 说了一句和真的改了是两件事。
+    from anima_world.redis_state import RedisBeatsStore
+    rows = RedisBeatsStore(client, "w").definitions()
+    assert rows[0]["trigger"]["at"]["day"] == 0, rows
+
+
+def test_加一拍再开机_才是那条rc2(tmp_path):
+    """**新增**的拍才是 3.10.0 那条拒绝真正要挡的东西:一份**新**剧情正试图走
+    `--world-file` 混进一个跑着的世界,而它的零点会是世界第 0 天。
+
+    ⚠️ 而这一条要和上面两条并排读:三种情形走的是**同一行代码**,
+    只差 `split_against_stored` 分出来的那三堆。
+    """
+    redis_for(tmp_path / "add.db")
+    first = write_seed_file(tmp_path / "add-1.cyberworld",
+                            dict(BASE, beats=[_beat("第一幕", 0)]))
+    r = run_cli("simulate", "--world-id", "w", "--ticks", "1",
+                "--world-file", first, "--llm", "mock")
+    assert r.returncode == 0, r.stderr
+
+    both = write_seed_file(tmp_path / "add-2.cyberworld",
+                           dict(BASE, beats=[_beat("第一幕", 0), _beat("第三幕", 0)]))
+    r = run_cli("simulate", "--world-id", "w", "--ticks", "0",
+                "--world-file", both, "--llm", "mock")
+    assert r.returncode == 2, f"新增的拍混进去了,退出码 {r.returncode}"
+    assert "第三幕" in r.stderr, r.stderr[-600:]
+    assert "pack install" in r.stderr
+
+
+
+
+def test_龙族那个形状_开机装包再开机(tmp_path):
+    """线上真实形状:`--world-file` 首启 → `pack install` 追加新拍 → 再开机。
+    第三步从前 rc 2(文件里的拍在库里了,而库里还多出包带来的几拍)。"""
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+    base = write_seed_file(tmp_path / "lz.cyberworld",
+                           dict(BASE, beats=[_beat("开学", 0)]))
+    r = run_cli("simulate", "--world-id", "lz", "--ticks", "1",
+                "--world-file", base, "--llm", "mock")
+    assert r.returncode == 0, r.stderr
+
+    pack = tmp_path / "week2.cyberworld"
+    write_world_file(
+        pack, WorldFileManifest(world_id="lz", engine_min="3.10.0"),
+        seed_to_author_records({"pack": {"id": "第二周", "version": "1.0.0"},
+                                "beats": [_beat("社团", 0)]}),
+        compress=False, checksum=False)
+    r = run_cli("pack", "install", str(pack), "--world-id", "lz")
+    assert r.returncode == 0, r.stderr
+
+    # 舰队重启:同一份 --world-file
+    r = run_cli("simulate", "--world-id", "lz", "--ticks", "1",
+                "--world-file", base, "--llm", "mock")
+    assert r.returncode == 0, f"装过包的世界重启不来了:{r.stderr[-900:]}"
+
+    # 读回来走**同一个 CLI**(`current_client` 就是它连的那个 fakeredis)——
+    # 另开一个 handle 读到的是另一个世界,那种"绿"什么都不证明。
+    from _worldfile import current_client
+    from anima_world.redis_state import RedisBeatsStore
+    rows = [b["id"] for b in RedisBeatsStore(current_client(), "lz").definitions()]
+    assert rows == ["开学", "社团"], rows
+
+
 def test_另外四段_开机当场说而且点得出名字(tmp_path, caplog):
     """开机手上有名册,所以这几句**点得出名字** —— 离线那两扇门只说得出条件句。"""
     import logging

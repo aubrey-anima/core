@@ -705,6 +705,65 @@ def beat_script_warnings(
     return warnings
 
 
+def split_against_stored(
+    authored: list[dict[str, Any]], stored: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[str]]:
+    """这份文件里的拍,对着库里那份分成三堆:`(一模一样的, 同 id 改过的, 新增的)`。
+
+    🔴 **这个函数存在的理由是一次线上开不了机**(3.10.1,2026-09-02)。
+    3.10.0 把「文件里有 beat 而世界已经有 beat」判成当场拒绝(退出码 2),
+    理由是对的 —— 一份写着 `day: 0..6` 的第 2 周包装进一个跑到第 40 天的世界,
+    那几拍会在同一 tick 里全部烧掉。**但那个判据取错了**:它问的是
+    `beats_store.seed()` 有没有播下去,而 `seed()` 的语义是「空的时候才播」——
+    于是**「同一份文件第二次开机」和「一份带着新剧情的包」在它眼里长得一模一样**。
+    而舰队每次开机都带 `--world-file`,所以第二次开机起,那个世界**再也起不来了**。
+
+    正确的判据是**逐拍比**,而三堆各有各的正确反应:
+
+    - **一模一样的** —— 同一份文件又开了一次机。什么都不做,rc 0。
+      这是舰队上的常态,它一个字都不该说得像出了事。
+    - **同 id 改过的** —— 作者改了一拍的内容,而库里那份和 `beat_fired` 那份历史
+      已经配好对了。**说一句,但不拒绝开机**:库里那份说了算(`:beats` 那条
+      「之后这里的行说了算」的契约),而作者需要知道他的改动没生效。
+    - **新增的** —— 这才是 3.10.0 那条拒绝真正要挡的东西:一份**新**剧情正试图
+      走 `--world-file` 混进一个跑着的世界,而它的零点会是世界第 0 天。
+      照旧 rc 2,并指向 `pack install`。
+
+    ⚠️ **比的是「按 JSON 规范化之后的字节」,不是 `==`**:同一份文件读两次,
+    键序可能不同(dict 的字面量顺序进不了 JSON 的语义),而 `==` 对 dict 本来就
+    不看顺序 —— 这里用 `sort_keys` 的 dumps 是为了让**嵌套 list 里的 dict**
+    也按同一把尺比,并且让"改过没有"这件事有一个可以印出来的形状。
+    """
+    def _norm(beat: Any) -> str:
+        try:
+            return json.dumps(beat, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            # 序列化不了的拍照旧算"改过" —— 猜"没变"会让一份坏拍安静地留在库里。
+            return repr(beat)
+
+    have = {}
+    for beat in stored:
+        if isinstance(beat, dict) and beat.get("id"):
+            have[str(beat["id"])] = _norm(beat)
+    same: list[str] = []
+    changed: list[str] = []
+    added: list[str] = []
+    for beat in authored:
+        if not isinstance(beat, dict) or not beat.get("id"):
+            # id 都没有的拍归"新增" —— 严格校验器会在别处拦它,而这里**不许**
+            # 把它算成"一样的"然后放行。
+            added.append(str((beat or {}).get("id") or "?"))
+            continue
+        bid = str(beat["id"])
+        if bid not in have:
+            added.append(bid)
+        elif have[bid] == _norm(beat):
+            same.append(bid)
+        else:
+            changed.append(bid)
+    return (same, changed, added)
+
+
 def is_per_player(beat: dict[str, Any]) -> bool:
     """这一条拍是不是"对每个玩家各跑一遍"的。"""
     for_each = beat.get("for_each")
