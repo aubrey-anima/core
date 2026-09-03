@@ -3531,7 +3531,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | `world.prompt_list()` / `world.prompt_set(name, template)` | 提示词模板;保存前试渲染,占位符错误抛 `PromptRenderError` |
 | 🆕 `world.world_setting()` | 这个世界的**世界观**此刻是什么:`{text, source, length}`。`source` 用 `prompt_list()` 那一套词(`默认值` / `世界文件`),不另造一套 |
 | 🆕 `world.set_world_setting(text=None, *, clear=False, dry_run=False)` | 改**一个已经跑着的世界**的世界观(3.8.0,收件箱 D4)。覆盖;`clear=True` 回落到引擎内置那份(**不是变成空的**);`None` / 空白 **拒绝**(`ValueError`);逐字相同 `changed: false`;`dry_run=True` 一个字节都不写。回执 `{before, after, source, changed, cleared, dry_run, length}`。CLI 出口是 `anima-world world setting`(§4.7.1) |
-| 🆕 `world.install_pack(path, *, force=False)` | 把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。`path` 是一份带 `pack` 段的 `.cyberworld`。**一个文件就是一个 pack**。这条路新开的三段:剧情拍(按 id 合并,**零点是这个包落地那天**)/ 作者动过的开关 / 世界观;其余段照旧只填缺不覆盖,走开机那条路上同一批播种函数,而**缺席的段 = 不动**(不是回落引擎内置那份 —— 那个回落只对创世成立)。回执 `{pack, version, note, day, tick, beats, config, world_setting, agents, locations, skipped, forced}`;`skipped` 点名说哪几个在册的人的 `personality` / `memory` **没装进去**。装不进抛 `PackInstallError`,而且**一个字节都没写**(判断全在写之前,插件降级那一道也在)。`force=True` 只放行一件事:写了 `since: "world"` 而 `day` 已经过期、装上去会在下一 tick 一起烧掉的那几拍。🆕 **2a-②**:在册的人的 `personality` 按 **compare-and-set** 覆盖 —— 判据不是「我是同一个 pack」,是「这一格此刻的值还等于我上一版写下去的那个值吗」;不是我写的、或者写下去之后被世界改过 → **默认拒绝**(`force=True` 才写,回执 `forced`)。在册的人的 `memory` **只增不改**(按 `(agent_id, summary)` 去重)。⚠️ 仍不做:停用一个包。CLI 出口是 `anima-world pack install`(§4.11) |
+| 🆕 `world.install_pack(path, *, force=False)` | 把一份**内容包**投进这个正在跑的世界(3.10.0)——「每周有更新」那条路。`path` 是一份带 `pack` 段的 `.cyberworld`。**一个文件就是一个 pack**。这条路新开的三段:剧情拍(按 id 合并,**零点是这个包落地那天**)/ 作者动过的开关 / 世界观;其余段照旧只填缺不覆盖,走开机那条路上同一批播种函数,而**缺席的段 = 不动**(不是回落引擎内置那份 —— 那个回落只对创世成立)。回执**十四格,那张表只有一处** —— §4.11「回执键表」(`tests/test_pack_doc_contract.py` 拿真回执逐格比着它;此前它有三个数,而下游抄的就是这几处)。`skipped` 点名说哪几个在册的人的 `personality` / `memory` **没装进去**。装不进抛 `PackInstallError`,而且**一个字节都没写**(判断全在写之前,插件降级那一道也在)。`force=True` 只放行一件事:写了 `since: "world"` 而 `day` 已经过期、装上去会在下一 tick 一起烧掉的那几拍。🆕 **2a-②**:在册的人的 `personality` 按 **compare-and-set** 覆盖 —— 判据不是「我是同一个 pack」,是「这一格此刻的值还等于我上一版写下去的那个值吗」;不是我写的、或者写下去之后被世界改过 → **默认拒绝**(`force=True` 才写,回执 `forced`)。在册的人的 `memory` **只增不改**(按 `(agent_id, summary)` 去重)。⚠️ 停用与启用是另外两扇门(`disable_pack` / `enable_pack`,3.10.0 / 3.10.1)。回执那张表见 §4.11「回执键表」——**十四格,只有那一张**。CLI 出口是 `anima-world pack install`(§4.11) |
 | 🆕 `world.disable_pack(pack_id)` | **停用**一份内容包(3.10.0,K7):它的拍不再响、它带来的新人**退场**(走 `agent_leave` 那条已有的路)、它开的开关**回落到装包前那个值**。🔴 **停用不是删除** —— 玩家的记忆里有这一周发生过的事,他的钱包里有那 800 块;删掉那几条事件 = 让历史指向不存在的东西,而"对账即重放"会让投影和日志对不上,**且没有任何地方会报错**(和 `forget_player` 逐字同一个形状)。它只往日志里追加一条 `pack_disabled`。⚠️ **只回落至今还等于这份包写下去的那个值的那几个开关** ——装完之后运维又调过的那一格不该被这一趟撤销(回执 `kept` 点名说哪几个留着没动)。⚠️ **「再装一次同一个包 = 重新启用」这句话 3.10.1 起不再成立**(它对**带拍的包**从来就是假的):`disable` 有意不删 `:beats`,而 `install` 有意拒绝重用已有的拍 id —— 两条规矩各自都对,而它们中间少一扇门。那扇门是 `enable_pack`。回执 `{pack, version, day, tick, beats, agents, config, kept}`。CLI:`anima-world pack disable`(§4.11) |
 | 🆕 `world.enable_pack(pack_id)` | 把一份**停用的**内容包重新启用(3.10.1)—— `disable_pack` 的逆,**只翻朝前看的那一半,一个字节的历史都不动**:那几拍又会响(已经响过的照旧响过 —— `beat_fired` 是历史)、它带来的人**回来**(走 `agent_return`,和 `disable` 走 `agent_leave` 逐字对称)、它写下的开关**重写**。🔴 **它必须是一扇独立的门**:一份带拍的包停用之后「再装一次」会被「这几拍的 id 这个世界里已经有了」拒掉(`beat_fired` 那份历史按 id 配对),于是**那份包永远回不来**。⚠️ **人回来这一支正是重装那条路答不出来的**:重装时名册里含已 `agent_leave` 的人,他被当成「已在册」跳过,于是 `disabled` 翻回 false 而人还站在场外。落一条 `pack_enabled` 事实。包本来就启用着 / 根本没装过都是当场 `PackInstallError`(**没有什么要做的这句话要说出来** —— 静默成功会让人以为它做了点什么)。回执 `{pack, version, day, tick, beats, agents, config}`。CLI:`anima-world pack enable`(§4.11) |
 | 🆕 `world.packs()` | 这个世界装了哪几份**内容包**,按落地先后(3.10.0)。每行 `id` / `version` / `note` / `day`(**第一次**落地那天)/ `tick` / **`sections`(真的落地了什么)** / **`declared`(文件里写了什么)** / **`beat_days`(每一拍各自的落地日,零点按它算)**。🔴 `sections` 与 `declared` 是**两格**:抄文件当落地是「两份真相」,而读的人分不出哪一份是对的(2a-① 验收 C)。`beat_days` 同理 —— 一个包升级时带的是新的几拍,而上一版那几拍的零点不该跟着动。🔴 **折自 `pack_installed` 事件,没有第二张表** —— 和余额折自 `payment` 逐字同一种;存一份直接写的清单就多出一种和日志对不上的坏法,而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。只读门自己补课(`catch_up_projection`)。CLI 出口是 `anima-world pack list`(§4.11) |
@@ -4543,9 +4543,16 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 老板 2026-09-02:「我要的是创作者能控制这个东西,相当于每周都能有更新」。
 
 ```bash
-anima-world pack install 第二周.cyberworld --world-id w [--json]
+anima-world pack install 第二周.cyberworld --world-id w [--json] [--force]
 anima-world pack list --world-id w [--json]
+anima-world pack disable 第二周 --world-id w [--json]   # 拍不再响、它带来的人退场、开关回落
+anima-world pack enable  第二周 --world-id w [--json]   # 上一条的逆(3.10.1)
 ```
+
+⚠️ **这四个子命令与 `contract --json` 的 `packs.cli` 逐条相等**
+(`tests/test_pack_doc_contract.py` 对着 argparse 那棵树比)——
+消费方**按 `packs.enable_method` / `packs.disable_method` 在不在做能力探测,
+不比版本号**(`anima-world:3.8.0` 这个名字下已经有过两支能力不同的引擎)。
 
 **一份内容包 = 一份 `.cyberworld` + 一条 `pack` 记录**(作者层第十五个段):
 
@@ -4567,12 +4574,12 @@ anima-world pack list --world-id w [--json]
 
 | 段 | `pack install` | `--world-file` 装进一个**已有**世界 |
 |---|---|---|
-| `beat` | ✅ 按 id 合并;**零点是这个包落地那天** | ❌ 整份不装(**退出码 2**,3.10.0 起) |
+| `beat` | ✅ 按 id 合并;**零点是这个包落地那天** | **逐拍比**(3.10.1 起):同 id 且**内容相同** → 静默跳过、rc 0(舰队每次开机都带 `--world-file`,这是常态);同 id 而**内容不同** → 说一句、**照常开机**(库里那份说了算);**新增**的拍 → **退出码 2** 并点名。⚠️ 3.10.0 是「整份不装 rc 2」,而那个判据把整支舰队关在门外 —— 装过剧情的世界第二次开机就起不来 |
 | `config`(作者动过的键) | ✅ 写进 `:config`,当场生效 | ❌ 不装(它钉在创世那一刻)—— 会说一句 |
 | `world_setting` | ✅ 换一段 | ❌ 不装 —— 会说一句 |
 | `kind` / `rule` | ✅ 同名覆盖(声明) | ✅ 同上 |
 | `entity` / `location` / `agent`(新的)/ `plugin` / `edge` / `stock` / `item` | ✅ 只填缺 | ✅ 同上 |
-| 在册的人的 `personality` / `memory` | ❌ **还没做**(2a-②)—— 会说一句 | ❌ 同上 |
+| 在册的人的 `personality` / `memory` | ✅ **2a-② 起做了**:`personality` 要过一把 compare-and-set 的尺(这一格还等于这个包上一版写下去的那句吗?是才覆盖,不是就报给你,`--force` 才写);`memory` **只增不改**(记忆是演化态) | ❌ 不装 —— 会说一句,并指向 `pack install` |
 
 **拍的零点跟着来路走**(`trigger.at.since`,闭集 `pack` / `world`,缺省 `pack`):
 
@@ -4608,8 +4615,17 @@ anima-world pack list --world-id w [--json]
 是因为**它们删东西**;装一份包是加东西,而"加了什么"由回执逐格答得出。要**先**知道
 装不装得进,那条命令已经有了:`anima-world world check <文件> --edit --json`。
 
-回执(`--json`):`{pack, version, note, day, tick, beats, config, world_setting,
-agents, locations}`。`day` 是**落地那天**,也就是这份包里那些拍的零点。
+回执键表(`install_pack`):`pack` `version` `note` `day` `tick` `beats` `config`
+`world_setting` `personality` `memories` `agents` `locations` `skipped` `forced`
+`forced_beats` `forced_personality`
+—— **十六格,而这一行是唯一的那张表**(`tests/test_pack_doc_contract.py` 拿**真回执**
+逐格比着它)。`day` 是**落地那天**,也就是这份包里那些拍的零点;`skipped` 是
+**没装进去的那几样**(一张只列"装了什么"的回执读起来像"别的都装进去了");
+`forced` 说这一趟是不是 `--force`,而 **`forced_beats` / `forced_personality` 说强的是哪一件** —— `--force` 放行的是**两件**事(过期的拍 / 人设 CAS 冲突),只有一格时那句解释必然对其中一种情形说假话(3.10.2,验收 C ②)。⚠️ **`skipped.personality` 记的是「不必写」那一种**(这份包想写的那句,世界里已经是了),不是「被拒了的」—— 被拒的那几个不带 `--force` 时整份 rc 2、带了就照写,两种都不会留在这张表上。`skipped.memories` 同理:因为**她已经记着了**而没补的那几条。
+⚠️ 那几个「只填缺」的段(`kinds` / `entities` / `plugins` / `rules` / `items`)
+**只在真装进去了什么的时候才多出来**,所以它们不在这张固定表里。
+🔴 **这张表此前有三个数**(代码 14 / §3 那一行 12 / 这里 10),而下游抄的就是这几处
+—— 现在只有这一张,别处一律指向它。
 
 `pack list` 读的是 `World.packs()` —— **折自 `pack_installed` 事件,没有第二张表**。
 

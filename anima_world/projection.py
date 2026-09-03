@@ -412,7 +412,14 @@ def _apply_pack_installed(proj: Projection, e: Event) -> None:
         # 「我写过而且没人动过」错判成「不是我写的」,于是作者改不动自己上周那一句。
         "wrote": _merge_wrote((have or {}).get("wrote"), payload.get("wrote")),
         "declared": dict(payload.get("declared") or {}),
-        # 再装一次 = 重新启用(见 `_apply_pack_disabled`)。
+        # ⚠️ **这一格写 `False` 是因为「能走到这儿的包一定是启用着的」** ——
+        # 装一份**停用着**的包在 `install_authored_pack` 里就当场拒了
+        # (3.10.2,验收 A ①)。此前这儿的注释写着「再装一次 = 重新启用」,
+        # 而那句话 `91a0fb9` 自己刚判为假(对带拍的包 `install` 会 rc 2),
+        # 却把无拍那一半留在原地:重装一份已停用的无拍包 rc 0、这一格翻回
+        # `False`、而它带来的人**还站在场外** —— 之后 `pack enable` 答
+        # 「本来就是启用的」,人永远回不来。
+        # **回来那条路只有一扇门:`enable_pack`。**
         "disabled": False,
         "seq": int(e.seq or 0),
     }
@@ -442,9 +449,10 @@ def _apply_pack_disabled(proj: Projection, e: Event) -> None:
     和日志对不上,**且没有任何地方会报错**(`forget_player` 那条 docstring 写的
     是同一句)。停用管的是**朝前看**的那一半。
 
-    ⚠️ **再装一次同一个包会把它重新启用** —— `_apply_pack_installed` 把这一格清掉。
-    「装回来」和「从没停过」在世界里是同一件事,而这一格记的是"此刻停没停",
-    不是"停用过没有"。
+    ⚠️ **回来那条路只有一扇门:`enable_pack`**(3.10.2)。这里曾经写着
+    「再装一次同一个包会把它重新启用」,而那句话是假的:带拍的包重装会因为拍 id
+    撞车 rc 2,无拍的包重装则把这一格翻回 `False` 而**人还站在场外** ——
+    两种都回不来,只是坏的样子不同。现在装一份停用着的包**当场拒**并指向那扇门。
     """
     payload = e.payload or {}
     pack_id = str(payload.get("pack_id") or "")

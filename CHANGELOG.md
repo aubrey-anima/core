@@ -73,6 +73,101 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.10.2] —— 一扇造好了的门,契约里一个字没提 (2026-09-02)
+
+3.10.1 把 `pack enable` 造出来了 —— 代码、CLI、REFERENCE 都有。
+**而 `contract --json` 的 `packs` 段一个字没提它**,`packs.cli` 那句串还停在
+三个子命令上。运维台那扇「启用」按钮亮不亮,判据正是 `packs.enable_method`
+在不在(**按段探测,不比版本号**)—— 于是一扇造好了的门,对消费方**等于不存在**。
+
+### Fixed
+
+- **`contract.packs` 补 `enable_method` / `enable_event`**,`packs.cli` 串补上
+  `pack enable`。
+- **`--world-file` 对 `beat` 段那一格**(REFERENCE)仍写着「整份不装 rc 2」,
+  而 3.10.1 已经改成**逐拍比** —— 改口(新增 rc 2 / 同 id 同内容 rc 0 /
+  同 id 改过说一句照常开机)。
+- **三处说「还没做」而其实做了**:在册的人的 `personality` / `memory`
+  (2a-② 做了)· 「仍不做:停用一个包」(3.10.0 / 3.10.1 做了两扇门)·
+  `install_pack` 的 docstring 还写着「2a-① 明确不做」那三件。
+  🔴 **权威与镜像分叉时,先烂的是照它抄的那一个** —— 创作台的错话很可能就是
+  照那段 docstring 抄的。
+- **同一张回执三个数**:代码 14 格 / REFERENCE §3 那一行 12 格 / §4.11 那段 10 格。
+  收成**一张**(§4.11「回执键表」),别处一律指向它。
+- REFERENCE §4.11 的 CLI 面补 `disable` / `enable`;`host_turn` 的 docstring
+  「四个时刻」→ 五个;FOR-STUDIO §3.65 子节序 (c)(d) 对调、探测句改成按
+  `packs.enable_method`。
+
+- 🔴 **无拍的包那一半没修**(验收 A ①):3.10.1 给带拍的包加了 `pack enable`,
+  而重装一份**已停用的无拍包** rc 0、`pack list` 的「(已停用)」消失,
+  而它带来的人**还站在场外**;之后 `pack enable` 答「本来就是启用的」rc 2 ——
+  **人永远回不来**,而屏幕上那份包看起来好好的。
+  **「再装一次 = 重新启用」这条路整个关掉**:装一份停用着的包当场拒并指向
+  `pack enable`(和带拍那条说同一句话)。`_apply_pack_installed` 那句注释同轮改口
+  —— 它自己还写着那句 `91a0fb9` 刚判为假的话。
+- 🔴 **`landed` 那两行是我在 3.10.1 写错的**(验收 A ②):
+  `kind_definitions()` 给的是 `list[dict]`,而那两行拿 `for k, _ in` 去解包 ——
+  **两个键的 dict 会静默解出键名**,别的行数当场 `ValueError`,被 `except` 吞成
+  一条 WARNING **并把一整段 Traceback 印在「装成功了」那一屏上**。
+  下场:`kinds` / `entities` 永远进不了 `landed`,而消费方照 FOR-STUDIO §3.62(m)
+  读 `declared - sections` —— **两样装得好好的东西被指着说没装进去**,
+  那正是这一格本来要治的病。这一格此前**零覆盖**,同轮补上。
+- 三条 `or True` 恒真断言拆掉(`test_joint_activity` / `test_live_world_marker` /
+  `test_migrate_v1`)—— 三条拆开之后都真的成立,所以它们此前只是**没有牙**。
+- 作者读的拒绝语里那几处 Python `list` repr(`['player']` 的方括号和引号是给机器
+  看的)与一句中英夹心(`beat pay amount must be > 0 … 反向转账请把 from/to`)。
+
+### 验收 C 那一份(玩家屏与文档)
+
+- 🔴 **`〔return · 模板〕`:一个裸英文枚举名印在给玩家看的那一屏上。**
+  另外四个时刻都是中文(〔你到了〕〔新的一天〕〔有事发生〕〔你问了一句〕),
+  而 2a-② 加第五个时刻时那张人话表没跟。表搬去 `host.MOMENT_LABELS` 当权威
+  (**一张表,住一处**),并上闸:`HOST_MOMENTS` 每一格都要有一句人话、
+  而且**不许是纯 ASCII**。
+- 🔴 **`--force` 那句解释按真原因分两句。** `forced` 是
+  `force and (expired or persona_conflict)` —— **两种原因**,而屏上只解释第一种:
+  一份**只为改人设**而 `--force` 的包(里头一条 `since` 都没有)照样被告知
+  「那几拍写着 `since: "world"`……下一 tick 一起响」。**一句指错原因的话,
+  和一句错的一样贵** —— 作者会去找一个他根本没写过的字段。
+  回执补 `forced_beats` / `forced_personality` 两格,`--help` 同轮改口。
+- 🔴 **四处「仍不做 / 还没做 / 仍然是排期」全清**,并上闸(只钉那几个具体短语,
+  不扫「没有排期」那一类 —— 那些说的是真的没做的东西,**它们该留着**)。
+- 🟡 **`skipped` 那两格结构上永远是空的** —— 而 FOR-STUDIO 教创作台读它。
+  **一格永远为空的读数,和没有这一格是同一件事。** 二选一里选了「让它真有值」:
+  `skipped.personality` 现在记**「不必写」**那一种(这份包想写的那句,世界里
+  已经是了),`skipped.memories` 记**因为她已经记着了**而没补的那几条。
+- 🟡 **舰队常态二开吐五段「装不进去」**:那几句说的是「一次编辑没生效」,
+  而这一趟根本不是编辑,是同一份文件又开了一次机。**每次重启都吼五段,
+  读的人第一反应是出事了,而世界好好的** —— 一句在错的时机说的真话,
+  和一句假话一样贵。同 id 同内容那一支从此只说一句「已经在库里了」。
+- 🟡 升版带旧拍 rc 2 时给的办法「改一个名字」**是错的**(换个 id 那一拍会
+  再响一次)→ 改成「v1.1.0 只放新增的那几拍」。
+- 🟡 §3.65(d) 说「改人设只带 `agents[].personality`」,而真敲 rc 2:
+  作者层那道 schema 对每条 agent 记录一视同仁,要写全 `id`+`name`+`location`。
+- 🟡 `return` 那一屏「这段时间世界更新了:」**按包重复**(三份包连说三遍,
+  像卡带了)→ 收成一句;建议句四条统一成同一种形状(前三条点名说给谁听,
+  最后一条光秃秃的「说说你自己」,并排读像换了个人在讲话)。
+- 🟢 两处 Python `list` repr 印给作者看(`world_file` 的记录类型、拍的那几张闭集表)。
+
+### 装了三道闸
+
+**这一版的病根不是"忘了改一处",是"没有一处会喊"** —— 所以每一条都配一道闸:
+
+- `packs.cli` 那句串**与 argparse 那棵树上真的子命令表逐条相等**(手写的串会烂,
+  而且烂了不报错)。
+- 三个写世界的子命令**各自都要有一格 `method`**(探测不到的门等于不存在)。
+- **REFERENCE 那张回执键表 == 真回执的键**,以及 `install_pack` 的 docstring
+  必须提到那三扇已经有了的门(照 `test_host_doc_contract.py` 那条的样子)。
+- ⑥ 那道「几个时刻」的闸**扩扫 `api.py` / `host.py`** ——
+  上一版它只扫 REFERENCE,而同一句话在 docstring 里也有一份,停在「四个」停了
+  整整一版。**一道只覆盖我记得去扫的地方的闸,和那道只认得自己语法的闸是同一个毛病。**
+
+### Known
+
+- **契约变了(加法)**:`packs` 段多两格、`packs.cli` 串变长。`storage` 段
+  **一个字没动**,运维台那条只比 `.storage` 的 deepEqual 不会红。
+- 作者层 schema 一个字没动,已发布世界的 `engine_min` 一格没抬。
+
 ## [3.10.1] —— 舰队每次开机都带 `--world-file`,而 3.10.0 让它第二次就起不来 (2026-09-02)
 
 ### Fixed

@@ -180,7 +180,10 @@ def test_a_non_positive_payment_is_refused_rather_than_silently_doing_nothing(ca
             agent_locs={}, known_agents={"夏", "遥"},
         )
     assert events == []
-    assert any("amount" in r.getMessage() for r in caplog.records)
+    # ⚠️ 3.10.2 起这句话是中文(此前是中英夹心的 `beat pay amount must be > 0`）——
+    # 断言换成"它说了金额这件事"这个意思本身,别钉在某一种语言上。
+    assert any("金额" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records]
 
 
 def test_material_ops_refuse_unknown_holders():

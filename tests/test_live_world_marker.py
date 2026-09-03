@@ -61,7 +61,8 @@ def test_config_set_on_a_live_world_warns_but_still_writes(tmp_path):
     assert "正被" in combined or "在跑" in combined, (
         f"对一个活着的世界改配置,连一句提示都没有:\n{combined}"
     )
-    assert _meta(db, "owner_pid") is None or True  # 世界已关,不断言标记
+    # 世界已关 —— 占用标记该被清掉。`or True` 让这一行三年没断言过任何事。
+    assert _meta(db, "owner_pid") is None, "世界关了,占用标记还在"
     from _worldfile import redis_for
 
     raw = redis_for(db).hget("anima:w:config", "world.minutes_per_tick")

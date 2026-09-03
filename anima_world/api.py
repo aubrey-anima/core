@@ -2905,11 +2905,24 @@ class World:
         **作者动过的开关**、**世界观**。其余段照旧**只填缺不覆盖**,走的是开机
         那条路上同一批播种函数。
 
-        返回一张回执:`{pack, version, note, day, tick, beats, config,
-        world_setting, agents, locations}`。装不进当场抛 `PackInstallError`,
-        而且**一个字节都没写**(判断全在写之前)。
+        返回一张回执 —— **十六格,而这张表是 `docs/REFERENCE.md` §3 那一行的
+        权威**(`tests/test_pack_doc_contract.py` 拿真回执逐格比着它):
 
-        ⚠️ **2a-① 明确不做**:改在册的人的人设、给在册的人补记忆、停用一个包。
+            pack · version · note · day · tick · beats · config · world_setting
+            · personality · memories · agents · locations · skipped · forced
+            · forced_beats · forced_personality
+
+        ⚠️ 后面那几个「只填缺」的段(`kinds` / `entities` / `plugins` / `rules`
+        / `items`)**只在真装进去了什么的时候才出现**,所以它们不在这张固定表里 ——
+        `pack list` 的 `sections` 记的是同一份东西。
+        装不进当场抛 `PackInstallError`,而且**一个字节都没写**(判断全在写之前)。
+
+        ⚠️ **这段 docstring 上一版还写着「2a-① 明确不做:改在册的人的人设、
+        给在册的人补记忆、停用一个包」,而同一棵树上三件都做了**(2a-② 与 3.10.1)。
+        **权威与镜像分叉时,先烂的是照它抄的那一个** —— 创作台的错话很可能就是
+        照这一段抄的。三件今天都有出口:人设走 `agents[].personality` 加一把
+        compare-and-set 的尺、记忆**只增不改**、停用与启用是
+        `disable_pack` / `enable_pack`(见 `docs/FOR-STUDIO.md` §3.64 / §3.65)。
 
         CLI 出口是 `anima-world pack install <文件>`。
         """
@@ -8587,13 +8600,15 @@ class World:
         而这种不一致一处都不报错。「回应」不新造(动词的 `emit.text` / `ToolResult` /
         `narrative` 事件已经是三条路),「导演」不在这一版里。
 
-        **只在四个时刻开口**(`HOST_MOMENTS`),而这道闸就在这个函数里:它算一把
+        **只在五个时刻开口**(`HOST_MOMENTS`:`arrive`/`new_day`/`beat`/`ask`/`return`),
+        而这道闸就在这个函数里:它算一把
         **时刻钥匙** `(place, day, 指着我的最后一条 beat_fired 的 seq)`,和上一条
         `host_scene` 事件上的那把不同才开口,否则原样返回上一屏
         (`scene.source == "cached"`)。**引擎里没有第二条生成场景的路**,所以这条
-        纪律是结构性的,不是提示词里的一句话。第四个时刻(玩家点「我该干嘛」)
+        纪律是结构性的,不是提示词里的一句话。`ask` 那个时刻(玩家点「我该干嘛」)
         走 `ask=True`,另加一道 `host.ask_cooldown_ticks` —— 否则连点十下就是十次
-        LLM 调用。契约里报这四个名字与那个冷却,**只为让宿主把按钮置灰;宿主守不守,
+        LLM 调用。契约里报这几个名字与那个冷却(**以 `contract.host.moments` 为准,
+        别照这段话数**),**只为让宿主把按钮置灰;宿主守不守,
         不改变这个函数的行为**。
 
         🔴 **藏起来的人一个字都不许漏。** `card.billing == "hidden"` 的角色不进候选,
@@ -8914,7 +8929,7 @@ class World:
                       beat_seq: int, tick: int, ask: bool,
                       move_seq: int = 0,
                       was_present: bool = True) -> str | None:
-        """这一刻要不要开口,要的话是四个时刻里的哪一个。`None` = 闭嘴,用上一屏。
+        """这一刻要不要开口,要的话是 `HOST_MOMENTS` 里的哪一个。`None` = 闭嘴,用上一屏。
 
         **次序是有意的**:换了地方 → `arrive`(最强的一次场景切换);剧情拍响了 →
         `beat`;新的一天 → `new_day`。三样同时变时报最强的那个,而不是把它们拼成

@@ -122,7 +122,17 @@ def test_那句话里的数字_和契约里有几个时刻对得上():
     是同一句话的另一半在撒谎(而且它是读者第一眼看到的那半)。"""
     want = len(contract_payload()["host"]["moments"])
     digits = {4: "四", 5: "五", 6: "六", 7: "七"}
-    text = _REFERENCE.read_text(encoding="utf-8")
+    # ⚠️ **不只扫 REFERENCE**(3.10.2,验收 B):同一句话在 `api.py` 的
+    # docstring 里也有一份,而它停在「四个时刻」上停了整整一版 ——
+    # **一道只覆盖我记得去扫的地方的闸,和那道只认得自己语法的闸是同一个毛病**
+    # (这个仓库为裸星号那一族记过一次)。
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in (
+            _REFERENCE,
+            _REFERENCE.parents[1] / "anima_world" / "api.py",
+            _REFERENCE.parents[1] / "anima_world" / "host.py",
+        )
+    )
     right = f"只在{digits[want]}个时刻开口"
     assert right in text, f"REFERENCE 里找不到「{right}」—— 现在有 {want} 个时刻"
     for n, word in digits.items():
@@ -130,3 +140,20 @@ def test_那句话里的数字_和契约里有几个时刻对得上():
             continue
         wrong = f"只在{word}个时刻开口"
         assert wrong not in text, f"REFERENCE 里还写着「{wrong}」,而实际有 {want} 个"
+
+
+def test_每个时刻都有一句人话_而且不许是裸英文():
+    """🔴 **`〔return · 模板〕`** —— 一个裸英文枚举名印在给玩家看的那一屏上
+    (3.10.2,验收 C ①)。2a-② 加了第五个时刻,而那张人话表没跟,
+    另外四个都是中文。
+
+    **`HOST_MOMENTS` 加一格就要在这儿加一句人话**,而这条闸让"忘了加"有人喊。
+    """
+    from anima_world.host import HOST_MOMENTS, MOMENT_LABELS
+
+    missing = [m for m in HOST_MOMENTS if not str(MOMENT_LABELS.get(m) or "").strip()]
+    assert not missing, f"这几个时刻没有人话:{missing} —— 屏上会印裸英文枚举名"
+    extra = sorted(set(MOMENT_LABELS) - set(HOST_MOMENTS))
+    assert not extra, f"人话表里有 `HOST_MOMENTS` 之外的名字:{extra}"
+    for name, said in MOMENT_LABELS.items():
+        assert not said.isascii(), f"时刻 {name!r} 的人话是 {said!r} —— 那是裸英文"
