@@ -303,15 +303,37 @@ def _apply_player_join(proj: Projection, e: Event) -> None:
     proj.players_joined.setdefault(player_id, day)
 
 
+#: `wrote` 里**第一次写下的那个值才算数**的那几格。
+#:
+#: 🔴 **`config_before` 记的是「装这个包**之前**那一格是什么」**,所以它是
+#: 一个**历史事实**,不是"我最近写了什么" —— 而这两种语义在同一个 `wrote`
+#: 字典里并排住着,合并规则正相反(2026-09-02 验收 A ④)。
+#:
+#: 病是这样的:装前 = 3,v1 写 5(`config_before[k] = 3`),v2 写 7
+#: (`config_before[k] = 5`)。`update()` 让**新的赢**,于是 `disable` 之后
+#: 回落到 **5**,而屏幕上还印着「回落到装包前那个值」——
+#: 装包前是 3。**一句写错的回执,和一次写错的回滚一样贵。**
+_WROTE_FIRST_WINS = ("config_before",)
+
+
 def _merge_wrote(have: Any, incoming: Any) -> dict[str, dict[str, str]]:
-    """`{格: {谁: 我写下去的那个值}}` —— 按格并入,新的赢。"""
+    """`{格: {谁: 我写下去的那个值}}` —— 按格并入。
+
+    **新的赢**,除了 `_WROTE_FIRST_WINS` 那几格 —— 它们记的是"装之前那一格是
+    什么",是历史事实,**第一次写下的才算数**。
+    """
     out: dict[str, dict[str, str]] = {
         str(k): dict(v) for k, v in (have or {}).items() if isinstance(v, dict)
     }
     for field, rows in (incoming or {}).items():
         if not isinstance(rows, dict):
             continue
-        out.setdefault(str(field), {}).update({str(k): str(v) for k, v in rows.items()})
+        bucket = out.setdefault(str(field), {})
+        for k, v in rows.items():
+            if str(field) in _WROTE_FIRST_WINS:
+                bucket.setdefault(str(k), str(v))   # 装包前那个值,只记第一次
+            else:
+                bucket[str(k)] = str(v)             # CAS 那几格:我上次写的才算
     return out
 
 

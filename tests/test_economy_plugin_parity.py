@@ -129,6 +129,21 @@ GOLDEN = json.loads(GOLDEN_PATH.read_text())
 # ⚠️ 同样不能靠重采化解,理由和上面那句逐字相同。
 _PARITY_IGNORED_EVENTS = ("narrative", "player_join", "pack_installed")
 
+
+#: 载荷里**不进这道闸**的那几格 —— 和 `test_needs_plugin_parity.py` 同一份理由
+#: (3.10.1):它们是**从别的字段派生出来的展示文本**(动词的 label、东西的
+#: name),一个字节的状态都不承载,old / new 两条路上完全相同。
+#: 🔴 **滤掉,而不是重采基线** —— 基线采自旧路那棵树,重采一遍这道闸就变成
+#: HEAD 和 HEAD 比,**永远绿而且什么都不测**。
+_PARITY_PRESENTATION_KEYS = ("verb_label", "target_name", "item_name")
+
+
+def _parity_payload(payload):
+    """去掉那几格展示文本之后的载荷 —— 见 `_PARITY_PRESENTATION_KEYS`。"""
+    if not isinstance(payload, dict):
+        return payload
+    return {k: v for k, v in payload.items() if k not in _PARITY_PRESENTATION_KEYS}
+
 ASYNC_KEYS = ("narrative_log", "recent_events", "runtime")
 
 #: 🔴 **第四样不可复现的东西,而它不是线程池:`players[*].last_seen` 是一个墙钟。**
@@ -252,7 +267,8 @@ def run(tmp_path) -> dict:
             "prompt_sha": {a: _sha(world.debug_prompt(a)) for a in agents},
             "state_sha": _sha(_comparable_state(world.state())),
             "events": sorted(
-                [e.type, json.dumps(e.payload, ensure_ascii=False, sort_keys=True)]
+                [e.type, json.dumps(_parity_payload(e.payload), ensure_ascii=False,
+                                    sort_keys=True)]
                 for e in world.scheduler.event_log.replay() if e.type not in _PARITY_IGNORED_EVENTS
             ),
         }

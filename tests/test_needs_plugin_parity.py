@@ -79,6 +79,33 @@ GOLDEN = json.loads(
 # ⚠️ 同样不能靠重采化解,理由和上面那句逐字相同。
 _PARITY_IGNORED_EVENTS = ("narrative", "player_join", "pack_installed")
 
+
+#: 载荷里**不进这道闸**的那几格:它们是**给人看的字**,不是世界的状态。
+#:
+#: 🔴 **这一格是 3.10.1 加的,而它必须是「滤掉」不是「重采基线」**
+#: (2026-09-02)。`entity_interaction` 那一轮补了两格人话
+#: (`verb_label` / `target_name`,为了让屏幕别印「你look了tree:harbor_oak」),
+#: `item_transfer` 补了 `item_name` —— 这道金线的基线**采自旧路那棵树**,
+#: 于是它当场红了。
+#:
+#: 两条路可选,而只有一条是对的:
+#:   · **重采基线** → 那道闸就变成 HEAD 和 HEAD 比,**永远绿而且什么都不测**
+#:     (这个仓库为这一句专门写过一条纪律)。
+#:   · **滤掉这几格** → 闸照旧咬得住"这个世界变了没有",而它本来就该咬这个:
+#:     这三格是**从别的字段派生出来的展示文本**(动词的 label、东西的 name),
+#:     一个字节的状态都不承载,而且 old / new 两条路上完全相同。
+#:
+#: ⚠️ **只滤这三格**,而且滤的是"派生的展示文本"这一类 —— 哪天有人想往这儿加
+#: 一个真的量,这条注释就是拦他的那句话。
+_PARITY_PRESENTATION_KEYS = ("verb_label", "target_name", "item_name")
+
+
+def _parity_payload(payload):
+    """去掉那几格展示文本之后的载荷 —— 见 `_PARITY_PRESENTATION_KEYS`。"""
+    if not isinstance(payload, dict):
+        return payload
+    return {k: v for k, v in payload.items() if k not in _PARITY_PRESENTATION_KEYS}
+
 ASYNC_KEYS = ("narrative_log", "recent_events", "runtime")
 
 
@@ -192,7 +219,8 @@ def _run(tmp_path):
             # 🔴 **非叙事事件的多重集** —— 被验收 A 收回来的那一半(见模块 docstring)。
             # **排序之后比**:次序不进这道闸,理由在 docstring 里。
             "events": sorted(
-                [e.type, json.dumps(e.payload, ensure_ascii=False, sort_keys=True)]
+                [e.type, json.dumps(_parity_payload(e.payload), ensure_ascii=False,
+                                    sort_keys=True)]
                 for e in world.scheduler.event_log.replay()
                 if e.type not in _PARITY_IGNORED_EVENTS
             ),

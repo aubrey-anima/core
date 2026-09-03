@@ -59,6 +59,30 @@ _JSON_COLUMNS = {"source_ids", "participants", "tool_calls"}
 _STATE_REDIS_VALUE_TYPES = {"hash": dict, "list": list, "string": str, "set": list}
 
 
+class PackInstallError(ValueError):
+    """一份内容包装不进这个世界;带着每一条理由。
+
+    **和 `WorldSeedError` / `PluginError` 同一类**:作者写错了东西,而作者该看到的
+    是那几行中文,不是一段 Python 堆栈。
+
+    🔴 **它住在这儿而不是 `__main__.py`,是被一次真的 Traceback 逼的**
+    (3.10.1,2026-09-02 验收 A ⑫)。`python -m anima_world` 会把
+    `__main__.py` 加载成模块 **`__main__`**,而 `api.py` 里那句
+    `from anima_world.__main__ import install_authored_pack` 又把同一个文件
+    **再加载一遍**,这次叫 `anima_world.__main__` —— 于是同一个 `class` 语句
+    产生了**两个不相等的类对象**。CLI 那句 `except PackInstallError` 抓的是
+    第一个,而 `World.install_pack` 抛的是第二个:一份坏包不再印那几行中文,
+    而是甩一段 Python 堆栈给作者。
+
+    **两份判断迟早给出不同答案**这条纪律,在"类的身份"上也成立。
+    住在这儿之后,两条路 import 的是同一个模块、同一个类。
+    """
+
+    def __init__(self, errors: list[str]):
+        self.errors = list(errors)
+        super().__init__("这份内容包装不进去:\n" + "\n".join(f"- {e}" for e in errors))
+
+
 class PackageValidationError(ValueError):
     """Raised when a world archive fails the portable package contract."""
 

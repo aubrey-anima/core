@@ -395,7 +395,7 @@ def welcome_back(*, away_days: int = 0, packs: list[dict[str, Any]] | None = Non
         out.append(f"你有 {away_days} 天没来了。")
     for row in (packs or ()):
         note = str(row.get("note") or "").strip()
-        out.append(f"这段时间世界更新了:{note}" if note
+        out.append(f"这段时间世界更新了:{note}。" if note
                    else f"这段时间世界更新了一次({row.get('id')})。")
     return out
 

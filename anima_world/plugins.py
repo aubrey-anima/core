@@ -2377,7 +2377,7 @@ def plugin_version_errors(plugins: Any, store: Any) -> list[str]:
         if version_tuple(was) > version_tuple(plugin.version):
             errors.append(
                 f"插件 `{plugin.id}`:这个世界里装的是 {was},而文件里是 "
-                f"{plugin.version} —— **不降级**。降级不是回退,是拿旧声明去盖"
+                f"{plugin.version} —— 「不降级」。降级不是回退,是拿旧声明去盖"
                 "新数据(上一版新加的事实会被当成「声明里没了」裁掉),而那不可逆"
             )
     return errors

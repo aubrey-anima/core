@@ -352,8 +352,10 @@ def _validate_for_each(for_each: Any, label: str) -> tuple[list[str], bool]:
                  '{"node": "player"})'], False)
     node = for_each.get("node")
     if node not in FOR_EACH_NODES:
+        # ⚠️ 印**名字**,不印 Python 的 list repr(`['player']` 里的引号和方括号
+        # 是给机器看的,而读这句话的是作者)。
         return ([f"{label}: for_each.node {node!r} 不认识 —— "
-                 f"这一层只收 {list(FOR_EACH_NODES)}"], False)
+                 f"这一层只收 {'、'.join(FOR_EACH_NODES)}"], False)
     return ([], node == PLAYER_TOKEN)
 
 

@@ -755,7 +755,7 @@ def test_不是这份包写的人设_默认拒绝(tmp_path):
         receipt = world.install_pack(pack, force=True)
         assert receipt["personality"] == ["甲"] and receipt["forced"] is True
         assert world.scheduler.agents["甲"].agent.blackboard.read(
-            "personality") == "改过的性格" or True   # 黑板下次开机才拼
+            "personality") == "改过的性格"
         assert world.roster()["agents"][0]["agent_id"]      # 投影读得到
 
 
