@@ -80,11 +80,28 @@ def test_没有指导时只许两个动作():
 
 
 def test_升级是默认行为_而breathe是唯一往回带的():
-    assert D.next_phase("setup", "reveal") == "escalation"
-    assert D.next_phase("escalation", "complicate") == "climax"
-    assert D.next_phase("climax", "breathe") == "release"
+    # ⚠️ 张力都给到位 —— 这条测的是"往哪走",不是"走不走得动"(那条在下面)。
+    assert D.next_phase("setup", "reveal", tension=0.9) == "escalation"
+    assert D.next_phase("escalation", "complicate", tension=0.9) == "climax"
+    assert D.next_phase("climax", "breathe", tension=0.9) == "release"
     # 还没到 climax 的线,喘一口气不该把它打回去
-    assert D.next_phase("setup", "breathe") == "setup"
+    assert D.next_phase("setup", "breathe", tension=0.0) == "setup"
+
+
+def test_相位是攒出来的_不是数出来的():
+    """🔴 真站第四轮 ④:三拍就 `climax`,而张力 0.1 —— 屏上「到节骨眼了」
+    和「松弛」**并排印在同一屏**。两句都是引擎说的,而它们互相打脸。
+
+    判据:张力没到这一相的目标,就翻不了篇(而这一拍照样写、照样加张力)。
+    """
+    assert D.next_phase("setup", "reveal", tension=0.1) == "setup"
+    assert D.next_phase("setup", "reveal", tension=D.PHASE_TARGET["setup"]) == "escalation"
+    assert D.next_phase("escalation", "complicate", tension=0.3) == "escalation"
+    # 数拍数的那一版:三拍必到 climax
+    phase = "setup"
+    for _ in range(3):
+        phase = D.next_phase(phase, "approach", tension=0.1)
+    assert phase == "setup", f"张力 0.1 而线走到了 {phase}"
 
 
 def test_张力随世界时间衰减_而且不必被存():

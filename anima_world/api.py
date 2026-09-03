@@ -3346,6 +3346,12 @@ class World:
             stance = ""
         seeds = host_mod.suggestion_seeds(
             hook=doing, beat_note=beat_note,
+            # 🔴 **她真说过的那句话**(3.11.2,真站 C 报的)。
+            # 「问问她刚才说的那句话」只能由**这一格**把门 —— 上一版由
+            # `beat_note` 把门,而那是**旁白**(拍上的 `narrate`,「手机震了一下」),
+            # 不是她开口说过的话。于是第一次搭话的输入框上方就写着
+            # 「问问她刚才说的那件事」,而她一个字都还没说过。
+            line=self._recent_hail_line(agent_id, player_id),
             agent_name=self.scheduler.agent_display_name(agent_id), stance=stance,
         )
         client = getattr(self.chat_service, "_background_llm", None)
@@ -3380,6 +3386,30 @@ class World:
             if str(payload.get("player_id") or "") != player_id:
                 continue
             return str(payload.get("line") or "")
+        return ""
+
+    def _recent_hail_line(self, agent_id: str, player_id: str) -> str:
+        """她上一次**当面开口**说的那句话(`agent_hail.payload.line`)。
+
+        🔴 **和 `_recent_beat_note` 是两样东西,别当同一种用**(3.11.2):
+        那一条是**旁白**(拍上的 `narrate`),这一条是**她的台词**。
+        `mock_opening` 那一格早就写着这句分界,而建议句那一层没跟上。
+
+        没有就是空串 —— **她还没说过话**,那时「问问她刚才说的那句话」是一句
+        指着空气的建议。
+        """
+        log = self.scheduler.event_log
+        if log is None:
+            return ""
+        for event in reversed(log.replay()):
+            if event.type != "agent_hail":
+                continue
+            payload = event.payload or {}
+            if str(payload.get("agent_id") or "") != agent_id:
+                continue
+            if str(payload.get("player_id") or "") != player_id:
+                continue
+            return str(payload.get("line") or "").strip()
         return ""
 
     def _recent_beat_note(self, player_id: str) -> str:
@@ -8804,6 +8834,9 @@ class World:
         place_name = str(menu.get("location_name") or place)
         transit = (state.get("players") or {}).get(pid) or {}
         in_transit = bool(transit.get("in_transit"))
+        # 在路上时 `place_name` 那一格由 `player_options` 给(真站第四轮 ⑤),
+        # 这一屏原样读它 —— **两扇门说同一句话**。
+        going_now = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
         options = host_mod.select_options(
             self._host_candidates(pid, place, places, menu, in_transit=in_transit),
             limit=int(self.config_get("host.max_options", default=5) or 5),
@@ -8815,16 +8848,37 @@ class World:
             beat_seq = int(self.scheduler._memory_projection.player_beat_seq.get(pid, 0))
             # 🆕 3.11.0(批 3a):钥匙的第四格 —— 「他自己刚动过手没有」。
             move_seq = int(self.scheduler._memory_projection.player_move_seq.get(pid, 0))
+        # 🆕 3.11.2(真站第三轮):**说过话也算动过手,而它不进事件日志。**
+        #
+        # 🔴 `conversation` 只在**会话关闭**那一刻发一条(「聊天子系统与事件核解耦:
+        # 整场会话只在关闭时发一个事件」是这个仓库的硬不变量)—— 而站点把会话
+        # **一直开着**。于是玩家聊了十轮,`move_seq` 一格没动,`_host_trigger`
+        # 答 `None`,整屏纹丝不动:**「每操作一次就有新剧情」在最常见的那条路上不成立。**
+        #
+        # ⚠️ **不许为它加一条每轮事件** —— 那正是那条不变量挡的东西。
+        # 接的是**转录那一侧本来就在写的水位**(`contact_store.last_contact_tick`,
+        # `World.chat` / `record_chat_turn` 两扇门都写它,`claim_hail` 的 docstring
+        # 早就写着这句)。它是 tick 不是 seq,所以**单独一格**,不和 `move_seq` 混。
+        chat_tick, chat_with = self._last_chat(pid)
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
-                                     move_seq=move_seq,
+                                     move_seq=move_seq, chat_tick=chat_tick,
                                      tick=tick, ask=bool(ask),
                                      was_present=was_present)
         if trigger is None:
             scene = {"text": str(last.get("text") or ""), "source": "cached",
                      "seq": int(last.get("seq") or 0)}
         else:
-            going = str((transit.get("transit") or {}).get("to") or "") if in_transit else ""
+            going = going_now
             recap = self._host_recap(pid, since_seq=int(last.get("seq") or 0)) if last else []
+            # 🔴 **聊过的那一句要进回顾**(3.11.2,真站第四轮 ①)。回顾折自日志,
+            # 而这条路**不进日志** —— 于是聊完一轮那一屏虽然重开了,内容和上一屏
+            # 一字不差。**一屏没变化和一屏没开口,在玩家眼里是同一件事**,
+            # 而真站上量到的正是「同一句台词连出三屏」。
+            # 读的是开屏用的**同一个水位**,不另攒一份。
+            if last and chat_tick != int(last.get("chat_tick") or 0) and chat_with:
+                said = host_mod.chat_line(self.scheduler.agent_display_name(chat_with))
+                if said:
+                    recap = list(recap) + [said]
             # 🔴 **编剧是这一屏的上半场**(3.11.0,批 3a,裁决 §2.1①)。
             #
             # 三条理由,每条单独成立:①「他刚做了什么」全仓只有 `_host_recap`
@@ -8853,7 +8907,12 @@ class World:
             # 9 次走路,`director_log` 只有 11 条)。
             # 🔴 而我 3a 那条「二十次操作二十拍、零沉默」的用例**二十次全是动词、
             # 一次没走** —— 它测的是我写对了的那一半。**试牙也要试对地方。**
-            acted_since = bool(last) and move_seq != int(last.get("move_seq") or 0)
+            # 🔴 **和开屏那道闸问的是同一个函数**(3.11.2,真站第四轮)。
+            # 上一版这儿自己比 `move_seq` —— 而同一轮加进钥匙的 `chat_tick`
+            # 只加在闸那一侧:于是聊完一轮屏重写了、抬头是 `acted`,
+            # 编剧照旧一个字不写。**这正是 A ① 那个形状的第二次。**
+            acted_since = host_mod.acted_since(
+                last, move_seq=move_seq, chat_tick=chat_tick)
             said = self._director_turn(
                 pid, recap=recap, place=place, place_name=place_name, day=day,
                 tick=tick, trigger=trigger, beat_fired=(trigger == "beat"),
@@ -8871,12 +8930,13 @@ class World:
                 place_desc=str((places.get(place) or {}).get("description") or ""),
                 day=day, hour=hour, minute=minute, options=options,
                 going_to=str((places.get(going) or {}).get("name") or going),
-                recap=recap,
+                recap=recap, in_transit=in_transit,
             )
             self._record_and_fan({
                 "type": "host_scene", "who": f"player:{pid}",
                 "payload": {"player_id": pid, "place": place, "day": day, "tick": tick,
                             "beat_seq": beat_seq, "move_seq": move_seq,
+                            "chat_tick": chat_tick,
                             "trigger": trigger,
                             "text": text, "source": source,
                             "options": [o["id"] for o in options]},
@@ -8900,6 +8960,15 @@ class World:
         ask_ready = scene_tick + cooldown
         # `arrive` 那一屏之后那一次问不起冷却(见 `_host_trigger`),所以这个读数
         # 也得跟着说真话 —— **一个读数和它旁边那扇门说两句话,比没有这个读数更坏。**
+        # 🔴 **`trigger` 答不了「这一趟有没有开口」,`scene.source` 才答得了**
+        # (3.11.2,真站第四轮)。这一趟闭嘴时,返回里报的是**上一屏那个抬头** ——
+        # 因为返回的确实还是上一屏,而 `ask_ready` 那一格要照它说真话。
+        # ⚠️ 于是屏幕上会出现 `trigger=return` + `source=cached` 这种组合,
+        # 而它的意思是「什么都没发生,上一屏碰巧是回来那一屏」——
+        # **运维侧照它读成过一次「回来那一屏把编剧短路了」**,查错了方向一整轮。
+        # 契约那一句写在 REFERENCE 与 FOR-STUDIO §3.67(f):**问「变了没有」
+        # 只有一个读数,是 `scene.source`。**不另加一格布尔 —— 同一个问题两个读数,
+        # 就是下一次它们说两句话。
         shown_trigger = trigger or str(last.get("trigger") or "arrive")
         ready = tick >= ask_ready or shown_trigger == "arrive"
         return {
@@ -8994,27 +9063,45 @@ class World:
         # 站在那儿的人照样被派出来。**一道声明了却没人执行的闸,和没有那道闸
         # 一样,只是更贵** —— 作者以为自己挡住了。
         banned_places = {str(x) for x in (forbidden.get("locations") or ())}
+        # 🆕 3.11.2(真站第四轮 ②):**他这一路走过什么 + 最近派过谁**,一次回扫。
+        context = self._director_context(pid)
         cast = dmod.select_cast(
             self._director_candidates(pid, place, banned_places=banned_places),
             cast_pool=guidance.get("cast_pool") or (),
             forbidden=forbidden.get("agents") or (),
             hidden=self._host_hidden_agents(),
             gated=self._director_gates(),
+            # 连着几拍别再派同一张脸 —— **除非那条线该收了**(收线得是同一个人)。
+            # ⚠️ 判据是「到期没有」,不是「有没有开着的线」:后者的下场正是真站
+            # 第四轮量到的那个 —— 第一拍开了一条线在芬格尔身上,于是**往后每一拍
+            # 都保他**,四次 approach 全指同一个人,而池子里有十三个。
+            # **一个永远成立的例外不是例外,是把闸关了。**
+            recent=context["recent"], keep=self._director_keep(thread, tick),
         )
         decision: dict[str, Any] | None = None
+        # 🔴 **这一拍是怎么来的,要分得开**(3.11.2,验收 A ③)。
+        # 上一版三种情形都记成 `source: "mock"` —— 而它们指向三种修法。
+        if move == "breathe" and tension >= ceiling and not capped and not beat_fired:
+            why_source = "ceiling"        # 世界该这样,不用管
+        elif not self._llm_key_configured_for_director():
+            why_source = "mock"           # 去配一把 key
+        else:
+            why_source = "refused"        # 提示词要改(模型答的不在闭集里)
         if move != "breathe" and cast:
             # 这一轮**最多**写到 `move`;模型只能在它及以下里挑。
             ladder = list(dmod.MOVES[:dmod.MOVES.index(move) + 1])
             messages = dmod.decide_messages(
                 recap=recap, cast=cast, allowed=[m for m in ladder if m in allowed],
                 thread=thread, guidance=guidance, place_name=place_name, day=day,
-                tension=tension, phase=phase, anchor=self._director_anchor(guidance))
+                tension=tension, phase=phase, anchor=self._director_anchor(guidance),
+                history=context["history"])
             decision = dmod.parse_decision(
                 self._director_reply(messages),
                 allowed=[m for m in ladder if m in allowed],
                 cast_ids=[c["id"] for c in cast])
         if decision is None:
-            decision = dmod.mock_move(recap, place_name=place_name)
+            decision = dmod.mock_move(recap, place_name=place_name,
+                                      source=why_source)
         decision.setdefault("source", "llm")
         return self._director_apply(
             pid, decision, tension_before=tension, phase=phase, tick=tick,
@@ -9090,7 +9177,9 @@ class World:
                 refused = refused or "error"
 
         after = max(0.0, min(1.0, tension_before + dmod.MOVE_TENSION.get(move, 0.0)))
-        new_phase = dmod.next_phase(phase, move)
+        # **相位跟着这一拍之后的张力走**,不是数拍数(真站第四轮 ④):
+        # 屏上「到节骨眼了」和「松弛」并排印过。
+        new_phase = dmod.next_phase(phase, move, tension=after)
         promise = str(decision.get("promise") or "")
         thread_id = str((thread or {}).get("id") or "")
         if promise and move != "breathe":
@@ -9130,6 +9219,11 @@ class World:
 
             return str(dmod.mock_move(recap, place_name=place_name)["line"])
         return f"{name}朝你走过来:「{line}」" if line else f"{name}朝你走过来。"
+
+    def _llm_key_configured_for_director(self) -> bool:
+        """这个世界有没有一把 key —— **按有没有 key 判,不按客户端类型判**
+        (和 `_host_scene_text` 那一格逐字同一句)。"""
+        return bool(str(self.config_get("llm.api_key", default="") or ""))
 
     def _director_reply(self, messages: list[dict[str, str]]) -> str:
         """那一次背景槽调用。**一次调用,失败即模板,不重试不合批** ——
@@ -9371,7 +9465,7 @@ class World:
 
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
                       beat_seq: int, tick: int, ask: bool,
-                      move_seq: int = 0,
+                      move_seq: int = 0, chat_tick: int = 0,
                       was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是 `HOST_MOMENTS` 里的哪一个。`None` = 闭嘴,用上一屏。
 
@@ -9379,6 +9473,8 @@ class World:
         `beat`;新的一天 → `new_day`。三样同时变时报最强的那个,而不是把它们拼成
         一句"变了" —— 宿主要拿它决定这一屏怎么进场。
         """
+        from anima_world import host as host_mod
+
         if not last:
             return "arrive"
         # 🆕 3.10.0(2a-②):**「你回来了」排在换地方前面。**
@@ -9400,7 +9496,11 @@ class World:
         # 一个手上已经有操作记录的老玩家会被判成 `acted` 开一次口 —— 那是对的
         # (他确实做过事而屏幕没说),而且**只多开一次**:这一屏落库时就带上
         # 这一格了。少了这一句注释,下一个人会以为它是个 bug 去"修"掉。
-        if int(last.get("move_seq") or 0) != move_seq:
+        # 🆕 3.11.2:**他跟人说过话**也算动过手,而那条路不进事件日志
+        # (见 `host_turn`),所以它在钥匙上自己一格。
+        # 🔴 **两格都由 `host.acted_since` 一处算**(真站第四轮):这个事实
+        # 编剧那道守卫也要问,而从前两处各写各的 —— 一版之内分岔了两次。
+        if host_mod.acted_since(last, move_seq=move_seq, chat_tick=chat_tick):
             return "acted"
         if int(last.get("day") or 0) != day:
             return "new_day"
@@ -9417,6 +9517,104 @@ class World:
             if tick - int(last.get("tick") or 0) >= cooldown:
                 return "ask"
         return None
+
+    def _last_chat(self, pid: str) -> tuple[int, str]:
+        """他上一次跟**谁**说话、是第几 tick —— 转录那一侧本来就在写的水位。
+
+        🔴 **它不是事件**,而那是有意的:「整场会话只在关闭时发一个事件」是这个
+        仓库的硬不变量(chat 子系统与事件核解耦)。所以主持人那把钥匙上,
+        「他说过话没有」只能读这个水位,而不能等一条不会来的事件。
+
+        ⚠️ **「谁」和「第几 tick」一次问出来**(3.11.2,真站第四轮 ①):
+        这一屏两样都要 —— tick 决定开不开口,名字决定屏上那句「你刚跟谁说过话」。
+        只取 tick 的那一版下场是:聊完一轮屏是换了,而**换出来的和上一屏一字不差**
+        (回顾折自日志,而这条路不进日志)。**一屏没变化和一屏没开口,
+        在玩家眼里是同一件事。**
+        """
+        store = getattr(self.scheduler, "contact_store", None)
+        if store is None:
+            return 0, ""
+        latest, who = 0, ""
+        for agent_id in list(self.scheduler.agents):
+            try:
+                row = store.get(agent_id, pid) or {}
+            except Exception:  # noqa: BLE001 - 读不到水位不该掀翻这一屏
+                continue
+            try:
+                seen = int(row.get("last_contact_tick") or 0)
+            except (TypeError, ValueError):
+                continue
+            if seen > latest:
+                latest, who = seen, agent_id
+        return latest, who
+
+    @staticmethod
+    def _director_keep(thread: dict[str, Any] | None, tick: int) -> str:
+        """让位那道软闸下,**哪个人这一拍仍然必须在场** —— 该收线的那条线上的人。
+
+        线开在谁身上,收线就得是谁:换个人来在这一格上不是新鲜,是失约。
+        ⚠️ 而**只在到期时**保他 —— 「有一条开着的线」这个条件几乎永远成立,
+        拿它当例外等于把闸关了(真站第四轮:四次 approach 全指同一个人)。
+        """
+        due = int((thread or {}).get("due_tick") or 0)
+        return str((thread or {}).get("with") or "") if due and int(tick) >= due else ""
+
+    def _director_context(self, pid: str) -> dict[str, list[str]]:
+        """编剧的两格额外输入,**一次回扫同时答出来**:
+
+        · `history` —— 他最近这几步(走到哪、跟谁说过话、做过什么动词)
+        · `recent`  —— 最近几拍派过谁(让位用,`select_cast` 的软闸)
+
+        🔴 **一次扫描答两个问题,不是两次。** 这一句挂在每一屏上,而两个答案的
+        窗口是同一段尾巴 —— 各扫一遍就是把这一屏的代价乘二,换不来任何东西。
+        ⚠️ 窗口封顶见 `director.HISTORY_SCAN`。
+        """
+        from anima_world import director, host as host_mod
+
+        log = self.scheduler.event_log
+        if log is None:
+            return {"history": [], "recent": []}
+        try:
+            top = int(log.max_seq() or 0)
+        except Exception:  # noqa: BLE001 - 读不到日志长度不该掀翻这一屏
+            return {"history": [], "recent": []}
+        since = max(0, top - int(director.HISTORY_SCAN))
+        try:
+            rows = list(log.replay(since))
+        except Exception:  # noqa: BLE001
+            return {"history": [], "recent": []}
+        player_key = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        mine: list[dict[str, Any]] = []
+        cast_recent: list[str] = []
+        for e in rows:
+            payload = e.payload or {}
+            if e.type == "director_log":
+                if str(payload.get("player_id") or "") != pid:
+                    continue
+                who = str(payload.get("target") or "")
+                if who:
+                    cast_recent.append(who)
+                continue
+            if host_mod.player_move_seq_of(e.type, payload, str(e.who or ""), player_key):
+                mine.append({"type": e.type, "who": e.who, "payload": payload})
+        mine = mine[-int(director.HISTORY_MOVES):]
+        proj = self.scheduler._memory_projection
+        agent_names = {
+            aid: str((getattr(a, "spec", None) or {}).get("name") or aid)
+            for aid, a in proj.agents.items()
+        }
+        places = {}
+        try:
+            places = {str(loc["id"]): str(loc.get("name") or loc["id"])
+                      for loc in (self.state().get("locations") or [])}
+        except Exception:  # noqa: BLE001 - 少一个地名不该掀翻这一屏
+            places = {}
+        return {
+            "history": host_mod.move_lines(
+                mine, player_key=player_key, agent_names=agent_names,
+                place_names=places),
+            "recent": cast_recent[-int(director.CAST_RECENT_BLOCKED):],
+        }
 
     def _host_recap(self, pid: str, *, since_seq: int) -> list[str]:
         """上一屏之后**跟这个玩家有关**的那几件事(3.10.0,批 1.1 ①)。
@@ -9509,8 +9707,8 @@ class World:
 
     def _host_scene_text(self, *, place_name: str, place_desc: str, day: int,
                          hour: int, minute: int, options: list[dict[str, Any]],
-                         going_to: str = "", recap: list[str] | None = None
-                         ) -> tuple[str, str]:
+                         going_to: str = "", recap: list[str] | None = None,
+                         in_transit: bool = False) -> tuple[str, str]:
         """场景那段话 + 顺手把钩子填进 `options`(就地改)。返回 `(正文, 来源)`。
 
         **一次调用,失败即模板,不重试、不合批** —— 和判定那一层同一条纪律。
@@ -9520,7 +9718,8 @@ class World:
         from anima_world import host as host_mod
 
         fallback = host_mod.mock_scene(place_name=place_name, day=day, hour=hour,
-                                       options=options, going_to=going_to, recap=recap)
+                                       options=options, going_to=going_to, recap=recap,
+                                       in_transit=in_transit)
         service = getattr(self, "chat_service", None)
         client = getattr(service, "_background_llm", None) if service else None
         if client is None or not str(self.config_get("llm.api_key", default="") or ""):
@@ -9635,6 +9834,18 @@ class World:
         if self.player_in_transit(pid):
             # 在途不是"还在出发地":算成出发地的话,他一边在路上一边擦着咖啡店
             # 的窗 —— 和 `perform_affordance` 的 `_where_is` 同一条。
+            # 🆕 3.11.2(真站第四轮 ⑤):**`location` 照旧空,`location_name` 给人话。**
+            # 那两格问的是两件事:前者是"他在哪个地点里"(在路上就是不在),
+            # 后者是"屏上写什么"。两格一起空的下场是同一屏上「你正走在去建筑
+            # 工作室的路上」说得出,而地名那一格说不出。
+            # ⚠️ **补在这儿而不是补在主持人那一屏**:两扇门对同一时刻必须说同一句话
+            # (`test_在路上的人_两扇门说同一句话` 钉着),而补在上面那扇门里就是
+            # 让它们分岔。
+            going = str((self.players.get(pid) or {}).get("transit", {}).get("to") or "")
+            from anima_world import host as host_mod
+
+            blank["location_name"] = host_mod.transit_place_name(
+                self.scheduler.place_name(going) or going)
             return blocked("in_transit")
         here = self._player_here(pid)
         if not here:

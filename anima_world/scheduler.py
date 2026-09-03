@@ -3022,7 +3022,14 @@ class Scheduler:
                             return name
             except Exception:  # noqa: BLE001
                 logger.debug("读 contact 里的玩家名字失败", exc_info=True)
-        return pid
+        # 🔴 **查不到名字就返回空串,不拿 pid 顶**(3.11.2,真站 C 报的)。
+        # 玩家的 pid 是一串 UUID,而这个函数的产物进的是**给人读的那一格**
+        # (`agent_hail.payload.player_name` → 站点的弹窗)——
+        # 于是屏上出现「a5b1d422-… 你在吗」。
+        # ⚠️ 这和 `entity_display_name` 那条「查不到就退回 id」**有意不同**:
+        # 那儿的 id 是作者写的、人读得懂(`tree:harbor_oak`),而这儿的是机器发的。
+        # **照实说 = 什么都不说**,让读的一方自己决定兜底成「你」还是「访客」。
+        return ""
 
     def _perform_joint(
         self, agent_id: str, target: str, verb: str, affordance: Any,
@@ -4006,6 +4013,11 @@ class Scheduler:
             "payload": {
                 "target": target, "verb": verb, "duration": int(affordance.duration),
                 "ends_tick": ends, "occupies": bool(affordance.occupies),
+                # 🆕 3.11.2(真站第四轮 ①):**起头这一条也要带那两格人话。**
+                # 主持人那一屏的回顾从 3.11.2 起也读这一条(玩家点一个长动词
+                # 之后到收尾之前,日志里只有它),而读的一方手上没有本体层 ——
+                # 不带的话屏幕上会印「你着手嫁接tree:harbor_oak」。
+                **self.interaction_words(verb, affordance, target),
                 # 起头就把代价记进历史。到点才记的话,一件做了十个月的事在账上
                 # 前十个月完全不存在 —— 而她那十个月的力气确实是这时候没的。
                 **self._spent(outcome), "consumed": dict(outcome.consumed),
@@ -4759,7 +4771,12 @@ class Scheduler:
                 "agent_id": agent_id,
                 "agent_name": self.agent_display_name(agent_id),
                 "player_id": player_id,
-                "player_name": info.get("display_name") or player_id,
+                # 🔴 **没名字就不带这一格**(3.11.2,真站 C 报的):
+                # 玩家的 pid 是一串 UUID,而这一格进的是站点的弹窗 ——
+                # 顶上去的下场是屏上出现「a5b1d422-… 你在吗」。
+                # 空着让读的一方自己兜底成「你」/「访客」,那是它该做的决定。
+                **({"player_name": str(info.get("display_name") or "").strip()}
+                   if str(info.get("display_name") or "").strip() else {}),
                 "location": here,
                 "location_name": self.place_name(here) if here else "",
                 # 🆕 3.10.1:她是在他跟前叫的,还是隔空留了句话。
@@ -6874,7 +6891,12 @@ class Scheduler:
                     "agent_id": agent.id,
                     "agent_name": self.agent_display_name(agent.id),
                     "player_id": player_id,
-                    "player_name": info.get("display_name") or player_id,
+                    # 🔴 **没名字就不带这一格**(3.11.2,真站 C 报的):
+                # 玩家的 pid 是一串 UUID,而这一格进的是站点的弹窗 ——
+                # 顶上去的下场是屏上出现「a5b1d422-… 你在吗」。
+                # 空着让读的一方自己兜底成「你」/「访客」,那是它该做的决定。
+                **({"player_name": str(info.get("display_name") or "").strip()}
+                   if str(info.get("display_name") or "").strip() else {}),
                     "location": here,
                     "location_name": self.place_name(here or ""),
                 },

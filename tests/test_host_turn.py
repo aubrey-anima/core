@@ -872,3 +872,51 @@ def test_一条要花时间的动词_按下去也得有一句话(tmp_path):
         assert "报到" in got["text"] and "狮心会报到处" in got["text"], got["text"]
         # **说的是"开始了",不是"做完了"** —— 他还没做完
         assert got["text"] != "你报到了狮心会报到处。", got["text"]
+
+
+def test_闭嘴那一趟_抬头是上一屏的而source说了实话(tmp_path):
+    """🔴 **真站第四轮那条误诊的根**:这一趟没开口时,`trigger` 报的是**上一屏**
+    那个抬头 —— 于是运维侧读到 `trigger=return` + `source=cached`,断成
+    「回来那一屏把编剧短路了」,查错了一整轮方向。
+
+    这**不是 bug**:返回的确实还是上一屏,那一屏就是回来那一屏,而 `ask_ready`
+    要照这个抬头说真话(`arrive` 那一屏之后第一次问不起冷却)。
+    ⚠️ **但它意味着一句契约**:问「这一趟变了没有」**只有 `scene.source` 答得了**。
+    这条用例把这句话钉住,免得下一个人"顺手"把抬头清空 —— 那会让站点分不清
+    「回来那一屏」和「进门那一屏」。
+    """
+    from _worldfile import open_world_at
+
+    with open_world_at(tmp_path / "echo.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert world.host_turn("p1")["trigger"] == "arrive"
+        world.tick(288 * 2)
+        world.player_leave("p1")
+        assert world.host_turn("p1")["trigger"] == "return"
+        again = world.host_turn("p1")               # 什么都没发生
+        assert again["scene"]["source"] == "cached", again["scene"]["source"]
+        assert again["trigger"] == "return", "抬头该是上一屏那个"
+
+
+def test_回顾截断留的是最新那几条_不是最老的(tmp_path):
+    """🔴 真站第四轮 ③:玩家点了「报到狮心会」,而那一屏复述的是**入场那一拍**
+    (录取通知、一部手机、800 块)—— 他刚做的那件事一个字没上屏。
+
+    根不在编剧,在这一行:截断留的是 `lines[:RECAP_LIMIT]`,**最老的六条**。
+    入场那一拍一口气写四条就把名额占满了。
+    **这一段的名字就叫「刚发生了什么」,而它当时留的是最不刚的那几条。**
+    """
+    from anima_world import host as host_mod
+
+    rows = [
+        {"type": "item_transfer", "who": "player:p1",
+         "payload": {"item": f"it{i}", "qty": 1, "to": "player:p1"}}
+        for i in range(host_mod.RECAP_LIMIT + 2)
+    ]
+    rows.append({"type": "entity_interaction", "who": "player:p1",
+                 "payload": {"verb_label": "报到", "target_name": "狮心会"}})
+    lines = host_mod.recap_lines(rows, player_key="player:p1")
+    assert len(lines) == host_mod.RECAP_LIMIT + 1, lines
+    assert "报到" in lines[-1], f"他刚做的那件事被截掉了:{lines}"
+    assert "更早还有" in lines[0], lines[0]

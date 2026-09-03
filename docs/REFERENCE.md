@@ -3536,7 +3536,7 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | 🆕 `world.enable_pack(pack_id)` | 把一份**停用的**内容包重新启用(3.10.1)—— `disable_pack` 的逆,**只翻朝前看的那一半,一个字节的历史都不动**:那几拍又会响(已经响过的照旧响过 —— `beat_fired` 是历史)、它带来的人**回来**(走 `agent_return`,和 `disable` 走 `agent_leave` 逐字对称)、它写下的开关**重写**。🔴 **它必须是一扇独立的门**:一份带拍的包停用之后「再装一次」会被「这几拍的 id 这个世界里已经有了」拒掉(`beat_fired` 那份历史按 id 配对),于是**那份包永远回不来**。⚠️ **人回来这一支正是重装那条路答不出来的**:重装时名册里含已 `agent_leave` 的人,他被当成「已在册」跳过,于是 `disabled` 翻回 false 而人还站在场外。落一条 `pack_enabled` 事实。包本来就启用着 / 根本没装过都是当场 `PackInstallError`(**没有什么要做的这句话要说出来** —— 静默成功会让人以为它做了点什么)。回执 `{pack, version, day, tick, beats, agents, config}`。CLI:`anima-world pack enable`(§4.11) |
 | 🆕 `world.player_story(player_id)` | 这个玩家的**故事状态**(3.11.0,批 3a):`{player_id, known, tension, tension_text, phase, phase_text, threads, moves, recent_log}`(键表以 `contract.director.story_keys` 为准)。🆕 **3.11.1 两格**:`known` 分开「查无此人」(false)与「认识但还没动过手」(true 而 `moves: 0`)—— **这一格由引擎答,别让宿主自己去翻 `player_join`**;`tension_text` / `phase_text` 与每条线上的 `phase_text` / `due_text` 是**给屏用的人话**(照 `ask_ready_text` 那条先例:`tension` 是浮点、`phase` 是枚举,而宿主按纪律两样都不上屏 —— **引擎给人话,宿主不自己译**,分档表只有一份)。`tension` 是**算出来的**(按世界小时衰减),不是存下来的那个数 —— 存一个会随时间变旧的值就多出一种和日志对不上的坏法,而这一层对不上的样子是「编剧以为他还紧张着,而他已经三天没上线了」。`threads` 只给**开着的**线,每条带 `promise` / `with` / `phase` / `stake` / `hours_left`(还剩几个世界小时要有个交代)。🔴 **零新键,折自 `director_log`** —— 和余额折自 `payment` 逐字同一种,所以 `contract.storage` 一个字没动。⚠️ 只读门自己补课(`catch_up_projection`)。CLI:`anima-world player story --player <pid> [--json]` |
 | 🆕 `world.world_time_cached()` | 世界时钟的**内存读法**,零 I/O(3.11.1)。🔴 **它不是 `world_time()` 的替代**:`RedisClock` 有意不缓存,理由是「不缓存意味着任何一个进程随时读到的都是真的现在」—— 两个进程各持一份「现在」,世界就分叉了,而分叉之后两边都还在正常跑。只给**每秒被打好几次、只是拿去显示**的门用(`/health`、仪表盘):platform 实测 `/health` 里那一次 `scheduler.clock` 是一次 Redis GET,而 tick 线程正吃满核 —— **每次 I/O 放掉 GIL 之后要重新抢回来**,p99 被拖到 5 秒。⚠️ **任何要写世界的判断一律用 `world_time()`**;这个进程没推过 tick 时它答第 0 天,那不是「世界在第 0 天」,是「我还没看过」 |
-| 🆕 `world.guidance()` | 给实时编剧的那份**指导**(3.11.0,作者层第十六个段):`{themes, cast_pool, forbidden{agents,locations,ops,text}, tone, pacing{ceiling,target_curve}, arcs[{id,milestone,steer}]}`。老板 2026-09-02:「这个周更只能算是指导」—— 它不是剧本,**主线由玩家自己走**。`{}` = 这个世界没写过指导,而**那不等于「编剧缺席」**:开关是 `director.enabled`,没写指导时编剧按保守默认跑(只 `breathe` / `approach`,人物池 = 全世界减藏起来的与被硬闸拦下的)。⚠️ 这一条和 perception / 本体层那句「声明本身就是开关」**有意不同**。🔴 `forbidden` 前三格是**闸**(引擎按它筛人、拦 op),`text` 只进提示词 —— **一句写在提示词里的禁令不是闸**。`arcs[].milestone` 用**拍那一套谓词**,不新发明一门表达式。换一份走 `pack install`(整份覆盖);`--world-file` 那条路只填缺不覆盖 |
+| 🆕 `world.guidance()` | 给实时编剧的那份**指导**(3.11.0,作者层第十六个段;CLI 出口 `anima-world guidance show [--json]`,**只读** —— 换一份走 `pack install`):`{themes, cast_pool, forbidden{agents,locations,ops,text}, tone, pacing{ceiling,target_curve}, arcs[{id,milestone,steer}]}`。老板 2026-09-02:「这个周更只能算是指导」—— 它不是剧本,**主线由玩家自己走**。`{}` = 这个世界没写过指导,而**那不等于「编剧缺席」**:开关是 `director.enabled`,没写指导时编剧按保守默认跑(只 `breathe` / `approach`,人物池 = 全世界减藏起来的与被硬闸拦下的)。⚠️ 这一条和 perception / 本体层那句「声明本身就是开关」**有意不同**。🔴 `forbidden` 前三格是**闸**(引擎按它筛人、拦 op),`text` 只进提示词 —— **一句写在提示词里的禁令不是闸**。`arcs[].milestone` 用**拍那一套谓词**,不新发明一门表达式。🆕 **3.11.1**:`pacing.target_curve` 认的是 `contract.director.target_curve_keys` 那**三**个相(`setup` / `escalation` / `climax`)—— 🔴 **`release` 不许写进去**:它是一条线**走完之后**的样子,**没有时长**;拿 `phases` 那四格去判会**多放一格**,而作者写下去**不报错也不生效**(引擎从 3.11.1 起当场拒)。换一份走 `pack install`(整份覆盖);`--world-file` 那条路只填缺不覆盖 |
 | 🆕 `world.packs()` | 这个世界装了哪几份**内容包**,按落地先后(3.10.0)。每行 `id` / `version` / `note` / `day`(**第一次**落地那天)/ `tick` / **`sections`(真的落地了什么)** / **`declared`(文件里写了什么)** / **`beat_days`(每一拍各自的落地日,零点按它算)**。🔴 `sections` 与 `declared` 是**两格**:抄文件当落地是「两份真相」,而读的人分不出哪一份是对的(2a-① 验收 C)。`beat_days` 同理 —— 一个包升级时带的是新的几拍,而上一版那几拍的零点不该跟着动。🔴 **折自 `pack_installed` 事件,没有第二张表** —— 和余额折自 `payment` 逐字同一种;存一份直接写的清单就多出一种和日志对不上的坏法,而这一层对不上的样子是「这一周的拍从哪天起算」答错,**没有一处会报错**。只读门自己补课(`catch_up_projection`)。CLI 出口是 `anima-world pack list`(§4.11) |
 
 ### 持久化与底层
@@ -5366,14 +5366,31 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 3. **自由输入永远在,永远最后,而且不占 `host.max_options` 的名额。** 跑团的规矩正是
    这样:GM 给选项,玩家可以不选,但 GM 先说话。
 4. **只在六个时刻开口** —— 进地点(`arrive`)/ 新的一天(`new_day`)/ 指着他的剧情拍
-   响了(`beat`)/ **他自己刚做了一件事**(`acted`,3.11.0,批 3a:钥匙的第四格
-   `move_seq`,`host.PLAYER_MOVE_EVENT_TYPES` 那张策展表说哪几种事件算)/
+   响了(`beat`)/ **他自己刚做了一件事**(`acted`,3.11.0,批 3a:
+   钥匙的第四、五格,见下)/
    他点了「我该干嘛」(`ask`)/ **你回来了**(`return`,3.10.0,2a-②:
    离线超过 `host.away_ticks`,或者他上一屏之后有新的内容包落地)。
    闸在 `host_turn` 里(时刻钥匙 vs 上一条 `host_scene` 事件),**引擎里没有第二条生成
    场景的路**,所以这条纪律是结构性的,不是提示词里的一句话。几样同时变时报最强的那个
    (`return` > `arrive` > `beat` > `acted` > `new_day`)—— `return` 排最前是因为一个离线三天的人
    回来时多半也换了地方,而这两句话里他更需要读到的是「你不在的时候……」。
+   ⚠️ 🔴 **`trigger` 答不了「这一趟开口了没有」。** 闭嘴那一趟返回里报的是
+   **上一屏那个抬头**(返回的确实还是上一屏,而 `ask_ready` 要照它说真话),
+   所以 `trigger:"return"` + `source:"cached"` 的意思是**「什么都没发生」**,
+   不是「这是一屏回来的场景」—— 真站上有人照它断成「回来那一屏把编剧短路了」,
+   查错了一整轮。**问「变了没有」只有 `scene.source` 一个读数**,不加第二个布尔。
+
+   ⚠️ **`acted` 那一格的钥匙有两格,而第二格不是事件。** 第四格 `move_seq` 数
+   已发生的动作(`host.PLAYER_MOVE_EVENT_TYPES` 那张策展表说哪几种事件算 ——
+   ⚠️ 3.11.2 起**长动词起头那条 `entity_engage` 也在表上**:有 `duration` 的
+   动词点下去只发它,那条 `entity_interaction` 要等收尾才发,于是从前点完
+   「拉票」到一小时后收尾之间,这一屏一动不动);
+   第五格 `chat_tick`(3.11.2)—— 🔴 **聊天也算"做了一件事",而它不发事件**:
+   `conversation` 只在**会话关闭那一刻**发一条,站点却把会话一直开着,于是一个
+   聊了十轮的人 `move_seq` 一格不动、整屏纹丝不动。这一格读的是转录那侧本来就在
+   写的水位(`contact_store.last_contact_tick`),**没有新事件、也没有新键** ——
+   「整场会话只在关闭时发一个事件」那条不变量挡的正是"每轮补一条事件"这种修法。
+
    ⚠️ **这份名单以 `contract --json` 的 `host.moments` 为准**,而且
    `tests/test_host_doc_contract.py` 拿它逐格比着这一段 —— 下一个时刻加进来时这里会
    当场红。上一次加 `return` 时它没红,于是这两处「五个时刻」后面只列了四个。
