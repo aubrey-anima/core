@@ -1119,3 +1119,73 @@ def test_日志那一格档词_和故事那扇门用的是同一张表(tmp_path)
         # 和故事那扇门同一张表:同一个值译出来必须逐字相同
         assert D.tension_text(0.63) == world.player_story("p1")["tension_text"] or True
         assert "tension_text" in D.DIRECTOR_LOG_KEYS
+
+
+# ── 被拒的操作也是玩家做过的一次操作(3.12.0,老板 09-03 裁决)──────────────
+
+def test_被拒两次_两屏都是模板句而且和上一屏都不同(tmp_path):
+    """🔴 **裁决那条的判据,逐字**:被拒的操作**要开口,但不加时刻** ——
+    抬头仍是 `acted`,`scene.source` 标 `template` **不许 `cached`**,
+    不调模型、不写 `director_log`,`host.moments` 那张表一个字不动。
+
+    老板那句底线:**屏不许逐字重复**。真站第五轮量到的正是"连着三屏同一句"。
+    """
+    with open_world_at(tmp_path / "rf.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.player_topup("p1", 100)
+        world.player_buy("p1", "cafe", "garden_shears")
+        world.host_turn("p1")
+        world.player_tool("p1", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        first = world.host_turn("p1")
+        before = len(_logs(world))
+
+        prev, seen = first["scene"]["text"], []
+        for _ in range(2):
+            got = world.player_tool("p1", "interact",
+                                    {"target": "tree:harbor_oak", "verb": "嫁接"})
+            assert got["ok"] is False, "在忙时再点该被拒"
+            turn = world.host_turn("p1")
+            assert turn["scene"]["source"] == "template", turn["scene"]["source"]
+            assert turn["trigger"] == "acted", turn["trigger"]
+            assert turn["scene"]["text"] != prev, "屏逐字重复了"
+            seen.append(turn["scene"]["text"])
+            prev = turn["scene"]["text"]
+
+        assert seen[0] != seen[1], "连着两次白按印了同一句"
+        # 那句拒绝的**原话**要在屏上(不另写一份措辞)
+        assert all("已经在做" in t for t in seen), seen
+        # 🔴 世界里什么都没发生 —— 编剧一个字都不许写
+        assert len(_logs(world)) == before, "为一件没发生的事写了一拍"
+
+
+def test_白按不许顶掉真做成的那件事(tmp_path):
+    """⚠️ **承重的那半**:一次里既走成了一步、又点废一个动词时,
+    他**做成了**事 —— 那一屏该照常写。拿白按去顶掉它,
+    就是把真发生过的事换成一句「你白按了」。
+    """
+    with open_world_at(tmp_path / "rf2.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.host_turn("p1")
+        world.player_tool("p1", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})  # 没剪子 → 拒
+        world.player_walk("p1", "workshop")
+        world.player_location("p1")
+        turn = world.host_turn("p1")
+        assert turn["scene"]["source"] != "template", (
+            "他真走了一步,而这一屏说的是「你白按了」")
+
+
+def test_屏那张钥匙表_是从编剧那张推出来的():
+    """🔴 **两张表有意不同,而分岔本身要有一处写下来**:
+    `ACTED_GRAINS` 答「他真动了手没有」(编剧那道守卫读它),
+    `SCREEN_GRAINS` 答「这一屏该不该重写」(开屏那道闸读它)。
+    ⚠️ 一张从另一张推出来,不并排写两份 —— 我在 3.11.1 / 3.11.2
+    各栽过一次「两处各写各的」。
+    """
+    from anima_world import host as H
+
+    assert H.SCREEN_GRAINS[:len(H.ACTED_GRAINS)] == H.ACTED_GRAINS
+    assert set(H.SCREEN_GRAINS) - set(H.ACTED_GRAINS) == {"refused_seq"}

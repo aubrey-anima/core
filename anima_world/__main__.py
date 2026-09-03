@@ -38,7 +38,9 @@ from anima_world.director import (
     STAKE_KINDS as DIRECTOR_STAKE_KINDS,
     TARGET_CURVE_PHASES as DIRECTOR_TARGET_CURVE,
 )
-from anima_world.host import PLAYER_MOVE_EVENT_TYPES
+from anima_world.host import (
+    PLAYER_MOVE_EVENT_TYPES, SCREEN_GRAINS as HOST_SCREEN_GRAINS,
+)
 # `PackInstallError` 住在 `world_package` 而不是这儿 —— `python -m` 会把本文件
 # 加载两遍(`__main__` 与 `anima_world.__main__`),同一个 class 语句于是产生
 # 两个不相等的类,`except` 抓不住另一条路抛的那个(验收 A ⑫)。
@@ -9344,6 +9346,12 @@ def contract_payload() -> dict[str, Any]:
             "config_keys": ["director.enabled", "director.max_per_player_per_hour",
                             "director.pin_ticks", "director.due_hours"],
             "moment": "acted",
+            # 🆕 3.12.0(裁决):**被拒的操作也是玩家做过的一次操作** ——
+            # 它要开口,但**不加时刻**:抬头照旧 `acted`,`host.moments` 不动。
+            # 那一屏 `scene.source == "template"`(不是 `cached`,也不调模型),
+            # 而**编剧一个字不写**(世界里什么都没发生)。
+            "screen_grains": list(HOST_SCREEN_GRAINS),
+            "refused_scene_source": "template",
             "move_event_types": list(PLAYER_MOVE_EVENT_TYPES),
             "gloss": (
                 "**实时编剧**:世界里一个不上场的角色,在玩家玩的时候即兴写下一拍。"

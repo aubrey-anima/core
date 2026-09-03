@@ -1992,6 +1992,10 @@ class World:
         # 他上一次开口是哪一 tick —— `player_doing` 的第三个来源(见那条 docstring)。
         # 只在 `_chat_prelude` 里写一处,过期靠比大小,所以没有要清的账。
         self._player_chat_tick: dict[str, int] = {}
+        # 他白按了几次、上一次为什么(3.12.0)。**内存态**,和 `_player_chat_tick`
+        # 同一条:重启之后归零,代价是升级/重启后第一次白按会多开一次口 ——
+        # 而那是对的(他确实按过而屏幕没说),且只多这一次。
+        self._player_refused: dict[str, tuple[int, str]] = {}
         # 让世界看得见在场的玩家(issue #13,访客模型)。scheduler 不认识 World,
         # 只认识这个回调;在场以键还在不在为准,所以角色不会去敲断线三小时的人的门。
         self.scheduler._present_players = self._present_roster
@@ -6886,7 +6890,14 @@ class World:
             actor=tools_mod.PLAYER_ACTOR,
         )
         args = dict(params or {})
-        return tools_mod.call(ctx, tool_id, args).to_dict(tool_id, args)
+        got = tools_mod.call(ctx, tool_id, args).to_dict(tool_id, args)
+        # 🆕 3.12.0(裁决:被拒的操作也是玩家做过的一次操作)。
+        # 🔴 **不发事件** —— 世界里确实什么都没发生,写一条事件就是记一件假事
+        # (而它会被折进投影、被编剧当成"他做了什么"读走)。记的是一个水位,
+        # 和聊天那一格逐字同源。
+        if not got.get("ok"):
+            self._note_player_refusal(player_id, str(got.get("error") or ""))
+        return got
 
     def player_leave(self, player_id: str) -> None:
         """玩家离场。幂等 —— 宿主的断线回调可能重入。
@@ -9070,8 +9081,10 @@ class World:
         # `World.chat` / `record_chat_turn` 两扇门都写它,`claim_hail` 的 docstring
         # 早就写着这句)。它是 tick 不是 seq,所以**单独一格**,不和 `move_seq` 混。
         chat_tick, chat_with = self._last_chat(pid)
+        refused_seq, refused_why = self._last_refusal(pid)
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
                                      move_seq=move_seq, chat_tick=chat_tick,
+                                     refused_seq=refused_seq,
                                      tick=tick, ask=bool(ask),
                                      was_present=was_present)
         if trigger is None:
@@ -9089,6 +9102,18 @@ class World:
                 said = host_mod.chat_line(self.scheduler.agent_display_name(chat_with))
                 if said:
                     recap = list(recap) + [said]
+            # 🆕 3.12.0(裁决:被拒的操作也是玩家做过的一次操作)。
+            # **只有白按那一格动了、而他确实什么都没做成**时,这一屏是模板句:
+            # 不调模型、不写 `director_log`、抬头照旧 `acted`。
+            # 🔴 `only_refused` 那个"确实什么都没做成"是承重的:一次同时"走了一步
+            # 又点废一个动词"的操作里,他**做成了**事 —— 那一屏该照常写,
+            # 拿白按去顶掉它就是把真发生过的事换成一句"你白按了"。
+            only_refused = bool(
+                last
+                and refused_seq != int(last.get("refused_seq") or 0)
+                and not host_mod.acted_since(
+                    last, move_seq=move_seq, chat_tick=chat_tick)
+            )
             # 🔴 **编剧是这一屏的上半场**(3.11.0,批 3a,裁决 §2.1①)。
             #
             # 三条理由,每条单独成立:①「他刚做了什么」全仓只有 `_host_recap`
@@ -9126,7 +9151,10 @@ class World:
             said = self._director_turn(
                 pid, recap=recap, place=place, place_name=place_name, day=day,
                 tick=tick, trigger=trigger, beat_fired=(trigger == "beat"),
-            ) if (acted_since or recap) else ""
+            # ⚠️ **白按那一趟编剧一个字都不写**(3.12.0,裁决):世界里什么都没
+            # 发生,而一拍关于没发生的事的剧情比不写更坏。`acted_since` 本来就是
+            # `False`,这里挡的是 `recap` 非空那一支(别处发生的事把它带起来)。
+            ) if ((acted_since or recap) and not only_refused) else ""
             if said:
                 # 编剧那一句排在回顾**最后**:回顾说的是"刚发生了什么",
                 # 而这一句是"于是世界现在做了什么" —— 顺序就是因果。
@@ -9135,7 +9163,19 @@ class World:
                 # 🔴 **「你不在的时候……本周更新……」排在回顾的最前面**(2a-②)。
                 # 「本周更新」读的是 `pack_installed`,不是一份另攒的公告栏。
                 recap = self._host_welcome_back(last, tick=tick, day=day) + recap
-            text, source = self._host_scene_text(
+            if only_refused:
+                # **模板那一条路**:一句说清他为什么白按,后面接原样的场景描述。
+                # ⚠️ 不走 `_host_scene_text` 的 LLM 那一半 —— 裁决写死了"不调模型"。
+                text = host_mod.refusal_line(refused_why, seq=refused_seq) + \
+                    host_mod.mock_scene(
+                        place_name=place_name, day=day, hour=hour,
+                        options=options,
+                        going_to=str((places.get(going) or {}).get("name") or going),
+                        recap=[], in_transit=in_transit)
+                source = "template"
+                said = ""
+            else:
+                text, source = self._host_scene_text(
                 place_name=place_name,
                 place_desc=str((places.get(place) or {}).get("description") or ""),
                 day=day, hour=hour, minute=minute, options=options,
@@ -9147,6 +9187,7 @@ class World:
                 "payload": {"player_id": pid, "place": place, "day": day, "tick": tick,
                             "beat_seq": beat_seq, "move_seq": move_seq,
                             "chat_tick": chat_tick,
+                            "refused_seq": refused_seq,
                             "trigger": trigger,
                             "text": text, "source": source,
                             "options": [o["id"] for o in options]},
@@ -9775,6 +9816,7 @@ class World:
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
                       beat_seq: int, tick: int, ask: bool,
                       move_seq: int = 0, chat_tick: int = 0,
+                      refused_seq: int = 0,
                       was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是 `HOST_MOMENTS` 里的哪一个。`None` = 闭嘴,用上一屏。
 
@@ -9784,6 +9826,8 @@ class World:
         """
         from anima_world import host as host_mod
 
+        now = {"move_seq": move_seq, "chat_tick": chat_tick,
+               "refused_seq": refused_seq}
         if not last:
             return "arrive"
         # 🆕 3.10.0(2a-②):**「你回来了」排在换地方前面。**
@@ -9809,7 +9853,11 @@ class World:
         # (见 `host_turn`),所以它在钥匙上自己一格。
         # 🔴 **两格都由 `host.acted_since` 一处算**(真站第四轮):这个事实
         # 编剧那道守卫也要问,而从前两处各写各的 —— 一版之内分岔了两次。
-        if host_mod.acted_since(last, move_seq=move_seq, chat_tick=chat_tick):
+        # ⚠️ **开屏那道闸读 `SCREEN_GRAINS`,比编剧那道守卫多一格 `refused_seq`**
+        # (3.12.0,裁决)。被拒的操作要开口(抬头照旧 `acted`,时刻表不动),
+        # 而编剧**不许**为它写一拍 —— 世界里什么都没发生。
+        if any(int((last or {}).get(g) or 0) != int(now.get(g) or 0)
+               for g in host_mod.SCREEN_GRAINS):
             return "acted"
         if int(last.get("day") or 0) != day:
             return "new_day"
@@ -9826,6 +9874,24 @@ class World:
             if tick - int(last.get("tick") or 0) >= cooldown:
                 return "ask"
         return None
+
+    def _note_player_refusal(self, player_id: str, why: str) -> None:
+        """他白按了一下 —— 记一个水位(3.12.0)。
+
+        🔴 **不进事件日志**:世界里什么都没发生,而一条"他试了但没成"的事件会被
+        折进投影、被编剧当成"他做了什么"读走 —— 那会写出一拍关于没发生的事的剧情。
+        和 `chat_seq` 逐字同源:**屏要看见的东西,不一定是世界里发生过的东西。**
+        """
+        pid = str(player_id or "").strip()
+        if not pid:
+            return
+        seq, _ = self._player_refused.get(pid, (0, ""))
+        self._player_refused[pid] = (int(seq) + 1, str(why or ""))
+
+    def _last_refusal(self, pid: str) -> tuple[int, str]:
+        """他白按了几次、上一次为什么。`(0, "")` = 没白按过。"""
+        seq, why = self._player_refused.get(str(pid or ""), (0, ""))
+        return int(seq), str(why or "")
 
     def _last_chat(self, pid: str) -> tuple[int, str]:
         """他上一次跟**谁**说话、是第几 tick —— 转录那一侧本来就在写的水位。

@@ -177,6 +177,45 @@ PLAYER_MOVE_INVITE_OUTCOMES = ("accepted", "declined")
 #: 逐格驱动表会在忘了写驱动时当场红。
 ACTED_GRAINS = ("move_seq", "chat_tick")
 
+#: 时刻钥匙上,**屏该不该重开**看哪几格 —— 比上面那张多一格 `refused_seq`。
+#:
+#: 🔴 **两张表有意不同,而这一次的分岔是被裁决过的**(3.12.0,老板 09-03):
+#: 「**一次被拒的操作也是玩家做过的一次操作**,要开口,但**不加时刻**」——
+#: 抬头照旧是 `acted`,`host.moments` 那张表一个字不动。
+#:
+#: 分界是一句话:**`ACTED_GRAINS` 答「他真动了手没有」(编剧那道守卫读它),
+#: `SCREEN_GRAINS` 答「这一屏该不该重写」(开屏那道闸读它)。**
+#: 一次被拒的操作**世界里什么都没发生** —— 所以编剧不许为它写一拍
+#: (那会是一拍关于没发生的事的剧情),而屏必须说一句
+#: (否则玩家连点三下,三屏一字不差,而他不知道自己为什么白按)。
+#:
+#: ⚠️ 我在 3.11.1 / 3.11.2 各栽过一次「两处各写各的」,所以这里**一张表从另一张
+#: 推出来**,而不是并排写两份:加一格到 `ACTED_GRAINS`,这张自动跟上。
+SCREEN_GRAINS = ACTED_GRAINS + ("refused_seq",)
+
+#: 白按了一下时那一句。**按第几次轮着说** —— 连点三下三屏一字不差,
+#: 和"屏根本没动"在玩家眼里是同一件事(老板那句底线:**屏不许逐字重复**)。
+#: ⚠️ 轮换按**次数**取,不掷骰子:同一份日志重放两遍要得到同一屏。
+REFUSAL_OPENERS = (
+    "这一下没成 —— {why}",
+    "你又试了一次,还是不行:{why}",
+    "还是那句话:{why}",
+)
+
+
+def refusal_line(why: str, *, seq: int = 0) -> str:
+    """白按那一下,屏上说的那句。**模板,不调模型**(裁决:也不写 `director_log`)。
+
+    `why` 是引擎已经给出的那句拒绝人话(「你已经在做这件事了 —— 还要 1 小时」/
+    「她这会儿不在」)—— **不另写一份措辞**:同一件事在工具回执和这一屏上
+    说两种话,比其中任何一句错更难查。
+    """
+    said = str(why or "").strip().rstrip("。")
+    if not said:
+        said = "这会儿做不了这件事"
+    opener = REFUSAL_OPENERS[max(0, int(seq)) % len(REFUSAL_OPENERS)]
+    return opener.format(why=said) + "。"
+
 
 def acted_since(last: dict[str, Any] | None, *, move_seq: int = 0,
                 chat_tick: int = 0) -> bool:
