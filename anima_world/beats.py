@@ -1061,7 +1061,8 @@ def expand_relations(
 
 
 def expand_event_op(
-    op: dict[str, Any], *, agent_locs: dict[str, str], known_agents: set[str]
+    op: dict[str, Any], *, agent_locs: dict[str, str], known_agents: set[str],
+    item_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Expand one EVENT_OPS op into raw event dicts (Scheduler records them).
 
@@ -1124,10 +1125,19 @@ def expand_event_op(
         source = str(op.get("from") or BEAT_WORLD_HOLDER)
         # qty 为负 = 拿走。投影只认正数,所以调换两端而不是发一条 no-op。
         holder_from, holder_to = (source, agent_id) if qty > 0 else (agent_id, source)
+        item_id = str(op.get("item_id"))
+        # 🆕 3.10.1(验收 A ②):**当时的人话跟着事件走。**
+        # 读的一方(主持人那一屏)手上没有物品表,而且「那样东西当时叫什么」
+        # 会变 —— 作者改一个 `name`,历史里那句话就跟着变了。契约里
+        # `item_transfer` 那一条早就写着「事件里那格当时的人话优先」,
+        # 而写它的这一头一直没写。查不到就不写这一格(**照实说比编一个好**),
+        # 读的一方照旧回落到物品表。
+        said = str((item_names or {}).get(item_id) or "")
         return [{
             "type": "item_transfer", "who": agent_id,
             "payload": {"from": holder_from, "to": holder_to,
-                        "item_id": str(op.get("item_id")), "qty": abs(qty)},
+                        "item_id": item_id, "qty": abs(qty),
+                        **({"item_name": said} if said else {})},
         }]
 
     if kind == "sentiment_delta":

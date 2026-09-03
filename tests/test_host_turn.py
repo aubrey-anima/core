@@ -667,3 +667,96 @@ def test_return进了contract的moments(tmp_path):
 
     assert contract_payload()["host"]["moments"] == [
         "arrive", "new_day", "beat", "ask", "return"]
+
+
+def test_藏起来的人在回顾里只叫有人_而事情照说(world):
+    """🔴 **这一条是 3.10.1 补的漏**(验收 A ①):候选那道闸 3.9.0 就立了,
+    而**回顾这一段从来没过它** —— 一个 `billing: "hidden"` 的角色给玩家转 500 块,
+    屏幕上就印着「<他的名字>给了你 500 块。」,而且 `mock_scene` 与
+    `scene_messages` **两条路一起漏**(两条都读同一个 `recap_lines`)。
+
+    ⚠️ **事情本身照说,藏的是「谁」**:钱包多了 500 必须说 —— 整条吞掉会让他
+    在一个"钱莫名其妙变了"的世界里做决定,那是另一种坏。
+
+    这一条按**纯函数**测三支(转账 / 给东西 / 她约你),因为 `recap_lines` 的
+    docstring 自己写着它存在的理由就是"哪几件算数、怎么说可以被单独测";
+    下一条测的是**引擎真的把那份名单传进来了**。
+    """
+    rows = [
+        {"type": "payment", "who": "暗", "payload": {"from": "暗", "to": "player:p1",
+                                                     "amount": 500}},
+        {"type": "item_transfer", "who": "暗",
+         "payload": {"from": "暗", "to": "player:p1", "item_id": "k", "item_name": "钥匙"}},
+        {"type": "agent_invites",
+         "payload": {"player_id": "p1", "agent_id": "暗", "agent_name": "黑衣人",
+                     "verb_label": "喝一杯", "target_name": "吧台"}},
+    ]
+    said = "\n".join(host_mod.recap_lines(
+        rows, player_key="player:p1", agent_names={"暗": "黑衣人"},
+        hidden_agents={"暗"}))
+    assert "黑衣人" not in said and "暗" not in said, said
+    # 三件事本身一件都不许少
+    assert "500" in said and "钥匙" in said and "喝一杯" in said, said
+    assert said.count(host_mod.HIDDEN_WHO) == 3, said
+
+    # 试牙:不传那份名单,名字当场漏出来 —— 这正是 3.10.1 之前的样子。
+    leaked = "\n".join(host_mod.recap_lines(
+        rows, player_key="player:p1", agent_names={"暗": "黑衣人"}))
+    assert "黑衣人" in leaked, leaked
+
+
+def test_引擎真的把藏起来的那份名单传进了回顾(world):
+    """上一条测的是纯函数会筛,这一条测的是**引擎真的把名单交给了它** ——
+    两件事分开测,因为 3.10.1 之前坏的恰恰是后者(函数没有那个参数,
+    而调用方当然也没传)。用**真发射点**:让那个藏起来的人真的开口约玩家。
+    """
+    hidden = [str(r["agent_id"]) for r in world.roster()["agents"]
+              if str(r.get("billing")) == "hidden"]
+    assert hidden, "橱窗里本来就有一个 billing:hidden 的人"
+    him = hidden[0]
+    names = _hidden_names(world)
+
+    world.player_move("p1", "workshop")
+    world.host_turn("p1")                    # 先有「上一屏」,回顾才有窗口起点
+    world.scheduler.invite_player(
+        him, "p1", target="bench", verb="talk", party=[], text="来一下",
+        agent_name=world.scheduler.agent_display_name(him),
+    )
+    lines = world._host_recap("p1", since_seq=1)
+    said = "\n".join(lines)
+    assert said, "那条邀请一个字都没进回顾"
+    for name in names:
+        assert name not in said, f"藏起来的人「{name}」从回顾漏出来了:{said}"
+    assert host_mod.HIDDEN_WHO in said, said
+
+def test_回顾里的动词和东西是人话_不是英文id(world):
+    """🔴 **验收 A ② 在真站上量到的那一句**:「你look了tree:harbor_oak」。
+
+    病根是 `entity_interaction` 的三处发射点**一格人话都不写**,而回顾读的正是
+    `verb_label` / `target_name`。⚠️ **用真发射点,不手塞 payload** ——
+    手塞的用例证明的是"回顾会读这两格",而漏掉的恰恰是"发射点会写这两格"。
+    """
+    world.player_move("p1", "cafe")
+    world.host_turn("p1")
+    options = world.player_options("p1")
+    target = next((t for t in options["targets"] for v in t["verbs"] if v["available"]), None)
+    assert target is not None, "橱窗里该有一样点得动的东西"
+    verb = next(v for v in target["verbs"] if v["available"])
+    world.player_tool("p1", "interact", {"target": target["id"], "verb": verb["verb"]})
+
+    events = [e for e in world.events() if e["type"] == "entity_interaction"]
+    assert events, "没发出 entity_interaction"
+    payload = events[-1]["payload"]
+    assert payload.get("verb_label"), f"发射点没写 verb_label:{payload}"
+    assert payload.get("target_name"), f"发射点没写 target_name:{payload}"
+    # 而且它们是人话:不是内部 id
+    assert payload["target_name"] == target["name"]
+    # ⚠️ 该查的是**散文**,不是整个 JSON:实体 id 出现在 `door.params` 里是
+    # **机器契约**(主持人是荐者,那扇门收的就是真 id)。第一版这里查了整个
+    # blob,当场红 —— 而红得对:那是我把契约当成了泄漏。
+    said = "".join(host_mod.recap_lines(
+        [{"type": "entity_interaction", "who": "player:p1", "payload": payload}],
+        player_key="player:p1"))
+    assert said, "回顾一个字都没说"
+    assert target["id"] not in said and verb["verb"] not in said, f"裸 id / 英文动词:{said}"
+    assert target["name"] in said, said

@@ -8968,6 +8968,10 @@ class World:
                 items = {}
         return host_mod.recap_lines(
             rows, player_key=player_key, item_names=items, agent_names=agent_names,
+            # 🔴 **回顾也要过那道闸**(3.10.1,验收 A ①)。同一份闸,同一个函数
+            # —— 候选那条路读的就是它,各查一遍的话两条路迟早对不上,而对不上的
+            # 样子是"选项里没有他,而回顾里有他的名字"。
+            hidden_agents=self._host_hidden_agents(),
         )
 
     def _host_welcome_back(self, last: dict[str, Any], *, tick: int,

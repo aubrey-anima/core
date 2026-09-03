@@ -2889,6 +2889,9 @@ class Scheduler:
                 "loc": here,
                 "payload": {
                     "target": target, "verb": verb, "changed": dict(outcome.updates),
+                    # 两格人话(3.10.1,验收 A ②):主持人那一屏的回顾读的就是它们,
+                    # 少了它们屏幕上会印「你look了tree:harbor_oak」。
+                    **self.interaction_words(verb, affordance, target),
                     # 她身上少了什么也进事件:代价不留痕的话,一个人干了一天活之后
                     # 账上只有"树高了",没有"她累了" —— 而后者才是她下一步的依据。
                     **self._spent(outcome),
@@ -3068,6 +3071,7 @@ class Scheduler:
                 "type": "entity_interaction", "who": who, "loc": here,
                 "payload": {
                     "target": target, "verb": verb,
+                    **self.interaction_words(verb, affordance, target),
                     # 目标身上的量只变了一次,所以只有发起人那条带 `changed` ——
                     # 每条都带的话,按事件重算"这棵树长了多少"会得到人数倍。
                     "changed": dict(head.updates) if who == agent_id else {},
@@ -4096,6 +4100,7 @@ class Scheduler:
                 "loc": here,
                 "payload": {
                     "target": target, "verb": verb, "changed": dict(outcome.updates),
+                    **self.interaction_words(verb, affordance, target),
                     # 代价在起头那条 `entity_engage` 上,这里不重复记 —— 记两遍的话
                     # 按事件重算"她今天花了多少力气"会得到两倍。
                     "me_changed": {}, "me_delta": {}, "consumed": {},
@@ -4742,7 +4747,8 @@ class Scheduler:
         # catch authoring typos, and the projection knows every real agent.
         known = (set(self.agents) | set(self._memory_projection.agents)
                  | {f"player:{pid}" for pid in self._memory_projection.players_joined})
-        events = expand_event_op(op, agent_locs=self._agent_locations(), known_agents=known)
+        events = expand_event_op(op, agent_locs=self._agent_locations(), known_agents=known,
+                                 item_names=self._item_names())
         if not events and kind != "broadcast_memory":
             return None  # skipped (unknown agent) — broadcast may legitimately be empty
         if kind == "persona_update":
@@ -6239,6 +6245,40 @@ class Scheduler:
         """这个动词给人读的那几个字。作者写了 `label` 就用它 —— 她提示词里读到的
         也是这几个字,两处同源。"""
         return str(getattr(affordance, "label", "") or verb or "")
+
+    def interaction_words(self, verb: str, affordance: Any, target: str) -> dict[str, str]:
+        """`entity_interaction` 载荷里那**两格人话**:`verb_label` / `target_name`。
+
+        🔴 **这两格是 3.10.1 补的,而它们此前一格都没写过**(2026-09-02 验收 A ②)。
+        下场在玩家屏上:主持人那一屏的回顾读的正是这两格(`host.recap_lines`),
+        读不到就退回原始值,于是屏幕上印着「你look了tree:harbor_oak」——
+        **裸英文动词加一个内部 id**,而同一件事在叙事流里早就有人话
+        (「你端详了门口那棵老橡树」)。同一个世界的同一件事,两个地方两种说法。
+
+        **写进事件载荷而不是让读的一方现查**,理由和 `item_transfer.item_name`
+        逐字相同:事件是**已经发生过的事实**,而"那棵树当时叫什么"会变
+        (作者改一个 `name`,历史里那句话就跟着变了);更要紧的是读的一方
+        (主持人那一屏)手上**没有本体层**——它拿到的只是一个 id。
+
+        取名两处都走已有的那份:`player_action_label` 是她提示词里读到的同几个字,
+        `entity_display_name` 查不到就退回 id(**照实说比编一个好**)。
+        """
+        return {
+            "verb_label": self.player_action_label(verb, affordance),
+            "target_name": self.entity_display_name(target),
+        }
+
+    def _item_names(self) -> dict[str, str]:
+        """`{物品 id: 人话名}`。读不到就空 —— 少一个名字不该掀翻一拍。"""
+        store = getattr(self, "economy_store", None)
+        if store is None:
+            return {}
+        try:
+            return {str(r.get("id")): str(r.get("name") or r.get("id"))
+                    for r in store.items()}
+        except Exception:  # noqa: BLE001 - 物品表读不到不该让一拍失败
+            logger.warning("读物品表失败,这一拍的 item_name 就不写了", exc_info=True)
+            return {}
 
     def entity_display_name(self, entity_id: str) -> str:
         """一样东西给人读的名字。查不到就退回 id —— **照实说比编一个好**。"""

@@ -110,10 +110,17 @@ def interaction_line(verb_label: str, target_name: str) -> str:
     return f"你{verb}了{target}。"
 
 
+#: 回顾里提到一个**藏起来的人**时,用来顶替名字的那三个字。
+#: 「有人」而不是整条不提,是有意的:钱包里多了 500 块这件事**必须说**
+#: (不说的话他在一个"钱莫名其妙变了"的世界里做决定),而**谁给的**才是要藏的。
+HIDDEN_WHO = "有人"
+
+
 def recap_lines(
     events: Iterable[dict[str, Any]], *, player_key: str,
     item_names: dict[str, str] | None = None,
     agent_names: dict[str, str] | None = None,
+    hidden_agents: Iterable[str] = (),
 ) -> list[str]:
     """上一屏之后**跟这个玩家有关**的那几件事,一件一行人话(3.10.0,批 1.1 ①)。
 
@@ -126,10 +133,23 @@ def recap_lines(
 
     ⚠️ **一律第二人称**:这一段是说给他听的(批 1.1 ②)。
     ⚠️ **超出 `RECAP_LIMIT` 要吭声** —— 最后一行会说还有几件没列。
+
+    🔴 **`hidden_agents` 是 3.10.1 补的,而它补的是一个真的漏**(2026-09-02 验收 A ①)。
+    `card.billing == "hidden"` 的人**不进候选、不进给模型的那份提示** —— 那道闸
+    3.9.0 就立了,理由是这一屏交出去的是**散文**,宿主筛不了。可**回顾这一段
+    从来没过那道闸**:一个藏起来的角色给玩家转 500 块,屏幕上就印着
+    「黑衣人给了你 500 块。」—— 而它同时进 `mock_scene` 和 `scene_messages`,
+    **两条路一起漏**。
+
+    补法照那道闸的原样:**不是"给了再叮嘱别说",是根本不给名字** ——
+    当事人是藏起来的人时,名字换成 `HIDDEN_WHO`(「有人」)。
+    ⚠️ **事情本身照说**:钱包多了 500 必须说,要藏的是**谁给的**。
+    整条吞掉会让他在一个"钱莫名其妙变了"的世界里做决定,而那是另一种坏。
     """
     lines: list[str] = []
     items = item_names or {}
     people = agent_names or {}
+    hidden = {str(a) for a in (hidden_agents or ())}
 
     def who(holder: str) -> str:
         holder = str(holder or "")
@@ -137,6 +157,9 @@ def recap_lines(
             return "你"
         if holder in ("__town__", "__world__"):
             return ""
+        # 🔴 藏起来的人:名字换掉,事情照说(见 docstring)。
+        if holder in hidden:
+            return HIDDEN_WHO
         return people.get(holder, holder.split(":")[-1] or holder)
 
     for event in events:
@@ -195,7 +218,11 @@ def recap_lines(
         if kind == "agent_invites":
             if str(payload.get("player_id") or "") != player_key.split(":", 1)[-1]:
                 continue
-            asker = str(payload.get("agent_name") or payload.get("agent_id") or "有人")
+            # 这一支不走 `who()`,所以它要自己过那道闸 —— 漏在这儿的样子是
+            # 「黑衣人问你要不要一起……」,和转账那条一样响。
+            asker = (HIDDEN_WHO if str(payload.get("agent_id") or "") in hidden
+                     else str(payload.get("agent_name")
+                              or payload.get("agent_id") or HIDDEN_WHO))
             verb = str(payload.get("verb_label") or payload.get("verb") or "")
             target = str(payload.get("target_name") or payload.get("target") or "")
             what = f"一起{verb}{target}" if verb else "一起做件事"
