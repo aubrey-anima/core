@@ -327,7 +327,8 @@ def _validate_script(data: Any, *, stored: bool = False) -> tuple[list[str], lis
         unknown = sorted(set(beat) - set(BEAT_KEYS))
         if unknown:
             errors.append(
-                f"{label}: 不认识的字段 {unknown} —— 一条拍只有 {list(BEAT_KEYS)}"
+                f"{label}: 不认识的字段 {'、'.join(unknown)} —— 一条拍只有 "
+                f"{'、'.join(BEAT_KEYS)}"
             )
         if beat.get("once") not in (None, True):
             errors.append(f"{label}: 'once' must be true — repeating beats are not supported (v1)")
@@ -400,7 +401,8 @@ def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False,
     unknown = sorted(set(trigger) - set(BEAT_TRIGGER_KEYS))
     if unknown:
         new_in_3_10.append(
-            f"{label}: trigger 里不认识的字段 {unknown} —— 只有 {list(BEAT_TRIGGER_KEYS)}"
+            f"{label}: trigger 里不认识的字段 {'、'.join(unknown)} —— 只有 "
+            f"{'、'.join(BEAT_TRIGGER_KEYS)}"
         )
     at = trigger.get("at")
     if at is not None:
@@ -408,14 +410,14 @@ def _validate_trigger(trigger: Any, label: str, *, per_player: bool = False,
             unknown_at = sorted(set(at) - set(AT_KEYS))
             if unknown_at:
                 new_in_3_10.append(
-                    f"{label}: trigger.at 里不认识的字段 {unknown_at} —— "
-                    f"只有 {list(AT_KEYS)}"
+                    f"{label}: trigger.at 里不认识的字段 {'、'.join(unknown_at)} —— "
+                    f"只有 {'、'.join(AT_KEYS)}"
                 )
             since = at.get("since")
             if since is not None and since not in AT_SINCE:
                 new_in_3_10.append(
                     f"{label}: trigger.at.since {since!r} 不认识 —— 只收 "
-                    f"{list(AT_SINCE)}(`pack` = 从这份内容包落地那天算起,也是缺省;"
+                    f"{'、'.join(AT_SINCE)}(`pack` = 从这份内容包落地那天算起,也是缺省;"
                     "`world` = 从世界第 0 天算起)"
                 )
         if not isinstance(at, dict) or not isinstance(at.get("day"), int) or at["day"] < 0:
@@ -1104,7 +1106,8 @@ def expand_event_op(
         if amount <= 0:
             # 投影对 amount<=0 是 no-op(payment 只加不减),所以负数不是"反向转账",
             # 是一条什么也不做的事件。作者以为钱转了,其实没有 —— 明说。
-            logger.warning("beat pay amount must be > 0 (got %r) — skipping;反向转账请把 from/to 调过来", amount)
+            logger.warning("这一拍的 pay 金额要大于 0(写的是 %r)—— 这一条跳过;"
+                           "反向转账请把 from / to 两头调过来", amount)
             return []
         return [{
             "type": "payment", "who": dst,

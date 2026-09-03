@@ -213,7 +213,7 @@ def test_没有判定器时按关系与声明的量判_而且降级要吭声(wor
     result = _act(world, "夏", "同坐", **{"with": ["遥"]})
     assert result["ok"] is False
     health = world.state()["runtime"].get("subsystems", {})
-    assert "joint_consent" in json.dumps(health, ensure_ascii=False) or True
+    assert "joint_consent" in json.dumps(health, ensure_ascii=False), health
 
     # 随和的人在同样的关系下答应。
     world.scheduler.stock_store.set_many("agent:遥", {"随和": 2.0}, tick=0)

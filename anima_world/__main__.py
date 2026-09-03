@@ -513,8 +513,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pack_install.add_argument("file", help="那份 `.cyberworld`(必须有 `pack` 段)")
     pack_install.add_argument(
         "--force", action="store_true",
-        help="明知有几拍会在下一 tick 一起响掉,也照装。"
-             "不带它时那种包「当场拒绝并逐条列出」—— `beat_fired` 是历史,烧掉回不来",
+        help="强来。它放行的是「两件」事,而不是一件:① 明知有几拍会在下一 tick "
+             "一起响掉(它们写了 `since: \"world\"`),也照装;② 在册的人的人设"
+             "不是这份包上一版写下去的那一句(或写下去之后被世界改过),也照写。"
+             "不带它时这两种都「当场拒绝并逐条列出」",
     )
     pack_install.add_argument(
         "--json", action="store_true", dest="as_json", help="机器可读输出(回执)"
@@ -2345,6 +2347,10 @@ def build_serve_scheduler(
     # **`--beats` 赢这一趟,但不写库。** 命令行上指名的那个文件是一次**明示的
     # 覆盖**(试炼、调试都靠它),而库里那份是这个世界自己的剧情。让它写回去的话,
     # 一次试炼就会把作者的剧情换掉,而且不报错。
+    # 🆕 3.10.2(验收 C ⑤):这一趟是不是「同一份文件又开了一次机」。
+    # 是的话,那五段「装不进去」的话一句都不说 —— 它们说的是「一次编辑没生效」,
+    # 而这一趟根本不是编辑。**每次重启都吼五段,读的人第一反应是出事了。**
+    quiet_edit_notes = False
     if seed_author_layer and world_seed and world_seed.get("beats"):
         # 验一遍再落库(`from_data` 会抛 `BeatScriptError`,和坏 `kinds` 同一条路),
         # 并且**拿它验过的那一份去播**。
@@ -2393,6 +2399,13 @@ def build_serve_scheduler(
             elif same:
                 # 舰队上的常态:同一份文件又开了一次机。**一句话,而且不像出了事。**
                 logger.info("这份文件的 %d 拍剧情已经在库里了,这次开机不重复装", len(same))
+                # 🔴 **那五段的话这一趟也不该说**(3.10.2,验收 C ⑤)。
+                # 舰队每次开机都带同一份 `--world-file`,而那几句
+                # (「装不进去」「在册而被丢掉的是:夏、柔、遥」)说的是
+                # **一次编辑没生效**;可这一趟根本不是编辑,是同一份文件又开了
+                # 一次机。**每次重启都吼五段"装不进去"**,读的人第一反应是出事了,
+                # 而世界好好的 —— 一句在错的时机说的真话,和一句假话一样贵。
+                quiet_edit_notes = True
             # 走到这儿 = 没有新增的拍 → **开机继续**,rc 0。
     if beat_script is None and len(beats_store):
         # **首启自动带** —— 这一条就是 D1 的另一半。没有它,节拍进得了世界文件
@@ -2661,9 +2674,9 @@ def build_serve_scheduler(
             )
         # 🆕 3.10.0:**那四段安静地什么都不做,从今天起当场说出来。**
         # 名册手上有,所以这几句点得出名字 —— 离线那两扇门只说得出条件句。
-        for note in edit_path_silent_notes(
+        for note in (() if quiet_edit_notes else edit_path_silent_notes(
             world_seed, on_roster=set(scheduler._memory_projection.agents),
-        ):
+        )):
             logger.warning("%s", note)
         logger.info(
             "--world-file %s 装进了一个「已有」的世界 %r(%d 条事件)—— 这是一次编辑:"
@@ -4702,6 +4715,30 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         ])
     pack_id = str(body["id"])
 
+    # ── ①b 这份包**停用着**吗 —— 当场拒,并指向那扇专门的门(3.10.2,验收 A ①)。
+    #
+    # 🔴 **「再装一次 = 重新启用」这条路必须整个关掉,而不是只对带拍的包关掉。**
+    # 3.10.1 给带拍的包加了 `pack enable`,而**无拍的包那一半漏了**:重装一份
+    # 已停用的无拍包 rc 0、回执不提人、`pack list` 的「(已停用)」消失 ——
+    # 而它带来的那几个人**还站在场外**(重装时名册里含已 `agent_leave` 的人,
+    # 他被当成「已在册」跳过)。之后 `pack enable` 答「本来就是启用的」rc 2:
+    # **人永远回不来**,而屏幕上那份包看起来好好的。
+    #
+    # 两条修法里选这条,理由是**同一件事只该有一扇门**:让 `install` 兼职
+    # "重新启用"就要在它里头再长一套「谁该回来、哪几拍该解封、开关写不写回去」,
+    # 而那正是 `enable_authored_pack` 已经做完的事 —— 两份判断迟早给出不同答案。
+    # 拒绝语和带拍那条**说同一句话**(指向 `pack enable`)。
+    with scheduler._lock:
+        scheduler.catch_up_projection()
+        have_row = dict(scheduler._memory_projection.packs.get(pack_id) or {})
+    if have_row.get("disabled"):
+        raise PackInstallError([
+            f"内容包 {pack_id!r} 这个世界里「停用着」,重装不会把它启用回来 ——"
+            "「再装一次 = 重新启用」这条路已经关掉了。要它回来用 "
+            f"`anima-world pack enable {pack_id}`(那扇门会把拍解封、把它带来的人"
+            "带回来、把它写下的开关重写);要装一份「新的」内容,换一个 `pack.id`"
+        ])
+
     # ── ② 装不装得进:**和开机、和离线那两扇门同一份判断。**
     errors = list(authored_layer_errors(authored, complete=False))
     errors += pack_engine_min_errors(authored, manifest)
@@ -4771,7 +4808,10 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             raise PackInstallError([
                 f"这几拍的 id 这个世界里已经有了:{'、'.join(clash)} —— 一份新包不许重用旧 id"
                 "(`beat_fired` 那份历史按 id 配对,重了就再也分不出是谁响过)。"
-                "改一个名字;要改已经发出去的那一拍,那是另一件事(还没做)"
+                "⚠️ 「改一个名字」不是办法 —— 换个 id 那一拍会「再响一次」。"
+                "升版发 v1.1.0 时「只放新增的那几拍」,上一版那几拍不要带"
+                "(它们已经在这个世界里了,零点也各自记着);"
+                "真要改已经发出去的那一拍,今天没有出口"
             ])
         try:
             BeatScript.from_data({"beats": have_beats + new_beats})
@@ -4814,6 +4854,7 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
     )
     persona_wanted: dict[str, str] = {}
     persona_conflict: list[str] = []
+    persona_noop: list[str] = []          # 想写的那句,世界里已经是了
     for entry in _seed_entry_dicts(authored, "agents"):
         aid = entry.get("id")
         said = str(entry.get("personality") or "").strip()
@@ -4821,7 +4862,14 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             continue
         now = _current_personality(scheduler, aid)
         if said == now:
-            continue                       # 一个字都没变,不必写一条事件
+            # 一个字都没变,不必写一条事件 —— **但回执要说得出来**
+            # (3.10.2,验收 C ④):`skipped.personality` 此前**结构上永远是空的**
+            # (不带 `--force` 是整份 rc 2、带了是照写又划掉),而 FOR-STUDIO
+            # 教创作台读它 —— **一格永远为空的读数,和没有这一格是同一件事**,
+            # 而读它的人以为自己在看"哪几个人没改成"。
+            # 这一支才是它真正非空的那一种:**这份包想写的那句,世界里已经是了。**
+            persona_noop.append(aid)
+            continue
         mine = was_written.get(aid)
         if mine is not None and mine == now:
             persona_wanted[aid] = said     # 我上一版写的,至今没被动过
@@ -4862,15 +4910,21 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         # "别的都装进去了" —— 而那正是这一族最贵的错法。
         "personality": [],
         "memories": 0,
+        # **`skipped` 记的是「这一趟没写下去的那几样」,而且它必须真的会非空** ——
+        # 一格永远为空的读数,和没有这一格是同一件事(验收 C ④)。
         "skipped": {
-            "personality": skipped_persona,
+            "personality": sorted(persona_noop),
             "memories": 0,
-            "reason": ("这几个人的人设不是这份包上一版写下去的那一句(或者写下去"
-                       "之后被世界改过了)—— 覆盖它等于把这中间发生的事抹掉。"
-                       "`--force` 才写")
-            if skipped_persona else "",
+            "reason": ("这几个人的人设「这份包想写的那句,世界里已经是了」——"
+                       "所以这一趟一条事件都没写(不是被拒,是不必写)")
+            if persona_noop else "",
         },
         "forced": bool(force and (expired or persona_conflict)),
+        # **`forced` 是「这一趟强来过没有」,而强的是哪一件要分开说**
+        # (验收 C ②:只有一格时,屏上那句解释必然对其中一种情形说假话)。
+        "forced_beats": sorted(expired) if (force and expired) else [],
+        "forced_personality": (sorted(persona_conflict)
+                               if (force and persona_conflict) else []),
     }
 
     def _merge_section_ids() -> dict[str, set[str]]:
@@ -4890,8 +4944,21 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
         """
         out: dict[str, set[str]] = {}
         try:
-            out["kinds"] = {str(k) for k, _ in ontology_store.kind_definitions()}
-            out["entities"] = {str(k) for k, _ in ontology_store.entity_definitions()}
+            # 🔴 **`*_definitions()` 给的是 `list[dict]`,不是 `(id, 行)` 的序对**
+            # (3.10.2,验收 A ②:这两行是我在 3.10.1 写错的)。
+            # `for k, _ in` 拿它去解包每一行:**两个键的 dict 会静默解出键名**
+            # (于是 `landed` 里躺着 `id`/`quantities` 这种假 id),别的行数
+            # 当场 `ValueError` —— 而它被下面那个 `except` 吞成一条 WARNING,
+            # **连带一整段 Traceback 印在一屏「装成功了」上面**。
+            # 下场是 `kinds` / `entities` 永远进不了 `landed`,而 FOR-STUDIO
+            # §3.62(m) 教消费方读的正是 `declared - sections` ——
+            # **两样装得好好的东西被指着说没装进去**,而那正是这一格要治的病本身。
+            out["kinds"] = {
+                str(r.get("id")) for r in ontology_store.kind_definitions()
+                if isinstance(r, dict) and r.get("id")}
+            out["entities"] = {
+                str(r.get("id")) for r in ontology_store.entity_definitions()
+                if isinstance(r, dict) and r.get("id")}
         except Exception:  # noqa: BLE001 - 读不到就报不出这一格,别掀翻装包
             logger.warning("读本体表失败,回执里 kinds/entities 这两格会缺", exc_info=True)
         try:
@@ -5021,13 +5088,9 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             # 而那条恒真的 `or True` 正好把它盖住了。
             scheduler._apply_spec_to_blackboard(aid, {"personality": said})
             receipt["personality"].append(aid)
-            # 🔴 **一张自相矛盾的回执比一张不全的更坏**(3.10.1,验收 A ⑤)。
-            # `skipped_persona` 是**写之前**算的清单,而 `--force` 正是"这一趟
-            # 照写不误" —— 两格同时为真时,读的人不知道该信哪一格,
-            # 而机器(创作台照 `skipped` 判"要不要提醒作者")会信错的那一格。
-            # 真写下去了就从"没装进去"里划掉。
-            if aid in receipt["skipped"]["personality"]:
-                receipt["skipped"]["personality"].remove(aid)
+            # ⚠️ 3.10.2 起 `skipped.personality` 记的是**「不必写」**那一种
+            # (想写的那句世界里已经是了),而不是"被拒了的" —— 所以这里
+            # 不再需要划掉什么:真写下去的那几个本来就不在那张表上。
         # 记忆**只增不改**,按 `(agent_id, summary)` 去重 —— 同一份包装两遍不该
         # 让她记得两次。已有的一条一个字不动:记忆是演化态,改它就是伪造历史。
         have_summaries = {
@@ -5035,10 +5098,16 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             for e in event_log.replay() if e.type == "memory_seed"
         }
         fresh_memories: list[str] = []
+        skipped_memories = 0
         for mem in memories_wanted:
             aid = str(mem.get("agent_id") or "")
             summary = str(mem.get("summary") or "")
-            if not summary or (aid, summary) in have_summaries:
+            if not summary:
+                continue
+            if (aid, summary) in have_summaries:
+                # 同一份包装两遍不该让她记得两次 —— **而这一格也要说得出来**
+                # (验收 C ④:`skipped.memories` 此前恒为 0)。
+                skipped_memories += 1
                 continue
             have_summaries.add((aid, summary))
             try:
@@ -5054,11 +5123,12 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
             })
             fresh_memories.append(aid)
         receipt["memories"] = len(fresh_memories)
-        # 同一条:真补进去的记忆不算"没装进去"。
-        receipt["skipped"]["memories"] = max(
-            0, int(receipt["skipped"].get("memories") or 0) - len(fresh_memories))
-        if not receipt["skipped"]["personality"] and not receipt["skipped"]["memories"]:
-            receipt["skipped"]["reason"] = ""
+        # 因为**已经记着了**而没补的那几条(记忆只增不改,按 (谁, 那句话) 去重)。
+        receipt["skipped"]["memories"] = skipped_memories
+        if skipped_memories and not receipt["skipped"]["reason"]:
+            receipt["skipped"]["reason"] = (
+                "这几条记忆她已经记着了 —— 记忆「只增不改」,同一份包装两遍"
+                "不该让她记得两次")
 
         # ⚠️ **回执要在落账之前填好** —— `pack_installed` 的 `sections` 记的就是它。
         receipt["agents"] = [e["id"] for e in newcomers]
@@ -7927,8 +7997,9 @@ def _print_host_turn(args: argparse.Namespace, turn: dict[str, Any]) -> int:
     # 抬头上的字**全是人话**(3.9.0 验收 C 逮的):从前直出 `〔arrive · cached〕`,
     # 两个英文枚举印在一屏中文上;`place_name` 空时还留一个吊着的 `·`。
     # 枚举是**给机器的**,它的家在 `--json`(那份才是契约)。
-    moments = {"arrive": "你到了", "new_day": "新的一天", "beat": "有事发生",
-               "ask": "你问了一句"}
+    # **一张表,住在 `host.py`** —— 各写一份的那天,加一个时刻只会改到其中一份
+    # (`return` 就是这么漏的:玩家屏上印出 `〔return · 模板〕`)。
+    from anima_world.host import MOMENT_LABELS as moments
     sources = {"llm": "现写的", "mock": "模板", "cached": "还是刚才那一屏"}
     head = f"  第 {turn['day']} 天"
     if turn.get("place_name"):
@@ -9676,13 +9747,21 @@ def contract_payload() -> dict[str, Any]:
             "id_pattern": PACK_ID_PATTERN,
             "event": "pack_installed",
             # 🆕 3.10.0(2a-② K7):停用。**追加一条事实,不删任何东西** ——
-            # 玩家的记忆里有这一周发生过的事。再装一次同一个包 = 重新启用。
+            # 玩家的记忆里有这一周发生过的事。
             "disable_event": "pack_disabled",
             "disable_method": "disable_pack",
+            # 🆕 3.10.1:**启用是一扇独立的门,不是"再装一次"。**
+            # 上一版这儿的注释写着「再装一次同一个包 = 重新启用」,而那句话对
+            # **带拍的包是假的**:`install` 会因为拍 id 撞车 rc 2(`beat_fired`
+            # 那份历史按 id 配对),而 `disable` 又有意不删 `:beats`。
+            # 🔴 **消费方按这一格在不在做能力探测,不比版本号** ——
+            # 运维台那扇「启用」按钮亮不亮,判据就是 `packs.enable_method`。
+            "enable_event": "pack_enabled",
+            "enable_method": "enable_pack",
             "subscribable": False,
             "method": "install_pack",
             "cli": ("anima-world pack install <file> / anima-world pack list / "
-                    "anima-world pack disable <id>"),
+                    "anima-world pack disable <id> / anima-world pack enable <id>"),
             # ⚠️ **两张表都用「编译段名」,不混作者层 `type`**(2a-① 验收:
             # 上一版 `installs_sections` 报的是 `beat`/`config`/`world_setting`
             # (作者层的 `type`),而 `merge_sections` 报的是 `beats`/`kinds`/…
@@ -9726,7 +9805,7 @@ def run_pack(args: argparse.Namespace) -> int:
     redis, world_id, mysql = _world_args(args)
     command = getattr(args, "pack_command", None)
     if command not in {"install", "list", "disable", "enable"}:
-        print("[pack] 只有 install / list / disable 三个子命令", file=sys.stderr)
+        print("[pack] 只有 install / list / disable / enable 四个子命令", file=sys.stderr)
         return 2
     if not _world_exists(redis, world_id):
         # 装包是**给一个已经在跑的世界**加东西 —— 对着一个不存在的名字创世,
@@ -9867,8 +9946,18 @@ def run_pack(args: argparse.Namespace) -> int:
             print(f"  ⚠ 没装进去:{len(skipped.get('personality') or [])} 个人的人设、"
                   f"{skipped.get('memories') or 0} 条记忆 —— {skipped.get('reason') or ''}")
         if receipt.get("forced"):
-            print("  ⚠ 这一趟是 --force:那几拍写着 `since: \"world\"`,"
-                  "零点是世界第 0 天,所以它们下一 tick 会一起响")
+            # 🔴 **按真原因说**(3.10.2,验收 C ②)。`forced` 是
+            # `force and (expired or persona_conflict)` —— 两种原因,而上一版
+            # 只解释了第一种:一份**只为改人设**而 `--force` 的包(里头一条
+            # `since` 都没有)屏上照样印着「那几拍写着 since:"world"……下一 tick
+            # 一起响」。**一句指错原因的话,和一句错的一样贵** ——
+            # 作者会去找一个他根本没写过的字段。
+            if receipt.get("forced_beats"):
+                print("  ⚠ 这一趟是 --force:那几拍写着 `since: \"world\"`,"
+                      "零点是世界第 0 天,所以它们下一 tick 会一起响")
+            if receipt.get("forced_personality"):
+                print("  ⚠ 这一趟是 --force:那几个人的人设不是这份包上一版写下去"
+                      "的那一句(或写下去之后被世界改过),照写了")
         return 0
     finally:
         world.close()

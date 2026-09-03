@@ -1046,7 +1046,19 @@ def test_停用_装完之后被人调过的那一格_留着没动而且说出来
         assert world.config_get("host.max_options") == 5
 
 
-def test_再装一次同一个包_等于重新启用(tmp_path):
+def test_再装一次同一个包_不再等于重新启用_而是当场拒(tmp_path):
+    """🔴 **这条用例的断言在 3.10.2 反过来了,而反得对。**
+
+    它原先钉的是「再装一次 = 重新启用」,而那句话**对带拍的包从来就是假的**
+    (`install` 会因为拍 id 撞车 rc 2),对无拍的包则是「`disabled` 翻回 false
+    而它带来的人还站在场外」—— 两种都回不来,只是坏的样子不同。
+    ⚠️ 这条用例当年之所以绿,是因为它的第二份包**不带拍**(`d5b` 只有 `pack` 段),
+    正好落在那个坏得不报错的那一半上。
+
+    现在只有一扇门:`enable_pack`。
+    """
+    from anima_world.world_package import PackInstallError
+
     with _world(tmp_path, name="dis5") as world:
         world.tick(3)
         world.install_pack(_pack(tmp_path, "d5a",
@@ -1054,8 +1066,13 @@ def test_再装一次同一个包_等于重新启用(tmp_path):
                                  beats=[_beat("社团", 1)]))
         world.disable_pack("第二周")
         assert world.packs()[0]["disabled"] is True
-        world.install_pack(_pack(tmp_path, "d5b",
-                                 pack={"id": "第二周", "version": "1.1.0"}))
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(_pack(tmp_path, "d5b",
+                                     pack={"id": "第二周", "version": "1.1.0"}))
+        assert "pack enable" in str(raised.value)
+        assert world.packs()[0]["disabled"] is True, "拒了却还是把它翻成启用了"
+
+        world.enable_pack("第二周")
         assert world.packs()[0]["disabled"] is False
         world.tick(288 * 2)
         assert [b for b, _ in _fired(world)] == ["社团"], "重新启用之后那一拍没响"
@@ -1127,10 +1144,12 @@ def test_带拍带人的包_停用之后启用得回来(tmp_path):
         assert "乙" not in world.scheduler.agents, "停用了,人该退场"
         assert world.packs()[0]["disabled"] is True
 
-        # 「再装一次」这条路对带拍的包是走不通的 —— 这正是这扇门存在的理由。
+        # 「再装一次」这条路走不通 —— 这正是这扇门存在的理由。
+        # ⚠️ 3.10.2 起挡它的是**更早**那道闸(「这份包停用着」),而不是拍 id
+        # 撞车那一条:两句话指向同一扇门,而早的那句对无拍的包也成立。
         with pytest.raises(PackInstallError) as raised:
             world.install_pack(str(pack))
-        assert "社团" in str(raised.value)
+        assert "pack enable" in str(raised.value)
 
         receipt = world.enable_pack("第二周")
         assert receipt["beats"] == ["社团"]
@@ -1167,3 +1186,96 @@ def test_启用一份本来就启用着的包_当场说不做(tmp_path):
         with pytest.raises(PackInstallError) as raised:
             world.enable_pack("没装过的")
         assert "没有装过" in str(raised.value)
+
+
+def test_无拍的包停用之后_重装当场拒并指向enable(tmp_path):
+    """🔴 **「再装一次 = 重新启用」这条路必须整个关掉,不是只对带拍的包关掉**
+    (3.10.2,验收 A ①)。
+
+    3.10.1 给带拍的包加了 `pack enable`,而**无拍那一半漏了**:重装一份已停用的
+    无拍包 rc 0、`pack list` 的「(已停用)」消失,而它带来的人**还站在场外**;
+    之后 `pack enable` 答「本来就是启用的」rc 2 —— **人永远回不来**,
+    而屏幕上那份包看起来好好的。
+    """
+    from anima_world.api import World
+    from anima_world.world_package import PackInstallError
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    client = redis_for(tmp_path / "nb.db")
+    base = write_seed_file(tmp_path / "nb-base.cyberworld", BASE)
+    World.open("w", redis=client, world_file=base, force_mock_llm=True).close()
+
+    pack = tmp_path / "nb.cyberworld"
+    write_world_file(
+        pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+        seed_to_author_records({
+            "pack": {"id": "无拍周", "version": "1.0.0"},
+            "agents": [{"id": "丙", "name": "丙", "location": "cafe",
+                        "personality": "路过的"}],
+        }), compress=False, checksum=False)
+
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        world.install_pack(str(pack))
+        assert "丙" in world.scheduler.agents
+        world.disable_pack("无拍周")
+        assert "丙" not in world.scheduler.agents
+
+        # 重装:**当场拒**,而且那句话要指向 `pack enable`
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(str(pack))
+        said = str(raised.value)
+        assert "pack enable" in said and "停用着" in said, said
+        # 拒了就一个字节都没写:那份包还停用着
+        assert world.packs()[0]["disabled"] is True
+
+        # 而那扇门真的把人带回来
+        receipt = world.enable_pack("无拍周")
+        assert receipt["agents"] == ["丙"], receipt
+        assert "丙" in world.scheduler.agents
+        assert world.packs()[0]["disabled"] is False
+
+
+def test_装包回执里_种类和实例真的记了(tmp_path):
+    """🔴 **这一格此前零覆盖,而它整个是坏的**(3.10.2,验收 A ②)。
+
+    `kind_definitions()` 给的是 `list[dict]`,而 3.10.1 那两行拿 `for k, _ in`
+    去解包 —— **两个键的 dict 会静默解出键名**,别的行数当场 `ValueError`
+    被 except 吞成 WARNING **并把 Traceback 印在一屏「装成功了」上面**。
+    下场:`kinds` / `entities` 永远进不了 `landed`,而 FOR-STUDIO §3.62(m)
+    教消费方读的正是 `declared - sections` —— **两样装得好好的东西被指着说
+    没装进去**,那正是这一格要治的病本身。
+    """
+    from anima_world.api import World
+    from anima_world.world_file import (
+        WorldFileManifest, seed_to_author_records, write_world_file,
+    )
+
+    client = redis_for(tmp_path / "ki.db")
+    base = write_seed_file(tmp_path / "ki-base.cyberworld", BASE)
+    World.open("w", redis=client, world_file=base, force_mock_llm=True).close()
+
+    pack = tmp_path / "ki.cyberworld"
+    write_world_file(
+        pack, WorldFileManifest(world_id="w", engine_min="3.10.0"),
+        seed_to_author_records({
+            "pack": {"id": "带实例的周", "version": "1.0.0"},
+            "kinds": [{"id": "灯", "quantities": {"亮度": {"default": 1.0, "visibility": "here"}}}],
+            "entities": [{"id": "灯:门口", "name": "门口那盏灯",
+                          "location": "cafe"}],
+        }), compress=False, checksum=False)
+
+    with World.open("w", redis=client, force_mock_llm=True) as world:
+        receipt = world.install_pack(str(pack))
+        assert "灯" in (receipt.get("kinds") or []), receipt
+        assert "灯:门口" in (receipt.get("entities") or []), receipt
+        # 而且它进了 `pack list` 的 `sections` —— 消费方读的就是这一格
+        sections = world.packs()[0]["sections"]
+        assert "灯" in (sections.get("kinds") or []), sections
+        assert "灯:门口" in (sections.get("entities") or []), sections
+        # `declared - sections` 不该再把它们算成"没装进去"
+        declared = world.packs()[0].get("declared") or {}
+        for name in ("kinds", "entities"):
+            missing = set(declared.get(name) or ()) - set(sections.get(name) or ())
+            assert not missing, f"{name} 里这几样被指着说没装进去,而它们装进去了:{missing}"

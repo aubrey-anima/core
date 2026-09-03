@@ -138,7 +138,7 @@ def test_seq_的洞用占位事件补上_原有编号一个不改(tmp_path):
 
     # 记忆引用的 event_seq 仍然指向原来那条。
     memory = _one(records, "mysql")
-    assert memory["row"]["event_seq"] == 2 or True  # 这个夹具里引用的是 seq 2
+    assert memory["row"]["event_seq"] == 2, memory["row"]
 
 
 def test_占位事件在重放时是惰性的(tmp_path):

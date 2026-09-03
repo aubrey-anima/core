@@ -34,6 +34,20 @@ from typing import Any, Iterable
 # **零新状态**:`host_scene` 事件载荷里已经有 `tick`、投影里每个玩家一条,
 # 而 `pack_installed` 也在同一条日志上 —— 两个判据都是减法。
 HOST_MOMENTS = ("arrive", "new_day", "beat", "ask", "return")
+
+#: 每个时刻印在**玩家屏**上的那几个字。
+#:
+#: 🔴 **`HOST_MOMENTS` 加一格就要在这儿加一句人话**(3.10.2,验收 C ①):
+#: 2a-② 加了 `return` 而这张表没跟,于是玩家屏上出现 `〔return · 模板〕`
+#: —— **一个裸英文枚举名印在给玩家看的那一屏上**,而另外四个都是中文。
+#: 闸在 `tests/test_host_doc_contract.py`(和「几个时刻」那两条同处)。
+MOMENT_LABELS: dict[str, str] = {
+    "arrive": "你到了",
+    "new_day": "新的一天",
+    "beat": "有事发生",
+    "ask": "你问了一句",
+    "return": "你回来了",
+}
 OPTION_KINDS = ("invitation", "beat", "talk", "verb", "travel", "free")
 # 点下去走哪条**今天已经有**的门。闭集 —— 多一种就是多一条写世界的路。
 DOOR_METHODS = ("answer_invitation", "chat", "player_walk", "player_tool", "free")
@@ -346,7 +360,10 @@ def suggestion_seeds(*, hook: str = "", beat_note: str = "",
     if stance in ("试探", "回避", "刺"):
         out.append(f"直接问{who}怎么了")
     out.append(f"问问{who}最近怎么样")
-    out.append("说说你自己")
+    # ⚠️ **四句是同一种形状**(3.10.2,验收 C ⑧):都是「你打算说什么」的
+    # 描述句,都点名说给谁听。上一版最后一句是光秃秃的「说说你自己」——
+    # 前三句在说「跟谁」,它在说「说什么」,并排读像换了个人在讲话。
+    out.append(f"跟{who}说说你自己")
     seen: list[str] = []
     for line in out:
         if line not in seen:
@@ -413,10 +430,16 @@ def welcome_back(*, away_days: int = 0, packs: list[dict[str, Any]] | None = Non
     out: list[str] = []
     if away_days > 0:
         out.append(f"你有 {away_days} 天没来了。")
-    for row in (packs or ()):
-        note = str(row.get("note") or "").strip()
-        out.append(f"这段时间世界更新了:{note}。" if note
-                   else f"这段时间世界更新了一次({row.get('id')})。")
+    # 🔴 **「这段时间世界更新了」只说一次**(3.10.2,验收 C ⑧)。
+    # 上一版按包逐条说,于是他离线期间装了三份包,屏上就是三句
+    # 「这段时间世界更新了:…」 —— **同一句开场白连说三遍**,读起来像卡带了。
+    # 这一句是**一段时间**的总结,不是每份包各自的公告。
+    rows = list(packs or ())
+    if rows:
+        notes = [str(r.get("note") or "").strip() or f"({r.get('id')})" for r in rows]
+        said = "、".join(notes)
+        out.append(f"这段时间世界更新了:{said}。" if len(rows) == 1
+                   else f"这段时间世界更新了 {len(rows)} 次:{said}。")
     return out
 
 

@@ -365,7 +365,7 @@ def read_world_file(
                 if kind not in RECORD_KINDS:
                     raise WorldFileError([
                         f"第 {lineno} 行:不认识的记录类型 {kind!r} —— 只认 "
-                        f"{sorted(RECORD_KINDS)}。跳过它等于安静地少装一半世界"
+                        f"{'、'.join(sorted(RECORD_KINDS))}。跳过它等于安静地少装一半世界"
                     ])
                 if kind == "manifest":
                     raise WorldFileError([f"第 {lineno} 行:manifest 只能是第一行"])
