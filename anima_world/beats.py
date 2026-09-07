@@ -598,7 +598,12 @@ def _validate_payload(payload: Any, label: str, *, per_player: bool = False) -> 
             line = op.get("line")
             if line is not None and not isinstance(line, str):
                 errors.append(f"{op_label}: hail 的 'line' 要是一段文本")
-        if kind in ("link", "unlink", "transfer"):
+        # ⚠️ **只有这两个** —— `transfer` **不是剧情拍的 op**(它不在 `VALID_OPS`
+        # 上,上面那道闭集闸先把它拦下了)。上一版这儿写着三个,而第三个
+        # **那一支永远到不了** —— 一句在代码里写着、却永远不成立的条件,
+        # 会让下一个人以为剧情拍支持 `transfer`,然后去查它为什么"不生效"。
+        # 要给剧情拍开 `transfer`,先把它加进 `VALID_OPS` 与 REFERENCE §9 那张表。
+        if kind in ("link", "unlink"):
             # 🔴 **公共边上关掉的那几个 op,加载期就说**(3.13.0,A 四轮 ①)。
             # 运行期那道闸(`Scheduler.apply_edge_effect`)已经拦得住它,而
             # **一条装得进去、跑起来什么都不做的拍,比一条装不进去的坏得多**:

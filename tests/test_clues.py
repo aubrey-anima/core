@@ -454,3 +454,24 @@ def test_没有本体层的世界_线索板也不塌(tmp_path):
 
     assert board["total"] == 0 and board["known"] == 0, board
     assert board["text"], "一个没有线索的世界也该有一句人话"
+
+
+def test_剧情拍没有transfer_而那不是漏了():
+    """🟢 **A 复验 ③**:`_validate_payload` 里那支写着 `("link","unlink","transfer")`,
+    而 `transfer` **不在 `VALID_OPS` 上** —— 那一支永远到不了。
+
+    **一句在代码里写着、却永远不成立的条件,会让下一个人以为剧情拍支持
+    `transfer`,然后去查它为什么"不生效"。** 这条闸把这件事钉成一句实话:
+    要给剧情拍开 `transfer`,得先把它加进闭集与 REFERENCE §9 那张表。
+    """
+    import inspect
+
+    from anima_world import beats as B
+
+    assert "transfer" not in B.VALID_OPS, (
+        "`transfer` 进了剧情拍的闭集 —— 那 `_validate_payload` 那一支要跟着收它,"
+        "REFERENCE §9 也要多一行")
+    assert {"link", "unlink"} <= B.VALID_OPS
+    body = inspect.getsource(B._validate_payload)
+    assert '("link", "unlink", "transfer")' not in body, (
+        "那一支又把 `transfer` 写回去了,而闭集里没有它 —— 永远到不了")
