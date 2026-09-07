@@ -26,6 +26,11 @@ from anima_world.beats import (
     BeatScript, BeatScriptError, coerce_goals, split_against_stored,
 )
 from anima_world.roll import DEFAULT_BANDS as ROLL_DEFAULT_BANDS, FACES as ROLL_FACES
+from anima_world.clues import (
+    BOARD_KEYS as CLUE_BOARD_KEYS, CLUE_KIND, CLUE_STATES,
+    KNOWS_EDGE as CLUES_KNOWS_EDGE, PLUGIN_ID as CLUES_PLUGIN_ID,
+    UNLOCK_PATHS as CLUE_UNLOCK_PATHS,
+)
 from anima_world.person_verbs import (
     TARGET_FIELDS as PERSON_VERB_TARGET_FIELDS,
     TARGET_PLACEHOLDER as PERSON_VERB_TARGET_PLACEHOLDER,
@@ -4208,8 +4213,10 @@ def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
     # 这里按它遍历,加一个出厂插件不必再改这段代码的形状。
     from anima_world.together import factory_plugin as invitation_plugin
 
+    from anima_world.clues import factory_plugin as clues_plugin
+
     builders = {"needs": needs_plugin, "economy": economy_plugin,
-                "invitation": invitation_plugin}
+                "invitation": invitation_plugin, "clues": clues_plugin}
     out: list[dict[str, Any]] = []
     for plugin_id, switch in FACTORY_PLUGINS.items():
         # 空串 = 这个出厂插件没有开关(它搬的那件事今天也没有),永远装。
@@ -4225,6 +4232,12 @@ def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
 #: 于是那道热更新的钩子里没有一个具体插件的名字。
 FACTORY_PLUGINS: dict[str, str] = {
     "needs": "needs.enabled",
+    # 🆕 3.13.0(批 3c §2.4):**线索。**
+    # 🔴 **它只声明那条「知道」的边** —— 线索本身(`clue` 那个种类与每一条实例)
+    # 是**作者写的东西**,每个世界各不相同;出厂插件替作者声明种类,
+    # 就是替他决定线索长什么样。
+    # 开关 `clues.enabled` 默认关:一个没写线索的世界不该多一条边类型。
+    "clues": "clues.enabled",
     # 🆕 3.8.0 第 2 期 2e:邀请的**存储与过期规律**(裁决 ③)。
     # 🔴 **空串 = 没有开关,永远装**,而这不是偷懒:**它搬的那件事今天也没有开关**
     # (邀请不受 `social.enabled` 管 —— 那一格管的是八卦与小团体;
@@ -4247,6 +4260,13 @@ FACTORY_SCOPE: dict[str, str] = {
         "三扇门(`invitations_page` / `answer_invitation` / "
         "`invitation_outcomes_page`)**留在内核,签名一格不变** —— 它们是冻结面。"
         "别把它读成「邀请这条机制变成插件了」"
+    ),
+    "clues": (
+        "**只有那条「知道」的边**(`clues.knows`,玩家 → `entity:clue`)。"
+        "🔴 **线索本身不在里面** —— `clue` 那个种类与每一条实例是**作者写的东西**,"
+        "每个世界各不相同;出厂插件替作者声明种类,就是替他决定线索长什么样。"
+        "解锁**只有三条路**(动词 `effects` 的 `link` / 剧情拍的 op / 编剧的 "
+        "`reveal`),**没有第四条** —— 别等一个不会来的作者判定"
     ),
     "economy": (
         "**只有钱包一格**(`economy.coins`,projected,认领 `payment`)。"
@@ -9568,7 +9588,33 @@ def contract_payload() -> dict[str, Any]:
                 "同一个点,这也是「对账即重放」在这一层的落点。"
             ),
         },
+        # 🆕 3.13.0(批 3c §2.4):**线索。**
+        # 🔴 **零新原语**:一条线索是一个实体,「他知不知道」是一条边 ——
+        # `kind` / 实例 / 边 / 可见性,四样今天全有。
+        "clues": {
+            "enabled_key": "clues.enabled",
+            "kind": CLUE_KIND,
+            "edge_type": f"{CLUES_PLUGIN_ID}.{CLUES_KNOWS_EDGE}",
+            "states": list(CLUE_STATES),
+            "options_method": "player_clues",
+            "options_field": "clues",
+            "options_keys": list(CLUE_BOARD_KEYS),
+            "unlock_paths": list(CLUE_UNLOCK_PATHS),
+            "gloss": (
+                "**线索板只报「存在与解锁状态」,不报内容。** 已知的那几条给 id"
+                "(他本来就知道),**未知的那几条连 id 都不给** —— "
+                "一个未解锁线索的 id 往往就是它的谜面。"
+                "内容是作者写在实体上的字,而**谁读得到它**由可见性那一层答。"
+                "🔴 **解锁只有三条路**(`unlock_paths`):动词的 `effects` 里 `link`、"
+                "剧情拍的 op、编剧的 `reveal` —— **没有第四条**,"
+                "别等一个不会来的作者判定(和「作者层写不了 `confront`」同一课)。"
+                "⚠️ **不报「怀疑」那一档**:那一档要**置信度**,而置信度是判定"
+                "那一族的东西(批 4)—— **报一个算不出来的档,"
+                "就是让屏幕替引擎撒谎**。"
+            ),
+        },
         # 🆕 3.12.0(批 3b,裁决 §2.6):**对人动词。**
+
         # 🔴 **它和 `plugins.verb_target_forms` 是两条路,别混** ——
         # 那一格是 affordance(一个人、一样东西、一个瞬间),而对人动词走工具路,
         # 中间多一道**同意门**。`verb_target_forms` 里**永远不许出现 `agent`**。

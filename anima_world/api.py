@@ -8137,6 +8137,36 @@ class World:
             for r in shelves
         ]
 
+    def player_clues(self, player_id: str) -> dict[str, Any]:
+        """他的**线索板**(3.13.0,批 3c §2.4)。
+
+        🔴 **只报存在与解锁状态,不报内容**(设计 §5 那张表的原话)。
+        已知的那几条给 id(他本来就知道);**未知的那几条连 id 都不给** ——
+        一个未解锁线索的 id 往往就是它的谜面
+        (`clue:昂热知道路明非的身世` —— 光是这个名字就把谜底说了)。
+
+        「他知不知道」**没有第二处状态**:就是 `clues.knows` 那条边在不在。
+        ⚠️ 这一格**不依赖本体层能不能用**(和 `own` / `person_verbs` 逐字同一课)
+        —— 线索是实体,而 `blocked` 该挡的只有「这儿有什么」。
+        """
+        from anima_world import clues as clue_mod
+
+        store = getattr(self.scheduler, "edge_store", None)
+        ontology = self.scheduler.ontology
+        total = 0
+        if ontology is not None:
+            total = len([e for e in ontology.entities
+                         if str(e).split(":", 1)[0] == clue_mod.CLUE_KIND])
+        known: list[str] = []
+        if store is not None:
+            edge = f"{clue_mod.PLUGIN_ID}.{clue_mod.KNOWS_EDGE}"
+            me = f"{Scheduler.PLAYER_PREFIX}{str(player_id or '').strip()}"
+            try:
+                known = [dst for src, dst, _f in store.of_src(edge, me)]
+            except Exception:  # noqa: BLE001 - 读不到边不该掀翻这一屏
+                logger.warning("读线索边失败 player=%s", player_id, exc_info=True)
+        return clue_mod.board(known, total)
+
     def person_verbs(self) -> dict[str, dict[str, Any]]:
         """这个世界声明过哪些**对人动词**(3.12.0,批 3b · 裁决 §2.6)。
 
