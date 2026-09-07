@@ -1166,6 +1166,44 @@ def _story(world, pid, **kw):
     return base
 
 
+def test_头几拍那个配置键_真的走到翻篇那一处(tmp_path):
+    """🔴 **`director.first_arc_beats` 曾经是个死键**(A 第三轮 ①,3.13.0)。
+
+    纯函数那一条(`test_director.py`)钉的是「`next_phase` 收到 `first_arc` 会照办」;
+    这一条钉的是**世界里那条线真的接上了** —— 上一版它在 `_director_beat` 里被读出来,
+    喂给 `pick_move` 一个**它根本不读的形参**,而真压低目标的那一处签名里没有它:
+    **把这个键改成 60 和改成 6,世界里一个字都不差。**
+
+    ⚠️ 这就是我自己 ⑤ 写下的那句话反过来咬人:
+    **一句已经发给下游的承诺(REFERENCE / config_store / 契约都报了这个键),
+    兑现不了就是假承诺。**
+    """
+    def _one(world, moves_made):
+        tick = int(world.scheduler.clock)
+        world._director_apply(
+            "p1", {"move": "approach", "who": "", "line": "有人来找你",
+                   "why": "", "promise": "", "source": "mock"},
+            tension_before=0.10, phase="setup", tick=tick, place="cafe",
+            thread=None, pin_ticks=12, due_ticks=100, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店",
+            moves_made=moves_made)
+        return _logs(world)[-1]["phase"]
+
+    with open_world_at(tmp_path / "fa1.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        # 默认 6:第 10 拍早出了头几拍 → 满目标 0.25,0.15 不够翻篇
+        assert _one(world, 10) == "setup"
+
+    with open_world_at(tmp_path / "fa2.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.config_set("director.first_arc_beats", 60)
+        # 开到 60:第 10 拍还在头几拍里 → 目标压到 0.0875,0.15 够了
+        assert _one(world, 10) == "escalation", (
+            "`director.first_arc_beats` 改成 60 和默认一模一样 —— 这个键是死的")
+
+
 def test_摊牌掷一次点_而且同一份日志重放两遍是同一个点(tmp_path):
     """🔴 **`confront` 要的是一次掷点 + 一个说法**(§2.3)。
     成败是**算术**,不是模型说了算 —— 和 `contact` 那条「LLM 在这一层没有否决权」

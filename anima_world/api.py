@@ -9502,13 +9502,13 @@ class World:
             grace_ticks=int(grace_hours * ticks_per_hour))
         if overdue is not None:
             thread = overdue          # 这一拍就是冲着它去的
-        # 🆕 3.13.0(C 第七轮 ⑤):**头几拍走快一点** —— 目标压低,相位翻得快,
-        # 新玩家头一小时到得了节骨眼(`director.first_arc_beats`)。
-        moves_made = int(story.get("moves") or 0)
-        first_arc = int(self.config_get("director.first_arc_beats", default=6) or 6)
+        # 🔴 **`director.first_arc_beats` 不在这儿读** —— 压低目标只该影响
+        # **翻不翻篇**(`next_phase`,在 `_director_apply` 里),不该影响
+        # **写多大**:`gap = 目标 − 张力`,目标压低 = gap 变小 = 动作变小,
+        # 而 `confront` 恰恰要 `gap >= 0.30`。上一版在这儿读了那个键、
+        # 喂给 `pick_move` 一个**它根本不读的形参**,于是那个键
+        # **一路没到过真压低的那一处**:配置改成 60 和改成 6 一模一样。
         move = dmod.pick_move(tension=tension, phase=phase, allowed=allowed,
-                              moves_made=(moves_made
-                                          if moves_made < first_arc else first_arc),
                               capped=capped, anchor_fired=beat_fired,
                               ceiling=ceiling, must_callback=overdue is not None)
 
@@ -9706,8 +9706,13 @@ class World:
         # 屏上「到节骨眼了」和「松弛」并排印过。
         # ⚠️ **和 `pick_move` 读同一个目标**(`phase_target`)——各算一遍的话,
         # 会出现「按这个目标该翻篇了,而按那个目标还差一点」,而两处都不报错。
+        # 🔴 **`director.first_arc_beats` 只有这一处读得着** —— 它压的是
+        # 「翻不翻篇」那个目标(`phase_target`),而 `next_phase` 是唯一读它的人。
+        first_arc = int(self.config_get("director.first_arc_beats",
+                                        default=dmod.FIRST_ARC_BEATS)
+                        or dmod.FIRST_ARC_BEATS)
         new_phase = dmod.next_phase(phase, move, tension=after,
-                                    moves_made=moves_made)
+                                    moves_made=moves_made, first_arc=first_arc)
         promise = str(decision.get("promise") or "")
         thread_id = str((thread or {}).get("id") or "")
         if promise and move != "breathe":

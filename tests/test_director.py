@@ -381,8 +381,7 @@ def test_新玩家头几拍_到得了摊牌():
     phase, tension, seen = "setup", 0.0, []
     for i in range(8):
         move = D.pick_move(tension=tension, phase=phase, allowed=list(D.MOVES),
-                           capped=False, anchor_fired=False, ceiling=0.6,
-                           moves_made=i)
+                           capped=False, anchor_fired=False, ceiling=0.6)
         seen.append(move)
         if move in ("confront", "reward"):
             break
@@ -396,12 +395,45 @@ def test_新玩家头几拍_到得了摊牌():
     assert len(seen) <= 6, f"用了 {len(seen)} 拍才到,超出一小时的额度:{seen}"
 
 
-def test_压低目标只影响翻篇_不影响写多大():
-    """这条分界是踩出来的(见上一条):`pick_move` 读**满目标**。"""
-    early = D.pick_move(tension=0.1, phase="climax", allowed=list(D.MOVES),
-                        capped=False, anchor_fired=False, ceiling=0.95,
-                        moves_made=0)
-    late = D.pick_move(tension=0.1, phase="climax", allowed=list(D.MOVES),
-                       capped=False, anchor_fired=False, ceiling=0.95,
-                       moves_made=D.FIRST_ARC_BEATS)
-    assert early == late == "confront", (early, late)
+def test_压低目标只影响翻篇_不影响写多大(monkeypatch):
+    """这条分界是踩出来的(见上一条):`pick_move` 读**满目标**。
+
+    ⚠️ 上一版这条闸是拿 `moves_made=0` 和 `moves_made=6` 各调一次 —— 而
+    `pick_move` **根本不读那个形参**,于是这条闸**在恒等式上打转**:
+    两边当然相等,改成什么都相等。**一道拿"两次调用结果一样"当判据的闸,
+    在被测的那一格根本没接线时也是绿的。**
+
+    现在的判据是:**把 `phase_target` 整个换掉,`pick_move` 也不许变** ——
+    它读的是 `PHASE_TARGET` 那张表本身。
+    """
+    import inspect
+
+    monkeypatch.setattr(D, "phase_target", lambda *a, **k: 0.0)
+    got = D.pick_move(tension=0.1, phase="climax", allowed=list(D.MOVES),
+                      capped=False, anchor_fired=False, ceiling=0.95)
+    assert got == "confront", (
+        f"`pick_move` 走了 `phase_target`:目标被压到 0 之后它挑了 {got} —— "
+        "gap 变成负的,摊牌就没了")
+    assert "moves_made" not in inspect.signature(D.pick_move).parameters, (
+        "`pick_move` 又收了一个 `moves_made` —— 收下来不读的形参会让调用方"
+        "以为自己已经把「头几拍」这件事说出去了")
+
+
+def test_头几拍那个键真的一路走到压低那一处():
+    """🔴 **`director.first_arc_beats` 曾经是个死键**(A 第三轮 ①)。
+
+    它在 `_director_beat` 里被读出来,喂给 `pick_move` 一个**不读的形参**;
+    真压低目标的 `phase_target` 只由 `next_phase` 调,而 `next_phase` 当时
+    **签名里没有 `first_arc`** —— 永远吃常量 6。
+    REFERENCE / config_store / CHANGELOG / 契约四处都把它当可调闸报给下游,
+    而**改它和不改它一模一样**。
+    """
+    # 第 10 拍:按默认的 6 已经出了头几拍 → 满目标 0.5,0.2 不够翻篇
+    assert D.next_phase("setup", "reveal", tension=0.2, moves_made=10,
+                        first_arc=D.FIRST_ARC_BEATS) == "setup"
+    # 把闸开到 60 → 还在头几拍里 → 目标压到 0.175,0.2 够了
+    assert D.next_phase("setup", "reveal", tension=0.2, moves_made=10,
+                        first_arc=60) == "escalation", (
+        "`first_arc` 传进来了却没影响翻篇 —— 那个键还是死的")
+    assert D.phase_target("setup", moves_made=10, first_arc=60) < \
+        D.phase_target("setup", moves_made=10, first_arc=6)

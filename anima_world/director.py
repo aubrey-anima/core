@@ -447,7 +447,8 @@ def story_text(tension: float, phase: str) -> str:
 
 
 def next_phase(phase: str, move: str, *, tension: float,
-               moves_made: int = 0) -> str:
+               moves_made: int = 0,
+               first_arc: int = FIRST_ARC_BEATS) -> str:
     """这一拍之后,这条线走到哪一相。**升级是默认行为**(口径 4),但**要带着张力走**。
 
     `breathe` 是唯一把线往回带的动作(climax 之后的 release),别的都往前推。
@@ -472,7 +473,8 @@ def next_phase(phase: str, move: str, *, tension: float,
     if move == "breathe":
         # 已经到 climax 的线,喘一口气就是 release;还没到的原地不动。
         return PHASES[3] if i >= 2 else phase
-    if float(tension) < phase_target(phase, moves_made=moves_made):
+    if float(tension) < phase_target(phase, moves_made=moves_made,
+                                     first_arc=first_arc):
         return phase
     return PHASES[min(i + 1, 3)]
 
@@ -524,7 +526,6 @@ def overdue_thread(threads: Sequence[dict[str, Any]] | None, *, now_tick: int,
 
 def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
               capped: bool, anchor_fired: bool, ceiling: float,
-              moves_made: int = 0,
               must_callback: bool = False) -> str:
     """**算术那一半**:这一轮最多能写多大。LLM 在这之后才被叫到,而且只能在
     这个结果**及以下**里挑(见 `parse_decision` 的 `allowed`)。
@@ -541,7 +542,12 @@ def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
         return "callback"
     if capped or anchor_fired or float(tension) >= float(ceiling):
         return "breathe"
-    # 🔴 **这儿用满目标,`moves_made` 不参与**(3.13.0,C 第七轮 ⑤)。
+    # 🔴 **这儿用满目标,头几拍那个压低一格都不参与**(3.13.0,C 第七轮 ⑤)。
+    # ⚠️ 3.13.0 后一批改成**连形参都不收** —— 上一版留着一个 `moves_made=`
+    # 不读,而调用方**真的在传**:于是「这儿不压低」这句话看起来是被遵守的,
+    # 而 `director.first_arc_beats` 那个键**一路只走到这个不读的形参上**,
+    # 从来没到过真压低的 `next_phase`。**一个收下来却不读的形参,
+    # 会让调用方以为自己已经把那件事说出去了。**
     # 第一版我把头几拍的目标也压低了 —— 而 `gap = 目标 − 张力`,
     # **目标压低 = gap 变小 = 动作变小**:`confront` 要 `gap >= 0.30`,
     # 于是"想让新玩家早点摊牌"的那一改,**恰好把摊牌关掉了**
