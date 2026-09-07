@@ -169,17 +169,74 @@ def test_别的作者插件的边_照旧连不动(tmp_path):
         f"连别的作者插件的边也放行了 —— 那条规矩一个字都没松过:{said}")
 
 
-def test_契约点名了解锁只有三条路_而且不报怀疑那一档():
+def test_解锁路二_剧情拍的link_走真门连得上(tmp_path):
+    """🔴 **第二条路上一版根本不存在**:`link` 不在 `beats.VALID_OPS` 上,
+    一份这么写的世界**开机当场拒** —— 而契约里写着它是三条路之一。
+
+    这一条走真门:作者写一条拍 → 世界跑到那个时刻 → 板子看得见。
+    ⚠️ 顺带钉住 `ops_applied` —— 没连成的 `link` **不许**出现在那儿:
+    一个"什么都没做"的 link 和一个"建成了"的 link 在日志上长得一样,
+    而 `ops_applied` 是作者唯一读得到的回执。
+    """
+    beat = {"id": "开场", "for_each": {"node": "player"},
+            "trigger": {"at": {"day": 0, "minute_of_day": 5}},
+            "payload": [{"op": "link", "type": "clues.knows",
+                         "from": "player", "to": "clue:老橡树的来历"}]}
+    path = write_seed_file(tmp_path / "beat.cyberworld", {**_WORLD, "beats": [beat]})
+    with open_world_at(str(tmp_path / "beat.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.config_set("clues.enabled", True)
+        world.player_move("p1", "cafe")
+        world.tick(8)
+        fired = [e["payload"] for e in world.history(kind="beat_fired")["events"]]
+        board = world.player_clues("p1")
+
+    assert fired and fired[0]["ops_applied"] == ["link"], (
+        f"这一拍响了,而那条边一格没动:{fired}")
+    assert board["known"] == 1 and board["known_ids"] == ["clue:老橡树的来历"], board
+
+
+def test_没装线索的世界_那条拍不假装自己连上了(tmp_path):
+    """`clues.enabled` 关着时那条边**根本不存在** —— 这一格没连成,
+    而 `ops_applied` 里**不许**有它。
+
+    ⚠️ 这条闸拦的是「静默成功」:边没连、拍照旧 `mark_fired`,
+    作者读到的回执说 `link` 干过了 —— 他会去别处找 bug。
+    """
+    beat = {"id": "开场", "for_each": {"node": "player"},
+            "trigger": {"at": {"day": 0, "minute_of_day": 5}},
+            "payload": [{"op": "link", "type": "clues.knows",
+                         "from": "player", "to": "clue:老橡树的来历"}]}
+    path = write_seed_file(tmp_path / "off.cyberworld", {**_WORLD, "beats": [beat]})
+    with open_world_at(str(tmp_path / "off.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(8)
+        fired = [e["payload"] for e in world.history(kind="beat_fired")["events"]]
+
+    assert fired, "拍没响,这条用例就什么都没验到"
+    assert fired[0]["ops_applied"] == [], (
+        f"边没连上,回执里却说 `link` 干过了:{fired[0]}")
+
+
+def test_契约点名了解锁那两条路_而且说得出不做哪条_为什么():
     """🔴 **纪律 2 / 3 写进契约**:一个等不来的东西会让人一直等着,
     而不是换个写法(和「作者层写不了 `confront`」同一课);
     而**报一个算不出来的档,就是让屏幕替引擎撒谎**。
+
+    🔴 3.13.0 从三条收到两条,**收的那一版才是真的**:上一版那三条一条都连不上。
+    **一个报得出、却走不通的取值,比不报它更坏** —— tool 正照着它写第 3 周的底稿。
     """
     from anima_world import clues as C
     from anima_world.__main__ import contract_payload
 
     seg = contract_payload()["clues"]
     assert seg["unlock_paths"] == list(C.UNLOCK_PATHS)
-    assert len(seg["unlock_paths"]) == 3, seg["unlock_paths"]
+    assert set(seg["unlock_paths"]) == {"verb_effect", "beat_op"}, seg["unlock_paths"]
+    assert "director_reveal" not in seg["unlock_paths"], (
+        "编剧那条又回到闭集里了 —— 它要模型知道线索名单,而那个名字就是谜面")
+    assert seg["refused"]["director_reveal"], (
+        "拿掉一条路而不说为什么,下一个人会把它当成漏掉的、再加一遍")
     assert "judge" not in str(seg["unlock_paths"])
     # 两档,不是三档
     assert seg["states"] == ["known", "unknown"], seg["states"]

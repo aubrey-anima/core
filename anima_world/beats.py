@@ -45,8 +45,19 @@ EVENT_OPS = {
 # 这一条让作者写得出「芬格尔在车站等你」那种**世界主动来找你**的时刻。
 # 它走的是**已有那条**(`agent_hail` 事件 + 站点已有的 `hail.ts`),
 # 引擎这一层一条新的"写世界"的路都不开。
+# 🆕 3.13.0(验收 A 整体 ①):`link` / `unlink` —— **剧情拍连一条边。**
+#
+# 它是线索那个玩法的第二条解锁路(`contract.clues.unlock_paths` 的 `beat_op`):
+# 「这一拍响了,他就知道了这件事」。上一版那条路**在契约里,而引擎里不存在** ——
+# `link` 不在这张表上,写下去开机当场拒。
+#
+# 🔴 **它一条新的「写世界」的路都不开**:走的是内核那份 `apply_edge_effect`
+# (约束、`exclusive`、边上的事实默认值,全在那儿查一遍)——
+# 剧情拍这一层只是**又一个调用方**,和动词那条路共用同一份判断。
+# ⚠️ **不发事件**(和 `location_desc` 同一类):边本身就是状态,
+# 为它再造一种事件就是第二份真相。
 VALID_OPS = EVENT_OPS | {"agent_join", "location_desc", "agent_leave", "agent_return",
-                         "hail"}
+                         "hail", "link", "unlink"}
 
 # 物质 op 里 `from`/`to` 允许写的非角色持有者。金库允许负债(economy.TOWN),
 # 世界是凭空来源 —— 一件道具"本来就在她口袋里"不需要有人先失去它。
@@ -207,6 +218,12 @@ PLAYER_ALLOWED_OP_FIELDS: dict[str, tuple[str, ...]] = {
     # 🆕 3.10.0:`hail` 的 `target` **只写得下玩家** —— 「角色去找角色搭话」是
     # 行为树那条路的事,不该由剧情拍代劳(那会是第二份"谁去找谁"的判断)。
     "hail": ("target",),
+    # 🆕 3.13.0:边的**两端都写得下玩家** —— `clues.knows` 正是
+    # 「玩家 → 那条线索」,而 `factions.member_of` 是「玩家 → 那个阵营」。
+    # ⚠️ 写下去之后由 `Scheduler._edge_node` 换成图上那个形状
+    # (`agent:player:<id>`);两个形状各管一头,而边只认后者。
+    "link": ("from", "to"),
+    "unlink": ("from", "to"),
     "sentiment_delta": ("target",),
     "r_type": ("target",),
     "pay": ("from", "to"),
@@ -522,6 +539,10 @@ _OP_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "agent_return": ("agent_id", "location"),
     "pay": ("from", "to", "amount"),
     "grant_item": ("agent_id", "item_id"),
+    # 🆕 3.13.0:边。`unlink` 只要一端就够(「把他这类边全断掉」那种写法),
+    # 所以它的必填只有 `type` —— 而 `link` 两端都要,少一端连不出一条边。
+    "link": ("type", "from", "to"),
+    "unlink": ("type",),
 }
 
 

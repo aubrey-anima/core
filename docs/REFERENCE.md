@@ -5115,6 +5115,8 @@ MySQL。两个理由都是硬的:① 一行一条 —— 塞进一个 `redis` li
 | `hail` | `agent_id`, `target` | 🆕 **3.10.0:让这个角色主动来找玩家搭话**(3.10.0,§9.1.2)。`target` 只写得下保留字 `player`,所以它只在 `for_each: {"node":"player"}` 的拍上有意义;可选 `line` 是作者写的**她的台词**(和拍上的 `narrate` 是两种东西:那是旁白)。走已有的 `agent_hail` 事件 + 真的把她挪到他跟前;频率沿用 `claim_hail`,**没叫成不等于这一拍作废** |
 | `pay` | `from`, `to`, `amount` | 转账(可选 `reason`)。持有者可以是角色、`__town__`(金库,允许负债)或 `__world__`。`amount` 必须 > 0 —— 反向转账把 `from`/`to` 调过来 |
 | `grant_item` | `agent_id`, `item_id` | 给/拿走一件东西(可选 `qty`,**负数 = 拿走**;可选 `from`,缺省 `__world__`) |
+| `link` | `type`, `from`, `to` | 🆕 **3.13.0:连一条边。**「这一拍响了,他就知道了这件事」——线索那个玩法的 `beat_op` 那条解锁路。`type` 是边类型(自己插件声明的,或 `contract.plugins.shared_edge_types` 里出厂那几条,如 `clues.knows`);两端写 `player` 就是这一趟的那个人;可选 `facts` 覆盖边上事实的默认值。🔴 **走的是内核那份 `apply_edge_effect`**(`exclusive` 之类的约束在那一刻查)—— 这一层一条新的「写世界」的路都不开,**也不发事件**(边本身就是状态)。没连成(边类型没装 / `exclusive` 那端已经有了)时它**不进 `ops_applied`** |
+| `unlink` | `type` | 🆕 **3.13.0:断一条边。** 给了两端就断那一条;只给一端就把这一端上这个类型的边**全断掉**(「退出师门」那种写法)——所以必填只有 `type` |
 
 后两条是**物质层**:op 曾经只能改"她怎么想",改不了"她有什么"。作者写不出"父亲的
 怀表在这一幕里丢了",只能写一条"她觉得很难过"的记忆去暗示。它们展开成账本已有的
@@ -5283,6 +5285,8 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
 | `agent_return` | — | 同上 |
 | `location_desc` | — | 它和人无关 |
 | `hail` | `target` | 🆕 3.10.0:而且 `target` **只**写得下它 —— 「角色去找角色搭话」走的是行为树那条路,不由剧情拍代劳 |
+| `link` | `from`、`to` | 🆕 3.13.0:**两端都写得下** —— `clues.knows` 正是「玩家 → 那条线索」,`factions.member_of` 是「玩家 → 那个阵营」 |
+| `unlink` | `from`、`to` | 同上 |
 
 **谓词的收拒表**(一行一个谓词):
 

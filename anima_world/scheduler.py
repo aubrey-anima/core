@@ -4853,6 +4853,8 @@ class Scheduler:
             return self._beat_agent_return(op)
         if kind == "hail":
             return self._beat_hail(op)
+        if kind in ("link", "unlink"):
+            return self._beat_edge(op)
         if kind == "location_desc":
             # config path (nested-map D7): writes the locations table, no event.
             self.update_location_description(str(op.get("location")), str(op.get("description", "")))
@@ -4869,6 +4871,36 @@ class Scheduler:
         if kind == "persona_update":
             self._apply_spec_to_blackboard(op.get("agent_id"), (op.get("spec") or {}))
         return events
+
+    def _beat_edge(self, op: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """`link` / `unlink`:**剧情拍连一条边**(3.13.0,验收 A 整体 ①)。
+
+        「这一拍响了,他就知道了这件事」—— 线索那个玩法的第二条解锁路
+        (`contract.clues.unlock_paths` 的 `beat_op`)。
+
+        🔴 **一条新的「写世界」的路都不开**:走的是内核那份 `apply_edge_effect`,
+        约束、`exclusive`、边上的事实默认值全在那儿查一遍 —— 这一层只是**又一个
+        调用方**,和动词那条路共用同一份判断。另写一份的下场是「同一条 link
+        写在动词里过得了、写在拍里过不了」,而作者读不出为什么。
+
+        ⚠️ **不发事件**(和 `location_desc` 同一类):边本身就是状态,
+        为它再造一种事件就是第二份真相。
+
+        🔴 **没连成就答 `None`** —— 那样它不进 `ops_applied`。
+        一个"什么都没做"的 `link` 和一个"建成了"的 `link` 在日志上长得一样,
+        而 `ops_applied` 是作者唯一读得到的回执:边类型没装(`clues.enabled`
+        关着)、`exclusive` 那一端已经有了、写错了 id —— 三种都该看得出来。
+        """
+        spec = {"op": str(op.get("op") or ""), "type": str(op.get("type") or ""),
+                "from": op.get("from"), "to": op.get("to"),
+                "facts": dict(op.get("facts") or {})}
+        if spec["type"] and spec["type"] not in self.edge_types:
+            # 装没装上是**世界配置**的事,不是作者写错了 —— 说清楚,别静默跳过。
+            logger.warning(
+                "剧情拍要连 `%s`,而这个世界没装这种边(出厂插件的开关关着?)—— "
+                "这一格没连成,`ops_applied` 里不会有它", spec["type"])
+            return None
+        return [] if self.apply_edge_effect(spec, {}) else None
 
     def _apply_spec_to_blackboard(self, agent_id: str | None, spec: dict[str, Any]) -> None:
         """Live-apply a persona/goals edit so the planner and judge see it this

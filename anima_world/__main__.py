@@ -36,6 +36,7 @@ from anima_world.factions import (
 from anima_world.clues import (
     BOARD_KEYS as CLUE_BOARD_KEYS, CLUE_KIND, CLUE_STATES,
     KNOWS_EDGE as CLUES_KNOWS_EDGE, PLUGIN_ID as CLUES_PLUGIN_ID,
+    REFUSED_PATHS as CLUE_REFUSED_PATHS,
     UNLOCK_PATHS as CLUE_UNLOCK_PATHS,
 )
 from anima_world.person_verbs import (
@@ -4326,8 +4327,8 @@ FACTORY_SCOPE: dict[str, str] = {
         "**只有那条「知道」的边**(`clues.knows`,玩家 → `entity:clue`)。"
         "🔴 **线索本身不在里面** —— `clue` 那个种类与每一条实例是**作者写的东西**,"
         "每个世界各不相同;出厂插件替作者声明种类,就是替他决定线索长什么样。"
-        "解锁**只有三条路**(动词 `effects` 的 `link` / 剧情拍的 op / 编剧的 "
-        "`reveal`),**没有第四条** —— 别等一个不会来的作者判定"
+        "解锁**只有两条路**(动词 `effects` 的 `link` / 剧情拍的 `link` op),"
+        "而**两条都真的通**;编剧那条有意不做(理由在 `contract.clues.refused`)"
     ),
     "factions": (
         "**只有那条 exclusive 成员边 + 两格量**(每人声望、世界级士气)。"
@@ -9705,14 +9706,23 @@ def contract_payload() -> dict[str, Any]:
             "options_field": "clues",
             "options_keys": list(CLUE_BOARD_KEYS),
             "unlock_paths": list(CLUE_UNLOCK_PATHS),
+            # 🔴 **有意不做的那条,连理由一起点名**(3.13.0,验收 A 整体 ①)。
+            # 上一版 `unlock_paths` 里有它,而引擎里**一行实现都没有** ——
+            # 报得出却走不通的取值,比不报它更坏。
+            "refused": dict(CLUE_REFUSED_PATHS),
             "gloss": (
                 "**线索板只报「存在与解锁状态」,不报内容。** 已知的那几条给 id"
                 "(他本来就知道),**未知的那几条连 id 都不给** —— "
                 "一个未解锁线索的 id 往往就是它的谜面。"
                 "内容是作者写在实体上的字,而**谁读得到它**由可见性那一层答。"
-                "🔴 **解锁只有三条路**(`unlock_paths`):动词的 `effects` 里 `link`、"
-                "剧情拍的 op、编剧的 `reveal` —— **没有第四条**,"
-                "别等一个不会来的作者判定(和「作者层写不了 `confront`」同一课)。"
+                "🔴 **解锁只有两条路**(`unlock_paths`),而两条都真的通:"
+                "动词的 `effects` 里 `link`(玩家做那个动词的那一刻)、"
+                "剧情拍的 `link` op(这一拍响了他就知道了)。"
+                "两条走的都是内核那份 `apply_edge_effect` —— 一条新的「写世界」的路"
+                "都不开。⚠️ 出厂插件的边**任何插件都连得动**"
+                "(`plugins.shared_edge_types`),这一格是这两条路的前提。"
+                "🔴 **`director_reveal` 有意不做,理由在 `refused` 里** —— "
+                "别等它;要等的话请连着「引擎挑、模型不知道」那个形状一起等。"
                 "⚠️ **不报「怀疑」那一档**:那一档要**置信度**,而置信度是判定"
                 "那一族的东西(批 4)—— **报一个算不出来的档,"
                 "就是让屏幕替引擎撒谎**。"

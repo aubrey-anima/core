@@ -6829,14 +6829,33 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 ⚠️ `from: "self"` 在动词那条路上就是**做这件事的人**;玩家做时它是
 `agent:player:<id>`,**图上玩家只有这一个形状**(`plugins.edge_node_id_forms`)。
 
-### (c) 🔴 解锁**只有三条路,没有第四条**
+### (c) 🔴 解锁**只有两条路** —— 而这两条都真的通
 
 `contract.clues.unlock_paths`:
 
-    verb_effect(动词 `effects` 里的 `link`)· beat_op(剧情拍的 op)·
-    director_reveal(编剧的 `reveal`)
+    `verb_effect`(动词 `effects` 里的 `link`)· `beat_op`(剧情拍的 `link` op)
 
-**别等一个「订 `conversation` 的作者判定」** —— 它要判定运行器,那是批 4 的东西。
+🔴 **上一版这儿写着三条,而三条一条都连不上**(3.13.0 头一版):`link` 不在剧情拍
+的 op 表上、出厂插件的边谁都连不动、编剧那条压根没有实现。
+**一个报得出、却走不通的取值,比不报它更坏** —— 你正照着它写底稿。收到两条,
+**收的这一版才是真的**,两条各有一条走真门的用例钉着。
+
+剧情拍那条长这样(`from` 写保留字 `player` = 这一拍指着的那个人):
+
+    {"id": "第一幕", "for_each": {"node": "player"},
+     "trigger": {"at": {"day": 0, "minute_of_day": 5}},
+     "payload": [{"op": "link", "type": "clues.knows",
+                  "from": "player", "to": "clue:老橡树的来历"}]}
+
+⚠️ **没连成时它不进 `ops_applied`**(`clues.enabled` 关着、`exclusive` 那端已经
+有了、id 写错了)—— 那一格是你唯一读得到的回执,**它不会假装干过了**。
+
+**`director_reveal` 有意不做**(`contract.clues.refused` 里连理由一起点名):
+编剧是个模型,要它揭哪一条就得把**线索名单**放进提示词 —— 而未解锁线索的名字
+往往**就是它的谜面**,模型抄进 `line` 就直接印在玩家屏幕上。
+**别等它。** 要等的话,请连着「引擎挑、模型不知道」那个形状一起等。
+
+**也别等一个「订 `conversation` 的作者判定」** —— 它要判定运行器,那是批 4 的东西。
 这句话写在这儿的理由和「作者层写不了 `confront`」逐字相同:
 **一个等不来的东西会让人一直等着,而不是换一个写得出来的写法。**
 
