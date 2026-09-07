@@ -9442,6 +9442,9 @@ class World:
             # 都保他**,四次 approach 全指同一个人,而池子里有十三个。
             # **一个永远成立的例外不是例外,是把闸关了。**
             recent=context["recent"], keep=self._director_keep(thread, tick),
+            # 🆕 3.13.0(C 第七轮 ④):**别人那条开着的线上的人,让位** ——
+            # 换对手,不换剧本(裁决 §2.12)。
+            taken=self._threads_taken_by_others(pid),
         )
         decision: dict[str, Any] | None = None
         called = False
@@ -10120,6 +10123,28 @@ class World:
             if seen > latest:
                 latest, who = seen, agent_id
         return total, who
+
+    def _threads_taken_by_others(self, pid: str) -> list[str]:
+        """**别人那几条开着的线上的对手是谁**(3.13.0,C 第七轮 ④)。
+
+        🔴 只回**人的 id**,一个字的剧情都不带 —— 那正是这条修法和
+        「把别人的 `promise` 摘要塞进提示词」的分界(裁决 §2.12):
+        `promise` 是别人剧情的原文,进了提示词就可能被模型抄进 `line`,
+        **从这个人的屏上漏出去**;而一个 NPC 的名字是公开的。
+        """
+        with self.scheduler._lock:
+            stories = dict(self.scheduler._memory_projection.stories or {})
+        out: list[str] = []
+        for other, row in stories.items():
+            if other == pid:
+                continue
+            for thread in (row.get("threads") or ()):
+                if thread.get("closed"):
+                    continue
+                who = str(thread.get("with") or "")
+                if who:
+                    out.append(who)
+        return out
 
     @staticmethod
     def _director_keep(thread: dict[str, Any] | None, tick: int) -> str:

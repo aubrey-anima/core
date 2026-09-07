@@ -560,7 +560,8 @@ CAST_RECENT_BLOCKED = 2
 def select_cast(candidates: Iterable[dict[str, Any]], *, cast_pool: Sequence[str] = (),
                 forbidden: Sequence[str] = (), hidden: Sequence[str] = (),
                 gated: dict[str, str] | None = None,
-                recent: Sequence[str] = (), keep: str = "") -> list[dict[str, Any]]:
+                recent: Sequence[str] = (), keep: str = "",
+                taken: Sequence[str] = ()) -> list[dict[str, Any]]:
     """编剧这一轮**能派谁**。**筛在前** —— 筛掉的人根本不进提示词。
 
     四道闸,顺序是承重的(裁决 §2.1⑤):
@@ -581,6 +582,9 @@ def select_cast(candidates: Iterable[dict[str, Any]], *, cast_pool: Sequence[str
 
     · **软**:筛空了就整份还回去 —— **一个空 cast 会让编剧沉默**,而「不许沉默」
       是这一层的硬纪律。少一点新鲜面孔,好过这一拍什么都不发生。
+    · `taken` 是**别人那条开着的线上的人**(3.13.0)——同样是软的:
+      两道软闸叠起来最容易把 cast 筛空,而**空 cast 的下场是沉默**,
+      比撞线坏得多。
     · `keep` 是**该收线了的那条线上的人**:线开在谁身上,收线就得是谁 ——
       "换个人来"在这一格上不是新鲜,是失约。⚠️ 只在**到期**时保他:
       拿「有一条开着的线」当例外的话,那个条件几乎永远成立,而
@@ -602,7 +606,17 @@ def select_cast(candidates: Iterable[dict[str, Any]], *, cast_pool: Sequence[str
         out.append(dict(row))
     # **确定**:同一个世界同一时刻挑两次逐项相同(和 `host.select_options` 同一条)。
     out.sort(key=lambda r: str(r.get("id") or ""))
-    stale = {str(a) for a in recent if str(a) and str(a) != str(keep)}
+    # 🆕 第六道**软**闸(3.13.0,C 第七轮 ④,裁决 §2.12):
+    # **已经被别人那条开着的线占着的对手,让位。**
+    # 真站实测:两个玩家的线同对手、同相位、同 `story_text`,只差措辞 ——
+    # 而产品命题是「两个玩家走出两条不一样的线」。
+    # 🔴 **换的是对手,不是剧本**:剧本是模型写的,而模型手上**没有、也不该有**
+    # 「别人写了什么」这个信息(把别人的 `promise` 放进提示词 = 别人的剧情
+    # 会从这个人的屏上漏出来,而 §2.2 花了一整个 commit 堵这件事)。
+    # 对手是**引擎挑的**,而"谁被占着"这个知识**不含任何别人的剧情内容** ——
+    # 一个 NPC 的名字是公开的。**能不给模型的信息就不给它。**
+    stale = {str(a) for a in (*recent, *taken)
+             if str(a) and str(a) != str(keep)}
     if stale:
         fresh = [r for r in out if str(r.get("id") or "") not in stale]
         # **筛空了就不筛** —— 见上面那条"软"。

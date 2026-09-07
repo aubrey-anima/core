@@ -2136,3 +2136,51 @@ def test_降级那几拍_doctor数得出来(tmp_path):
     screen = buf.getvalue()
     assert "降级" in screen, f"doctor 上看不见降级那几拍:{screen[-600:]}"
     assert "1 拍被降级" in screen, screen[-600:]
+
+
+def test_别人那条线上的对手_让位_而筛空了照旧派得出人():
+    """🔴 **C 真站第七轮 ④**:两个玩家的线**同对手、同相位、同 `story_text`,
+    只差措辞** —— 而产品命题是「两个玩家走出两条不一样的线」。
+
+    🔴 **换的是对手,不是剧本**(裁决 §2.12):模型手上**没有、也不该有**
+    「别人写了什么」这个信息 —— 把别人的 `promise` 放进提示词,
+    模型完全可能把它抄进 `line`,那就是**别人的剧情从这个人的屏上漏出去**,
+    而 §2.2 花了一整个 commit 堵这件事。
+
+    ⚠️ 后半条是承重的:**两道软闸叠起来最容易把 cast 筛空,
+    而空 cast 的下场是沉默** —— 比撞线坏得多。
+    """
+    from anima_world import director as D
+
+    pool = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+    assert [c["id"] for c in D.select_cast(pool, taken=["a"])] == ["b", "c"]
+    # 两道软闸叠起来
+    assert [c["id"] for c in D.select_cast(pool, recent=["b"], taken=["a"])] == ["c"]
+    # 🔴 筛空了整份还回去 —— 宁可撞脸,不可沉默
+    assert [c["id"] for c in D.select_cast(pool, recent=["a", "b"],
+                                           taken=["c"])] == ["a", "b", "c"]
+    # 该收线的那个人照旧保得住
+    assert "a" in [c["id"] for c in D.select_cast(pool, taken=["a"], keep="a")]
+
+
+def test_两个玩家的线_对手真的不一样(tmp_path):
+    """接上世界那一半:A 的线开在谁身上,B 那一拍就该换个人。"""
+    with open_world_at(tmp_path / "clash.db", force_mock_llm=True) as world:
+        agents = sorted(world.scheduler.agents)
+        assert len(agents) >= 2, "这条用例要至少两个角色"
+        for pid in ("p1", "p2"):
+            world.player_move(pid, "cafe")
+        world.tick(2)
+        # A 那条线开在第一个人身上
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agents[0], "line": "她欲言又止",
+                   "why": "", "promise": "那本旧相册", "stake": None,
+                   "source": "mock"},
+            tension_before=0.3, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=50, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        taken = world._threads_taken_by_others("p2")
+
+    assert agents[0] in taken, f"没认出别人那条线上的对手:{taken}"
+    assert world._threads_taken_by_others("p1") == [], (
+        "自己那条线不该算进「别人的」")
