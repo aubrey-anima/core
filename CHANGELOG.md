@@ -150,6 +150,12 @@ A 当着 B 的面做一件事 → B 那一屏开口,并**指名道姓**;A 在别
   `moves_made=0` 和 `moves_made=6` 各调一次 `pick_move` 比结果 —— 而它不读那个
   形参,**两边当然相等,改成什么都相等**。现在的判据是把 `phase_target` 整个
   换掉、`pick_move` 也不许变。
+  ⚠️ **同一条病的第二处,顺手治了**:`contract.director.config_keys` 是**手抄**
+  的四个键,而 `director.grace_hours`(3.12.0)与 `director.first_arc_beats`
+  (3.13.0)**都没进来** —— 加开关的人记得改 `_CONFIG_DEFAULTS`,不会想到还有
+  那一行,**而下游正是照这一格去列「编剧这一段能调什么」**。
+  改成从真表里按 `category == "director"` 数出来(那一格因此 4 → 6 个键,纯增)。
+  **一张手抄的键表,会停在它被抄下来的那一天。**
 - 🔴 **`world check --edit` / `validate world --edit` 假红**(A ②)。
   上一批把「effect 指到不存在的角色当场拒」接上线时,判断写进了
   `world_plugin_errors` —— 而**那个函数在 `--edit` 上照跑**,`known_agents`

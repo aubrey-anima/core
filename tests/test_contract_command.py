@@ -195,6 +195,26 @@ def test_可见性五档进了契约_而且和引擎读的是同一份常量():
     assert "none" not in listed and "" not in listed, listed
 
 
+def test_编剧那段的配置键_是从真表里数出来的(tmp_path):
+    """🔴 **一张手抄的键表,会停在它被抄下来的那一天**(3.13.0,A 三轮 ①)。
+
+    `director.config_keys` 手抄了四个键,而 `director.grace_hours`(3.12.0)与
+    `director.first_arc_beats`(3.13.0)加进来时**没有一处会红** ——
+    加开关的人记得改 `_CONFIG_DEFAULTS`,不会想到还有这一行,
+    **而下游正是照这一格去列「编剧这一段能调什么」**。
+
+    判据是那张真表本身,不是再抄一遍名字:抄一遍就又是一张会停住的表。
+    """
+    from anima_world.config_store import _DEFAULTS
+
+    payload = json.loads(_contract("--json").stdout)
+    listed = set(payload["director"]["config_keys"])
+    real = {k for k, meta in _DEFAULTS.items() if meta[2] == "director"}
+    assert listed == real, (
+        f"契约那一格说 {sorted(listed)},而真表里的编剧开关是 {sorted(real)} —— "
+        "少一个会让下游以为那个开关不存在,多一个会让它去设一个设不了的键")
+
+
 def test_REFERENCE_里那份顶层段清单_和真门逐格相等():
     """🔴 **别数数,点名。**
 

@@ -9568,8 +9568,14 @@ def contract_payload() -> dict[str, Any]:
             # 🆕 3.12.1(验收 B+C ⑤):`outcome_text` 也是线上那一族人话
             # —— 收掉的线靠它说「怎么收的」,漏报这一格,宿主就不知道它存在。
             "thread_text_keys": ["phase_text", "due_text", "outcome_text"],
-            "config_keys": ["director.enabled", "director.max_per_player_per_hour",
-                            "director.pin_ticks", "director.due_hours"],
+            # 🔴 **从真表里数出来,不手抄**(3.13.0,A 三轮 ① 的连带):
+            # 手抄那一版停在四个键上,而 `director.grace_hours`(3.12.0)与
+            # `director.first_arc_beats`(3.13.0)都没进来 —— **加一个开关时
+            # 谁都记得改 `_CONFIG_DEFAULTS`,没人记得来改这一行**,
+            # 而下游正是照这一格去列「编剧这一段能调什么」。
+            # 判据就是那张表本身:`category == "director"`。
+            "config_keys": sorted(
+                k for k, meta in _CONFIG_DEFAULTS.items() if meta[2] == "director"),
             "sources": list(DIRECTOR_SOURCES),
             "source_labels": dict(DIRECTOR_SOURCE_LABELS),
             "moment": "acted",
