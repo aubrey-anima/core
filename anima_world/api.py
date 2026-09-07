@@ -9117,6 +9117,12 @@ class World:
             beat_seq = int(self.scheduler._memory_projection.player_beat_seq.get(pid, 0))
             # 🆕 3.11.0(批 3a):钥匙的第四格 —— 「他自己刚动过手没有」。
             move_seq = int(self.scheduler._memory_projection.player_move_seq.get(pid, 0))
+            # 🆕 3.13.0(批 3c §2.1):**这儿刚有人动过手没有。**
+            # 🔴 只在**他自己也在这儿**时才算 —— 一个在别处的人不该被这儿的事
+            # 叫醒(判据:A 在别处做同一件事,B 那一屏 `cached`)。
+            here_seq = int(
+                self.scheduler._memory_projection.place_move_seq.get(place, 0)
+            ) if place else 0
         # 🆕 3.11.2(真站第三轮):**说过话也算动过手,而它不进事件日志。**
         #
         # 🔴 `conversation` 只在**会话关闭**那一刻发一条(「聊天子系统与事件核解耦:
@@ -9132,7 +9138,7 @@ class World:
         refused_seq, refused_why = self._last_refusal(pid)
         trigger = self._host_trigger(last, place=place, day=day, beat_seq=beat_seq,
                                      move_seq=move_seq, chat_seq=chat_seq,
-                                     refused_seq=refused_seq,
+                                     refused_seq=refused_seq, here_seq=here_seq,
                                      tick=tick, ask=bool(ask),
                                      was_present=was_present)
         if trigger is None:
@@ -9146,6 +9152,11 @@ class World:
             # 一字不差。**一屏没变化和一屏没开口,在玩家眼里是同一件事**,
             # 而真站上量到的正是「同一句台词连出三屏」。
             # 读的是开屏用的**同一个水位**,不另攒一份。
+            # 🆕 3.13.0(批 3c §2.1):**他在旁边看见的那几件事**排在自己那几条后面
+            # —— 先说「你做了什么」,再说「你看见谁做了什么」。
+            if last and place:
+                recap = list(recap) + self._crossing_recap(
+                    pid, since_seq=int(last.get("seq") or 0), place=place)
             if last and chat_seq != int(last.get("chat_seq") or 0) and chat_with:
                 said = host_mod.chat_line(self.scheduler.agent_display_name(chat_with))
                 if said:
@@ -9236,6 +9247,7 @@ class World:
                             "beat_seq": beat_seq, "move_seq": move_seq,
                             "chat_seq": chat_seq,
                             "refused_seq": refused_seq,
+                            "here_seq": here_seq,
                             "trigger": trigger,
                             "text": text, "source": source,
                             "options": [o["id"] for o in options]},
@@ -9942,7 +9954,7 @@ class World:
     def _host_trigger(self, last: dict[str, Any], *, place: str, day: int,
                       beat_seq: int, tick: int, ask: bool,
                       move_seq: int = 0, chat_seq: int = 0,
-                      refused_seq: int = 0,
+                      refused_seq: int = 0, here_seq: int = 0,
                       was_present: bool = True) -> str | None:
         """这一刻要不要开口,要的话是 `HOST_MOMENTS` 里的哪一个。`None` = 闭嘴,用上一屏。
 
@@ -9953,7 +9965,7 @@ class World:
         from anima_world import host as host_mod
 
         now = {"move_seq": move_seq, "chat_seq": chat_seq,
-               "refused_seq": refused_seq}
+               "refused_seq": refused_seq, "here_seq": here_seq}
         if not last:
             return "arrive"
         # 🆕 3.10.0(2a-②):**「你回来了」排在换地方前面。**
@@ -10131,6 +10143,50 @@ class World:
                 place_names=places),
             "recent": cast_recent[-int(director.CAST_RECENT_BLOCKED):],
         }
+
+    def _crossing_recap(self, pid: str, *, since_seq: int, place: str) -> list[str]:
+        """**他在旁边看见别人做的那几件事**(3.13.0,批 3c §2.1)。
+
+        🔴 **同地才算**(§2.10 代拍 ②:只算同一个 point)——「撞见」的语义是
+        当面;放宽到父节点就是"隔着半条街看见你端详一棵树"。
+        判据是那条事件的 `loc` 和他此刻站的地方**逐字相同**。
+
+        ⚠️ **别人的 GM 笔记不出门**:这儿只读 `CROSSING_EVENT_TYPES` 那几种
+        **看得见的动作** —— `director_log` / `*_settled` / `payment` 一条都不在
+        里面(§2.2 那条红线)。
+        """
+        from anima_world import host as host_mod
+
+        log = self.scheduler.event_log
+        if log is None or since_seq <= 0 or not place:
+            return []
+        player_key = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        rows = [
+            {"type": e.type, "who": e.who, "payload": e.payload}
+            for e in log.replay(since_seq)
+            if e.type in host_mod.CROSSING_EVENT_TYPES and str(e.loc or "") == place
+        ]
+        if not rows:
+            return []
+        names: dict[str, str] = {}
+        for other in list(self.players or {}):
+            if other == pid:
+                continue
+            said = self.scheduler._relation_name(
+                f"{Scheduler.PLAYER_PREFIX}{other}")
+            # 🔴 **叫不出名字就不说** —— 别拿 id,也别兜底成「有人」:
+            # 那是 `hidden` 才有的待遇,给一个站在这儿的人用它是把
+            # 一件看得见的事说成悄悄话。
+            if said and said != other:
+                names[f"{Scheduler.PLAYER_PREFIX}{other}"] = said
+        places = {}
+        try:
+            places = {str(loc["id"]): str(loc.get("name") or loc["id"])
+                      for loc in (self.state().get("locations") or [])}
+        except Exception:  # noqa: BLE001 - 少一个地名不该掀翻这一屏
+            places = {}
+        return host_mod.crossing_lines(rows, player_key=player_key,
+                                       names=names, place_names=places)
 
     def _host_recap(self, pid: str, *, since_seq: int) -> list[str]:
         """上一屏之后**跟这个玩家有关**的那几件事(3.10.0,批 1.1 ①)。

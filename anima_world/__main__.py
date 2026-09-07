@@ -42,8 +42,9 @@ from anima_world.director import (
     TARGET_CURVE_PHASES as DIRECTOR_TARGET_CURVE,
 )
 from anima_world.host import (
-    ACTED_GRAINS as HOST_ACTED_GRAINS, PLAYER_MOVE_EVENT_TYPES,
-    SCREEN_GRAINS as HOST_SCREEN_GRAINS,
+    ACTED_GRAINS as HOST_ACTED_GRAINS,
+    CROSSING_EVENT_TYPES as HOST_CROSSING_EVENT_TYPES,
+    PLAYER_MOVE_EVENT_TYPES, SCREEN_GRAINS as HOST_SCREEN_GRAINS,
 )
 # `PackInstallError` 住在 `world_package` 而不是这儿 —— `python -m` 会把本文件
 # 加载两遍(`__main__` 与 `anima_world.__main__`),同一个 class 语句于是产生
@@ -9324,7 +9325,10 @@ def contract_payload() -> dict[str, Any]:
         _VALID_PREDICATES,
     )
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
-    from anima_world.events import EVENT_PAYLOAD_KEYS, SUBSCRIBABLE_EVENTS
+    from anima_world.events import (
+        EVENT_PAYLOAD_KEYS, PLAYER_FACING_EVENTS, PLAYER_FACING_PRIVATE_KEYS,
+        SUBSCRIBABLE_EVENTS,
+    )
     from anima_world.host import (
         DOOR_METHODS,
         FREE_OPTION_ID,
@@ -9459,6 +9463,18 @@ def contract_payload() -> dict[str, Any]:
             # 那一屏 `scene.source == "template"`(不是 `cached`,也不调模型),
             # 而**编剧一个字不写**(世界里什么都没发生)。
             "screen_grains": list(HOST_SCREEN_GRAINS),
+            # 🆕 3.13.0(批 3c §2.1):**别人做的事里,哪几种他该看见。**
+            # 🔴 **第三张表,有意不复用那两张**:`move_event_types` 答「他自己动没动手」,
+            # 回顾那张答「该跟他说哪几件事」,这一张答「别人做的事里哪几种他该看见」。
+            # ⚠️ 收的是**看得见的动作**:`payment` / `item_transfer` / `director_log`
+            # 一条都不在里面 —— 站在旁边的人看不见别人的账,把它们放进来就是
+            # **拿交织当剧透**。
+            # ⚠️ **同地才算**(同一个 point,不放宽到父节点)。
+            "crossing_event_types": list(HOST_CROSSING_EVENT_TYPES),
+            # 玩家面事件进插件触发器时被剥掉的那几格,以及"只许作用于当事人"那条。
+            "private_payload_keys": list(PLAYER_FACING_PRIVATE_KEYS),
+            "player_facing_events": list(PLAYER_FACING_EVENTS),
+            "cross_player_refused_event": "director_log_refused",
             # 🆕 3.12.0(player 带回):**结算那三条玩家面事件。**
             # 🔴 `director_log` 是 GM 笔记(`why` 就是写给创作者的那一句),
             # 而摊牌的输赢 / 还了哪条线 / 收线怎么收的**从前只写在它里面** ——

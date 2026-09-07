@@ -181,6 +181,25 @@ PLAYER_MOVE_INVITE_OUTCOMES = ("accepted", "declined")
 #: 所以现在它是**一张表加一个函数**:`acted_since` 是这个事实的唯一算法,闸和守卫
 #: 都调它。再加一格时**没有第二处要记得改**,而 `test_director_world.py` 那张
 #: 逐格驱动表会在忘了写驱动时当场红。
+#: **别人做的事里,哪几种该让同一个地方的人看见**(3.13.0,批 3c §2.1)。
+#:
+#: 🔴 **第三张表,而它有意不复用那两张。** 三个问题,三张表:
+#:   `PLAYER_MOVE_EVENT_TYPES` —— 「**他自己**动没动手」
+#:   `RECAP_EVENT_TYPES`       —— 「该跟**他**说哪几件事」
+#:   `CROSSING_EVENT_TYPES`    —— 「**别人**做的事里,哪几种他该看见」
+#: 我在 3.11.1 / 3.11.2 / 3.11.3 为「两处各写各的」栽过三次,所以这一张
+#: **从代码里生成不出来**,必须显式写下来并配一条逐格用例。
+#:
+#: ⚠️ **收的是"看得见的动作",不是"发生过的事"**:钱包变了(`payment`)、
+#: 拿到东西(`item_transfer`)都**不进** —— 站在旁边的人看不见别人的账,
+#: 而把它们放进来就是**拿交织当剧透**(§2.2 那条红线的另一半)。
+CROSSING_EVENT_TYPES = (
+    "travel",              # 他走进来 / 走出去
+    "entity_interaction",  # 他点了一个动词
+    "entity_engage",       # 他起了个长动词的头
+    "person_verb.accepted",  # 他对一个人做成了一件事
+)
+
 ACTED_GRAINS = ("move_seq", "chat_seq")
 
 #: 时刻钥匙上,**屏该不该重开**看哪几格 —— 比上面那张多一格 `refused_seq`。
@@ -197,7 +216,7 @@ ACTED_GRAINS = ("move_seq", "chat_seq")
 #:
 #: ⚠️ 我在 3.11.1 / 3.11.2 各栽过一次「两处各写各的」,所以这里**一张表从另一张
 #: 推出来**,而不是并排写两份:加一格到 `ACTED_GRAINS`,这张自动跟上。
-SCREEN_GRAINS = ACTED_GRAINS + ("refused_seq",)
+SCREEN_GRAINS = ACTED_GRAINS + ("refused_seq", "here_seq")
 
 #: 白按了一下时那一句。**按第几次轮着说** —— 连点三下三屏一字不差,
 #: 和"屏根本没动"在玩家眼里是同一件事(老板那句底线:**屏不许逐字重复**)。
@@ -350,6 +369,51 @@ def transit_place_name(going_to: str) -> str:
     """
     dest = str(going_to or "").strip()
     return f"去{dest}的路上" if dest else "路上"
+
+
+def crossing_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
+                   names: dict[str, str] | None = None,
+                   place_names: dict[str, str] | None = None) -> list[str]:
+    """**他在旁边看见别人做的那几件事**(3.13.0,批 3c §2.1)。
+
+    🔴 **主语是那个人的显示名** —— 别拿 id,也别兜底成「有人」:
+    那是 `billing: "hidden"` 才有的待遇(`HIDDEN_WHO`),
+    给一个大大方方站在这儿的人用它,是把一件看得见的事说成了悄悄话。
+
+    ⚠️ **他自己做的事不在这里**(那是 `recap_lines` 的活)——
+    两处都收一遍的话,他会在自己的屏上读到两遍自己。
+    """
+    who = dict(names or {})
+    places = dict(place_names or {})
+    out: list[str] = []
+    for event in rows:
+        kind = str(event.get("type") or "")
+        if kind not in CROSSING_EVENT_TYPES:
+            continue
+        actor = str(event.get("who") or "")
+        if not actor or actor == player_key:
+            continue                      # 他自己那几条归 `recap_lines`
+        payload = event.get("payload") or {}
+        name = who.get(actor) or who.get(actor.split(":", 1)[-1]) or ""
+        if not name:
+            continue                      # 叫不出名字就不说 —— 别编一个
+        if kind == "travel":
+            dest = str(payload.get("to") or "")
+            said = places.get(dest, dest)
+            if said:
+                out.append(f"{name}往{said}去了。")
+            continue
+        verb = str(payload.get("verb_label") or payload.get("verb") or "")
+        target = str(payload.get("target_name") or payload.get("target") or "")
+        if not verb or not target:
+            continue
+        if kind == "entity_engage":
+            out.append(f"{name}着手{verb}{target}。")
+        elif kind == "person_verb.accepted":
+            out.append(f"{name}{verb}了{str(payload.get('agent_name') or target)}。")
+        else:
+            out.append(f"{name}{verb}了{target}。")
+    return out
 
 
 def chat_line(agent_name: str) -> str:

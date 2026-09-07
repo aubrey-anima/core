@@ -296,6 +296,15 @@ def _apply_player_move(proj: Projection, e: Event) -> None:
     for player_id in proj.players_joined:
         if host_mod.player_move_seq_of(e.type, payload, who, f"player:{player_id}"):
             proj.player_move_seq[player_id] = seq
+    # 🆕 3.13.0(批 3c §2.1):**这个地方刚有人动过手。**
+    # 🔴 按地点记、不按人记 —— 「撞见」的语义是**同一个地方**,
+    # 而"谁撞见了谁"是读的时候才知道的(B 此刻在哪)。
+    # ⚠️ **只收玩家做的**:她们每 tick 都在动,把 NPC 也算进来的话,
+    # 一个有三个 NPC 的地方会让每个玩家的屏幕永不停歇地重开。
+    if e.type in host_mod.CROSSING_EVENT_TYPES and who.startswith("player:"):
+        where = str(e.loc or "")
+        if where:
+            proj.place_move_seq[where] = seq
 
 
 def _apply_beat_fired(proj: Projection, e: Event) -> None:
