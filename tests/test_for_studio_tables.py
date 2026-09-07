@@ -163,13 +163,43 @@ def test_公共边上放开哪几个op_和引擎逐格相等():
         f"真值:{ {k: list(v) for k, v in real.items()} }")
 
 
-def test_成员边那两端的形状_三处镜像都跟着真声明():
-    """🟡 **A 四轮 ③**:`group:*` 那个**从来没生效过**的写法,在三处留了镜像 ——
-    `config_store` 的说明(它进 `contract.config.factions.enabled.description`)、
-    FOR-STUDIO §3.72(a)、REFERENCE 的配置行。
+#: 一条镜像里那句「成员边的两端」长什么样。**两端各是一个带 `<…>` 占位的 id 形状**,
+#: 中间一个箭头(中文档用 `→`,英文那句用 `->`)。反引号可有可无。
+#: ⚠️ 端点形状里**带得下 `:`**(`agent:player:<id>` 就是三段)——
+#: 少了它,起点只捕到最后一段 `player`,而那正是这道闸要分辨的那两种写法。
+_ENDS = re.compile(
+    r"member_of`?[^\n]{0,40}?`?([A-Za-z_][A-Za-z0-9_.:]*):<[^>]+>`?"
+    r"\s*(?:→|->)\s*`?([A-Za-z_][A-Za-z0-9_.:]*):<[^>]+>`?")
 
-    真声明改掉之后,这三处**一处都不会红** —— 而它们是三个不同的读者各自照着写的
-    那一行。判据统一成:**那两端的形状从真声明里读出来,三处都得对得上**。
+
+def _member_of_ends(text: str, where: str) -> tuple[str, str]:
+    """从一份镜像里把那条成员边的**两端**读出来。读不出就是这道闸红。
+
+    🔴 **判据必须钉在那一行本身**(3.13.1,A 复验 ①)。上一版这里判的是
+    「全文没有 `group:*`」加一个 `in` 子串 —— 于是**整句改成散文
+    (「任何角色 → 一个阵营」)照绿、起点改回「玩家 →」照绿、
+    连真声明的 `from` 改成 `agent` 也照绿**(`"agent" in` 那句子串命中)。
+    **一道用 `not in` 和 `in` 拼出来的闸,拦的是它见过的那一种写法,
+    不是它声称的那件事。**
+    """
+    found = _ENDS.search(text)
+    assert found, (
+        f"{where} 里读不出那条成员边的两端 —— 这道闸就是靠它工作的。"
+        "那一行要写成 `factions.member_of`(`<起点形状>` → `<终点形状>`),"
+        "两端都带 `<…>` 占位;改成散文(「任何角色 → 一个阵营」)读不出来,"
+        "而读不出来就是红,不是绿")
+    return found.group(1), found.group(2)
+
+
+def test_成员边那两端的形状_三处镜像都跟着真声明():
+    """🟡 **A 四轮 ③ / 复验 ①**:`group:*` 那个**从来没生效过**的写法,
+    在三处留了镜像 —— `config_store` 的说明(它进
+    `contract.config.factions.enabled.description`)、FOR-STUDIO §3.72(a)、
+    REFERENCE 的配置行。真声明改掉之后,这三处**一处都不会红**,
+    而它们是三个不同的读者各自照着写的那一行。
+
+    判据:**两端的形状从真声明里算出来,三处那一行逐格对得上** ——
+    不是"全文里没出现过某个坏词"。
     """
     from pathlib import Path
 
@@ -178,25 +208,20 @@ def test_成员边那两端的形状_三处镜像都跟着真声明():
     from anima_world.plugins import EDGE_NODE_ID_FORMS
 
     edge = factory_plugin()["edges"][MEMBER_EDGE]
-    src_form = EDGE_NODE_ID_FORMS[str(edge["from"])]        # agent:player:<player_id>
-    dst_kind = str(edge["to"]).partition(":")[2]            # group
+    # 起点:声明写 `player` → 图上那个形状是 `agent:player:<player_id>`
+    want_src = EDGE_NODE_ID_FORMS[str(edge["from"])].partition(":<")[0]
+    # 终点:声明写 `group:group` → 实例 id 的头是 `group`
+    want_dst = str(edge["to"]).partition(":")[2]
+    assert want_src and want_dst
 
-    said = _DEFAULTS["factions.enabled"][4]
-    assert "group:*" not in said, (
-        "`config_store` 那句说明还写着 `group:*` —— 那个写法从来没生效过,"
-        "而它经 `contract.config` 直接发给下游")
-    assert src_form.split(":<")[0] in said, (
-        f"那句说明里没有起点那一端的形状({src_form}):{said}")
-
+    mirrors = {"config_store.factions.enabled": _DEFAULTS["factions.enabled"][4]}
     for name in ("FOR-STUDIO.md", "REFERENCE.md"):
-        text = (Path(__file__).resolve().parent.parent / "docs" / name).read_text(
-            encoding="utf-8")
-        head, _, _ = text.partition("## 3.7")  # 只扫到正文足够远
-        body = text
-        assert "`factions.member_of`,玩家 → `group:*`" not in body, name
-        assert "`factions.member_of`(玩家 → `group:*`)" not in body, name
-        assert f"`{dst_kind}:" in body, (
-            f"{name} 里那条成员边的终点没写成 `{dst_kind}:<…>`")
-        assert "group:*" not in body, (
-            f"{name} 里还留着 `group:*` —— 那个写法从来没生效过,"
-            "而它把作者往一条连不上的路上带")
+        mirrors[name] = (Path(__file__).resolve().parent.parent / "docs"
+                         / name).read_text(encoding="utf-8")
+
+    for where, text in mirrors.items():
+        got_src, got_dst = _member_of_ends(text, where)
+        assert (got_src, got_dst) == (want_src, want_dst), (
+            f"{where} 那一行写着 `{got_src}:<…>` → `{got_dst}:<…>`,"
+            f"而真声明是 `{want_src}:<…>` → `{want_dst}:<…>` —— "
+            "三个不同的读者正照着这一行写")

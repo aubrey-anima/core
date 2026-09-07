@@ -73,6 +73,19 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [Unreleased] —— 3.13.1 线(引擎未动,先记判据侧)
+
+### 🟡 ① 那道「三处镜像跟着真声明」的闸,自己是假绿的(A 复验 ①)
+
+判据是「全文没出现过 `group:*`」加一个 `in` 子串 —— 于是**整句改成散文
+(「任何角色 → 一个阵营」)照绿、起点改回「玩家 →」照绿,
+连真声明的 `from` 改成 `agent` 也照绿**(`"agent" in` 那句子串命中)。
+
+**一道用 `not in` 和 `in` 拼出来的闸,拦的是它见过的那一种写法,
+不是它声称的那件事。** 现在判据钉在**那一行本身**:从三处镜像里把成员边的
+**两端**读出来(两端都得带 `<…>` 占位),和真声明算出来的那两个形状逐格比;
+读不出来就是红 —— 散文读不出来。
+
 ## [3.13.0] —— 交织与线索(玩法层批 3c) (2026-09-07)
 
 ### 🔴 升级前先读:三条不是加法(2026-09-07,验收 B ④)
