@@ -498,6 +498,37 @@ def test_撞见那几行_去重且截得住_而且截了要吭声():
     assert "没细说" in got[-1], f"截了却不吭声:{got[-1]}"
 
 
+def test_只扣了自己身上的量_也算动了东西_而键名两处必须对得上(tmp_path):
+    """🔴 **第二个死格也一条闸都没有**(验收 A 三轮 ④,3.13.0)。
+
+    上一批从 `_outcome_moved` 里删掉了一个 `spent.get("spent")` ——
+    `_spent` 只产出 `me_changed` / `me_delta` 两格,**查一个不存在的键不会报错,
+    只会永远答 False**。而那一改**一条闸都没留**:把那个死格加回去,全仓不红。
+
+    这条闸问的是**行为**,不是键名的拼写:一个只扣体力、不改目标的动词
+    (`训练`)**是动了东西的** —— 于是回执说「这得花上一会儿」而不是
+    「什么都还没动」。哪天有人改了 `_spent` 的键名而忘了这一处,这条会红。
+    """
+    class _Outcome:
+        updates: dict = {}
+        consumed: list = []
+
+        def __init__(self, me_updates=None, me_deltas=None):
+            self.me_updates = me_updates or {}
+            self.me_deltas = me_deltas or {}
+
+    with open_world_at(tmp_path / "moved.db", force_mock_llm=True) as world:
+        sched = world.scheduler
+        # 两格的键名**就是 `_spent` 产出的那两格** —— 各译一遍就会分岔
+        assert set(sched._spent(_Outcome({"体力": 96}, {"体力": -4}))) == {
+            "me_changed", "me_delta"}
+        assert sched._outcome_moved(_Outcome(me_deltas={"体力": -4})) is True, (
+            "只扣了自己身上的量就被判成「什么都没动」—— "
+            "查一个不存在的键不会报错,只会永远答 False")
+        assert sched._outcome_moved(_Outcome(me_updates={"体力": 96})) is True
+        assert sched._outcome_moved(_Outcome()) is False
+
+
 # ── 她开口就得有话说(3.13.0,C 真站第七轮 ③)────────────────────────────
 
 def test_三条发射点_没有一条发得出空话的敲门(tmp_path):

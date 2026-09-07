@@ -6715,7 +6715,9 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
                  "target": "player:<那个玩家>", "delta": 0.1}]
 
 占位名与会被替换的那几格在 `contract.person_verbs.target_placeholder` /
-`target_fields`(`as` / `agent_id` / `target` / `from` / `to` / `who`)。
+`target_fields`(`as` / `agent_id` / `target` / `from` / `to`)。
+⚠️ **`who` 3.13.0 拿掉了**:没有任何一个 op 拿它当字段名 —— 写 `{"who": "$target"}` 会一声不吭地什么都不发生。
+**照 `contract` 那一格读,别照这一行的记忆读**(闸:那几格必须真有 op 读)。
 ⚠️ **逐字相等才换**,不做全文替换 —— 一个叫 `$targets_note` 的名字不该被改写。
 🔴 **拼错(或指到一个这个世界没有的角色)现在加载期当场拒**,不再静默吞:
 **一个装得进去、却什么都不做的动词,比一个装不进去的动词坏得多** ——

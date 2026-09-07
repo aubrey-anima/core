@@ -371,6 +371,30 @@ def test_占位符拼错_加载期当场拒(tmp_path):
     assert not world_plugin_errors({"plugins": [dict(_DUIREN)]})
 
 
+def test_指人的那几格_每一格都真有op读它():
+    """🔴 **三个死格那一批一条闸都没有**(验收 A 三轮 ④,3.13.0)。
+
+    上一批把 `who` 从 `TARGET_FIELDS` 里删掉了 —— 理由写得很清楚
+    (**没有任何一个 op 用这个字段名**,而它报在契约里会让作者写下
+    `{"who": "$target"}` 然后发现什么都没发生)。而**那一改一条闸都没留**:
+    把 `who` 加回去,全仓一条不红。
+
+    **一次靠读代码读出来的删除,下一个人靠读代码是读不回来的。**
+    判据在这儿写成机器能问的话:`TARGET_FIELDS` 里的每一格,
+    都得是**真有 op 拿它当字段名**的那种。
+    """
+    from anima_world.beats import OP_REQUIRED_FIELDS
+    from anima_world.person_verbs import TARGET_FIELDS
+
+    used = {f for fields in OP_REQUIRED_FIELDS.values() for f in fields}
+    for field in TARGET_FIELDS:
+        assert field in used, (
+            f"`{field}` 报在 `contract.person_verbs.target_fields` 里,"
+            f"而没有任何一个 op 拿它当字段名 —— 作者写 "
+            f'{{"{field}": "$target"}} 会一声不吭地什么都不发生。'
+            f"真有 op 读的那几格是 {sorted(used)}")
+
+
 def test_指到一个不存在的角色_也要拒():
     """⚠️ 这一格**插件那一层查不动**(它有意不认识世界),所以判断放在
     `person_verbs.effect_errors` 上,由认识世界的那一层传 `known_agents`。
