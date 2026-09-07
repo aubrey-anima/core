@@ -149,6 +149,12 @@ PLAYER_MOVE_EVENT_TYPES = (
     # ⚠️ 收尾那条 `entity_interaction` 照旧也算,而那不是重复计数:
     # 起头和做完是**他这一屏该读到的两件不同的事**。
     "entity_engage",
+    # 🆕 3.12.1(验收 B+C ②):**对人动词做成了也算他动了一次手。**
+    # 少了它,一次成功的「拜师」在主持人那一屏上什么都不算 —— 屏不换、
+    # 编剧不写、故事里没有。**一个做成了却没进故事的动作,和没做过一样。**
+    # ⚠️ 只收 `accepted`:被回的那一条走**白按那道水位**
+    # (世界里什么都没发生,编剧不许为它写一拍)。
+    "person_verb.accepted",
     "conversation",        # 一轮聊完(整场只在关闭时发这一条)
     "invitation_settled",  # 他答了一份邀请
     "player_action",       # 宿主自己报的那条
@@ -285,7 +291,20 @@ FREE_LABEL = "自己说点什么……"
 _KIND_RANK = {kind: i for i, kind in enumerate(OPTION_KINDS)}
 
 
-def interaction_line(verb_label: str, target_name: str) -> str:
+def _moved_something(payload: dict[str, Any]) -> bool:
+    """这一次交互**真的动了什么吗** —— 目标身上的量,或者他自己身上的量。
+
+    ⚠️ 两格都要看:一个只扣体力、不改目标的动词(`训练`)**是动了东西的**,
+    只看 `changed` 会把它错判成零效果。
+    """
+    for key in ("changed", "me_delta", "me_changed", "consumed", "spent"):
+        if payload.get(key):
+            return True
+    return False
+
+
+def interaction_line(verb_label: str, target_name: str, *,
+                     changed: bool = True) -> str:
     """「你<动词>了<东西>。」—— **一次交互给玩家的那一句模板人话**(3.10.0)。
 
     🔴 **一处写法,两个读者**:主持人那一屏的回顾(`recap_lines`)和叙事流里
@@ -295,6 +314,15 @@ def interaction_line(verb_label: str, target_name: str) -> str:
     verb, target = str(verb_label or "").strip(), str(target_name or "").strip()
     if not verb or not target:
         return ""
+    if not changed:
+        # 🔴 **零效果的动词照实说**(3.12.1,platform 从龙族审计带回)。
+        # 真站上那三发(`报到`/`拉票`/`训练`)`ok:true`、事件也在,而
+        # `changed` / `me_delta` **全是空的** —— 世界什么都没变。
+        # 说成「你报到了狮心会。」是**一句说大了的话**:玩家读到的是"成了",
+        # 而编剧读到的也是"成了",于是它顺着一件没发生的事往下写。
+        # ⚠️ 这**不是**把它判成失败 —— 他确实按了,这一屏照样要换
+        # (`ACTED_GRAINS` 那一格照旧推)。变的只有**这句话说得准不准**。
+        return f"你试着{verb}{target},没什么变化。"
     return f"你{verb}了{target}。"
 
 
@@ -376,7 +404,8 @@ def move_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
             verb = str(payload.get("verb_label") or payload.get("verb") or "")
             target = str(payload.get("target_name") or payload.get("target") or "")
             said = (engage_line(verb, target) if kind == "entity_engage"
-                    else interaction_line(verb, target))
+                    else interaction_line(verb, target,
+                                          changed=_moved_something(payload)))
             if said:
                 out.append(said)
             continue
@@ -537,7 +566,7 @@ def recap_lines(
                 continue
             verb = str(payload.get("verb_label") or payload.get("verb") or "")
             target = str(payload.get("target_name") or payload.get("target") or "")
-            said = interaction_line(verb, target)
+            said = interaction_line(verb, target, changed=_moved_something(payload))
             if said:
                 lines.append(said)
             continue

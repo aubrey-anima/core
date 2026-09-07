@@ -247,3 +247,59 @@ def test_没有本体层的世界_对人动词照样递得出(tmp_path):
         menu = world.player_options("p1")
         assert menu["blocked"] == "no_ontology", menu["blocked"]
         assert menu["person_verbs"], "本体层挡掉了一个不依赖本体层的能力"
+
+
+def test_人话那张脸上真的印得出对人动词(tmp_path):
+    """🔴 **验收 B+C ⑦**:引擎里有、`--json` 里有,而**人话那张脸一个字不印**。
+    这个仓库对这种形状有一句现成的话:**库里有而对方看不见,等于没有。**
+
+    ⚠️ **别数源码,去问屏幕。**
+    """
+    import contextlib
+    import io as _io
+
+    from anima_world.__main__ import contract_payload, main as _main
+
+    with _world(tmp_path, name="scr") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _main(["player", "options", "--player", "p1", "--world-id", "w"])
+    screen = buf.getvalue()
+    assert "拜师" in screen, f"屏上没有对人动词:{screen}"
+    assert "阿岚" in screen, screen
+    # 「可以」要说得出「问得出口 ≠ 她会答应」这条分界
+    assert "她可以不答应" in screen, screen
+    # 屏幕纪律:不许裸英文枚举、不许 Python 字面量、不许裸星号
+    assert "**" not in screen and "{'" not in screen, screen
+    for enum in ("required", "none", "accepted", "declined"):
+        assert enum not in screen, f"屏上印了裸枚举 {enum!r}:{screen}"
+    # 组外面那两格进契约(宿主要知道这一组是对谁的)
+    want = set(contract_payload()["person_verbs"]["options_group_keys"])
+    assert want == {"agent_id", "agent_name", "verbs"}, sorted(want)
+
+
+def test_没有本体层时_那张脸也不许早退(tmp_path):
+    """`blocked` 挡的只有「这儿有什么」—— 上一版在 `blocked` 那一行就
+    `return 0`,于是一个 `no_ontology` 的世界屏上连对人动词都看不到。"""
+    import contextlib
+    import io as _io
+
+    from _worldfile import open_world_at, write_seed_file
+    from anima_world.__main__ import main as _main
+
+    seed = {**_BARE, "plugins": [dict(_MENPAI)]}
+    path = write_seed_file(tmp_path / "no2.cyberworld", seed)
+    with open_world_at(str(tmp_path / "no2.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert world.player_options("p1")["blocked"] == "no_ontology"
+
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _main(["player", "options", "--player", "p1", "--world-id", "w"])
+    screen = buf.getvalue()
+    assert "拜师" in screen, f"blocked 那一行把不相干的东西也挡掉了:{screen}"

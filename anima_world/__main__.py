@@ -3074,6 +3074,11 @@ def build_serve_scheduler(
         }))
     # The planner needs the registered roster (chat targets) and the duty trees
     # (free windows), so it is attached only once both exist.
+    # 🔴 **把降级档记在世界上**(3.12.1,验收 B+C ⑥)。
+    # `World.__init__` 造聊天与背景槽那两个客户端时要知道这一趟是不是 `--llm mock`
+    # —— 从前它不知道,于是降级档只降到规划器,主持人那一屏和编剧那一次照样出网。
+    # ⚠️ 这不是"第二份真相":它记的是**这一趟的构造参数**,不是从别处派生的值。
+    scheduler.force_mock_llm = bool(force_mock_llm)
     scheduler.set_planner(
         _build_planner(
             scheduler, config_store, prompt_store, bt_store, location_store, memory_store,
@@ -8619,6 +8624,33 @@ _BLOCKED_SAYS = {
 }
 
 
+def _print_person_verbs(menu: dict[str, Any]) -> None:
+    """这儿站着的人,每人能被做点什么(3.12.1,验收 B+C ⑦)。
+
+    🔴 **上一版这一屏一个字都不印** —— 引擎里有、`--json` 里有,而**人话那张脸
+    看不见**。这个仓库对这种形状有一句现成的话:*库里有而对方看不见,等于没有*。
+
+    ⚠️ 「可以」的意思是**问得出口**,不是她会答应 —— 措辞要说得出这条分界,
+    否则玩家点下去被回一句,会以为是 bug。
+    """
+    rows = menu.get("person_verbs") or []
+    if not rows:
+        return
+    print("  这儿的人:")
+    for row in rows:
+        who = row.get("agent_name") or row.get("agent_id") or "?"
+        print(f"  [{row.get('agent_id')}] {who}")
+        for verb in row.get("verbs") or []:
+            if verb.get("available"):
+                mark = "可以开口问"
+                tail = ""
+            else:
+                mark = f"不行/{verb.get('reason') or ''}"
+                tail = f" —— {verb['refusal']}" if verb.get("refusal") else ""
+            need = "" if verb.get("consent_mode") == "none" else "(她可以不答应)"
+            print(f"      · {verb.get('label') or verb.get('verb')} {mark}{need}{tail}")
+
+
 def _print_player_options(args: argparse.Namespace, menu: dict[str, Any]) -> int:
     """`player options` 的两张脸。**`--json` 才是契约**,渲染是赠品。"""
     if args.as_json:
@@ -8626,11 +8658,18 @@ def _print_player_options(args: argparse.Namespace, menu: dict[str, Any]) -> int
         return 0
     where = menu["location_name"] or menu["location"] or "?"
     print(f"[player] {menu['player_id']} 在 {where}:")
+    # 🔴 **`blocked` 挡的只有「这儿有什么」**(3.12.1,验收 B+C ⑦)。
+    # 上一版在这儿 `return 0` —— 于是一个 `no_ontology` 的世界,
+    # 屏上连**对人动词**都看不到,而那一族根本不走 affordance。
+    # 这和 `player_options` 里 `own` / `person_verbs` 两格**不被 `blocked` 挡住**
+    # 是同一条:挡错了范围的闸,和没有那道闸一样,只是更难查。
     if menu["blocked"]:
         print(f"  —— {_BLOCKED_SAYS.get(menu['blocked'], menu['blocked'])}")
-        return 0
-    if not menu["targets"]:
+    elif not menu["targets"]:
         print("  —— 这儿没有能做点什么的东西")
+    _print_person_verbs(menu)
+    if menu["blocked"]:
+        return 0
     for row in menu["targets"]:
         gloss = f"({row['gloss']})" if row["gloss"] else ""
         print(f"  [{row['id']}] {row['name']}{gloss}")
@@ -9407,7 +9446,9 @@ def contract_payload() -> dict[str, Any]:
             "story_keys": ["player_id", "known", "tension", "tension_text", "story_text",
                            "closed_threads",
                            "phase", "phase_text", "threads", "moves", "recent_log"],
-            "thread_text_keys": ["phase_text", "due_text"],
+            # 🆕 3.12.1(验收 B+C ⑤):`outcome_text` 也是线上那一族人话
+            # —— 收掉的线靠它说「怎么收的」,漏报这一格,宿主就不知道它存在。
+            "thread_text_keys": ["phase_text", "due_text", "outcome_text"],
             "config_keys": ["director.enabled", "director.max_per_player_per_hour",
                             "director.pin_ticks", "director.due_hours"],
             "sources": list(DIRECTOR_SOURCES),
@@ -9465,8 +9506,9 @@ def contract_payload() -> dict[str, Any]:
             "bands": [list(b) for b in ROLL_DEFAULT_BANDS],
             "seed_coordinates": ["world_id", "tick", "actor", "verb", "nonce"],
             "event": "roll",
-            "payload_keys": ["actor", "verb", "player_id",
-                             "faces", "result", "band", "seed"],
+            # 🔴 **从 `EVENT_PAYLOAD_KEYS` 生成,不手抄**(3.12.1,验收 A ③):
+            # 手抄那一版删掉 `band` 之后**全量照样绿** —— 一张没人验的手抄表。
+            "payload_keys": list(EVENT_PAYLOAD_KEYS["roll"]),
             "used_by": ["confront"],
             "gloss": (
                 "**一次判定掷的那个点**。`result` 是 1..`faces`,`band` 是它落在"
@@ -9503,8 +9545,22 @@ def contract_payload() -> dict[str, Any]:
             "options_field": "person_verbs",
             "options_keys": ["verb", "label", "consent_mode", "available",
                              "reason", "refusal"],
+            # ⚠️ **每组外面那两格也要报**(3.12.1,验收 B+C ⑦):
+            # 少了它们,宿主知道每个动词长什么样,却不知道**这一组是对谁的**。
+            "options_group_keys": ["agent_id", "agent_name", "verbs"],
             "declared_method": "person_verbs",
-            "host_option_kind": "verb",
+            # 🔴 **说真话:主持人那一屏今天不递对人动词**(3.12.1,验收 B+C ⑦)。
+            # 上一版这一格写着 `"verb"`,像是在说"host_turn 的 options 里会有
+            # 一项 kind=verb 的对人动词"—— **而它从来没递过**。
+            # 一句比实现大的契约,会让宿主去找一个不存在的分支。
+            # 玩家那扇门是 `player_options().person_verbs`(见上面三格)。
+            "host_option_kind": None,
+            "host_option_note": (
+                "主持人那一屏**今天不递对人动词** —— 它只递 `player_options` "
+                "那几族(动词 / 人 / travel / free)。要画对人动词,读 "
+                "`player_options().person_verbs`。⚠️ 这一格从前写着 `\"verb\"`,"
+                "而那是一句比实现大的话。"
+            ),
             "gloss": (
                 "**玩家对一个人做一件事**(拜师 / 决斗 / 说服)。"
                 "🔴 **永不走 affordance** —— `interact` 的定义是「一个人、一样东西、"

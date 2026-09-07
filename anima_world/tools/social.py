@@ -376,4 +376,14 @@ def person_verb(ctx: ToolContext, params: dict) -> ToolResult:
         raise ToolCallError(str(got["error"]))
     # 🔴 **被回了那一句是她的话,进 `text`**(纪律 1);成了则一个字不编 ——
     # 「做成了什么」由 `effects` 落的那几条事件自己说。
-    return ToolResult(text=str(got.get("said") or ""), detail=dict(got))
+    #
+    # 🔴 **顶层 `ok` 要跟着 `detail.ok` 走**(3.12.1,验收 B+C ②)。
+    # 上一版用 `ToolResult` 的默认值(`ok=True`),于是**她不肯时顶层照样是
+    # `ok: true`**,拒绝只躺在 `detail` 里 —— 而白按那道水位
+    # (`_note_player_refusal`)只看顶层。下场:
+    # **点两次「拜师」被回两次,两屏逐字不变** —— 正是 3.12.0 那条裁决要杀的东西,
+    # 而那条裁决的用例是拿"在忙时点长动词"验的,**没验这条路**,所以它绿着。
+    # ⚠️ 真站第六轮那三发 `/tool` 报 `200 accepted`,答案就在这儿:
+    # **`200` 是 HTTP,`ok:true` 是这一行写错的** —— 那个动作根本没做成。
+    return ToolResult(ok=bool(got.get("ok")),
+                      text=str(got.get("said") or ""), detail=dict(got))

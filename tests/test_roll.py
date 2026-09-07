@@ -142,3 +142,21 @@ def test_契约报的载荷格_一格不少地真出现在事件里(tmp_path):
         rolls = [e["payload"] for e in world.history(kind="roll")["events"]]
     assert rolls, "摊牌了而一个点都没掷"
     assert want <= set(rolls[-1]), f"契约说有 {sorted(want)},事件里是 {sorted(rolls[-1])}"
+
+
+def test_roll不许混进表达式那张名表():
+    """🟡 **验收 A ⑥ 的反向闸**:`roll` 是**判定原语**,不是作者写得进表达式的
+    一个函数。混进 `expressions` 那套(那是**算术**,而且是安全边界)的下场:
+    作者在一条规律里写 `roll(...)`,而**同一份日志重放两遍会得到两副骰子** ——
+    「对账即重放」当场破。
+    """
+    from anima_world import expressions
+
+    names = set()
+    for attr in ("FUNCTIONS", "ALLOWED_FUNCTIONS", "SAFE_FUNCTIONS", "FUNCS"):
+        table = getattr(expressions, attr, None)
+        if isinstance(table, dict):
+            names |= set(table)
+        elif isinstance(table, (set, tuple, list)):
+            names |= set(table)
+    assert "roll" not in names, f"`roll` 混进了表达式名表:{sorted(names)}"
