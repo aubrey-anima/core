@@ -75,3 +75,66 @@ def test_撞见那几种事_和引擎那张表逐格相等():
     assert int(said.group(1)) == CROSSING_LIMIT, (
         f"回执写着今天 {said.group(1)} 行,而引擎是 {CROSSING_LIMIT} —— "
         "**一个写在文档里的数,是一个迟早会烂的判据**,所以它必须有闸")
+
+
+def test_解锁那两条路_和契约逐格相等():
+    """🔴 **A 末轮 ②**:这张表 3.13.0 刚从三条收到两条,而它**零闸** ——
+    改回三条,99 条用例一条不红。而 tool 的第 3 周底稿正照着它写。
+    """
+    from anima_world.clues import UNLOCK_PATHS
+
+    text = _text()
+    head = "### (c) 🔴 解锁**只有两条路** —— 而这两条都真的通"
+    assert head in text, "§3.71(c) 那个标题换了写法 —— 这道闸靠它定位"
+    # 标题之后第三段就是那张表(第一段是空的,第二段是「`…unlock_paths`:」)
+    block = text.split(head, 1)[1].split("\n\n", 3)[2]
+    listed = re.findall(r"`([a-z_]+)`(?:\(|(?:（))", block)
+    assert listed == list(UNLOCK_PATHS), (
+        f"回执那几条说 {listed},而引擎那张表是 {list(UNLOCK_PATHS)} —— "
+        "多一条就是让人去写一条走不通的路,少一条就是让他绕远")
+
+
+def test_出厂公共边那份名单_和引擎逐格相等():
+    """`contract.plugins.shared_edge_types`。**多抄一条最贵**:
+    作者照它写下一条 `link`,而加载期当场拒 —— 一盏假红灯。
+    """
+    from anima_world.plugins import shared_edge_types
+
+    text = _text()
+    found = re.search(
+        r"`contract\.plugins\.shared_edge_types` 那几条\(([^)]*)\)", text)
+    assert found, "「`contract.plugins.shared_edge_types` 那几条(…)」那句换了写法"
+    listed = sorted(re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", found.group(1)))
+    assert listed == sorted(shared_edge_types()), (
+        f"回执那几条说 {listed},而引擎是 {sorted(shared_edge_types())}")
+
+
+def test_出厂插件那份id名单_和引擎逐格相等():
+    """§3.71(c-2) 第 1 条那份「别拿来当自己插件 id」的名单。
+
+    ⚠️ **抄错的方向两种都疼**:少写一个,作者拿它当 id 而加载期当场拒(他不知道
+    为什么);多写一个,他绕开一个其实能用的名字。
+    """
+    from anima_world.__main__ import FACTORY_PLUGINS
+
+    text = _text()
+    found = re.search(r"别给自己的插件起名叫([^—]*)——", text)
+    assert found, "§3.71(c-2) 那句「别给自己的插件起名叫 …」换了写法"
+    listed = sorted(re.findall(r"`([a-z_]+)`", found.group(1)))
+    assert listed == sorted(FACTORY_PLUGINS), (
+        f"回执那份名单说 {listed},而出厂插件是 {sorted(FACTORY_PLUGINS)}")
+
+
+def test_玩家节点那个形状_和引擎逐字相等():
+    """🔴 图上玩家**只有一个形状**,而这个仓库为「写的人和读的人各写各的」
+    在同一版里红过一次(A 整体 ②)。回执里那一行要是抄成裸 `player:<id>`,
+    下一个照它写 `link` 的人会连出一条**谁都读不到**的边。
+    """
+    from anima_world.plugins import EDGE_NODE_ID_FORMS
+
+    want = EDGE_NODE_ID_FORMS["player"].replace("<player_id>", "<id>")
+    text = _text()
+    found = re.search(r"玩家做时它是\s*`([^`]+)`", text)
+    assert found, "§3.71(b-2) 那句「玩家做时它是 `…`」换了写法"
+    assert found.group(1) == want, (
+        f"回执写着 `{found.group(1)}`,而图上玩家的形状是 `{want}`")
