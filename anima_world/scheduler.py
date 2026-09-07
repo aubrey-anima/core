@@ -31,7 +31,9 @@ from anima_world.beats import (
 from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.chat_service import DEFAULT_ADDRESS
 from anima_world.events import EventLog
-from anima_world.host import engage_line, interaction_line
+from anima_world.host import (
+    engage_line, hail_fallback_line, interaction_line,
+)
 from anima_world.expressions import ExpressionError
 from anima_world import memory_store as memory_store_mod
 from anima_world.narrative import NarrativeProvider
@@ -4823,7 +4825,12 @@ class Scheduler:
                 **({"source": source} if source else {}),
                 # 作者写了就用他的,没写就让 `chat_open` 现生成一句
                 # (**引擎不在这里编台词**:它手上只有 op 名)。
-                **({"line": str(op["line"])} if str(op.get("line") or "").strip() else {}),
+                # 🔴 **这一格永远非空**(3.13.0,C 真站第七轮 ③):
+                # 拍/编剧写了台词就用它,没写就用兜底那一句 ——
+                # 上一版是"没写就不带这一格",而站点那边读出来就是空串。
+                "line": (str(op["line"]).strip()
+                         if str(op.get("line") or "").strip()
+                         else hail_fallback_line(int(self.clock))),
                 "opening": True,
             },
         }]
@@ -6954,6 +6961,8 @@ class Scheduler:
                     # 这个字段把它显示成"她回来了"而不是"她来打招呼"。
                     "reason": row.get("kind") or "delayed_reply",
                     "note": row.get("reason"),
+                    # 三条发射点里的第三条 —— 同一条纪律:**开口就得有话说**。
+                    "line": hail_fallback_line(int(self.clock)),
                 },
             })
 
@@ -7057,6 +7066,14 @@ class Scheduler:
                    if str(info.get("display_name") or "").strip() else {}),
                     "location": here,
                     "location_name": self.place_name(here or ""),
+                    # 🔴 **她开口就得有话说**(3.13.0,C 真站第七轮 ③)。
+                    # 这条路从前**根本不填 `line`** —— 于是站点 `/contacts`
+                    # 上那条是空的:**一条「有人找过你」却一个字都没有的敲门,
+                    # 和没有那条敲门是同一件事**,而它还占掉了她今天那一次
+                    # 开口的额度(`claim_hail`)。
+                    # 兜底句一处生成、按次数轮着说(不掷骰子:同一份日志重放
+                    # 两遍要得到同一句)。
+                    "line": hail_fallback_line(int(self.clock)),
                 },
             })
 

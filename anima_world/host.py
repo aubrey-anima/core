@@ -452,6 +452,29 @@ def crossing_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
     return unique
 
 
+#: 她主动开口、而**没有一句现成台词**时说的那几句(3.13.0,C 真站第七轮 ③)。
+#:
+#: 🔴 真站上 `/contacts[0]` 那条(昂热)`text` 是**空串** —— 产地是
+#: `_maybe_hail_player`(她闲着想起你那条路):它**根本没填 `line`**。
+#: 编剧那条和约好回话那条都带话,只有这一条不带。
+#: **一条"有人找过你"却一个字都没有的敲门,和没有那条敲门是同一件事** ——
+#: 而它还占掉了她今天那一次开口的额度(`claim_hail`)。
+#:
+#: ⚠️ **按次数轮着说,不掷骰子**:同一份日志重放两遍要得到同一句话;
+#: 而一句**永远不变**的台词会让她显得像个推送(邀请那一层的原话)。
+#: ⚠️ 这几句是**她说的话**,不是旁白 —— 和 `mock_opening` 那条分界逐字同一条。
+HAIL_FALLBACK_LINES = (
+    "在忙吗?",
+    "正好碰上你。",
+    "哎,你也在。",
+)
+
+
+def hail_fallback_line(seq: int = 0) -> str:
+    """她开口那一句的兜底 —— **一处生成,三条发射点共用**。"""
+    return HAIL_FALLBACK_LINES[max(0, int(seq)) % len(HAIL_FALLBACK_LINES)]
+
+
 def chat_line(agent_name: str) -> str:
     """「你刚跟<她>说过话。」—— **一处措辞,两个读者。**
 

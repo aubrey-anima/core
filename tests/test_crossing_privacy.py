@@ -496,3 +496,51 @@ def test_撞见那几行_去重且截得住_而且截了要吭声():
                            names={"player:p1": "楚子航"})
     assert len(got) == H.CROSSING_LIMIT + 1, got
     assert "没细说" in got[-1], f"截了却不吭声:{got[-1]}"
+
+
+# ── 她开口就得有话说(3.13.0,C 真站第七轮 ③)────────────────────────────
+
+def test_三条发射点_没有一条发得出空话的敲门(tmp_path):
+    """🔴 **C 真站第七轮 ③**:真站 `/contacts[0]`(昂热那条)`text` 是**空串**。
+
+    产地是 `_maybe_hail_player`(她闲着想起你那条路)——它**根本不填 `line`**;
+    编剧那条和约好回话那条也各有各的空法。
+    **一条「有人找过你」却一个字都没有的敲门,和没有那条敲门是同一件事** ——
+    而它还占掉了她今天那一次开口的额度(`claim_hail`)。
+
+    ⚠️ 判据**扫的是真发出来的事件**,不是数源码:三条发射点哪条漏了都要红。
+    """
+    from anima_world import host as H
+
+    with open_world_at(tmp_path / "hail.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe", display_name="路明非")
+        world.tick(3)
+        # ① 编剧那条(拍/编剧写了台词)
+        world._director_apply(
+            "p1", {"move": "approach", "who": agent, "line": "跟我来一趟",
+                   "why": "推一把", "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.3, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=0, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        # ② 编剧那条但**没写台词**
+        world.scheduler._beat_hail({"op": "hail", "agent_id": agent,
+                                    "target": "player:p1", "source": "director"})
+        # ③ 她闲着想起你那条(直接点那个方法,绕开频率闸)
+        brain = world.scheduler.agents.get(agent)
+        if brain is not None:
+            world.scheduler._maybe_hail_player(brain.agent)
+        world.tick(2)
+        hails = [e for e in world.events() if e["type"] == "agent_hail"]
+
+    assert len(hails) >= 2, f"夹具只发出了 {len(hails)} 条 hail"
+    for row in hails:
+        said = str((row.get("payload") or {}).get("line") or "").strip()
+        assert said, (
+            f"这条敲门一个字都没有:{row['payload']} —— "
+            "站点那边读出来就是空串,而它占掉了她今天那一次开口")
+    # 兜底那几句**按次数轮着说**,不是一句永远不变的台词
+    assert len({H.hail_fallback_line(i) for i in range(len(H.HAIL_FALLBACK_LINES))}) \
+        == len(H.HAIL_FALLBACK_LINES)
+    assert H.hail_fallback_line(0) == H.hail_fallback_line(
+        len(H.HAIL_FALLBACK_LINES)), "同一份日志重放两遍要得到同一句"
