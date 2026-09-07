@@ -73,6 +73,71 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.12.2] —— 三道从没红过的闸 (2026-09-07)
+
+A 复验 3.12.1 判 PASS-有保留,六条尾巴。**三条是闸自己从没红过** ——
+而它们全是我上一版**为了治别的病刚加的**。
+
+### 🔴 一道 `getattr` 找不到表的闸,找不到时不会报错,只会永远同意
+
+`test_roll.py` 那道「`roll` 不许混进表达式名表」找的是
+`FUNCTIONS`/`ALLOWED_FUNCTIONS`/`SAFE_FUNCTIONS`/`FUNCS` —— **四个名字在
+`expressions.py` 里一个都不存在**(真表是 `_FUNCTIONS` + `DICE_NAME`),
+于是 `names` 恒为空、断言恒真。A 把 `roll` 真塞进 `_FUNCTIONS`,11 条照样绿。
+改成直接盯真表,并加一条**读对了表的正判据**(`min`/`clamp` 在里面)——
+**只断"不在"的闸,读空了也算过。**
+
+### 🔴 一句承诺了一道不存在的闸的注释
+
+`projection.py` 收线那一格写着「值只能从 `OUTCOME_LABELS` 里取 —— 闸在
+`test_director_world.py`」,而**那道闸不存在**:把值改回 `"called_back"`,
+四个测试文件 122 条全绿。**一句承诺了一道不存在的闸的注释,比没有注释更坏** ——
+它让下一个人以为改坏了会有人喊。现在那道闸真的有了,而且同时断
+**那句话带不带得出结果那半**。
+
+### 🔴 同一条收掉的线,两条路两句话
+
+`closed_threads[].outcome_text` 读**线上存的** stake,而
+`callback_settled.outcome_text` 读**这一拍 decision 的** stake ——
+而 `callback` 本来就不带:
+
+    「「那本旧相册」,押着她的信任,这条线收了。」   ← 故事页
+    「「那本旧相册」,这条线收了。」                 ← 事件
+
+**同一件事两处各说一句,而少的那半没有一处会报错。**
+两处现在共用 `director.settle_view`,分界写死成一句话:
+**赌注是线上的那一笔**,这一拍自己的 `stake` 只在**没有线**时才算数。
+
+### 🟠 降级仍然是静默的
+
+无 stake 的 `confront` 降级时:`director_log.source` 照旧 `llm`、
+`refused_by` 空、而那句 log **写死了 `complicate`** —— 运维 grep `confront`
+什么都搜不到。**摊牌那一拍从来没真的发生过,而三处读数都说一切正常。**
+现在 `source` 记 `refused`、`refused_by` 写 `stake missing:<真实 move>`、
+log 句带真实 move。
+⚠️ 那条用例**没有做成端到端**,而理由写在用例里:橱窗世界的
+`pacing.ceiling` 是 0.6,`complicate`/`confront` 要的 gap 在它的 ladder 上
+**永远不出现**(实测八轮,每轮 offered 最多到 `reveal`)——
+**拿一个到不了的路径当端到端用例,就是又造一道永远绿的闸。**
+判断那一半钉在纯函数上(含 `confront`),记账那一半直接喂一个降级过的决定。
+
+### 🟡 其余两条
+
+- `grace_hours` 读坏退回默认值**没有闸**(改回 `grace = 0` 照样 93 条全绿)。
+  补用例,而且它**绕过 `config_set`**:那扇门自己会拒 —— 这一条要验的是
+  「**它已经躺在库里**了怎么办」(手改过的库 / 老世界文件 / 半截的写入),
+  **挡在门口的闸救不了已经进来的那一格**。
+- FOR-STUDIO §3.69(d) 写「十六段齐」,而代码报的是**三张表之和**
+  (`test_packs.py` 自己断言 19)。**这份文档不再写那个数** ——
+  **一个写在文档里的数,是一个迟早会烂的判据**;要数就敲 `contract --json`。
+
+### Known
+
+- 契约面**只动了值不动形状**:`director_log.source` 现在会出现 `refused`
+  这个**已有**的取值(闭集没加新值),`refused_by` 会出现
+  `stake missing:<move>` 这种字符串。消费方按闭集写的分支不用改。
+- `.storage` 段一个字没动;作者层 schema 未动。
+
 ## [3.12.1] —— 老板那句「输了真掉东西」两个方向各错一次 (2026-09-06)
 
 A 判 3.12.0 FAIL,B+C 两条 🔴 落在**我自报的 release 门槛上,而各有绿用例盖住**。

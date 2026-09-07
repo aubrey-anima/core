@@ -152,11 +152,12 @@ def test_roll不许混进表达式那张名表():
     """
     from anima_world import expressions
 
-    names = set()
-    for attr in ("FUNCTIONS", "ALLOWED_FUNCTIONS", "SAFE_FUNCTIONS", "FUNCS"):
-        table = getattr(expressions, attr, None)
-        if isinstance(table, dict):
-            names |= set(table)
-        elif isinstance(table, (set, tuple, list)):
-            names |= set(table)
+    # 🔴 **盯真表,不猜名字**(3.12.2,验收 A ①)。
+    # 上一版找的是 `FUNCTIONS` / `ALLOWED_FUNCTIONS` / `SAFE_FUNCTIONS` / `FUNCS`
+    # —— **四个名字一个都不存在**,于是 `names` 恒为空、断言恒真。
+    # A 把 `roll` 真塞进 `_FUNCTIONS`,这条照样绿。
+    # **一道靠 `getattr(..., None)` 找表的闸,找不到表时不会报错,只会永远同意。**
+    names = set(expressions._FUNCTIONS) | {expressions.DICE_NAME}
+    assert names, "表达式那张函数表读空了 —— 这道闸自己瞎了"
+    assert "min" in names and "clamp" in names, sorted(names)   # 读对了表的正判据
     assert "roll" not in names, f"`roll` 混进了表达式名表:{sorted(names)}"

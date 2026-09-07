@@ -350,6 +350,35 @@ def settle_text(move: str, *, stake: dict[str, Any] | None,
     return ",".join(parts) + "。" if parts else ""
 
 
+def settle_view(move: str, *, thread: dict[str, Any] | None,
+                stake: dict[str, Any] | None, outcome: str) -> dict[str, Any]:
+    """一次结算**给玩家看的那几格** —— 🔴 **两条路共用这一个函数**。
+
+    3.12.1 之前那两条路各算各的,于是**同一条收掉的线有两句话**
+    (3.12.2,验收 A ③):
+
+    · `player_story().closed_threads[].outcome_text` 读**线上存的** stake →
+      「「那本旧相册」,押着她的信任,这条线收了。」
+    · `callback_settled.outcome_text` 读**这一拍 decision 的** stake ——
+      而 `callback` 本来就不带 → 「「那本旧相册」,这条线收了。」
+
+    **同一件事,两处各说一句,而少的那半没有一处会报错。**
+
+    分界写死成一句话:**赌注是线上的那一笔**(`thread.stake`),
+    这一拍自己的 `stake` 只在**没有线**时才算数(`confront` 可以不挂线)。
+    """
+    on_thread = dict(thread or {})
+    used = on_thread.get("stake") or stake or None
+    promise = str(on_thread.get("promise") or "")
+    return {
+        "stake": dict(used) if used else None,
+        "stake_text": stake_text(used),
+        "outcome": str(outcome or ""),
+        "outcome_text": settle_text(move, stake=used, outcome=outcome,
+                                    promise=promise),
+    }
+
+
 def story_text(tension: float, phase: str) -> str:
     """这条线此刻读作**一句话** —— 不是两句(3.11.3,验收 A ⑤ / B+C ④)。
 
@@ -774,15 +803,29 @@ def parse_decision(text: str, *, allowed: Sequence[str],
             amount = 0.0
         stake_out = {"kind": str(stake["kind"]), "amount": amount,
                      "what": str(stake.get("what") or "")[:12]}
+    downgraded_from = ""
     if move in MOVES_REQUIRING_STAKE and stake_out is None:
         # **降级而不是丢弃**:一句写好了的台词不该因为少一格就整条作废,
         # 但「添乱」这个名分得收回来 —— 没有赌注的添乱只是一句吓唬。
-        logger.info("编剧写了 complicate 却没写 stake —— 降成 reveal")
+        #
+        # 🔴 **降级要留痕,而且那句 log 得说真话**(3.12.2,验收 A ④)。
+        # 上一版只落一条 `logger.info`,而且**句子里写死了 `complicate`** ——
+        # 于是一次 `confront` 被降级时:`director_log.source` 照旧 `llm`、
+        # `refused_by` 是空的、日志里 grep 不到 `confront`。
+        # **摊牌那一拍从来没真的发生过,而三处读数都说一切正常。**
+        downgraded_from = move
+        logger.info("编剧写了 %s 却没写 stake —— 降成 %s",
+                    move, "reveal" if "reveal" in allowed else "approach")
         move = "reveal" if "reveal" in allowed else "approach"
         if move not in allowed:
             return None
     return {
         "move": move, "who": who,
+        # 🔴 降级过的那一拍**不许记成 `llm`**:模型答的那个动作没被采纳。
+        # `refused_by` 说清是哪一格缺了,运维 grep 得到。
+        **({"source": "refused",
+            "refused_by": f"stake missing:{downgraded_from}"}
+           if downgraded_from else {}),
         "line": str(data.get("line") or "").strip()[:60],
         "why": str(data.get("why") or "").strip()[:80],
         "promise": str(data.get("promise") or "").strip()[:20],

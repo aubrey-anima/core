@@ -3199,9 +3199,9 @@ class World:
             thread["phase_text"] = dmod.PHASE_LABELS.get(
                 str(thread.get("phase") or ""), "")
             thread["due_text"] = ""
-            thread["outcome_text"] = dmod.settle_text(
-                "callback", stake=thread.get("stake"), outcome=got,
-                promise=str(thread.get("promise") or ""))
+            # 🔴 **和 `*_settled` 那条路共用同一个纯函数**(3.12.2,验收 A ③)。
+            thread["outcome_text"] = dmod.settle_view(
+                "callback", thread=thread, stake=None, outcome=got)["outcome_text"]
         tension = dmod.tension_now(float(row.get("tension") or 0.0),
                                    int(row.get("tension_tick") or 0), tick,
                                    ticks_per_hour)
@@ -9472,7 +9472,10 @@ class World:
         line = str(decision.get("line") or "")
         holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
         ops: list[dict[str, Any]] = []
-        refused = ""
+        # 🔴 **降级过的那一拍带着自己的 `refused_by` 进来**(3.12.2,验收 A ④):
+        # `parse_decision` 把「模型答的动作没被采纳」记在决定上,这一层照收 ——
+        # 各写一遍的话,`director_log` 那一格会和纯函数说两句话。
+        refused = str(decision.get("refused_by") or "")
         rolled: dict[str, Any] | None = None
         outcome = ""
 
@@ -9597,12 +9600,16 @@ class World:
                         "with": target_id,
                         "with_name": (self.scheduler.hail_agent_name(target_id)
                                       if target_id else ""),
-                        "stake": dict(stake) if stake else None,
-                        "stake_text": dmod.stake_text(stake),
-                        "outcome": settled,
-                        "outcome_text": dmod.settle_text(
-                            move, stake=stake, outcome=settled,
-                            promise=str(promise or (thread or {}).get("promise") or "")),
+                        # 🔴 **和 `closed_threads` 那条路共用同一个纯函数**
+                        # (3.12.2,验收 A ③):从前两处各算各的,于是同一条
+                        # 收掉的线有两句话 —— 这一处读这一拍的 stake,而
+                        # `callback` 本来就不带,于是「押了什么」那半没了。
+                        **dmod.settle_view(
+                            move,
+                            thread=({**(thread or {}), "promise": (
+                                promise or (thread or {}).get("promise") or "")}
+                                if (thread or promise) else None),
+                            stake=stake, outcome=settled),
                         "tick": int(tick),
                     },
                 })
