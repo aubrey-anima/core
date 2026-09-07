@@ -138,3 +138,26 @@ def test_玩家节点那个形状_和引擎逐字相等():
     assert found, "§3.71(b-2) 那句「玩家做时它是 `…`」换了写法"
     assert found.group(1) == want, (
         f"回执写着 `{found.group(1)}`,而图上玩家的形状是 `{want}`")
+
+
+def test_公共边上放开哪几个op_和引擎逐格相等():
+    """🔴 又一张手抄表(3.13.0,A 末轮 ④)—— **抄错的方向两种都疼**:
+    多抄一个,作者照它写下一条加载期被拒的动词(假红灯);
+    少抄一个,他绕开一条其实写得出的路。
+    """
+    from anima_world.plugins import _shared_edge_ops
+
+    text = _text()
+    real = _shared_edge_ops()
+    found = re.search(
+        r"`contract\.plugins\.shared_edge_ops` 判:\n\n(.+?)\n\n", text, re.S)
+    assert found, "§3.71(b-2) 那张 `shared_edge_ops` 表换了写法 —— 这道闸靠它定位"
+    listed: dict[str, list[str]] = {}
+    for line in found.group(1).splitlines():
+        row = re.match(r"\s*`([A-Za-z_][A-Za-z0-9_.]*)`\s*→\s*(.+)", line.strip())
+        if row:
+            listed[row.group(1)] = re.findall(r"[a-z]+", row.group(2).replace(
+                "**只有", "").replace("**", ""))
+    assert listed == {k: list(v) for k, v in real.items()}, (
+        f"回执那张表说 {listed},而引擎是 {{k: list(v) for k, v in real.items()}} —— "
+        f"真值:{ {k: list(v) for k, v in real.items()} }")

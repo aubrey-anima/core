@@ -122,3 +122,34 @@ def test_声望那句人话_引擎给_而分档表只有一份(tmp_path):
         said = world.player_faction("p1")["text"]
 
     assert "狮心会" in said and "生面孔" in said, said
+
+
+def test_作者写不出叛出改投_而那不是漏了(tmp_path):
+    """🔴 **A 末轮 ④,调度台裁**:3.13.0 把出厂的边放开给所有插件连之后,
+    **一条作者写的 `unlink` 就能让人叛出改投** —— 而「站了就回不去」是
+    3c §2.10 ④ 的**产品裁决**,不该由一条动词推翻。
+
+    ⚠️ 判据是**两头都验**:`link` 那一刻内核拒第二次站队(上面那条),
+    而这一条保证**没有第二条路把第一条边摘掉**。少了任何一半,那句话都不成立。
+    """
+    from anima_world.__main__ import contract_payload, world_plugin_errors
+
+    bad = {"id": "menpai2", "version": "1.0.0", "label": "门派",
+           "verbs": {"叛出": {"target": "group", "label": "叛出",
+                             "effects": [{"unlink": {"type": "factions.member_of",
+                                                     "from": "self",
+                                                     "to": "target"}}]}}}
+    said = world_plugin_errors({"plugins": [bad]})
+    assert any("关着的" in line for line in said), (
+        f"作者写得出「叛出」——「站了就回不去」被一条动词绕开了:{said}")
+    # 而线索那条边三个 op 全开(它没有这条产品裁决)
+    ok = {**bad, "verbs": {"忘掉": {"target": "group", "label": "忘掉",
+                                   "effects": [{"unlink": {"type": "clues.knows",
+                                                           "from": "self",
+                                                           "to": "target"}}]}}}
+    assert world_plugin_errors({"plugins": [ok], "kinds": [{"id": "group"}]}) == [], (
+        "把线索那条边也一起关了 —— 拦过头和漏掉一样坏")
+    seg = contract_payload()["plugins"]["shared_edge_ops"]
+    assert seg["factions.member_of"] == ["link"], seg
+    assert "leave" in contract_payload()["factions"]["deferred"], (
+        "关掉一条路而不说「放人走去哪儿找」,下一个人会以为是漏了")

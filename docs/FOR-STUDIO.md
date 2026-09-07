@@ -6826,6 +6826,15 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
                                              "from": "self", "to": "target"}}]}}}
 
 ⚠️ 放开的**只有出厂那几条** —— 另一个作者插件的边照旧连不动(它归它自己管)。
+🔴 **而不是每条边上三个 op 全开** —— 照 `contract.plugins.shared_edge_ops` 判:
+
+    `clues.knows` → link · unlink · transfer
+    `factions.member_of` → **只有 link**
+
+`factions.member_of` 上 `unlink` / `transfer` 是**关着的**:「站了就回不去」是
+产品裁决(3c §2.10 ④),而放开公共边之后**一条 `unlink` 就能让人叛出改投** ——
+一条动词不该推翻一条产品裁决。写了它加载期当场拒。
+**放人走这件事在批 4**(`contract.factions.deferred` 里的 `leave`)—— 别自己绕。
 ⚠️ `from: "self"` 在动词那条路上就是**做这件事的人**;玩家做时它是
 `agent:player:<id>`,**图上玩家只有这一个形状**(`plugins.edge_node_id_forms`)。
 

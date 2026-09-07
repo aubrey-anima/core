@@ -2174,14 +2174,30 @@ def shared_edge_types() -> frozenset[str]:
     那条边不在 `edge_types` 里,`apply_edge_effect` 当场不连并留一句 warning。
     在这儿拒的话,一份**开得起来**的世界会被离线那两扇门报成红的 —— 假红。
     """
+    return frozenset(_shared_edge_ops())
+
+
+def _shared_edge_ops() -> dict[str, tuple[str, ...]]:
+    """公共边 → **这条边上放开哪几个 op**(3.13.0,A 末轮 ④)。
+
+    🔴 **不是每条公共边都三个 op 全开。** `factions.member_of` 上
+    `unlink` / `transfer` 是关的:「站了就回不去」是 3c §2.10 ④ 的**产品裁决**,
+    而 3.13.0 把出厂的边放开给所有插件连之后,**作者写一条 `unlink`
+    就能让人叛出改投** —— 一条产品裁决不该由一个作者的动词来推翻。
+    ⚠️ 关的是**这条口子**(别的插件连它),不是内核本身:引擎自己
+    (以后批 4 那条「放人走」)照旧动得了它。
+    """
     from anima_world import clues as _clues, factions as _factions
 
-    out: set[str] = set()
+    out: dict[str, tuple[str, ...]] = {}
     for module in (_clues, _factions):
         body = module.factory_plugin()
+        closed = getattr(module, "SHARED_EDGE_CLOSED_OPS", {})
         for local in (body.get("edges") or {}):
-            out.add(f"{body['id']}.{local}")
-    return frozenset(out)
+            allowed = tuple(op for op in EDGE_VERB_EFFECTS
+                            if op not in closed.get(local, ()))
+            out[f"{body['id']}.{local}"] = allowed
+    return out
 
 
 #: 边那三条效果里,`from` / `to` 认得出的几个词。**认不出就是一个光名字**
@@ -2210,6 +2226,14 @@ def _parse_link_effect(
     # 🆕 3.13.0:出厂插件的**公共边**照连(`clues.knows` / `factions.member_of`)。
     # 它们由引擎声明,而声明的目的**就是让作者去连** —— 见 `shared_edge_types`。
     if edge_type in shared_edge_types():
+        if kind not in _shared_edge_ops()[edge_type]:
+            errors.append(
+                f"{where}.{kind}.type:`{edge_type}` 这条出厂公共边上 `{kind}` "
+                f"是关着的,只放开 {list(_shared_edge_ops()[edge_type])} —— "
+                "「站了就回不去」是产品裁决(3c §2.10 ④),不该由一条动词推翻;"
+                "要放人走,那件事在批 4(`contract.factions.deferred` 的 `leave`)"
+            )
+            return None
         return {"op": kind, "type": edge_type,
                 "from": body.get("from"), "to": body.get("to"),
                 "by_dst": bool(body.get("by_dst")),

@@ -9487,6 +9487,7 @@ def contract_payload() -> dict[str, Any]:
         EDGE_VERB_EFFECTS,
         EDGE_EFFECT_KEYS,
         EDGE_KEYS,
+        _shared_edge_ops,
         shared_edge_types,
         EMIT_KEY_REQUIRES,
         EMIT_KEYS,
@@ -9704,10 +9705,15 @@ def contract_payload() -> dict[str, Any]:
             # 同一课:一个等不来的东西会让人一直等着)。
             "deferred": list(FACTION_DEFERRED),
             "gloss": (
-                "**站了就回不去** —— 成员边是 `exclusive`,而**内核在 `link` "
-                "那一刻查**,不是插件自己判:放行的样子是安静的"
-                "(两条边同时挂着,`plugin list` 看不出来,而提示词里"
-                "他同时属于两个阵营)。"
+                "**站了就回不去**,而这句话是**两道闸合起来**才成立的:"
+                "① 成员边是 `exclusive`,**内核在 `link` 那一刻查**,"
+                "不是插件自己判(放行的样子是安静的:两条边同时挂着,"
+                "`plugin list` 看不出来,而提示词里他同时属于两个阵营);"
+                "② 这条边在公共边那一格上**只放开 `link`** "
+                "(`plugins.shared_edge_ops`)—— 少了这一道,"
+                "**作者写一条 `unlink` 就能让人叛出改投**,"
+                "而那是拿一条动词推翻一条产品裁决(3c §2.10 ④)。"
+                "放人走这件事在批 4(`deferred` 里的 `leave`)。"
                 "🔴 **计票 / 人数上限 / 禁地 / 全城声望这一版一行都没有**"
                 "(`deferred`)—— 四样全是**聚合或 gates**,那是批 4。"
                 "**在一个没有聚合的引擎上手写一遍计票,就是把批 4 那件事"
@@ -10202,6 +10208,12 @@ def contract_payload() -> dict[str, Any]:
             # (`clues.knows` 的全部意义就是「他知道了这条线索」)。
             # 没有这一格,线索/阵营两个玩法在作者层**一条都点不亮**。
             "shared_edge_types": sorted(shared_edge_types()),
+            # 🆕 3.13.0(A 末轮 ④):**每条公共边上放开哪几个 op** ——
+            # 不是三个全开。`factions.member_of` 上 `unlink`/`transfer` 关着:
+            # 「站了就回不去」是产品裁决(3c §2.10 ④),而放开公共边之后
+            # **一条作者写的 `unlink` 就能推翻它**。照这一格判,别照上一格猜。
+            "shared_edge_ops": {k: list(v) for k, v in
+                                sorted(_shared_edge_ops().items())},
             "rule_required_keys": list(RULE_REQUIRED_KEYS),
             "rule_keys": list(RULE_KEYS),
             "rule_every_keys": list(RULE_EVERY_KEYS),
