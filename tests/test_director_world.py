@@ -2194,9 +2194,15 @@ def test_别人那条线上的对手_让位_而筛空了照旧派得出人():
     assert [c["id"] for c in D.select_cast(pool, taken=["a"])] == ["b", "c"]
     # 两道软闸叠起来
     assert [c["id"] for c in D.select_cast(pool, recent=["b"], taken=["a"])] == ["c"]
-    # 🔴 筛空了整份还回去 —— 宁可撞脸,不可沉默
+    # 🔴 **分级退让**(3.13.0,A 三轮 ⑤,调度台裁):两道一起上筛空了,
+    # **先丢 `recent`、还保着 `taken`** —— 小池子上「两个玩家不同对手」
+    # 这件事因此更常成立,而下面那条兜底一个字没改。
     assert [c["id"] for c in D.select_cast(pool, recent=["a", "b"],
-                                           taken=["c"])] == ["a", "b", "c"]
+                                           taken=["c"])] == ["a", "b"], (
+        "两道一起筛空之后直接整份还回去了 —— `taken` 那道本来还筛得动")
+    # 🔴 连 `taken` 一道也筛空了,才整份还回去 —— 宁可撞脸,不可沉默
+    assert [c["id"] for c in D.select_cast(pool, recent=["a"],
+                                           taken=["a", "b", "c"])] == ["a", "b", "c"]
     # 该收线的那个人照旧保得住
     assert "a" in [c["id"] for c in D.select_cast(pool, taken=["a"], keep="a")]
 
