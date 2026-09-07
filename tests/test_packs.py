@@ -1588,3 +1588,36 @@ def test_不加那个开关时_导出一条作者记录都没有(tmp_path):
     assert "authored_sections" not in manifest.extra
     _, records = read_world_file(str(out))
     assert not [r for r in records if r.get("kind") == "author"]
+
+
+def test_装包路上_插件降级照旧当场拒(tmp_path):
+    """🔴 **3.11.2 划的那条分界,在装包这一侧的闸**:人按下的一次装包,
+    「拿旧声明去盖新数据」仍然是一次真的、不可逆的降级 —— **当场拒**。
+    (开机那一侧相反:「库里那份说了算」,跳过并说一句,rc 0。)
+
+    ⚠️ **顺带记一笔我自己写反过的地方(验收 ⑥)**:3.11.3 那一轮我把
+    `on_boot=True` 也传给了 `install_authored_pack` —— 而那条路是 `pack install`,
+    不是开机,和 `_plugin_bodies` 自己的 docstring 正相反。
+    **它今天没有可观察的症状**:装包那条路在更上游还有一道**硬预检**
+    (就是这条用例断的这一句),先一步把降级拦下了。
+    所以那处改回 `on_boot=False` 修的是**意图和代码对不上**,不是一个活着的 bug
+    —— 这句话写在这儿,免得下一个人照 CHANGELOG 去找一个复现不出来的症状。
+    而这条用例守的是那道**真的**闸:它要是哪天松了,silent-skip 就立刻变成活的。
+    """
+    from anima_world.__main__ import PackInstallError
+
+    QI2 = {"id": "qi", "version": "2.0.0", "label": "灵力",
+           "facts": {"灵力": {"bearer": "agent", "shape": "number",
+                             "default": 10.0, "visibility": "self"}}}
+    with _world(tmp_path, name="dg", plugins=[QI2]) as world:
+        assert any(p.id == "qi" and p.version == "2.0.0"
+                   for p in world.scheduler.plugins), "夹具没装上 2.0.0"
+        old = _pack(tmp_path, "old", pack={"id": "降级", "version": "1.0.0"},
+                    plugins=[{**QI2, "version": "1.0.0"}])
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(old)
+        said = str(raised.value)
+        assert "qi" in said and "不降级" in said, said
+        assert world.packs() == [], "拒了还写进去了"
+        assert any(p.id == "qi" and p.version == "2.0.0"
+                   for p in world.scheduler.plugins), "旧声明把库里那份盖了"

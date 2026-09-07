@@ -279,6 +279,62 @@ def tension_now(value: float, since_tick: int, now_tick: int,
     return round(base * (TENSION_DECAY_PER_HOUR ** hours), 4)
 
 
+# ── 结算那三条:**玩家看得见的那一份**(3.12.0,player 带回)────────────────
+#
+# 🔴 **`director_log` 是 GM 笔记,不是玩家屏。** 3b 把 `confront` 的输赢、
+# `reward` 还了哪条线、`callback` 怎么收的,**只写进了 `director_log`** ——
+# 于是玩家**没有任何来源**看得到「我押了什么、输赢了什么」。
+# 老板那句「剧情要有张力」的可验形式正是:**玩家必须看见赌注和结果**;
+# 一个只有 GM 看得见的赌注,和没有赌注是同一件事。
+#
+# 照 `roll` 那条已经走通的路做:**发一条玩家面事件,载荷里带人话**
+# (站点按 `recent_events` 接,不自己译)。
+SETTLE_EVENTS = ("confront_settled", "reward_settled", "callback_settled")
+
+#: 那三条事件共用的载荷键。**人话那三格是承重的** —— 站点按纪律不上浮点、
+#: 不上枚举,而 `stake`/`outcome`/`phase` 三样都是给机器看的。
+SETTLE_KEYS = ("player_id", "move", "thread_id", "thread", "with", "with_name",
+               "stake", "stake_text", "outcome", "outcome_text", "tick")
+
+#: 结局那几个词。⚠️ `won`/`lost` 是**摊牌**的结局,`repaid`/`closed` 是还债与收线。
+OUTCOME_LABELS: dict[str, str] = {
+    "won": "你赌赢了",
+    "lost": "你赌输了",
+    "repaid": "这笔还给你了",
+    "closed": "这条线收了",
+    "expired": "这条线过期了,那笔照扣",
+}
+
+
+def stake_text(stake: dict[str, Any] | None) -> str:
+    """一笔赌注读作一句人话 —— **一处生成**(引擎屏 / 站点 / 创作台同一句)。
+
+    ⚠️ 作者写的 `what`(「她的信任」)优先:那是这个世界自己的说法,
+    而 `STAKE_LABELS` 那几个词是没写时的兜底。
+    """
+    if not stake:
+        return ""
+    what = str((stake or {}).get("what") or "").strip()
+    kind = STAKE_LABELS.get(str((stake or {}).get("kind") or ""), "")
+    said = what or kind
+    return f"押着{said}" if said else ""
+
+
+def settle_text(move: str, *, stake: dict[str, Any] | None,
+                outcome: str, promise: str = "") -> str:
+    """结算那一下,**给玩家看的那一句**。
+
+    🔴 它必须同时说出**押了什么**和**结果是什么** —— 少任何一半,
+    玩家都读不出"我刚才那一下值多少"。
+    """
+    head = str(OUTCOME_LABELS.get(str(outcome or ""), "")).strip()
+    bet = stake_text(stake)
+    line = str(promise or "").strip()
+    parts = [p for p in (f"「{line}」" if line else "", bet, head) if p]
+    # ⚠️ 用顿号分开 —— 连着拼出来的是「押着她的信任你赌输了」,一句读不断的话。
+    return ",".join(parts) + "。" if parts else ""
+
+
 def story_text(tension: float, phase: str) -> str:
     """这条线此刻读作**一句话** —— 不是两句(3.11.3,验收 A ⑤ / B+C ④)。
 
@@ -545,7 +601,8 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
                     guidance: dict[str, Any] | None, place_name: str,
                     day: int, tension: float, phase: str,
                     anchor: dict[str, Any] | None = None,
-                    history: Sequence[str] = ()) -> list[dict[str, str]]:
+                    history: Sequence[str] = (),
+                    player_name: str = "") -> list[dict[str, str]]:
     """交给背景槽的那一次调用。**一次调用同时挑动作、挑人、写台词**。
 
     🔴 **这份提示里没有第二个名字来源** —— 它只由**已经筛过**的 `cast` 拼出来
@@ -581,6 +638,20 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
             f"\n⚠️ 创作者预设的下一个路口:{anchor.get('steer') or anchor.get('id')}"
             "。**绕着它写、冲着它写,但别替它发生** —— 它自己会响。\n"
         )
+    # 🔴 **提示词里必须有"这句话是对谁说的"**(3.12.0,真站第六轮 ②)。
+    # 线上实测:古德里安对玩家开口第一句是「**路明非?**正好,来帮我搬一箱旧卷子」
+    # —— 把玩家叫成了名单上另一个 NPC。
+    # 根不在模型:上一版这份提示里**根本没有玩家的名字**,只有一串「你这一拍能派
+    # 的人」。要它写一句"对他说的话",而手边唯一的人名是那张名单 ——
+    # **它只能从那儿抄一个**。
+    # ⚠️ 没有名字时说「他」,不编一个:一个编出来的称呼和抄错一个名字一样坏。
+    you = str(player_name or "").strip()
+    line_you = (f"\n🔴 **这一句是对「{you}」说的** —— 他就是这个玩家本人。"
+                f"下面那张名单是**你能派谁来找他**,不是他的名字,"
+                f"**一个字都别拿来称呼他**。\n"
+                if you else
+                "\n🔴 **这一句是对这个玩家说的**(他还没报过名字,就用「你」)。"
+                "下面那张名单是**你能派谁来找他**,不是他的名字。\n")
     user = (
         f"玩家在{place_name or '某个地方'},第 {day} 天。\n"
         f"**他刚做了这些**(这是你这一拍最重要的输入,必须冲着它来):\n{did}"
@@ -588,6 +659,7 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
         + f"\n这个世界讲的是:{themes}\n"
         + (f"语气:{tone}\n" if tone else "")
         + (f"**绝对不许发生的**:\n{forbid}" if forbid else "")
+        + line_you
         + f"\n你这一拍能派的人(**只能从这里面挑,不许写别的名字**):\n{who}\n"
         + f"\n你这一拍能做的事(**只能挑一个**):{'、'.join(allowed)}\n"
         + "  breathe = 只写一句冲着他刚做的事的旁白,不派人\n"

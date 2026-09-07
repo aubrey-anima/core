@@ -33,6 +33,8 @@ from anima_world.person_verbs import (
 from anima_world.director import (
     DIRECTOR_LOG_KEYS,
     MOVE_LABELS as DIRECTOR_MOVE_LABELS, PHASE_LABELS as DIRECTOR_PHASE_LABELS,
+    OUTCOME_LABELS as DIRECTOR_OUTCOME_LABELS,
+    SETTLE_EVENTS as DIRECTOR_SETTLE_EVENTS, SETTLE_KEYS as DIRECTOR_SETTLE_KEYS,
     SOURCES as DIRECTOR_SOURCES, SOURCE_LABELS as DIRECTOR_SOURCE_LABELS,
     STAKE_LABELS as DIRECTOR_STAKE_LABELS,
     MOVES as DIRECTOR_MOVES, PHASES as DIRECTOR_PHASES,
@@ -5116,10 +5118,14 @@ def install_authored_pack(scheduler: Any, path: Path | str, *,
     # 插件声明的种类先并进 `kinds` —— **和开机那条路逐字同序**(见
     # `build_serve_scheduler` 里那一段:晚一步的话,引用不到的 `spawn.kind` 会
     # 绕过预检,到 `_load_ontology` 那儿才炸,而那时表已经写过几张了)。
-    merged = _merge_plugin_kinds(config_store, plugin_store, authored,
-                                 on_boot=True) or authored
-    boot_plugin_bodies = _plugin_bodies(config_store, plugin_store, authored,
-                                        on_boot=True)
+    # 🔴 **这条路是 `pack install`,不是开机 —— 所以 `on_boot=False`**
+    # (3.12.0,验收 ⑥)。3.11.3 那一轮我把 `on_boot=True` 传到了这儿,而它和
+    # `_plugin_bodies` 自己的 docstring 正相反(「只在 `on_boot` 上这么判 ——
+    # `pack install` 那条路照旧『文件里那份赢』」),也和 3.11.2 划的那条分界相反:
+    # **人按下的一次装包,「拿旧声明去盖新数据」仍然是一次真的、不可逆的降级,
+    # 该当场拒。** 传 `True` 的下场是它**安静地跳过**,而装包的人以为装上了。
+    merged = _merge_plugin_kinds(config_store, plugin_store, authored) or authored
+    boot_plugin_bodies = _plugin_bodies(config_store, plugin_store, authored)
     namespaces = tuple(
         str(b.get("id") or "") for b in boot_plugin_bodies if str(b.get("id") or "")
     )
@@ -9279,7 +9285,7 @@ def contract_payload() -> dict[str, Any]:
         _VALID_PREDICATES,
     )
     from anima_world.config_store import _DEFAULTS as _CONFIG_DEFAULTS
-    from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.events import EVENT_PAYLOAD_KEYS, SUBSCRIBABLE_EVENTS
     from anima_world.host import (
         DOOR_METHODS,
         FREE_OPTION_ID,
@@ -9399,6 +9405,7 @@ def contract_payload() -> dict[str, Any]:
             # 🆕 3.11.1(platform 带回):`known` 分开「查无此人」与「认识但还没
             # 动过手」—— 别让壳自己去翻 `player_join`。
             "story_keys": ["player_id", "known", "tension", "tension_text", "story_text",
+                           "closed_threads",
                            "phase", "phase_text", "threads", "moves", "recent_log"],
             "thread_text_keys": ["phase_text", "due_text"],
             "config_keys": ["director.enabled", "director.max_per_player_per_hour",
@@ -9411,6 +9418,18 @@ def contract_payload() -> dict[str, Any]:
             # 那一屏 `scene.source == "template"`(不是 `cached`,也不调模型),
             # 而**编剧一个字不写**(世界里什么都没发生)。
             "screen_grains": list(HOST_SCREEN_GRAINS),
+            # 🆕 3.12.0(player 带回):**结算那三条玩家面事件。**
+            # 🔴 `director_log` 是 GM 笔记(`why` 就是写给创作者的那一句),
+            # 而摊牌的输赢 / 还了哪条线 / 收线怎么收的**从前只写在它里面** ——
+            # 玩家没有任何来源读得到「我押了什么、输赢了什么」。
+            # **一个只有 GM 看得见的赌注,和没有赌注是同一件事。**
+            # 照 `roll` 那条路:站点按 `recent_events` 接,人话在载荷里,别自己译。
+            # ⚠️ **有意不进 `SUBSCRIBABLE_EVENTS`** —— 那张表是**插件触发器**能订
+            # 哪几种内核事件的白名单(≤12 条,今天 11 条,规矩写着「同一批里不许
+            # 再加第二条」),和"玩家读得到什么"是两件事。
+            "settle_events": list(DIRECTOR_SETTLE_EVENTS),
+            "settle_keys": list(DIRECTOR_SETTLE_KEYS),
+            "outcome_labels": dict(DIRECTOR_OUTCOME_LABELS),
             "refused_scene_source": "template",
             "move_event_types": list(PLAYER_MOVE_EVENT_TYPES),
             # 🆕 3.11.3(验收 B+C ⑦):**「他动过手没有」那把钥匙有几格,报出来。**
@@ -9826,6 +9845,19 @@ def contract_payload() -> dict[str, Any]:
             # 详见 `anima_world/events.py` 的 `SUBSCRIBABLE_EVENTS`。
             "subscribable_events": {
                 name: dict(spec) for name, spec in SUBSCRIBABLE_EVENTS.items()
+            },
+            # 🆕 3.12.0(platform 带回):**每种事件的载荷键表。**
+            # 🔴 壳那侧的送达门有一份**手抄**的 `_KNOWN_PAYLOAD_KEYS`,而 `line`
+            # 和 `source` 两次漏发都出在那儿 —— 引擎加了一格、手抄那份没跟上,
+            # **那一格永远送不到消费方,而两边都不报错**。
+            # 照这一格生成,别再手抄。
+            # ⚠️ **它比 `subscribable_events` 宽**:那一张是插件触发器能订哪几种
+            # (≤12 的闭集),这一张是**消费方读得到什么**(含 `agent_hail` /
+            # `roll` / 三条 `*_settled`)。两件事,别合并。
+            # ⚠️ 判据是**包含**不是相等:有几种事件按情况带格
+            # (`state_change` 按 `kind` 分支、一起做事才有 `party`)。
+            "payload_keys": {
+                name: list(keys) for name, keys in EVENT_PAYLOAD_KEYS.items()
             },
             # 🆕 3.8.0 第 1 期。**这一格缺席 = 这支引擎不认 `plugin` 记录**
             # (3.7.0 及更早,而它见到那种记录是**开不了机的硬失败** ——

@@ -1114,6 +1114,13 @@ def test_编剧派一个不在场的人_hail载荷自带名字(tmp_path):
 
     判据:**派一个不在他跟前的人**(那正是 `approach` 存在的理由 ——
     「她不在这儿」不是闸),payload 里那一格非空。
+
+    ⚠️ **这条用例没有牙,而这句话必须写在它自己身上**(2026-09-06,验收 A ①):
+    三个发射点本来就都填了 `agent_display_name(...)`,而它对非 `player:` 的 id
+    **永不返回空**(查不到就退回 id)——所以它贴到 `169009f` 上照样绿。
+    真正有牙的是下面那条(`agent_display_name` 答空时兜底到 id)。
+    留着它是当**回归闸**:哪天有人把这一格从载荷里删掉,它会红。
+    **屏上那句「一位还没报上名字的人」的根还没找到,不在这三处。**
     """
     with open_world_at(tmp_path / "hn.db") as world:
         world.player_move("p1", "cafe")
@@ -1455,3 +1462,146 @@ def test_这道零外网的闸自己有牙():
     with pytest.raises(RuntimeError, match="测试进程试图连外网"):
         socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(
             ("api.openai.com", 443))
+
+
+def test_同一个tick里连点五次短动词_每一次都换屏(tmp_path):
+    """🔴 **真站第六轮 ① 的判据**:10 次操作里 3 次 `scene.source=cached`
+    且逐字重复上一屏,**全是动词**(走路 4/4、对话 2/2 都是新的)。
+
+    ⚠️ 这条在本地**复现不出来** —— 短动词每一次都发 `entity_interaction`,
+    `move_seq` 每次都推,五次五屏。所以它钉的是「这条路本来就该是通的」:
+    真站那三次若仍 `cached`,病根**不在这一格**(见回报里给 platform 的那一问:
+    那三发 `/tool` 的响应体里 `ok` 到底是 `true` 还是 `false` ——
+    `200` 只说明这一次调用没抛,不说明那个动作做成了)。
+    """
+    with open_world_at(tmp_path / "6th.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.host_turn("p1")
+        frozen = int(world.scheduler.clock)
+        seen = []
+        for _ in range(5):
+            got = world.player_tool("p1", "interact",
+                                    {"target": "tree:harbor_oak", "verb": "look"})
+            assert got["ok"] is True, got
+            seen.append(world.host_turn("p1"))
+        assert int(world.scheduler.clock) == frozen, "这条用例不许推时钟"
+        cached = [i for i, t in enumerate(seen) if t["scene"]["source"] == "cached"]
+        assert not cached, f"第 {cached} 次 accepted 的短动词之后屏没换:{cached}"
+
+
+def test_编剧那份提示词里_有玩家是谁_也说清这句话对谁说(tmp_path):
+    """🔴 **真站第六轮 ②**:古德里安对玩家开口第一句是
+    「路明非?正好,来帮我搬一箱旧卷子」—— **把玩家叫成了名单上另一个 NPC**。
+
+    根不在模型:那份提示里**根本没有玩家的名字**,只有一串「你这一拍能派的人」。
+    要它写一句"对他说的话",而手边唯一的人名是那张名单 ——
+    **它只能从那儿抄一个**。
+    """
+    from anima_world import director as D
+
+    msgs = D.decide_messages(
+        recap=["你端详了老橡树。"], cast=[{"id": "路明非", "name": "路明非"}],
+        allowed=["approach"], thread=None, guidance={}, place_name="图书馆",
+        day=1, tension=0.2, phase="setup", player_name="楚子航")
+    blob = "".join(m["content"] for m in msgs)
+    assert "楚子航" in blob, "提示词里没有玩家的名字"
+    assert "一个字都别拿来称呼他" in blob, blob[-400:]
+
+    # 没名字时说「你」,**不编一个**
+    blank = "".join(m["content"] for m in D.decide_messages(
+        recap=[], cast=[{"id": "路明非", "name": "路明非"}], allowed=["approach"],
+        thread=None, guidance={}, place_name="图书馆", day=1,
+        tension=0.2, phase="setup"))
+    assert "就用「你」" in blank, blank[-300:]
+
+
+def test_那份提示词真的带上了这个世界里玩家的名字(tmp_path):
+    """接上世界那一半:名字从 `_relation_name` 来(和记忆、关系事件里印的**同一个**),
+    不是这一层另查一遍 —— 各查各的迟早给出两个名字。"""
+    with open_world_at(tmp_path / "pn.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe", display_name="楚子航")
+        world.tick(2)
+        world.host_turn("p1")
+        fake = _PromptFake()
+        world.config_set("llm.api_key", "sk-test")
+        world.chat_service._background_llm = fake
+        _act_once(world, "p1")
+        world.host_turn("p1")
+        assert fake.prompts, "编剧那条路一次都没被调到"
+        assert "楚子航" in fake.prompts[-1], fake.prompts[-1][:300]
+
+
+def test_一次摊牌_玩家读得到押了什么和输赢(tmp_path):
+    """🔴 **player 对 3b 的那条**:`confront` 的输赢、`reward` 还了哪条线、
+    `callback` 怎么收的,3b **只写进了 `director_log`** —— 而那是 **GM 笔记**
+    (`why` 就是写给创作者的那一句)。玩家**没有任何来源**读得到
+    「我押了什么、输赢了什么」。
+
+    **一个只有 GM 看得见的赌注,和没有赌注是同一件事** ——
+    老板那句「剧情要有张力」的可验形式正是这个。
+
+    照 `roll` 那条已经走通的路:发一条玩家面事件,**人话在载荷里**
+    (站点按 `recent_events` 接,不自己译)。
+    """
+    from anima_world import director as D
+
+    with open_world_at(tmp_path / "st.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        before = len(_logs(world))
+        world._director_apply(
+            "p1", {"move": "confront", "who": agent, "line": "摊牌了", "why": "推一把",
+                   "promise": "替她瞒下那件事",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
+                   "source": "mock"},
+            tension_before=0.6, phase="climax", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=100, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店", moves_made=1)
+
+        settled = [e for e in world.events() if e["type"] == "confront_settled"]
+        assert settled, "摊完牌玩家读不到任何东西"
+        payload = settled[-1]["payload"]
+        # **人话那两格是承重的** —— 站点按纪律不上浮点、不上枚举
+        assert payload["stake_text"], f"没说押了什么:{payload}"
+        assert payload["outcome_text"], f"没说输赢:{payload}"
+        assert "她的信任" in payload["stake_text"], payload["stake_text"]
+        assert payload["outcome"] in ("won", "lost"), payload
+        assert set(D.SETTLE_KEYS) <= set(payload), sorted(payload)
+        # 骰子那条照旧走事件(裁决 b:站点按 `recent_events` 的 `roll` 接)
+        assert [e for e in world.events() if e["type"] == "roll"]
+        # 🔴 GM 笔记那条**照旧**:这一版是**加了一条给玩家的**,不是搬走
+        assert len(_logs(world)) == before + 1, "director_log 变了"
+
+
+def test_收掉的线_玩家读得到它是怎么收的(tmp_path):
+    """开着的线有 `due_text`,**收掉的线要有 `outcome_text`** ——
+    只给开着的那几条,玩家就永远读不到自己那条线的结局。"""
+    with open_world_at(tmp_path / "ct.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        now = int(world.scheduler.clock)
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "她欲言又止", "why": "",
+                   "promise": "那本书", "stake": {"kind": "money", "amount": 5},
+                   "source": "mock"},
+            tension_before=0.3, phase="setup", tick=now, place="cafe", thread=None,
+            pin_ticks=12, due_ticks=50, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        opened = world.player_story("p1")["threads"]
+        assert opened and opened[0]["outcome_text"] == "", opened
+        tid = opened[0]["id"]
+        world._director_apply(
+            "p1", {"move": "callback", "who": agent, "line": "那本书呢", "why": "",
+                   "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.4, phase="climax", tick=int(world.scheduler.clock),
+            place="cafe", thread={"id": tid, "promise": "那本书", "with": agent},
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        story = world.player_story("p1")
+        closed = story["closed_threads"]
+        assert closed, f"收掉的线一条都读不到:{story}"
+        assert closed[-1]["outcome_text"], closed[-1]

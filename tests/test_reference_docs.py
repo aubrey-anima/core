@@ -497,14 +497,32 @@ def test_配置表里那一列默认值_和_DEFAULTS对得上():
 
     text = REFERENCE.read_text(encoding="utf-8")
     rows = dict(re.findall(r"^\| `([a-z0-9_.]+)` \| \w+ \| ([^|]+?) \|", text, re.M))
-    wrong = []
+    wrong, checked = [], 0
     for key, spec in _DEFAULTS.items():
         said = rows.get(key)
         if said is None:
             continue                      # 缺行由上面那条闸管
         want = spec[0]
-        got = said.strip().strip("*").strip()
+        got = said.strip().strip("*").strip().strip("`")
         if isinstance(want, bool):
+            checked += 1
             if got.lower().strip("*") != str(want).lower():
                 wrong.append(f"{key}: 表里写 {got!r},而 _DEFAULTS 是 {want}")
+        elif isinstance(want, int):
+            # 🆕 3.12.0(验收 ⑦):**int 也要对**。上一版只查 bool,而这张表里
+            # 绝大多数是数 —— `director.due_hours` 从 48 改成别的值时,
+            # 这道闸一声不吭。⚠️ 表里那一格允许带单位/备注(「48」「288(一天)」),
+            # 所以比的是**开头那个数**,不是整格字符串。
+            head = re.match(r"^-?\d+", got)
+            if head is None:
+                continue                  # 那一格根本不是数(比如「按世界」),不判
+            checked += 1
+            if int(head.group(0)) != int(want):
+                wrong.append(f"{key}: 表里写 {got!r},而 _DEFAULTS 是 {want}")
+        elif isinstance(want, str) and want:
+            # str 那一族:空串默认值不判(表里多写成「(空)」),非空的要逐字对上。
+            checked += 1
+            if want not in got:
+                wrong.append(f"{key}: 表里写 {got!r},而 _DEFAULTS 是 {want!r}")
+    assert checked >= 40, f"这道闸只对上了 {checked} 行 —— 它多半自己瞎了"
     assert not wrong, "配置表那一列在说谎:\n" + "\n".join(wrong)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from anima_world.types import Event
 
-__all__ = ["Event", "EventLog", "SUBSCRIBABLE_EVENTS"]
+__all__ = ["Event", "EventLog", "EVENT_PAYLOAD_KEYS", "SUBSCRIBABLE_EVENTS"]
 
 
 class EventLog:
@@ -70,6 +70,62 @@ class EventLog:
 # ⚠️ **`location_join` 这个名字底下有两件事,别订错**:顶层那条 `location_join`
 # 是**创世时播下的一个地点**(配置,不是发生的事),所以它不在这张表上;
 # "有人走进了一个地方"是 `state_change{kind: "location_join"}`。
+#: **每种事件的载荷键表** —— `{事件类型: (键, …)}`(3.12.0,platform 带回)。
+#:
+#: 🔴 **它存在的理由是一个手抄表漏了两次。** 壳那侧的送达门有一份手抄的
+#: `_KNOWN_PAYLOAD_KEYS`,而 `line` 和 `source` 两次漏发都出在那儿:
+#: 引擎加了一格,手抄那份没跟上,**于是那一格永远送不到消费方,而两边都不报错**。
+#: 一份手抄的键表和一句没人验的话是同一种东西。
+#:
+#: **判据是包含,不是相等**(`tests/test_event_payload_keys.py`):引擎**真发**
+#: 的每一个键都必须在这张表里。反过来不判 —— 有几种事件的载荷是**按情况带格**
+#: 的(`state_change` 按 `kind` 分支、一起做事时才有 `party`),
+#: 要求逐格相等会让这道闸在一次完全正常的世界里红。
+#:
+#: ⚠️ **这张表比 `SUBSCRIBABLE_EVENTS` 宽**:那一张是**插件触发器**能订哪几种
+#: 内核事件(≤12 条的闭集),这一张是**消费方读得到什么**。两件事,别合并。
+EVENT_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
+    "agent_join": ("location", "spec", "state"),
+    "agent_hail": ("agent_id", "agent_name", "player_id", "player_name",
+                   "location", "location_name", "player_present", "reason",
+                   "source", "line", "opening", "note"),
+    "conversation": ("agent_id", "closed_at", "conversation_id", "location",
+                     "message_count", "participants", "started_at", "summary"),
+    "director_log": ("player_id", "move", "tick", "place", "source", "target",
+                     "target_name", "line", "why", "thread_id", "promise",
+                     "phase", "due_tick", "closes_thread", "tension_before",
+                     "tension_after", "tension_text", "stake", "ops_applied",
+                     "capped", "refused_by", "pin_until", "outcome", "roll"),
+    "entity_destroy": ("target", "kind", "reason", "by"),
+    "entity_interaction": ("target", "target_name", "verb", "verb_label",
+                           "changed", "consumed", "me_changed", "me_delta",
+                           "spent", "party", "joint_role"),
+    "entity_spawn": ("target", "kind", "name", "location", "from"),
+    "item_consume": ("agent_id", "item_id", "qty", "reason", "location"),
+    "item_transfer": ("from", "to", "item_id", "item_name", "qty", "note",
+                      "reason"),
+    "payment": ("from", "to", "amount", "reason"),
+    "roll": ("actor", "verb", "player_id", "faces", "result", "band", "seed"),
+    # ⚠️ `state_change` 是**按 `kind` 分支**的一族(到站 / 关系变了 / 人设改写
+    # …),所以这几格里多数是"某几种 kind 才有"。这正是这张表判**包含**
+    # 而不判相等的理由。
+    "state_change": ("kind", "target", "target_name", "as", "as_name", "state",
+                     "spec", "sentiment", "delta", "axes",
+                     "r_type", "r_type_back",
+                     "conversation_id", "conversation_summary"),
+    "travel": ("player_id", "from", "to", "minutes", "arrive_at"),
+    # 结算那三条(玩家面)—— 三种共用一张表,见 `director.SETTLE_KEYS`。
+    "confront_settled": ("player_id", "move", "thread_id", "thread", "with",
+                         "with_name", "stake", "stake_text", "outcome",
+                         "outcome_text", "tick"),
+    "reward_settled": ("player_id", "move", "thread_id", "thread", "with",
+                       "with_name", "stake", "stake_text", "outcome",
+                       "outcome_text", "tick"),
+    "callback_settled": ("player_id", "move", "thread_id", "thread", "with",
+                         "with_name", "stake", "stake_text", "outcome",
+                         "outcome_text", "tick"),
+}
+
 SUBSCRIBABLE_EVENTS: dict[str, dict[str, object]] = {
     # 🆕 3.12.0(批 3b,裁决 §2.7):**编剧写的那一拍。**
     #

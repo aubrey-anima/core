@@ -3535,6 +3535,9 @@ Redis 的那份留在原地**冻在创世**(实测 MySQL 289 条事件,Redis 那
 | 🆕 `world.disable_pack(pack_id)` | **停用**一份内容包(3.10.0,K7):它的拍不再响、它带来的新人**退场**(走 `agent_leave` 那条已有的路)、它开的开关**回落到装包前那个值**。🔴 **停用不是删除** —— 玩家的记忆里有这一周发生过的事,他的钱包里有那 800 块;删掉那几条事件 = 让历史指向不存在的东西,而"对账即重放"会让投影和日志对不上,**且没有任何地方会报错**(和 `forget_player` 逐字同一个形状)。它只往日志里追加一条 `pack_disabled`。⚠️ **只回落至今还等于这份包写下去的那个值的那几个开关** ——装完之后运维又调过的那一格不该被这一趟撤销(回执 `kept` 点名说哪几个留着没动)。⚠️ **「再装一次同一个包 = 重新启用」这句话 3.10.1 起不再成立**(它对**带拍的包**从来就是假的):`disable` 有意不删 `:beats`,而 `install` 有意拒绝重用已有的拍 id —— 两条规矩各自都对,而它们中间少一扇门。那扇门是 `enable_pack`。回执 `{pack, version, day, tick, beats, agents, config, kept}`。CLI:`anima-world pack disable`(§4.11) |
 | 🆕 `world.enable_pack(pack_id)` | 把一份**停用的**内容包重新启用(3.10.1)—— `disable_pack` 的逆,**只翻朝前看的那一半,一个字节的历史都不动**:那几拍又会响(已经响过的照旧响过 —— `beat_fired` 是历史)、它带来的人**回来**(走 `agent_return`,和 `disable` 走 `agent_leave` 逐字对称)、它写下的开关**重写**。🔴 **它必须是一扇独立的门**:一份带拍的包停用之后「再装一次」会被「这几拍的 id 这个世界里已经有了」拒掉(`beat_fired` 那份历史按 id 配对),于是**那份包永远回不来**。⚠️ **人回来这一支正是重装那条路答不出来的**:重装时名册里含已 `agent_leave` 的人,他被当成「已在册」跳过,于是 `disabled` 翻回 false 而人还站在场外。落一条 `pack_enabled` 事实。包本来就启用着 / 根本没装过都是当场 `PackInstallError`(**没有什么要做的这句话要说出来** —— 静默成功会让人以为它做了点什么)。回执 `{pack, version, day, tick, beats, agents, config}`。CLI:`anima-world pack enable`(§4.11) |
 | 🆕 `world.player_story(player_id)` | 这个玩家的**故事状态**(3.11.0,批 3a):`{player_id, known, tension, tension_text, phase, phase_text, threads, moves, recent_log}`(键表以 `contract.director.story_keys` 为准)。🆕 **3.11.1 两格**:`known` 分开「查无此人」(false)与「认识但还没动过手」(true 而 `moves: 0`)—— **这一格由引擎答,别让宿主自己去翻 `player_join`**;`tension_text` / `phase_text` 与每条线上的 `phase_text` / `due_text` 是**给屏用的人话**(照 `ask_ready_text` 那条先例:`tension` 是浮点、`phase` 是枚举,而宿主按纪律两样都不上屏 —— **引擎给人话,宿主不自己译**,分档表只有一份)。`tension` 是**算出来的**(按世界小时衰减),不是存下来的那个数 —— 存一个会随时间变旧的值就多出一种和日志对不上的坏法,而这一层对不上的样子是「编剧以为他还紧张着,而他已经三天没上线了」。`threads` 只给**开着的**线,每条带 `promise` / `with` / `phase` / `stake` / `hours_left`(还剩几个世界小时要有个交代)。🔴 **零新键,折自 `director_log`** —— 和余额折自 `payment` 逐字同一种,所以 `contract.storage` 一个字没动。⚠️ 只读门自己补课(`catch_up_projection`)。CLI:`anima-world player story --player <pid> [--json]` |
+| 🆕 结算那三条事件 | `confront_settled` / `reward_settled` / `callback_settled`(3.12.0,player 带回)。🔴 **`director_log` 是 GM 笔记**(`why` 就是写给创作者的那一句),而摊牌的输赢 / `reward` 还了哪条线 / `callback` 怎么收的从前**只写在它里面** —— 玩家没有任何来源读得到「我押了什么、输赢了什么」,而**一个只有 GM 看得见的赌注,和没有赌注是同一件事**(老板「剧情要有张力」的可验形式)。载荷键见 `contract.director.settle_keys`,**人话那两格承重**:`stake_text`(「押着她的信任」)/ `outcome_text`(「『替她瞒下那件事』,押着她的信任,你赌输了。」)—— 站点按 `recent_events` 接,**别自己译**(`outcome_labels` 是那几个词的唯一出处)。⚠️ **有意不进 `SUBSCRIBABLE_EVENTS`**:那张表是**插件触发器**能订哪几种内核事件的闭集(≤12,今天 11),和「玩家读得到什么」是两件事 |
+| 🆕 `player_story()` 的 `closed_threads` | **收掉的那几条线**(最近 3 条),每条带 `outcome_text`(它是怎么收的)。只给开着的那几条,玩家就**永远读不到自己那条线的结局**。⚠️ 单独一格、不混进 `threads`:混在一起的话宿主每画一条线都要先问「这条还开着吗」,而漏问的那一处会把一条已经结束的线画成待办 |
+| 🆕 `contract.plugins.payload_keys` | **每种事件的载荷键表** `{事件类型: [键…]}`(3.12.0,platform 带回)。🔴 存在的理由是**一份手抄表漏了两次**:壳那侧送达门的 `_KNOWN_PAYLOAD_KEYS` 是手抄的,而 `line` / `source` 两次漏发都出在那儿 —— 引擎加了一格、手抄那份没跟上,**那一格永远送不到消费方,而两边都不报错**。**照它生成,别再手抄。** ⚠️ 判据是**包含**不是相等(`state_change` 按 `kind` 分支带格、一起做事才有 `party`),闸在 `tests/test_event_payload_keys.py` —— 下次加一格自动红 |
 | 🆕 `world.person_verbs()` | 这个世界声明过哪些**对人动词**(3.12.0,批 3b):`{id: 那一条}`,键表见 `contract.person_verbs.keys`。🔴 **折自插件库里那几份声明原文,没有第二张表** —— 和 `packs()` 折自 `pack_installed` 逐字同一种 |
 | 🆕 `world.player_person_verb(player_id, agent_id, verb)` | 玩家对**一个人**做一件事(拜师 / 决斗 / 说服,3.12.0,批 3b · 裁决 §2.6)。🔴 **同意门和编剧那道方向正相反**:编剧派人来是**世界**发起的(GM 说 NPC 进门,NPC 就进门,`willingness` 有意不用),而这一条是**玩家**发起的 —— 「我要拜师」是一次请求,她有真正的否决权,所以走 `willingness` / `judge_invite` 那条**真门**。两道门语义相反**不合并**,而世界那几条硬闸(睡着了 / 在赶路 / 不在这儿 / 手上有事 / 静音了)共用同一份 —— 复用的是 `_ToolRuntime._consent` **那一个实现**,各写一份的那天「问的时候行、做的时候不行」只会在真世界里现形。🔴 **被回了一个字都不写**(和 `apply_affordance` 逐字同一条):代价一分不扣,只落一条 `person_verb.refused`;拒绝语是**她的话**,世界说不行时才是一句规则说明。⚠️ **永不走 affordance** —— `verb_target_forms` 里永远不许出现 `agent`。宿主那条路是工具 `person_verb`(`player_tools()` 里有) |
 | 🆕 `world.export_snapshot(..., with_authored=False)` | 🔴 **它给不出作者层十六段,而它不假装给得出**(3.12.0)。只写这个世界还**逐字留着**的那三段(`World.AUTHORED_KEPT_VERBATIM` = `kind` / `plugin` / `guidance` —— 它们是**法**不是状态,库里留的就是声明原文);其余十三段是**演化态**(`agent` 的位置、`stock` 的量、`relation` 的亲疏早就不是作者写的那份),写出去就是宣称「这是作者写的」 —— 而那正是 3.11.2 销掉的那条运维权宜干的事,**一份自称是创世态的演化态比没有那份文件更坏**,它读起来完全正常。⚠️ 跳过了哪几段写进 manifest(`authored_sections` / `authored_skipped`),`world inspect` 离线读得到 —— 少了那一格,创作台会以为它判过了全部十六段。CLI:`anima-world world export --with-authored` |
@@ -4684,7 +4687,7 @@ anima-world pack enable  第二周 --world-id w [--json]   # 上一条的逆(3.1
 | `director.max_per_player_per_hour` | int | 6 | 🆕 **3.11.0**:一个玩家每**世界小时**最多几拍。按世界钟数不按墙钟 —— 墙钟会让同一份日志重放出两份历史。超了退 `breathe`(`director_log.capped`),**不是沉默** |
 | `director.pin_ticks` | int | 12 | 🆕 **3.11.0(口径 5「NPC 要配合」)**:编剧把她叫来之后,她被**钉住**几 tick —— 这几 tick 里排班的 `walk` 带不走她,而她身上挂着这一拍的**编剧意图**(进她提示词的 `director.intent` 块)。⚠️ 只拴 `walk` 那一支、只对编剧的 pin 生效,不动 `occupies` 那笔总账 |
 | `director.due_hours` | int | 48 | 🆕 **3.11.0**:编剧开的一条线,多少个世界小时之内要有个交代。到点没收,**引擎自己动手扣**那笔赌注(`relation` 掉好感 / `money` 扣钱 / `item` 少一样 / `deadline` 只作废),并落一条 `director_log{move:"collect"}`。🔴 一个到期没人执行的赌注,**和没有赌注是同一件事**,而屏幕上看不出差别 |
-| `director.grace_hours` | int | 12 | 🆕 **3.12.0**(批 3b):一条线到期之后,**再等几个世界小时**才真去扣那笔赌注。🔴 这一格买的是「玩家上线就还得上」:到期那一刻他多半不在,而**引擎自己动手扣**一个他没机会回应的赌注,等于把「有代价」变成「有惩罚」。宽限期里他一上线,编剧先出 `callback`(收线),扣不扣由那一拍定;过了宽限期没上线才照扣 |
+| `director.grace_hours` | int | 24 | 🆕 **3.12.0**(批 3b):一条线到期之后,**再等几个世界小时**才真去扣那笔赌注。🔴 这一格买的是「玩家上线就还得上」:到期那一刻他多半不在,而**引擎自己动手扣**一个他没机会回应的赌注,等于把「有代价」变成「有惩罚」。宽限期里他一上线,编剧先出 `callback`(收线),扣不扣由那一拍定;过了宽限期没上线才照扣 |
 | `llm.stream.first_timeout` | float | 30.0 | 流式:等**第一片**多久(prefill 在这一段里,慢是正常的)。**和从前的 `llm.timeout` 逐字相同,有意不收紧** |
 | `llm.stream.gap_timeout` | float | 15.0 | 流式:第一片之后**片与片之间**能空多久。比从前紧一半 —— 敢收紧是因为落在"还没吐正文"那一段的超时**会自动重来一次**(见下) |
 | `llm.background.model` | str | 空 | **背景槽**的模型:意图分类器与连续输出的每一步走它(便宜快模型)。空 = 用 `llm.model`。key 与端点共用主槽的 |
@@ -5389,10 +5392,16 @@ git grep -n '_authored_ontology_errors' -- anima_world/__main__.py
    ⚠️ 3.11.2 起**长动词起头那条 `entity_engage` 也在表上**:有 `duration` 的
    动词点下去只发它,那条 `entity_interaction` 要等收尾才发,于是从前点完
    「拉票」到一小时后收尾之间,这一屏一动不动);
-   第五格 `chat_tick`(3.11.2)—— 🔴 **聊天也算"做了一件事",而它不发事件**:
-   `conversation` 只在**会话关闭那一刻**发一条,站点却把会话一直开着,于是一个
-   聊了十轮的人 `move_seq` 一格不动、整屏纹丝不动。这一格读的是转录那侧本来就在
-   写的水位(`contact_store.last_contact_tick`),**没有新事件、也没有新键** ——
+   第五格 **`chat_seq`**(3.11.2 加,3.11.3 改名)—— 🔴 **聊天也算"做了一件事",
+   而它不发事件**:`conversation` 只在**会话关闭那一刻**发一条,站点却把会话一直
+   开着,于是一个聊了十轮的人 `move_seq` 一格不动、整屏纹丝不动。
+   🔴 **它是轮数,不是 tick**(3.11.3,验收 A ②):3.11.2 那一版读的是
+   `last_contact_tick`(**世界时钟**),而龙族一个 tick 是 4.2 真实分钟 ——
+   一个 tick 里聊十轮,那个数一格没动,**十轮里只有一轮换屏**。
+   现在读的是 `contact_store` 那一行上的 `contact_seq`(一轮加一格,和水位同住
+   一行,**没有新键**)。⚠️ **改名不是加法**:老名字 `chat_tick` 没了,
+   而它不改名的话,下一个读它的人会拿它去和 `world_time.tick` 比大小 ——
+   那个比较恒为真且不报错。
    「整场会话只在关闭时发一个事件」那条不变量挡的正是"每轮补一条事件"这种修法。
 
    ⚠️ **这份名单以 `contract --json` 的 `host.moments` 为准**,而且

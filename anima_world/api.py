@@ -3157,6 +3157,11 @@ class World:
             # 会得到一份看起来正常的空故事)。
             # 形状照 `roster()` / `debug_prompt().asker` 那一格既有的 `known`。
             known = pid in proj.players_joined
+        # 🆕 3.12.0(player 带回):**已经收掉的线也要给一条**,带「怎么收的」。
+        # 只给开着的那几条,玩家就永远读不到自己那条线的结局 —— 而
+        # 「我押了什么、最后怎么了」正是老板那句「剧情要有张力」要他看见的东西。
+        # ⚠️ 收掉的只留最近几条:这一格是**给屏用的**,不是一份全量档案。
+        closed = [dict(t) for t in (row.get("threads") or []) if t.get("closed")][-3:]
         threads = [dict(t) for t in (row.get("threads") or []) if not t.get("closed")]
         for thread in threads:
             due = int(thread.get("due_tick") or 0)
@@ -3168,6 +3173,16 @@ class World:
             thread["phase_text"] = dmod.PHASE_LABELS.get(
                 str(thread.get("phase") or ""), "")
             thread["due_text"] = dmod.due_text(left)
+            thread["outcome_text"] = ""      # 开着的线还没有结局
+        for thread in closed:
+            got = str(thread.get("outcome") or "closed")
+            thread["hours_left"] = None
+            thread["phase_text"] = dmod.PHASE_LABELS.get(
+                str(thread.get("phase") or ""), "")
+            thread["due_text"] = ""
+            thread["outcome_text"] = dmod.settle_text(
+                "callback", stake=thread.get("stake"), outcome=got,
+                promise=str(thread.get("promise") or ""))
         tension = dmod.tension_now(float(row.get("tension") or 0.0),
                                    int(row.get("tension_tick") or 0), tick,
                                    ticks_per_hour)
@@ -3185,6 +3200,10 @@ class World:
             "phase": str(row.get("phase") or "setup"),
             "phase_text": dmod.PHASE_LABELS.get(str(row.get("phase") or "setup"), ""),
             "threads": threads,
+            # **收掉的那几条单独一格**,不混进 `threads` —— 混在一起的话,
+            # 宿主要在每一处画线时先问一句"这条还开着吗",而漏问的那一处
+            # 会把一条已经结束的线画成待办。
+            "closed_threads": closed,
             "moves": int(row.get("moves") or 0),
             # 🔴 **按 `player_id` 过滤**(3.11.1,验收 C ④):上一版直接取最近 20 条
             # `director_log`,于是 `player story --player p1` 印的是 **p2 的剧情** ——
@@ -9352,7 +9371,12 @@ class World:
                 recap=recap, cast=cast, allowed=[m for m in ladder if m in allowed],
                 thread=thread, guidance=guidance, place_name=place_name, day=day,
                 tension=tension, phase=phase, anchor=self._director_anchor(guidance),
-                history=context["history"])
+                history=context["history"],
+                # 🔴 **告诉它这句话是对谁说的**(真站第六轮 ②:古德里安把玩家
+                # 叫成了路明非)—— 提示词里没有玩家的名字时,模型手边唯一的人名
+                # 是那张候选名单,它只能从那儿抄一个。
+                player_name=self.scheduler._relation_name(
+                    f"{Scheduler.PLAYER_PREFIX}{pid}"))
             decision = dmod.parse_decision(
                 self._director_reply(messages),
                 allowed=[m for m in ladder if m in allowed],
@@ -9527,6 +9551,36 @@ class World:
                     outcome=outcome, roll=rolled,
                 ),
             })
+            # 🔴 **结算那一下要让玩家看得见**(3.12.0,player 带回)。
+            # `director_log` 是 **GM 笔记**(`why` 就是写给创作者的那一句),
+            # 而 3b 把摊牌的输赢、还了哪条线、收线怎么收的**只写进了它** ——
+            # 于是玩家**没有任何来源**读得到「我押了什么、输赢了什么」。
+            # **一个只有 GM 看得见的赌注,和没有赌注是同一件事**,
+            # 而老板那句「剧情要有张力」的可验形式正是这个。
+            # 照 `roll` 那条已经走通的路:发一条**玩家面事件**,载荷自带人话
+            # (站点按 `recent_events` 接,**不自己译**)。
+            settled = {"confront": outcome, "reward": "repaid",
+                       "callback": "closed"}.get(move, "")
+            if settled:
+                target_id = who or str((thread or {}).get("with") or "")
+                self._record_and_fan({
+                    "type": f"{move}_settled", "who": holder,
+                    "payload": {
+                        "player_id": pid, "move": move,
+                        "thread_id": thread_id or str((thread or {}).get("id") or ""),
+                        "thread": str(promise or (thread or {}).get("promise") or ""),
+                        "with": target_id,
+                        "with_name": (self.scheduler.hail_agent_name(target_id)
+                                      if target_id else ""),
+                        "stake": dict(stake) if stake else None,
+                        "stake_text": dmod.stake_text(stake),
+                        "outcome": settled,
+                        "outcome_text": dmod.settle_text(
+                            move, stake=stake, outcome=settled,
+                            promise=str(promise or (thread or {}).get("promise") or "")),
+                        "tick": int(tick),
+                    },
+                })
         # 给玩家看的那一句。**永远有一句** —— 没派成人时说 `breathe` 那句旁白。
         if move == "breathe" or not who:
             return line
