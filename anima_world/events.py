@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from anima_world.types import Event
 
-__all__ = ["Event", "EventLog", "EVENT_PAYLOAD_KEYS", "SUBSCRIBABLE_EVENTS"]
+__all__ = ["Event", "EventLog", "EVENT_PAYLOAD_KEYS",
+           "PLAYER_FACING_EVENTS", "PLAYER_FACING_PRIVATE_KEYS",
+           "SUBSCRIBABLE_EVENTS"]
 
 
 class EventLog:
@@ -70,6 +72,21 @@ class EventLog:
 # ⚠️ **`location_join` 这个名字底下有两件事,别订错**:顶层那条 `location_join`
 # 是**创世时播下的一个地点**(配置,不是发生的事),所以它不在这张表上;
 # "有人走进了一个地方"是 `state_change{kind: "location_join"}`。
+#: **玩家面的那几种事件** —— 它们的载荷是**写给某一个玩家的**(3.13.0,批 3c §2.2)。
+#:
+#: 🔴 它们进插件触发器时要过两道:**剥掉 `why`**(那是编剧写给创作者的 GM 笔记,
+#: 不该出门),而且**由它触发的效果只许作用于当事人** —— 拿别人的剧情去动别人的
+#: 世界,是这一层最难查的越权:边连上了、`plugin list` 看不出来,而两个玩家的
+#: 线从此互相污染。
+#: ⚠️ 实测过那个口子是真的(不是理论):一条订 `director_log` 的触发器把
+#: `link` 的 `to` 写死成 `player:p2`,边真的连上了。
+PLAYER_FACING_EVENTS = ("director_log", "confront_settled", "reward_settled",
+                        "callback_settled")
+
+#: 玩家面事件里**不许出门**的那几格(进触发器时剥掉)。
+#: `why` 是编剧写给创作者的一句话 —— 给别的玩家的插件看,就是把 GM 的笔记摊开。
+PLAYER_FACING_PRIVATE_KEYS = ("why",)
+
 #: **每种事件的载荷键表** —— `{事件类型: (键, …)}`(3.12.0,platform 带回)。
 #:
 #: 🔴 **它存在的理由是一个手抄表漏了两次。** 壳那侧的送达门有一份手抄的

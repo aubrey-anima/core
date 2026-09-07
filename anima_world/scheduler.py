@@ -5782,10 +5782,15 @@ class Scheduler:
         # 去掉 `when` 当场就响。**两条路对同一个写法给两个答案,而错的那一边不说话。**
         world_values = self._trigger_world_values(batch)
         for event in batch:
+            # 🔴 **玩家面的事件进触发器前先剥掉 GM 那一句**(3.13.0,批 3c §2.2)。
+            # `why` 是编剧写给创作者的笔记 —— 一条插件触发器订得到它,就等于
+            # 把 GM 的笔记摊在所有人面前。**剥这一格,不拦整条**:
+            # 运维台那个视图读的是 `history`,不走这条路,一个字不受影响。
+            handed = self._without_private_keys(event)
             for trigger in self._triggers_by_event.get(str(event.get("type") or ""), ()):
                 self._trigger_tally(trigger, "matched")
                 try:
-                    self._fire_trigger(trigger, event, pending, emitted, causes,
+                    self._fire_trigger(trigger, handed, pending, emitted, causes,
                                        world_values=world_values)
                 except ExpressionError as exc:
                     # 运行期降级:一条算不出来的触发器不该掀翻 tick(规律那条纪律)。
@@ -5887,6 +5892,32 @@ class Scheduler:
         if trigger.sets:
             self._trigger_tally(trigger, "written", len(trigger.sets))
         for spec in trigger.links:
+            # 🔴 **玩家面的事件不许把效果作用到别人身上**(3.13.0,批 3c §2.2)。
+            # 实测过这个口子是真的:一条订 `director_log` 的触发器把 `link` 的
+            # `to` 写死成 `player:p2`,边真的连上了 —— 拿 A 的剧情去动 B 的世界。
+            # ⚠️ **拒了要留痕**:静默拒绝会让作者以为那条规律在跑,
+            # 而它每一次都被吞掉(和「静默满足一个作者写下的要求」同一课)。
+            if self._crosses_player(spec, namespace, event, owner):
+                self._trigger_tally(trigger, "errors")
+                self._record_event({
+                    "type": "director_log_refused",
+                    "who": str(event.get("who") or ""),
+                    "loc": event.get("loc"),
+                    "payload": {
+                        "plugin": trigger.plugin, "trigger": trigger.id,
+                        "because": str(event.get("type") or ""),
+                        "player_id": str((event.get("payload") or {}).get(
+                            "player_id") or ""),
+                        "reason": "cross_player",
+                        "effect": str(spec.get("type") or ""),
+                    },
+                })
+                logger.warning(
+                    "触发器 %s.%s 想把 %s 连到**别的玩家**身上 —— 拒了。"
+                    "玩家面的事件(%s)只许作用于当事人",
+                    trigger.plugin, trigger.id, spec.get("type"),
+                    event.get("type"))
+                continue
             self.apply_edge_effect(spec, namespace, event, owner)
         for spec in trigger.emits:
             self._trigger_tally(trigger, "emitted")
@@ -5896,6 +5927,64 @@ class Scheduler:
                             "trigger": trigger.id, "because": event.get("type"),
                             **({"text": spec["text"]} if spec.get("text") else {})},
             })
+
+    @staticmethod
+    def _without_private_keys(event: dict[str, Any]) -> dict[str, Any]:
+        """交给插件触发器的那一份事件 —— **玩家面那几种剥掉私话**(批 3c §2.2)。
+
+        ⚠️ **返回一份新的**,不动原事件:日志里那一条要原样保留
+        (`why` 正是运维台与创作者要读的东西),变的只有**触发器看到的那一份**。
+        一个就地改载荷的实现会让事件日志和它自己的投影对不上,而那不可逆。
+        """
+        from anima_world.events import (
+            PLAYER_FACING_EVENTS, PLAYER_FACING_PRIVATE_KEYS,
+        )
+
+        if str(event.get("type") or "") not in PLAYER_FACING_EVENTS:
+            return event
+        payload = event.get("payload") or {}
+        if not any(k in payload for k in PLAYER_FACING_PRIVATE_KEYS):
+            return event
+        return {**event, "payload": {k: v for k, v in payload.items()
+                                     if k not in PLAYER_FACING_PRIVATE_KEYS}}
+
+    def _crosses_player(self, spec: dict[str, Any], namespace: dict[str, Any],
+                        event: dict[str, Any], owner: str | None) -> bool:
+        """这条边效果会不会落到**当事人以外的玩家**身上(3.13.0,批 3c §2.2)。
+
+        只对**玩家面事件**成立(`events.PLAYER_FACING_EVENTS`)——
+        别的事件本来就不是"写给某个人的",不该被这条闸拦。
+
+        🔴 **判据是两端解析之后的节点**,不是声明里那个字符串:
+        `_resolve_node` 的字面量那一支会把作者写死的 `player:<id>` 原样返回,
+        而那正是实测出来的口子。
+        """
+        from anima_world.events import PLAYER_FACING_EVENTS
+
+        if str(event.get("type") or "") not in PLAYER_FACING_EVENTS:
+            return False
+        subject = str((event.get("payload") or {}).get("player_id") or "")
+        for end in ("from", "to"):
+            node = self._resolve_node(spec.get(end), namespace, event, owner)
+            pid = self._player_id_in(str(node or ""))
+            if pid and pid != subject:
+                return True
+        return False
+
+    @staticmethod
+    def _player_id_in(node: str) -> str:
+        """节点 id 里那个玩家是谁 —— 认得 `player:<id>` 与 `agent:player:<id>`。
+
+        ⚠️ 两种形状都要认:量表那一层的 owner 是 `agent:player:<id>`
+        (`stock_owner_of` 加的前缀),而边声明里写的多半是 `player:<id>`。
+        **只认一种的闸,换个写法就绕过去了。**
+        """
+        raw = str(node or "")
+        if raw.startswith("agent:"):
+            raw = raw.split(":", 1)[1]
+        if raw.startswith("player:"):
+            return raw.split(":", 1)[1]
+        return ""
 
     def apply_edge_effect(
         self, spec: dict[str, Any], namespace: dict[str, Any],
