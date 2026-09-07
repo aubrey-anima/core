@@ -2040,3 +2040,52 @@ def test_橱窗世界真跑得出一次降级(tmp_path):
     assert row["downgraded_from"] in ("complicate", "confront"), row
     assert row["source"] != "llm", f"降级过的那一拍记成了 `llm`:{row}"
     assert row["move"] != row["downgraded_from"], row
+
+
+def test_零效果的长动词_那句话也说得准_而三处产地并成一处(tmp_path):
+    """🔴 **C 真站第七轮 ①**:龙族那三个(报到 / 拉票 / 训练)是
+    `started:true occupies:true` 的**长动词**,回执 `changed={} me_delta={}`
+    —— 起了头,而且这一下什么都没花掉。而屏上是「你开始拉票狮心会了。」
+
+    那句话**既不是 `engage_line` 也不是 `interaction_line`** ——
+    它是 `scheduler._player_said` 里的**第三处产地**:
+    同一件事,回执和屏上两种说法。3.12.1 补的「你试着…没什么变化」那道守卫
+    只挂在**瞬时动词**那条路上,长动词走的是另一条。
+
+    ⚠️ **只扣体力、不改目标的长动词不算零效果**(3.12.1 那条规矩,这儿照旧)。
+    """
+    from anima_world import host as H
+
+    # ① 三处并成一处:起头那句由 `engage_line` 一处出
+    assert H.engage_line("拉票", "狮心会") == "你着手拉票狮心会,这得花上一会儿。"
+    assert "什么都还没动" in H.engage_line("拉票", "狮心会", changed=False)
+    assert "你开始" not in H.engage_line("拉票", "狮心会", changed=False)
+
+    # ② 接上世界:一个零效果的长动词,回执那句要说得准
+    from _worldfile import write_seed_file
+
+    plug = {"id": "hui", "version": "1.0.0", "label": "社团",
+            "facts": {"声望": {"bearer": "agent", "shape": "number",
+                              "default": 0.0, "visibility": "self"}},
+            "verbs": {"拉票": {"target": "tree", "label": "拉票", "duration": 12,
+                              "occupies": True}}}
+    bare = {"agents": [{"id": "阿岚", "name": "阿岚", "location": "cafe",
+                        "personality": "安静"}],
+            "locations": [{"id": "cafe", "name": "咖啡馆", "description": "小店"}],
+            "kinds": [{"id": "tree", "gloss": "一棵树",
+                       "affordances": {"look": {}}}],
+            "entities": [{"id": "tree:oak", "name": "老橡树", "location": "cafe"}]}
+    path = write_seed_file(tmp_path / "zl.cyberworld", {**bare, "plugins": [plug]})
+    with open_world_at(str(tmp_path / "zl.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        got = world.player_tool("p1", "interact",
+                                {"target": "tree:oak", "verb": "拉票"})
+
+    assert got["ok"] is True, got
+    said = str(got.get("detail", {}).get("said") or got.get("text") or "")
+    assert said, f"起了个头而回执一个字没有:{got}"
+    assert "什么都还没动" in said, (
+        f"零效果的长动词说成了「开始了」—— 一句说大了的话:{said!r}")
+    assert "你开始" not in said, said

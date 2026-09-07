@@ -345,7 +345,8 @@ def interaction_line(verb_label: str, target_name: str, *,
     return f"你{verb}了{target}。"
 
 
-def engage_line(verb_label: str, target_name: str) -> str:
+def engage_line(verb_label: str, target_name: str, *,
+                changed: bool = True) -> str:
     """「你着手<动词><东西>,这得花上一会儿。」—— **长动词起了个头**那一句。
 
     和 `interaction_line` 分开写,因为它们说的是两件事:那一句是"做完了",
@@ -356,6 +357,15 @@ def engage_line(verb_label: str, target_name: str) -> str:
     verb, target = str(verb_label or "").strip(), str(target_name or "").strip()
     if not verb or not target:
         return ""
+    if not changed:
+        # 🔴 **长动词也分两句**(3.13.0,C 真站第七轮 ①)。
+        # 龙族那三个(报到 / 拉票 / 训练)是 `started:true occupies:true` 的
+        # 长动词,回执 `changed={} me_delta={}` —— **起了头,而且这一下
+        # 什么都没花掉**。说成「你开始拉票狮心会了。」是**一句说大了的话**:
+        # 玩家读到的是"这件事开始了",而它连一点体力都没扣。
+        # ⚠️ 这**不是**判它失败,也不是说它到点了不会有结果 ——
+        # 说的只是**到这会儿为止**世界一格没动。
+        return f"你着手{verb}{target} —— 到这会儿为止,什么都还没动。"
     return f"你着手{verb}{target},这得花上一会儿。"
 
 

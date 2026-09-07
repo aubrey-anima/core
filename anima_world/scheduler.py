@@ -31,7 +31,7 @@ from anima_world.beats import (
 from anima_world.bt_nodes import Blackboard, StockCondition
 from anima_world.chat_service import DEFAULT_ADDRESS
 from anima_world.events import EventLog
-from anima_world.host import interaction_line
+from anima_world.host import engage_line, interaction_line
 from anima_world.expressions import ExpressionError
 from anima_world import memory_store as memory_store_mod
 from anima_world.narrative import NarrativeProvider
@@ -2947,7 +2947,8 @@ class Scheduler:
                 # 下面那条是「一起做的事」。第一版只加在那一条上,真敲一遍才发现
                 # `said` 是 `None` —— **两个 return 都要加,而"看上去只有一处"是
                 # 这个仓库最贵的一种错**(同一条死胡同在两处各修一次那条)。
-                **self._player_said(agent_id, verb, target, affordance),
+                **self._player_said(agent_id, verb, target, affordance,
+                                    moved=self._outcome_moved(outcome)),
                 **({"spawned": born} if born else {}),
                 **({"destroyed": target} if affordance.destroys_target else {}),
                 # 边那几条到底做成没有 —— **只在真有边效果时出现**,
@@ -3101,7 +3102,9 @@ class Scheduler:
                 "changed": {}, **self._spent(head),
                 "consumed": dict(head.consumed),
                 # 🆕 3.11.1(验收 C ③):**起了个头也得有一句话。**
-                **self._player_said(agent_id, verb, target, affordance, started=True),
+                **self._player_said(agent_id, verb, target, affordance,
+                                    started=True,
+                                    moved=self._outcome_moved(head)),
             }
 
         if head.updates:
@@ -3141,7 +3144,8 @@ class Scheduler:
             # 只有一堆空 dict,屏幕上**纹丝不动** —— 而世界里真的发生了一件事。
             # ⚠️ **只给玩家**:角色那条路的回执进的是她的对话流,多一句"你…了…"
             # 会变成她自己念出来的一句旁白。
-            **self._player_said(agent_id, verb, target, affordance),
+            **self._player_said(agent_id, verb, target, affordance,
+                                moved=self._outcome_moved(head)),
             **({"spawned": born} if born else {}),
             **({"destroyed": target} if affordance.destroys_target else {}),
         }
@@ -4056,7 +4060,9 @@ class Scheduler:
             "changed": {}, **self._spent(outcome),
             "consumed": dict(outcome.consumed),
             # 🆕 3.11.1(验收 C ③):**起了个头也得有一句话。**
-            **self._player_said(agent_id, verb, target, affordance, started=True),
+            **self._player_said(agent_id, verb, target, affordance,
+                                started=True,
+                                moved=self._outcome_moved(outcome)),
         }
 
     def _settle_engagements(self) -> None:
@@ -6426,8 +6432,25 @@ class Scheduler:
         self._deliver(event)
         self._record_event(event)
 
+    def _outcome_moved(self, outcome: Any) -> bool:
+        """这一次**真的动了什么吗** —— 目标身上的量,或者他自己身上的。
+
+        🔴 判据和 `host._moved_something` 是**同一条**(它读事件载荷,
+        这里读 `outcome` 对象)——两处答的必须是同一句话,否则回执说
+        「没什么变化」而回顾说「你 X 了 Y」。
+        ⚠️ **两格都看**:一个只扣体力、不改目标的动词(`训练`)**是动了东西的**
+        (3.12.1 那条规矩)。
+        """
+        if getattr(outcome, "updates", None):
+            return True
+        if getattr(outcome, "consumed", None):
+            return True
+        spent = self._spent(outcome) or {}
+        return any(spent.get(k) for k in ("me_delta", "me_changed", "spent"))
+
     def _player_said(self, agent_id: str, verb: str, target: str,
-                     affordance: Any, *, started: bool = False) -> dict[str, str]:
+                     affordance: Any, *, started: bool = False,
+                     moved: bool = True) -> dict[str, str]:
         """回执里那一格 `said` —— **只给玩家,而且只有一处算法**(3.10.0,批 1.1 ④)。
 
         ⚠️ **只给玩家**:角色那条路的回执进的是她的对话流,多一句「你…了…」
@@ -6451,9 +6474,13 @@ class Scheduler:
         if started:
             # ⚠️ **别在这儿算"还要多久"**:那要读 tick_rate,而它是宿主那一侧的
             # 换算(`_ask_ready_text` 那条教训)。回执里 `ends_tick` 已经给了。
-            said = f"你开始{label}{name}了。" if label and name else ""
+            # 🔴 **这一句从前是第三处产地**(3.13.0,C 真站第七轮 ①):
+            # 屏上那句「你开始拉票狮心会了。」既不是 `engage_line`(回顾读的那条),
+            # 也不是 `interaction_line` —— **同一件事,回执和屏上两种说法**。
+            # 现在两处共用 `engage_line`:**产地只剩一个函数族**。
+            said = engage_line(label, name, changed=moved)
         else:
-            said = interaction_line(label, name)
+            said = interaction_line(label, name, changed=moved)
         return {"said": said} if said else {}
 
     @staticmethod

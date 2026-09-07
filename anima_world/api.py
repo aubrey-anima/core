@@ -744,6 +744,14 @@ _WORLD_SAID_NO = frozenset({
 # 抹除认的是这张表,不认识的键只做名字替换,漏登等于给原文留一条静默的活路。
 _ERASE_TEXT_KEYS = frozenset({
     "summary", "conversation_summary", "note", "text", "content", "transcript",
+    # 🆕 3.13.0(C 真站第七轮 ②):**编剧那几格也是关于他的原文。**
+    # 抹除前 `host_scene.text` 早就被抹了,而 `director_log` 的
+    # `why` / `line` / `promise` **一个字没动** —— 一份已注销账号的
+    # **GM 笔记与剧情原文原样留在库里**,而回执上没有一格提到它。
+    # ⚠️ `why` 尤其要抹:它是编剧写给创作者的那句话,**关于这个人**。
+    "why", "line", "promise",
+    # 结算那三条事件上的人话(3.12.0 加的),同理。
+    "stake_text", "outcome_text", "said",
 })
 _ERASED_TEXT = "(已抹除)"
 _ERASED_NAME = "(已注销)"

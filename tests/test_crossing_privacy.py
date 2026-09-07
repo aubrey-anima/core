@@ -272,3 +272,39 @@ def test_三张表有意不同_而分岔本身要有一处写下来():
     # 而它确实和那两张不是同一张
     assert set(H.CROSSING_EVENT_TYPES) != set(H.PLAYER_MOVE_EVENT_TYPES)
     assert set(H.CROSSING_EVENT_TYPES) != set(H.RECAP_EVENT_TYPES)
+
+
+# ── 合规:抹除要扫到编剧那几格(3.13.0,C 真站第七轮 ②)──────────────────
+
+def test_抹除之后_编剧那几格原文一个字都不许留(tmp_path):
+    """🔴 **C 真站第七轮 ②**:第四轮已抹的账号,`director_log` 里
+    `why` / `line` / `promise` **一个字没动** —— 一份已注销账号的
+    **GM 笔记与剧情原文原样留在库里**,而回执上没有一格提到它。
+
+    ⚠️ 对照组是承重的:`host_scene.text` **早就被抹了**(它在
+    `_ERASE_TEXT_KEYS` 里)—— 所以这不是「抹除整个没跑」,
+    而是**那张表少了几格**。一处抹了、一处没抹,最难查。
+    """
+    with open_world_at(tmp_path / "er.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe", display_name="路明非")
+        world.tick(2)
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "她欲言又止",
+                   "why": "这一拍是为了把他往楚子航那边推",
+                   "promise": "那本旧相册",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
+                   "source": "mock"},
+            tension_before=0.3, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=0, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        world.host_turn("p1")
+        world.erase_player("p1", reason="用户行使删除权", dry_run=False)
+
+        blob = "\n".join(
+            str(e.get("payload") or "") for e in world.events())
+
+    for secret in ("这一拍是为了把他往楚子航那边推", "那本旧相册", "她欲言又止"):
+        assert secret not in blob, f"抹除之后这句话还留在库里:{secret}"
+    # 对照:名字那一格照旧走「(已注销)」,不是整条删行
+    assert "(已抹除)" in blob or "(已注销)" in blob, "什么都没改写 —— 抹除整个没跑?"
