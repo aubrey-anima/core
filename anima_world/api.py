@@ -8221,16 +8221,33 @@ class World:
         # 她点了头 —— 代价与效果照算。**效果走 `_expand_beat_op` 那个展开器**
         # (和剧情拍、编剧那一拍同一个函数):不另写一份判断。
         landed: list[str] = []
-        for op in (entry.get("effects") or ()):
-            if not isinstance(op, dict):
-                continue
+        # 🔴 **先把占位符换成这一次问的那个人**(3.13.0,tool 诉求 E ①)。
+        # 一条对人动词的全部意义就是**对谁做**在运行时才知道 —— 没有占位符时,
+        # 作者只能写死一个角色 id,而 tool 写的 `{"as": "$target"}` 引擎照收、
+        # 运行时展开不出、`except` 吞掉,玩家侧 `ok:true / accepted` 一切正常。
+        for op in pv_mod.resolve_effects(entry.get("effects"), agent_id=aid):
             try:
                 expanded = self.scheduler._expand_beat_op(dict(op))
             except Exception:  # noqa: BLE001 - 一个 op 挂了不该掀翻这一次
                 logger.warning("对人动词 %r 的 op %r 没兑现", name, op, exc_info=True)
                 continue
-            if expanded:
-                landed.extend(str(e.get("op") or "") for e in expanded)
+            if not expanded:
+                # ⚠️ **展开不出也要吭声**:上一版这儿是静默 `continue`,
+                # 于是「装得进去、却什么都不做」在日志上也看不见。
+                logger.warning(
+                    "对人动词 %r 的 op %r 展开不出 —— 那一格多半指到了一个"
+                    "不存在的东西(指「你刚才问的那个人」写 %s)",
+                    name, op, pv_mod.TARGET_PLACEHOLDER)
+                continue
+            # 🔴 **展开完要真的发出去**(3.13.0,tool 诉求 E ①)。
+            # 上一版只把 op 名字攒进 `landed` 就完了 —— **一条都没落库**:
+            # 于是即便把角色 id 写死(不用占位符),同意之后世界照样一格不动,
+            # 而回执 `ok:true / accepted` 一切正常。
+            # **占位符只是这条 bug 的一半,另一半是这几行从来没发过事件。**
+            # 和编剧那条路逐字同一句(`_director_apply` 里 `_record_and_deliver`)。
+            for event in expanded:
+                self.scheduler._record_and_deliver(event)
+            landed.extend(str(e.get("op") or "") for e in expanded)
         blank["ok"] = True
         blank["said"] = ""
         with self.scheduler._lock:

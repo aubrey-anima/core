@@ -303,3 +303,113 @@ def test_没有本体层时_那张脸也不许早退(tmp_path):
         _main(["player", "options", "--player", "p1", "--world-id", "w"])
     screen = buf.getvalue()
     assert "拜师" in screen, f"blocked 那一行把不相干的东西也挡掉了:{screen}"
+
+
+# ── tool 诉求 E:占位符 + 装得进去却什么都不做(3.13.0)─────────────────────
+
+_DUIREN = {
+    "id": "duiren", "version": "1.0.0", "label": "对人",
+    "person_verbs": [
+        {"id": "请教一句", "label": "请教一句", "consent": "none",
+         "effects": [{"op": "sentiment_delta", "as": "$target",
+                      "target": "player:p1", "delta": 0.1}]},
+        {"id": "借一次笔记", "label": "借一次笔记"},
+        {"id": "远远看一眼", "consent": "none"},
+    ],
+}
+
+
+def test_占位符指得到刚才问的那个人_同意之后世界真的变了(tmp_path):
+    """🔴 **tool 诉求 E ①**(真发包到龙族时量出来的)。
+
+    一条对人动词的全部意义就是**对谁做在运行时才知道**,而在这之前作者只能写死
+    一个角色 id。tool 写了 `{"as": "$target"}`,引擎**照收**(`world check` rc 0),
+    运行时去找一个叫 `$target` 的角色、展开不出、`except` 吞掉,
+    而玩家侧 `ok:true / accepted` **一切正常** —— 龙族装着的三个对人动词
+    **同意了也什么都不发生**。
+
+    ⚠️ **占位符只是这条 bug 的一半**:另一半是那几行**从来没发过事件** ——
+    展开完只把 op 名字攒进 `landed` 就完了。即便把角色 id 写死也一样什么都不动。
+    """
+    from _worldfile import open_world_at, write_seed_file
+
+    path = write_seed_file(tmp_path / "e1.cyberworld",
+                           {**_BARE, "plugins": [dict(_DUIREN)]})
+    with open_world_at(str(tmp_path / "e1.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        before = world.relationship_summary("阿岚", "player:p1")["axes"]["sentiment"]
+        got = world.player_person_verb("p1", "阿岚", "请教一句")
+        after = world.relationship_summary("阿岚", "player:p1")["axes"]["sentiment"]
+
+    assert got["ok"] is True and got["answer"] == "accepted", got
+    assert after != before, (
+        f"同意了,而世界一格没动({before} → {after})—— "
+        "`ok:true / accepted` 一切正常,正是这条 bug 最难查的地方")
+    assert after > before
+
+
+def test_占位符拼错_加载期当场拒(tmp_path):
+    """🔴 **另一半:`world check` 从前一声不吭**(rc 0)。
+    **一个装得进去、却什么都不做的动词,比一个装不进去的动词坏得多**:
+    前者要人去线上一个一个试,后者当场就告诉你。
+    """
+    from anima_world.__main__ import world_plugin_errors
+    from anima_world.person_verbs import TARGET_PLACEHOLDER
+
+    bad = {**_DUIREN, "person_verbs": [
+        {"id": "请教一句", "label": "请教",
+         "effects": [{"op": "sentiment_delta", "as": "$targt",
+                      "target": "player:p1", "delta": 0.1}]}]}
+    said = world_plugin_errors({"plugins": [bad]})
+    assert any("$targt" in line for line in said), said
+    assert any(TARGET_PLACEHOLDER in line for line in said), (
+        f"报了错却没告诉他正确写法是什么:{said}")
+
+    # 写对了就放行
+    assert not world_plugin_errors({"plugins": [dict(_DUIREN)]})
+
+
+def test_指到一个不存在的角色_也要拒():
+    """⚠️ 这一格**插件那一层查不动**(它有意不认识世界),所以判断放在
+    `person_verbs.effect_errors` 上,由认识世界的那一层传 `known_agents`。
+    这条用例把那个函数本身钉住。"""
+    from anima_world.person_verbs import effect_errors
+
+    said = effect_errors(
+        {"effects": [{"op": "sentiment_delta", "as": "没这个人"}]},
+        "拜师", known_agents=["阿岚"])
+    assert said and "指不到" in said[0], said
+    # 认识的角色、以及占位符,都不该被咬
+    assert not effect_errors(
+        {"effects": [{"op": "sentiment_delta", "as": "阿岚"}]},
+        "拜师", known_agents=["阿岚"])
+    assert not effect_errors(
+        {"effects": [{"op": "sentiment_delta", "as": "$target"}]},
+        "拜师", known_agents=["阿岚"])
+
+
+def test_plugin_list_报得出对人动词有几条(tmp_path):
+    """🟡 **tool 诉求 E ②**:那行 `动词 N` 是 **affordance 那一族**,而对人动词
+    **永不走 affordance** —— 于是一个装了三条对人动词的插件在这一屏上
+    显示的是「动词 0」。**库里有而对方看不见,等于没有。**
+    """
+    import contextlib
+    import io as _io
+
+    from _worldfile import open_world_at, write_seed_file
+    from anima_world.__main__ import main as _main
+
+    path = write_seed_file(tmp_path / "e2.cyberworld",
+                           {**_BARE, "plugins": [dict(_DUIREN)]})
+    with open_world_at(str(tmp_path / "e2.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.tick(1)
+
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _main(["plugin", "list", "--world-id", "w"])
+    screen = buf.getvalue()
+    assert "duiren" in screen, screen
+    assert "对人动词 3" in screen, f"那一屏报不出对人动词有几条:{screen}"

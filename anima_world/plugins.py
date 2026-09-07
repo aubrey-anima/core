@@ -544,10 +544,21 @@ def _parse_one(
     errors += unknown_keys(label, entry, PLUGIN_KEYS, "plugin_keys")
     # 🆕 3.12.0:对人动词(裁决 §2.6)。判断住在 `person_verbs.py` ——
     # 这儿只把它接上,不抄第二份。
-    from anima_world.person_verbs import verb_errors as _pv_errors
+    from anima_world.person_verbs import (
+        effect_errors as _pv_effect_errors, verb_errors as _pv_errors,
+    )
 
     for i, row in enumerate(entry.get("person_verbs") or ()):
-        errors += _pv_errors(row, f"{label}.person_verbs[{i}]")
+        tag = f"{label}.person_verbs[{i}]"
+        errors += _pv_errors(row, tag)
+        # 🔴 **`effects` 里指人的那几格,指得到东西吗**(3.13.0,tool 诉求 E ①)。
+        # 上一版一声不吭:`world check` rc 0,而运行时展开不出、`except` 吞掉,
+        # 玩家侧 `ok:true / accepted` 一切正常 —— 龙族三个对人动词就是这么
+        # **同意了也什么都不发生**的。
+        # ⚠️ 这儿**不认识这个世界有哪些角色**(插件那一层有意不认识世界),
+        # 所以只查得动「占位符拼没拼对」;"这个角色存不存在"由认识世界的那一层
+        # 传 `known_agents` 进来。
+        errors += _pv_effect_errors(row, tag)
     version = str(entry.get("version") or "").strip()
     if not version:
         errors.append(

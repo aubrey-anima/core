@@ -6700,6 +6700,38 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 落到你们这儿:两个玩家在同一间屋子里,**一个人做的事另一个看得见**,
 而**两条线仍然各是各的**。
 
+### (a-2) 🔴 对人动词的 `effects`:**用 `$target` 指「你刚才问的那个人」**
+
+你们真发包时量出来的那条(诉求 E ①),两半都修了:
+
+**一半是没有占位符**。一条对人动词的全部意义就是**对谁做在运行时才知道**,
+而在这之前作者只能写死一个角色 id。你们写的 `{"as": "$target"}` 引擎**照收**
+(`world check` rc 0),运行时去找一个叫 `$target` 的角色、展开不出、被 `except`
+吞掉,而玩家侧 `ok:true / accepted` **一切正常**。
+
+现在:
+
+    "effects": [{"op": "sentiment_delta", "as": "$target",
+                 "target": "player:<那个玩家>", "delta": 0.1}]
+
+占位名与会被替换的那几格在 `contract.person_verbs.target_placeholder` /
+`target_fields`(`as` / `agent_id` / `target` / `from` / `to` / `who`)。
+⚠️ **逐字相等才换**,不做全文替换 —— 一个叫 `$targets_note` 的名字不该被改写。
+🔴 **拼错(或指到一个这个世界没有的角色)现在加载期当场拒**,不再静默吞:
+**一个装得进去、却什么都不做的动词,比一个装不进去的动词坏得多** ——
+前者要人去线上一个一个试,后者当场就告诉你。
+
+⚠️ **另一半更要紧,而它和占位符无关**:那几行**从来没发过事件** ——
+展开完只把 op 名字攒进一个列表就完了。**即便把角色 id 写死也一样什么都不动。**
+所以 `duiren 1.0.1` 填上 effects 之后,请**在真世界里核一次关系真的变了**,
+别只看 `ok:true`。
+
+### (a-3) `plugin list` 报得出对人动词有几条(诉求 E ②)
+
+那行 `动词 N` 是 **affordance 那一族**,而对人动词**永不走 affordance** ——
+于是一个装了三条对人动词的插件在那一屏上显示「动词 0」。
+现在多一格:`对人动词 3`;`--json` 里是 `person_verbs: [...]`(id 列表)。
+
 ### (b) 哪几种事会被撞见 —— `contract.director.crossing_event_types`
 
     travel · entity_interaction · entity_engage · person_verb.accepted

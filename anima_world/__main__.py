@@ -27,6 +27,8 @@ from anima_world.beats import (
 )
 from anima_world.roll import DEFAULT_BANDS as ROLL_DEFAULT_BANDS, FACES as ROLL_FACES
 from anima_world.person_verbs import (
+    TARGET_FIELDS as PERSON_VERB_TARGET_FIELDS,
+    TARGET_PLACEHOLDER as PERSON_VERB_TARGET_PLACEHOLDER,
     ANSWERS as PERSON_VERB_ANSWERS, CONSENT_MODES as PERSON_VERB_CONSENT,
     EVENTS as PERSON_VERB_EVENTS, PERSON_VERB_KEYS,
 )
@@ -9564,6 +9566,12 @@ def contract_payload() -> dict[str, Any]:
             # ⚠️ **每组外面那两格也要报**(3.12.1,验收 B+C ⑦):
             # 少了它们,宿主知道每个动词长什么样,却不知道**这一组是对谁的**。
             "options_group_keys": ["agent_id", "agent_name", "verbs"],
+            # 🆕 3.13.0(tool 诉求 E ①):**`effects` 里指「你刚才问的那个人」的那个词。**
+            # 🔴 没有它之前,作者只能写死一个角色 id —— 而一条对人动词的全部意义
+            # 就是**对谁做**在运行时才知道。写错(或写一个指不到的角色名)
+            # **加载期当场拒**,不再静默吞。
+            "target_placeholder": PERSON_VERB_TARGET_PLACEHOLDER,
+            "target_fields": list(PERSON_VERB_TARGET_FIELDS),
             "declared_method": "person_verbs",
             # 🔴 **说真话:主持人那一屏今天不递对人动词**(3.12.1,验收 B+C ⑦)。
             # 上一版这一格写着 `"verb"`,像是在说"host_turn 的 options 里会有
@@ -10788,6 +10796,19 @@ def run_plugin(args: argparse.Namespace) -> int:
         scheduler = world.scheduler
         store = scheduler.plugin_store
         if command == "list":
+            # 🆕 3.13.0(tool 诉求 E ②):对人动词**不在** `Plugin` 那个对象上
+            # (它只解析 affordance 那一族),所以从**声明原文**里数。
+            from anima_world.plugins import stored_bodies as _bodies
+
+            _pv_by_plugin: dict[str, list[str]] = {}
+            try:
+                for body in _bodies(store):
+                    _pv_by_plugin[str(body.get("id") or "")] = sorted(
+                        str(v.get("id") or "")
+                        for v in (body.get("person_verbs") or ())
+                        if isinstance(v, dict) and v.get("id"))
+            except Exception:  # noqa: BLE001 - 读不到声明不该掀翻这一屏
+                logger.warning("读插件声明原文失败,对人动词那一格空着", exc_info=True)
             rows = [
                 {
                     "id": plugin.id, "version": plugin.version, "label": plugin.label,
@@ -10803,6 +10824,11 @@ def run_plugin(args: argparse.Namespace) -> int:
                     "edges": sorted(e.qualified for e in plugin.edges.values()),
                     "verbs": [v.schema() for v in
                               sorted(plugin.verbs.values(), key=lambda v: v.name)],
+                    # 🆕 3.13.0(tool 诉求 E ②):**对人动词单独一格。**
+                    # 上面那格 `verbs` 是 affordance 那一族,而对人动词
+                    # **永不走 affordance** —— 它们从来没被这一屏报过,
+                    # 于是一个装了三条对人动词的插件在这儿显示 `动词 0`。
+                    "person_verbs": _pv_by_plugin.get(plugin.id, []),
                     # **装载顺序是答案的一部分**:依赖图定的那个顺序决定"我读的那个
                     # 量在我第一次求值时在不在库里",而它不是字母序。
                     "order": index,
@@ -10823,7 +10849,8 @@ def run_plugin(args: argparse.Namespace) -> int:
                          f"触发器 {row['triggers']}"]
                 # **只印真有的那几样**:一个只声明边和动词的插件,从前这一行是
                 # 「挂在 」加一片空白 —— 一个空着的字段比没有这个字段更难读。
-                for label, key in (("种类", "kinds"), ("边", "edges"), ("动词", "verbs")):
+                for label, key in (("种类", "kinds"), ("边", "edges"),
+                                   ("动词", "verbs"), ("对人动词", "person_verbs")):
                     if row[key]:
                         parts.append(f"{label} {len(row[key])}")
                 if row["bearers"]:

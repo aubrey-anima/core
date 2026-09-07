@@ -64,6 +64,74 @@ CONSENT_MODES = ("required", "none")
 EVENTS = ("person_verb.proposed", "person_verb.accepted", "person_verb.refused")
 
 
+#: 🔴 **`effects` 里指「你刚才问的那个人」的那个词**(3.13.0,tool 诉求 E ①)。
+#:
+#: 没有它之前,作者只能写死一个角色 id —— 而一条对人动词的全部意义就是
+#: **对谁做**在运行时才知道。tool 真发包时写了 `{"as": "$target"}`,
+#: 引擎**照收**(`world check` rc 0),运行时去找一个叫 `$target` 的角色、
+#: 展开不出、`except` 吞掉,而玩家侧 `ok:true / accepted` **一切正常** ——
+#: 于是龙族装着的三个对人动词**同意了也什么都不发生**。
+#: **一个静默吞掉的 op,比一个报错的 op 贵得多。**
+TARGET_PLACEHOLDER = "$target"
+
+#: `effects` 里哪几个字段是**指人的**(会被占位符替换)。
+#: ⚠️ 只替换这几格,不做全文替换:一个叫 `$target` 的**物品 id** 不该被改写。
+TARGET_FIELDS = ("as", "agent_id", "target", "from", "to", "who")
+
+
+def resolve_effects(effects: Any, *, agent_id: str) -> list[dict[str, Any]]:
+    """把 `effects` 里的占位符换成**这一次问的那个人**。
+
+    ⚠️ **只认 `TARGET_FIELDS` 那几格**,而且**逐字相等**才换 ——
+    子串替换会把 `"$targets_note"` 这种名字也改掉。
+    """
+    out: list[dict[str, Any]] = []
+    for op in (effects or ()):
+        if not isinstance(op, dict):
+            continue
+        row = dict(op)
+        for field in TARGET_FIELDS:
+            if str(row.get(field) or "") == TARGET_PLACEHOLDER:
+                row[field] = agent_id
+        out.append(row)
+    return out
+
+
+def effect_errors(entry: Any, label: str, *, known_agents: Any = None) -> list[str]:
+    """`effects` 里那几个指人的格子,**指得到东西吗** —— 加载期一次列全。
+
+    🔴 **这条是 tool 诉求 E ① 的另一半**:上一版 `world check` 对一个指不到的
+    角色名**一声不吭**(rc 0),而运行时静默吞掉。
+    **一个装得进去、却什么都不做的动词,比一个装不进去的动词坏得多**:
+    前者要人去线上一个一个试,后者当场就告诉你。
+    """
+    out: list[str] = []
+    if not isinstance(entry, dict):
+        return out
+    names = None if known_agents is None else {str(a) for a in known_agents}
+    for i, op in enumerate(entry.get("effects") or ()):
+        if not isinstance(op, dict):
+            out.append(f"{label}.effects[{i}]: 不是一个对象")
+            continue
+        for field in TARGET_FIELDS:
+            said = str(op.get(field) or "")
+            if not said or said == TARGET_PLACEHOLDER:
+                continue
+            if said.startswith("player:") or said.startswith("$"):
+                if said.startswith("$"):
+                    out.append(
+                        f"{label}.effects[{i}].{field}: 不认识的占位符 {said!r} "
+                        f"—— 指「你刚才问的那个人」只有一个写法:"
+                        f"`{TARGET_PLACEHOLDER}`")
+                continue
+            if names is not None and said not in names:
+                out.append(
+                    f"{label}.effects[{i}].{field}: 指不到 {said!r} —— "
+                    f"这个世界里没有这个角色。要指「你刚才问的那个人」"
+                    f"就写 `{TARGET_PLACEHOLDER}`")
+    return out
+
+
 def verb_errors(entry: Any, label: str) -> list[str]:
     """一条对人动词写得对不对 —— **加载期,一次列全**。"""
     if not isinstance(entry, dict):
