@@ -6755,8 +6755,8 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 
 ### (b) 哪几种事会被撞见 —— `contract.director.crossing_event_types`
 
-    travel · state_change(**只有 location_join**)· entity_interaction ·
-    entity_engage · person_verb.accepted
+    `travel` · `state_change`(**只有 `location_join`**)· `entity_interaction` ·
+    `entity_engage` · `person_verb.accepted`
 
 ⚠️ **`state_change` 只认到站那一支**(`contract.director.crossing_state_kinds`)
 —— 关系变了、人设被改写都不是"看得见的动作";整族都收的下场是
