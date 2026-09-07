@@ -530,10 +530,20 @@ def test_三条发射点_没有一条发得出空话的敲门(tmp_path):
         brain = world.scheduler.agents.get(agent)
         if brain is not None:
             world.scheduler._maybe_hail_player(brain.agent)
+        # ④ 她说过的「等会儿再说」到点了 —— 🔴 **第三个发射点**
+        # (`_fire_due_followups`)。上一版这条用例没走到它:
+        # 把那一格 `line` 整个删掉,44 条用例一条都不红。
+        world.scheduler.chat_state.add_followup(
+            agent, "p1", due_tick=int(world.scheduler.clock),
+            kind="delayed_reply", reason="手上有活",
+            created_tick=int(world.scheduler.clock))
         world.tick(2)
         hails = [e for e in world.events() if e["type"] == "agent_hail"]
 
-    assert len(hails) >= 2, f"夹具只发出了 {len(hails)} 条 hail"
+    assert len(hails) >= 3, f"夹具只发出了 {len(hails)} 条 hail"
+    reasons = {str((e.get("payload") or {}).get("reason") or "") for e in hails}
+    assert "delayed_reply" in reasons, (
+        f"「等会儿再说」那条发射点根本没响,这条用例就没扫到它:{reasons}")
     for row in hails:
         said = str((row.get("payload") or {}).get("line") or "").strip()
         assert said, (
