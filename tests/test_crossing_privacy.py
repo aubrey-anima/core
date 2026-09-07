@@ -214,6 +214,63 @@ def test_当着他的面做一件事_他那一屏开口并指名道姓(tmp_path)
             f"{away['scene']['source']}")
 
 
+#: 🔴 **只读门那张表,从 `World` 自己数出来**(验收 A 整体 ④,3.13.0)。
+#:
+#: §2.2 的判据是「**新加一扇只读门忘了它 → 闸红**」,而手写一份清单做不到这件事:
+#: 3.13.0 同一批新开的 `player_clues` / `player_faction` 就没进上一版那份手写清单。
+#: 判据是**签名**:公开、只吃一个 `player_id`。
+#:
+#: ⚠️ 例外表**逐条写理由**,而且它自己有闸(下面那条用例)——
+#: 一张没人验的例外表,是这条闸最容易被绕开的地方:
+#: 往里加一行就能让任何一扇门不被扫。
+_NOT_A_READ_DOOR: dict[str, str] = {
+    "erase_player": "它是写:抹掉一个玩家的痕迹",
+    "forget_player": "同上",
+    "player_leave": "它是写:把人从在场表里摘掉",
+}
+
+
+def _read_only_player_doors() -> list[str]:
+    import inspect
+
+    from anima_world.api import World
+
+    out: list[str] = []
+    for name in sorted(dir(World)):
+        if name.startswith("_") or name in _NOT_A_READ_DOOR:
+            continue
+        fn = getattr(World, name)
+        if not callable(fn):
+            continue
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            continue
+        need = [p for p in list(sig.parameters.values())[1:]
+                if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        if len(need) == 1 and need[0].name == "player_id":
+            out.append(name)
+    return out
+
+
+def test_只读门那张表_例外表里的每一条都真的是写门():
+    """⚠️ **给例外表也上闸**(2026-08-25 那一课)。
+
+    上面那张表是这条泄漏闸的**全部覆盖面**,而例外表是它唯一的出口:
+    往里加一行,那扇门就再也不会被扫 —— 而**加一行不会有任何一处报错**。
+    所以每一条都得对得上一个**真的会写世界**的方法名。
+    """
+    from anima_world.api import World
+
+    for name, why in _NOT_A_READ_DOOR.items():
+        assert hasattr(World, name), (
+            f"例外表里的 `{name}` 已经不存在了 —— 一条指着空气的例外,"
+            "下一个人读不出它当初豁免的是什么")
+        assert why.strip(), f"`{name}` 没写理由"
+    assert not (set(_NOT_A_READ_DOOR) & set(_read_only_player_doors()))
+
+
 def test_撞见不许把别人的线带过来(tmp_path):
     """🔴 **§2.1 的总口径**:交织的价值在「你的选择被另一个人撞见」,
     **不在「两个人共享一份剧情」**。
@@ -238,12 +295,25 @@ def test_撞见不许把别人的线带过来(tmp_path):
             forbidden_ops=set(), recap=[], place_name="咖啡店")
         _act(world, "p1")
 
-        screen = world.host_turn("p2")["scene"]["text"]
-        story = world.player_story("p2")
+        # 🔴 **扫的是一张门表,不是手写的两扇**(验收 A 整体 ④,3.13.0)。
+        # §2.2 那条判据的原话是「**新加一扇只读门忘了它 → 闸红**」,而上一版
+        # 这儿手写着 `host_turn` / `player_story` 两扇 —— 3.13.0 同一批加的
+        # `player_clues` / `player_faction` **一扇都没被扫到**,判据不成立。
+        # 门表从 `World` 自己数出来(只吃一个 `player_id` 的公开方法),
+        # 于是**加一扇门自动进**。
+        doors = _read_only_player_doors()
+        assert {"host_turn", "player_story", "player_clues",
+                "player_faction"} <= set(doors), (
+            f"门表自己漏了 —— 它是这条闸的全部覆盖面:{sorted(doors)}")
+        opened = {name: getattr(world, name)("p2") for name in sorted(doors)}
+        screen = opened["host_turn"]["scene"]["text"]
+        story = opened["player_story"]
 
     for secret in ("那本旧相册", "把他往楚子航那边推", "她的信任"):
+        for name, said in opened.items():
+            assert secret not in str(said), (
+                f"别人的线从 `{name}` 那扇门漏出去了:{secret}")
         assert secret not in screen, f"别人的线漏到 B 的屏上了:{secret}"
-        assert secret not in str(story), f"别人的线漏进 B 的故事页了:{secret}"
     assert story["threads"] == [], "B 平白多了一条不是他的线"
     # ⚠️ **B 自己那几拍是该有的**:他看见 A 做了一件事,那是他这一屏的输入
     # (§2.3)—— 判据是「这几拍**都是他的**」,不是「他一拍都没有」。
