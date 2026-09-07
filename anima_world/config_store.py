@@ -405,6 +405,7 @@ _DEFAULTS: dict[str, tuple[Any, str, str, bool, str]] = {
     # 过了这段才由 tick 上那条结算动手扣。**代拍(自主程序):一个世界日** ——
     # 它要长到「一个下班后才上线的人接得住」,短到「挂机免疫」不成立。
     "director.grace_hours": (24, "int", "director", False, "Director: world hours after due in which the player can still get a callback before the stake is collected"),
+    "director.first_arc_beats": (6, "int", "director", False, "Director: for a player's first N beats, phase targets are scaled down so the arc reaches its first climax (and thus a confront/reward) inside the first hour. Measured on the live site: confront/reward/callback and roll were ALL zero-triggered for new players, so 3b's whole player-facing set did not exist for them. Scaling affects ONLY phase advance, never how big a move is picked."),
     "llm.stream.first_timeout": (30.0, "float", "llm", False, "Streaming: seconds to wait for the FIRST chunk (prefill lives here; deliberately the same as llm.timeout was)"),
     "llm.stream.gap_timeout": (15.0, "float", "llm", False, "Streaming: seconds allowed BETWEEN chunks once text started; a stall before any prose is retried once"),
     "scheduler.tick_rate": (1 / DEFAULT_SECONDS_PER_TICK, "float", "scheduler", False, "Real-time clock: one 5-minute world tick every 5 real minutes"),

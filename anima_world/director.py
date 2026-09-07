@@ -157,6 +157,37 @@ PHASE_TARGET: dict[str, float] = {
     "setup": 0.25, "escalation": 0.55, "climax": 0.85, "release": 0.2,
 }
 
+#: 🆕 3.13.0(C 真站第七轮 ⑤):**头几拍走快一点。**
+#:
+#: 🔴 真站实测:13 条 `director_log` 里 `move` 只有 `collect` 9 / `approach` 3 /
+#: `breathe` 1,`confront` / `reward` / `callback` 与 `roll` **真站零触发**,
+#: 张力 0.05。**新玩家头一小时到不了摊牌** —— 而 `confront` 要
+#: `phase == "climax"`,climax 又要张力先攒过 escalation 的目标(0.55),
+#: 在 `ceiling` 0.6 的世界里那是四五拍开外的事。
+#: **于是 3b 那整套玩家面,对一个新玩家等于不存在。**
+#:
+#: 落法是**把头几拍的目标压低**(不是把张力抬高):目标低 → 相位翻得快 →
+#: 一小时内到得了节骨眼。⚠️ **压的是目标,不是曲线的形状** ——
+#: 过了这几拍就回到原来那张表,后面的节奏一格没动。
+FIRST_ARC_BEATS = 6
+FIRST_ARC_SCALE = 0.35
+
+
+def phase_target(phase: str, *, moves_made: int = 0,
+                 first_arc: int = FIRST_ARC_BEATS) -> float:
+    """**翻不翻篇**那一问用的目标 —— 头几拍压低(见 `FIRST_ARC_BEATS`)。
+
+    🔴 **只有 `next_phase` 读它,`pick_move` 读满目标** —— 这条分界是踩出来的:
+    `gap = 目标 − 张力`,**目标压低 = gap 变小 = 动作变小**;
+    而 `confront` 恰恰要 `gap >= 0.30`。
+    第一版两处都压,于是"想让新玩家早点摊牌"那一改**把摊牌关掉了**。
+    **压低目标只该让相位翻得快,不该让动作变小。**
+    """
+    base = PHASE_TARGET.get(str(phase or ""), 0.5)
+    if int(moves_made) < max(0, int(first_arc)):
+        return round(base * FIRST_ARC_SCALE, 4)
+    return base
+
 #: 赌注的四种,**每一种都对得上一个已有的 op** —— 一个兑现不了的赌注就是一句
 #: 标签,而「真赌注」正是口径 4 要的东西(裁决 §2.2③)。
 #:   relation → `sentiment_delta` · money → `pay` · item → `grant_item` 负数
@@ -415,7 +446,8 @@ def story_text(tension: float, phase: str) -> str:
     return f"{phase_word},{word}"
 
 
-def next_phase(phase: str, move: str, *, tension: float) -> str:
+def next_phase(phase: str, move: str, *, tension: float,
+               moves_made: int = 0) -> str:
     """这一拍之后,这条线走到哪一相。**升级是默认行为**(口径 4),但**要带着张力走**。
 
     `breathe` 是唯一把线往回带的动作(climax 之后的 release),别的都往前推。
@@ -440,7 +472,7 @@ def next_phase(phase: str, move: str, *, tension: float) -> str:
     if move == "breathe":
         # 已经到 climax 的线,喘一口气就是 release;还没到的原地不动。
         return PHASES[3] if i >= 2 else phase
-    if float(tension) < PHASE_TARGET.get(phase, 0.0):
+    if float(tension) < phase_target(phase, moves_made=moves_made):
         return phase
     return PHASES[min(i + 1, 3)]
 
@@ -492,6 +524,7 @@ def overdue_thread(threads: Sequence[dict[str, Any]] | None, *, now_tick: int,
 
 def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
               capped: bool, anchor_fired: bool, ceiling: float,
+              moves_made: int = 0,
               must_callback: bool = False) -> str:
     """**算术那一半**:这一轮最多能写多大。LLM 在这之后才被叫到,而且只能在
     这个结果**及以下**里挑(见 `parse_decision` 的 `allowed`)。
@@ -508,6 +541,12 @@ def pick_move(*, tension: float, phase: str, allowed: Sequence[str],
         return "callback"
     if capped or anchor_fired or float(tension) >= float(ceiling):
         return "breathe"
+    # 🔴 **这儿用满目标,`moves_made` 不参与**(3.13.0,C 第七轮 ⑤)。
+    # 第一版我把头几拍的目标也压低了 —— 而 `gap = 目标 − 张力`,
+    # **目标压低 = gap 变小 = 动作变小**:`confront` 要 `gap >= 0.30`,
+    # 于是"想让新玩家早点摊牌"的那一改,**恰好把摊牌关掉了**
+    # (`test_摊牌只在节骨眼上` 当场红:climax 上拿到的是 `reveal`)。
+    # 压低目标只该影响**翻不翻篇**(`next_phase`),不该影响**写多大**。
     target = PHASE_TARGET.get(phase, 0.5)
     gap = float(target) - float(tension)
     # 离目标越远,写得越大 —— 这就是「张力是目标曲线」那句话的落点。

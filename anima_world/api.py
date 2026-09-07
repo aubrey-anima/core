@@ -9417,7 +9417,13 @@ class World:
             grace_ticks=int(grace_hours * ticks_per_hour))
         if overdue is not None:
             thread = overdue          # 这一拍就是冲着它去的
+        # 🆕 3.13.0(C 第七轮 ⑤):**头几拍走快一点** —— 目标压低,相位翻得快,
+        # 新玩家头一小时到得了节骨眼(`director.first_arc_beats`)。
+        moves_made = int(story.get("moves") or 0)
+        first_arc = int(self.config_get("director.first_arc_beats", default=6) or 6)
         move = dmod.pick_move(tension=tension, phase=phase, allowed=allowed,
+                              moves_made=(moves_made
+                                          if moves_made < first_arc else first_arc),
                               capped=capped, anchor_fired=beat_fired,
                               ceiling=ceiling, must_callback=overdue is not None)
 
@@ -9613,7 +9619,10 @@ class World:
         after = max(0.0, min(1.0, tension_before + dmod.MOVE_TENSION.get(move, 0.0)))
         # **相位跟着这一拍之后的张力走**,不是数拍数(真站第四轮 ④):
         # 屏上「到节骨眼了」和「松弛」并排印过。
-        new_phase = dmod.next_phase(phase, move, tension=after)
+        # ⚠️ **和 `pick_move` 读同一个目标**(`phase_target`)——各算一遍的话,
+        # 会出现「按这个目标该翻篇了,而按那个目标还差一点」,而两处都不报错。
+        new_phase = dmod.next_phase(phase, move, tension=after,
+                                    moves_made=moves_made)
         promise = str(decision.get("promise") or "")
         thread_id = str((thread or {}).get("id") or "")
         if promise and move != "breathe":

@@ -94,14 +94,24 @@ def test_相位是攒出来的_不是数出来的():
 
     判据:张力没到这一相的目标,就翻不了篇(而这一拍照样写、照样加张力)。
     """
-    assert D.next_phase("setup", "reveal", tension=0.1) == "setup"
-    assert D.next_phase("setup", "reveal", tension=D.PHASE_TARGET["setup"]) == "escalation"
-    assert D.next_phase("escalation", "complicate", tension=0.3) == "escalation"
+    # ⚠️ **说清是哪一段弧**(3.13.0):头几拍的目标是压低的
+    # (`FIRST_ARC_BEATS`,C 第七轮 ⑤:新玩家头一小时到不了摊牌),
+    # 所以这几条断的是**过了那几拍之后**的稳态曲线。
+    past = D.FIRST_ARC_BEATS
+    assert D.next_phase("setup", "reveal", tension=0.1, moves_made=past) == "setup"
+    assert D.next_phase("setup", "reveal", tension=D.PHASE_TARGET["setup"],
+                        moves_made=past) == "escalation"
+    assert D.next_phase("escalation", "complicate", tension=0.3,
+                        moves_made=past) == "escalation"
     # 数拍数的那一版:三拍必到 climax
     phase = "setup"
     for _ in range(3):
-        phase = D.next_phase(phase, "approach", tension=0.1)
+        phase = D.next_phase(phase, "approach", tension=0.1, moves_made=past)
     assert phase == "setup", f"张力 0.1 而线走到了 {phase}"
+
+    # 🔴 而**头几拍**那一段是有意翻得快的 —— 同样的张力,同样的动作,
+    # 只因为他是个新玩家,线就该往前走一步。
+    assert D.next_phase("setup", "reveal", tension=0.1, moves_made=0) == "escalation"
 
 
 def test_张力随世界时间衰减_而且不必被存():
@@ -356,3 +366,42 @@ def test_编剧自己动手时_只扣得动关系():
             assert ops and back, kind
         else:
             assert ops == [] and back == [], f"{kind} 被引擎自己动了:{ops} / {back}"
+
+
+def test_新玩家头几拍_到得了摊牌():
+    """🔴 **C 真站第七轮 ⑤**:13 条 `director_log` 里
+    `confront` / `reward` / `callback` 与 `roll` **真站零触发**,张力 0.05 ——
+    **新玩家头一小时到不了摊牌,于是 3b 那整套玩家面对他等于不存在。**
+
+    ⚠️ 修法是**把头几拍的目标压低**(相位翻得快),
+    而**不是**把 `pick_move` 的目标也压低 —— `gap = 目标 − 张力`,
+    目标压低 = gap 变小 = **动作变小**,而 `confront` 恰恰要 `gap >= 0.30`:
+    第一版两处都压,**那一改把摊牌关掉了**。
+    """
+    phase, tension, seen = "setup", 0.0, []
+    for i in range(8):
+        move = D.pick_move(tension=tension, phase=phase, allowed=list(D.MOVES),
+                           capped=False, anchor_fired=False, ceiling=0.6,
+                           moves_made=i)
+        seen.append(move)
+        if move in ("confront", "reward"):
+            break
+        tension = max(0.0, min(1.0, tension + D.MOVE_TENSION[move]))
+        phase = D.next_phase(phase, move, tension=tension, moves_made=i)
+
+    assert seen[-1] in ("confront", "reward"), (
+        f"头 8 拍一次摊牌/还债都没有:{seen}")
+    # 每小时上限是 6 拍(`director.max_per_player_per_hour` 的默认)——
+    # 到不了那个数就是"头一小时到得了"
+    assert len(seen) <= 6, f"用了 {len(seen)} 拍才到,超出一小时的额度:{seen}"
+
+
+def test_压低目标只影响翻篇_不影响写多大():
+    """这条分界是踩出来的(见上一条):`pick_move` 读**满目标**。"""
+    early = D.pick_move(tension=0.1, phase="climax", allowed=list(D.MOVES),
+                        capped=False, anchor_fired=False, ceiling=0.95,
+                        moves_made=0)
+    late = D.pick_move(tension=0.1, phase="climax", allowed=list(D.MOVES),
+                       capped=False, anchor_fired=False, ceiling=0.95,
+                       moves_made=D.FIRST_ARC_BEATS)
+    assert early == late == "confront", (early, late)
