@@ -6897,7 +6897,7 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 开关 `factions.enabled`(**默认关**:一个没写阵营的世界不该多一条边类型)。
 打开之后出厂插件 `factions` 给你:
 
-- **一条 `exclusive` 成员边** `factions.member_of`(玩家 → `group:*`);
+- **一条 `exclusive` 成员边** `factions.member_of`(`agent:player:<id>` → `group:<你起的名>`);⚠️ 这条边上**只放开 `link`**(`contract.plugins.shared_edge_ops`);
 - **每人一格声望** `factions.声望`(0–1,分过档);
 - **世界级一格士气** `factions.士气`(0–1)。
 

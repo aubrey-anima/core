@@ -161,3 +161,42 @@ def test_公共边上放开哪几个op_和引擎逐格相等():
     assert listed == {k: list(v) for k, v in real.items()}, (
         f"回执那张表说 {listed},而引擎是 {{k: list(v) for k, v in real.items()}} —— "
         f"真值:{ {k: list(v) for k, v in real.items()} }")
+
+
+def test_成员边那两端的形状_三处镜像都跟着真声明():
+    """🟡 **A 四轮 ③**:`group:*` 那个**从来没生效过**的写法,在三处留了镜像 ——
+    `config_store` 的说明(它进 `contract.config.factions.enabled.description`)、
+    FOR-STUDIO §3.72(a)、REFERENCE 的配置行。
+
+    真声明改掉之后,这三处**一处都不会红** —— 而它们是三个不同的读者各自照着写的
+    那一行。判据统一成:**那两端的形状从真声明里读出来,三处都得对得上**。
+    """
+    from pathlib import Path
+
+    from anima_world.config_store import _DEFAULTS
+    from anima_world.factions import MEMBER_EDGE, factory_plugin
+    from anima_world.plugins import EDGE_NODE_ID_FORMS
+
+    edge = factory_plugin()["edges"][MEMBER_EDGE]
+    src_form = EDGE_NODE_ID_FORMS[str(edge["from"])]        # agent:player:<player_id>
+    dst_kind = str(edge["to"]).partition(":")[2]            # group
+
+    said = _DEFAULTS["factions.enabled"][4]
+    assert "group:*" not in said, (
+        "`config_store` 那句说明还写着 `group:*` —— 那个写法从来没生效过,"
+        "而它经 `contract.config` 直接发给下游")
+    assert src_form.split(":<")[0] in said, (
+        f"那句说明里没有起点那一端的形状({src_form}):{said}")
+
+    for name in ("FOR-STUDIO.md", "REFERENCE.md"):
+        text = (Path(__file__).resolve().parent.parent / "docs" / name).read_text(
+            encoding="utf-8")
+        head, _, _ = text.partition("## 3.7")  # 只扫到正文足够远
+        body = text
+        assert "`factions.member_of`,玩家 → `group:*`" not in body, name
+        assert "`factions.member_of`(玩家 → `group:*`)" not in body, name
+        assert f"`{dst_kind}:" in body, (
+            f"{name} 里那条成员边的终点没写成 `{dst_kind}:<…>`")
+        assert "group:*" not in body, (
+            f"{name} 里还留着 `group:*` —— 那个写法从来没生效过,"
+            "而它把作者往一条连不上的路上带")
