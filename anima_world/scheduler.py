@@ -6094,6 +6094,24 @@ class Scheduler:
                 logger.warning(
                     "`%s` 是 exclusive_to 的:%s 那一端已经有一条了", edge_type, dst)
                 return False
+        # 🔴 **两端的形状也在这一刻查**(3.13.0,验收 A 末轮 ③)。
+        #
+        # 上一版这道闸只问「有没有人声明过这种边」,不问「这两个 id 配不配得上
+        # 它声明的那两端」。于是一条拍里写 `{"from": "阿岚"}`(少了 `agent:`)
+        # 的 `link` **建得出来**:`ops_applied` 里有它、库里真有那一行 ——
+        # 而 `src.体力` 读的是另一个 owner key、`connected` 那一档比的也是它,
+        # **那条边谁也读不到、谁也看不见,零报错**。
+        # 判断和作者层 `edge` 段那道闸**是同一个函数**(`edge_node_id_error`)——
+        # 两份判断迟早分岔,而分岔的样子是「同一条边写在文件里过得了闸、
+        # 写在拍里过不了」,作者读不出为什么。
+        from anima_world.plugins import link_node_error
+
+        for end, node in ((declared.src, src), (declared.dst, dst)):
+            said = link_node_error(end, node, plugin_id=declared.plugin)
+            if said:
+                logger.warning("`%s` 这一次 link 的端点不合声明:%s —— 不算数",
+                               edge_type, said)
+                return False
         facts = {
             f"{declared.plugin}.{key}": fact.text_default if fact.shape == "text"
             else fact.default

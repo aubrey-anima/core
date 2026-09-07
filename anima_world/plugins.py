@@ -1657,6 +1657,30 @@ def edge_node_id_error(end: str, node: str, *, plugin_id: str = "") -> str | Non
     return f"不认识的一端 `{end}` —— 这是插件声明里的问题,不是这条边的"
 
 
+def link_node_error(end: str, node: str, *, plugin_id: str = "") -> str | None:
+    """`link` 那一刻查两端的形状。**配得上就答 `None`。**
+
+    🔴 **它比 `edge_node_id_error` 多认一种情况:借来的种类**(3.13.0,A 末轮 ③)。
+    一个 `entity:<kind>` / `group:<kind>` 的端点,那个种类可能是**这个插件自己
+    声明的**(实例 id 是 `<plugin>.<kind>:<名>`),也可能是**作者写的**
+    (实例 id 就是 `<kind>:<名>`)—— 出厂的 `clues` 指着作者写的 `clue`,
+    正是后者;而**动词那一侧早就两种都认**(`verb_kind_id`:没前缀 = 借来的)。
+    只认前一种的话,`clues.knows` 这条出厂边**一条都连不上**,
+    而只认后一种会把插件自己声明的种类判成假红。**两种都试,都不合才拒。**
+
+    ⚠️ `agent` / `player` / `location` / `world` 那四端没有这种两义 ——
+    它们逐字走 `edge_node_id_error`,一格没松:一条 `{"from": "阿岚"}`
+    (少了 `agent:`)的边**建得出来而谁也读不到**,那正是这道闸要拦的。
+    """
+    said = edge_node_id_error(end, node, plugin_id=plugin_id)
+    if said is None or not plugin_id:
+        return said
+    if not any(end.startswith(prefix) for prefix in EDGE_END_PREFIXES):
+        return said
+    # 借来的种类:按端点里那个**局部名**再试一次
+    return edge_node_id_error(end, node)
+
+
 def _parse_edge(plugin_id: str, label: str, name: str, spec: Any) -> EdgeType:
     errors: list[str] = []
     if not name.strip() or any(m in name for m in _BAD_FACT_MARKS):

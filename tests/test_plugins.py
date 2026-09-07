@@ -579,9 +579,13 @@ def test_一端是玩家的边_抹除时一条不留(tmp_path):
     with _world_with(tmp_path, SECT, name="edge4") as world:
         world.player_move("ghost-edge", "cafe", display_name="阿檀")
         node = world.scheduler.stock_owner_of("player:ghost-edge")
-        world.scheduler.apply_edge_effect(
-            {"op": "link", "type": "sect.apprentice_of",
-             "from": node, "to": "agent:阿岚"}, {})
+        # ⚠️ **这一行有意直接写库,不走 `apply_edge_effect`**(3.13.0,A 末轮 ③):
+        # `sect.apprentice_of` 的起点声明的是 `agent`,而这里放的是一个**玩家** ——
+        # 3.13.0 起 `link` 那一刻就会拒掉这种形状。
+        # 而**抹除必须照旧扫得到它**:老世界里躺着的正是这种行
+        # (那道闸是这一版才有的),而"抹不干净"这件事不许因为"现在建不出来了"
+        # 就不验 —— 它建得出来的那些年里,真的建出来了。
+        world.scheduler.edge_store.link("sect.apprentice_of", node, "agent:阿岚", {})
         # 另一个人的边,一个字都不许动。
         world.scheduler.apply_edge_effect(
             {"op": "link", "type": "sect.apprentice_of",

@@ -72,7 +72,11 @@ def factory_plugin() -> dict[str, Any]:
         },
         "edges": {MEMBER_EDGE: {
             "label": "站在这一边", "from": "player",
-            "to": f"{FACTION_KIND}:*",
+            # ⚠️ **写的是那个种类的名字,不是通配符**(3.13.0,A 末轮 ③)。
+            # 上一版写着 `group:*`,而端点那一层没有通配符这回事 ——
+            # 它把 `*` 读成种类名,于是**每一条真的 `member_of` 都对不上**。
+            # 它一直没被发现,是因为 `link` 那一刻从前根本不查两端。
+            "to": f"{FACTION_KIND}:{FACTION_KIND}",
             # 🔴 **起点唯一** —— 一个人只能站一边,而**内核在 `link` 那一刻查**。
             # 放行的样子是安静的:两条边同时挂着,`plugin list` 看不出来,
             # 而提示词里他同时属于两个阵营。

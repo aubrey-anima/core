@@ -256,6 +256,59 @@ def test_没装线索的世界_那条拍不假装自己连上了(tmp_path):
         f"边没连上,回执里却说 `link` 干过了:{fired[0]}")
 
 
+def test_端点形状不合声明_一条都不连_而且回执不撒谎(tmp_path):
+    """🔴 **A 末轮 ③**:上一版那道新闸只查「有没有人声明过这种边」,
+    **不查这两个 id 配不配得上它声明的那两端**。
+
+    于是一条拍里写 `{"from": "阿岚"}`(`clues.knows` 的起点声明的是 `player`)
+    的 `link` **建得出来**:`ops_applied` 里有它、库里真有那一行 ——
+    而板子读的是 `agent:player:<id>`,**那条边谁也读不到、谁也看不见**,
+    零报错。**回执说成了,而世界里什么都没发生。**
+    """
+    beat = {"id": "开场", "for_each": {"node": "player"},
+            "trigger": {"at": {"day": 0, "minute_of_day": 5}},
+            # 🔴 起点写成一个角色 —— 而这条边的起点声明的是 `player`
+            "payload": [{"op": "link", "type": "clues.knows",
+                         "from": "阿岚", "to": "clue:老橡树的来历"}]}
+    path = write_seed_file(tmp_path / "shape.cyberworld", {**_WORLD, "beats": [beat]})
+    with open_world_at(str(tmp_path / "shape.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.config_set("clues.enabled", True)
+        world.player_move("p1", "cafe")
+        world.tick(8)
+        fired = [e["payload"] for e in world.history(kind="beat_fired")["events"]]
+        rows = world.scheduler.edge_store.all("clues.knows")
+        board = world.player_clues("p1")
+
+    assert fired, "拍没响,这条用例就什么都没验到"
+    assert fired[0]["ops_applied"] == [], (
+        f"端点形状不合声明,而回执说 `link` 干过了:{fired[0]}")
+    assert rows == [], f"库里落了一条谁都读不到的边:{rows}"
+    assert board["known"] == 0, board
+
+
+def test_借来的种类那一端_照旧连得上(tmp_path):
+    """上一条的另一半 —— **拦过头和漏掉一样坏,只是方向相反**。
+
+    `clues.knows` 的终点声明的是 `entity:clue`,而 `clue` 那个种类是**作者写的**
+    (实例 id 就是 `clue:<名>`,不是 `clues.clue:<名>`)。
+    只按"插件自己声明的种类"去判的话,这条出厂边**一条都连不上**。
+    """
+    path = write_seed_file(tmp_path / "borrow.cyberworld",
+                           {**_WORLD, "plugins": [dict(_MYSTERY)]})
+    with open_world_at(str(tmp_path / "borrow.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.config_set("clues.enabled", True)
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        got = world.scheduler.perform_affordance(
+            "player:p1", "clue:老橡树的来历", "打听")
+        board = world.player_clues("p1")
+
+    assert got["edges"] == [{"op": "link", "type": "clues.knows", "ok": True}], got
+    assert board["known"] == 1, board
+
+
 def test_契约点名了解锁那两条路_而且说得出不做哪条_为什么():
     """🔴 **纪律 2 / 3 写进契约**:一个等不来的东西会让人一直等着,
     而不是换个写法(和「作者层写不了 `confront`」同一课);
