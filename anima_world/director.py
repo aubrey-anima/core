@@ -229,6 +229,9 @@ DIRECTOR_LOG_KEYS: tuple[str, ...] = (
     "thread_id", "promise", "phase", "due_tick", "closes_thread",
     # 张力两头
     "tension_before", "tension_after", "tension_text",
+                      # 🆕 3.13.0:模型答的那个动作没被采纳时,**它原本是什么**。
+                      # 和 `refused_by`(同意门 / op 炸了)分开 —— 见 `parse_decision`。
+                      "downgraded_from",
     # 押了什么、真兑现了哪几个 op
     "stake", "ops_applied",
     # 为什么写小了 / 被谁拦了 / 钉到几时
@@ -823,8 +826,14 @@ def parse_decision(text: str, *, allowed: Sequence[str],
         "move": move, "who": who,
         # 🔴 降级过的那一拍**不许记成 `llm`**:模型答的那个动作没被采纳。
         # `refused_by` 说清是哪一格缺了,运维 grep 得到。
-        **({"source": "refused",
-            "refused_by": f"stake missing:{downgraded_from}"}
+        # 🔴 **降级另开一格,不和同意门共用 `refused_by`**(3.13.0,A 二轮 ①)。
+        # 3.12.2 我把它塞进了 `refused_by`,而 api 那边是
+        # `refused = decision.get("refused_by")` 预置的 —— 于是
+        # `refused or "gate"` / `refused or "error"` 对**降级过的那一拍成了空操作**:
+        # 同一个炸掉的 op,降级过的那拍读数上写着 `stake missing:confront`,
+        # **op 真炸这件事在结构化读数上没了**,而 `doctor` 正读那一格。
+        # **两件事挤进一格,后写的那件会安静地吃掉先写的那件。**
+        **({"source": "refused", "downgraded_from": downgraded_from}
            if downgraded_from else {}),
         "line": str(data.get("line") or "").strip()[:60],
         "why": str(data.get("why") or "").strip()[:80],

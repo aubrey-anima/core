@@ -9472,10 +9472,13 @@ class World:
         line = str(decision.get("line") or "")
         holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
         ops: list[dict[str, Any]] = []
-        # 🔴 **降级过的那一拍带着自己的 `refused_by` 进来**(3.12.2,验收 A ④):
-        # `parse_decision` 把「模型答的动作没被采纳」记在决定上,这一层照收 ——
-        # 各写一遍的话,`director_log` 那一格会和纯函数说两句话。
-        refused = str(decision.get("refused_by") or "")
+        # 🔴 **`refused_by` 只记 op 那一侧的原因**(同意门拒了 / op 炸了)。
+        # 3.12.2 我把「降级」也塞进这一格并**预置**在这儿,于是下面那两句
+        # `refused or "gate"` / `refused or "error"` 对降级过的那一拍成了空操作
+        # —— **op 真炸这件事在结构化读数上没了**,而 `doctor` 正读它。
+        # 降级现在有自己的一格 `downgraded_from`(A 二轮 ①)。
+        refused = ""
+        downgraded_from = str(decision.get("downgraded_from") or "")
         rolled: dict[str, Any] | None = None
         outcome = ""
 
@@ -9575,6 +9578,7 @@ class World:
                     tension_after=round(float(after), 4),
                     stake=stake, ops_applied=landed,
                     capped=bool(capped), refused_by=refused,
+                    downgraded_from=downgraded_from,
                     pin_until=((tick + pin_ticks) if landed else 0),
                     outcome=outcome, roll=rolled,
                 ),

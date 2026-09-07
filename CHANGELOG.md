@@ -73,6 +73,28 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.13.0] —— 交织与线索(玩法层批 3c) (2026-09-07)
+
+### Fixed(A 二轮对 3.12.2 的三条,做在 3c 第一个 commit 里)
+
+- 🔴 **两件事挤进一格,后写的那件会安静地吃掉先写的那件**(而这是 3.12.2
+  我自己引进的)。我把「降级」塞进了 `refused_by`,而 api 那边**预置**了它 ——
+  于是 `refused or "gate"` / `refused or "error"` 对降级过的那一拍成了**空操作**:
+  同一个炸掉的 op,降级过的那拍读数上写着 `stake missing:confront`,
+  而 **op 真炸这件事在结构化读数上没了**,`doctor` 正读那一格。
+  降级另开一格 `downgraded_from`(进 `DIRECTOR_LOG_KEYS`,契约 `log_keys`
+  从表生成所以自动带上);`refused_by` 回到只记 op 那一侧。
+- 🔴 **一句真话,证明的不是我拿它证明的那件事。** 上一版那条用例的 docstring
+  写着「橱窗世界跑不出这一条 …(实测八轮,每轮 offered 最多到 `reveal`)」——
+  **八轮只够走到 `escalation`,而我把「我没跑到」写成了「它到不了」**。
+  A 一试:`pick_move(phase="climax", ceiling=0.6)` 在 tension 0–0.54 上
+  **全返 `confront`**;真跑 120 轮,橱窗世界自己吐出
+  `('reveal','refused','complicate','escalation')`。
+  错理由删掉,端到端那条**真的写了**(按 offered 挑最高档、永不写 stake 的
+  假客户端 + `player_action`/`host_turn`/`tick` 循环)。
+- 🟡 `guidance` 那句「作者层**第十六个段**」(实际合并序 17/19)——
+  **拆掉序数,不写数**:段分三张表,序数从落笔那天起就会烂。
+
 ## [3.12.2] —— 三道从没红过的闸 (2026-09-07)
 
 A 复验 3.12.1 判 PASS-有保留,六条尾巴。**三条是闸自己从没红过** ——

@@ -1861,14 +1861,17 @@ def test_没写stake的动作被降级_读数上看得出来(tmp_path):
     照旧 `llm`、`refused_by` 是空的、运维 grep `confront` 什么都搜不到。
     **摊牌那一拍从来没真的发生过,而三处读数都说一切正常。**
 
-    ⚠️ **两半分开钉,而且要说清为什么**:
-    · 判断住在 `parse_decision`(纯函数)—— 那儿逐字断言,含 `confront`;
-    · api 那一半是「把决定带来的 `refused_by` 记进 `director_log`」—— 那儿直接
-      喂一个降级过的决定。
-    **橱窗世界跑不出这一条**:`guidance.pacing.ceiling` 是 0.6,而
-    `complicate`/`confront` 要的 gap 在这个世界的 ladder 上**永远不出现**
-    (实测八轮,每轮 offered 最多到 `reveal`)—— 拿一个到不了的路径当端到端
-    用例,就是又造一道永远绿的闸。
+    ⚠️ **3.13.0 更正(A 二轮 ②):上一版这段 docstring 里的理由是错的。**
+    我写着「橱窗世界跑不出这一条,`complicate`/`confront` 要的 gap 在它的 ladder
+    上永远不出现(实测八轮)」——**八轮只够走到 `setup`/`escalation`,而我把
+    「我没跑到」写成了「它到不了」**。A 拿 `pick_move(phase="climax",
+    ceiling=0.6)` 一试:tension 0–0.54 **全返 `confront`**;真跑 120 轮,
+    橱窗世界自己就吐出了 `('reveal','refused','complicate','escalation')`。
+    🔴 **「实测八轮」是一句真话,而它证明的不是我拿它证明的那件事。**
+    端到端那条现在真的有了,见下面 `test_橱窗世界真跑得出一次降级`。
+
+    这一条留作**两半的定点**:判断住在 `parse_decision`,记账住在
+    `_director_apply`。
     """
     from anima_world.director import parse_decision
 
@@ -1880,8 +1883,10 @@ def test_没写stake的动作被降级_读数上看得出来(tmp_path):
             cast_ids=["夏"])
         assert got["move"] != move, f"没写 stake 的 {move} 照原样落地了:{got}"
         assert got["source"] == "refused", got
-        assert got["refused_by"] == f"stake missing:{move}", (
-            f"`refused_by` 没点出是哪个动作被降的,运维 grep 不到:{got}")
+        assert got["downgraded_from"] == move, (
+            f"没点出是哪个动作被降的,运维 grep 不到:{got}")
+        assert not got.get("refused_by"), (
+            "降级不该占 `refused_by` —— 那一格是同意门 / op 炸了用的")
 
     # ② api:降级过的那个决定,`director_log` 上那两格要跟着
     with open_world_at(tmp_path / "dg.db", force_mock_llm=True) as world:
@@ -1901,9 +1906,9 @@ def test_没写stake的动作被降级_读数上看得出来(tmp_path):
 
     assert row["source"] != "llm", (
         f"降级过的那一拍记成了 `llm` —— 读数上看不出模型那个动作没被采纳:{row}")
-    assert "stake missing" in str(row["refused_by"]), row["refused_by"]
-    assert "confront" in str(row["refused_by"]), (
-        f"`refused_by` 没说是哪个动作被降的,运维 grep 不到:{row['refused_by']}")
+    assert row["downgraded_from"] == "confront", row
+    assert not row["refused_by"], (
+        f"降级占了 `refused_by`,op 那一侧的原因会被它盖掉:{row}")
 
 
 def test_grace_hours读坏时_退回默认值并吼一声(tmp_path, caplog):
@@ -1942,3 +1947,91 @@ def test_grace_hours读坏时_退回默认值并吼一声(tmp_path, caplog):
         # 而且**没有当场收账** —— 退回的是默认 24 小时,不是 0
         assert not [r for r in _logs(world) if r["move"] == "collect"], (
             "读坏了当成「没有宽限期」,于是到期那一刻当场扣")
+
+
+def test_降级过的那一拍_op炸了照样记得下来(tmp_path):
+    """🔴 **A 二轮 ①,而这是 3.12.2 我自己引进的**:我把「降级」塞进了
+    `refused_by`,而 api 那边**预置**了它 —— 于是 `refused or "gate"` /
+    `refused or "error"` 对降级过的那一拍成了**空操作**:
+    同一个炸掉的 op,降级过的那拍读数上写着 `stake missing:confront`,
+    而 **op 真炸这件事在结构化读数上没了**,`doctor` 正读那一格。
+
+    **两件事挤进一格,后写的那件会安静地吃掉先写的那件。**
+    """
+    from anima_world.director import parse_decision
+
+    with open_world_at(tmp_path / "dz.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        decision = parse_decision(
+            '{"move":"confront","who":"%s","line":"摊牌了","why":"推一把"}' % agent,
+            allowed=["breathe", "approach", "reveal", "complicate", "confront"],
+            cast_ids=[agent])
+        assert decision["downgraded_from"] == "confront", decision
+
+        # 让这一拍的 op **真的炸**
+        def _boom(op):
+            raise RuntimeError("op 炸了")
+
+        world.scheduler._expand_beat_op = _boom
+        world._director_apply(
+            "p1", decision, tension_before=0.4, phase="climax",
+            tick=int(world.scheduler.clock), place="cafe", thread=None,
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        row = _logs(world)[-1]
+
+    # 🔴 两格**各说各的事**,谁都不许盖掉谁
+    assert row["refused_by"] == "error", (
+        f"op 炸了这件事在读数上没了(被降级那一格盖掉):{row}")
+    assert row["downgraded_from"] == "confront", row
+
+
+def test_橱窗世界真跑得出一次降级(tmp_path):
+    """🔴 **A 二轮 ② 的端到端**:上一条用例的 docstring 曾断言「橱窗世界跑不出
+    这一条」,而那是**把「我没跑到」写成了「它到不了」** ——
+    `pick_move(phase="climax", ceiling=0.6)` 在 tension 0–0.54 上**全返
+    `confront`**,而橱窗世界真跑 120 轮就吐得出一次降级。
+
+    配方(A 的):**按提示词报的 `allowed` 挑最高那一档、而且永不写 stake**
+    的假客户端 + `player_action`/`host_turn`/`tick` 循环。
+    """
+    with open_world_at(tmp_path / "e2e.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+
+        class _Biggest:
+            """挑这一轮 offered 里最高那一档,**永不写 stake**。"""
+
+            calls = 0
+
+            async def complete(self, messages):
+                blob = "".join(m.get("content") or "" for m in messages)
+                if "你是一个文字冒险游戏的**编剧**" not in blob:
+                    return "这儿很安静。\\n看看那棵树\\n跟人说说话"
+                _Biggest.calls += 1
+                row = blob.split("你这一拍能做的事(**只能挑一个**):")[-1]
+                pick = row.splitlines()[0].split("、")[-1].strip()
+                return ('{"move":"%s","who":"%s","line":"出事了","why":"x"}'
+                        % (pick, agent))
+
+        world.config_set("llm.api_key", "sk-test")
+        world.chat_service._background_llm = _Biggest()
+        for i in range(120):
+            world.player_action("p1", f"看了看第 {i} 眼")
+            world.host_turn("p1")
+            world.tick(2)
+
+        rows = [r for r in _logs(world) if r["downgraded_from"]]
+
+    assert _Biggest.calls >= 1, "假客户端一次都没被调到"
+    assert rows, (
+        "橱窗世界 120 轮一次降级都没跑出来 —— 要么这条路真的到不了(那就把上一条"
+        "用例那段理由写回去),要么这个配方挑不到要 stake 的那几档")
+    row = rows[-1]
+    assert row["downgraded_from"] in ("complicate", "confront"), row
+    assert row["source"] != "llm", f"降级过的那一拍记成了 `llm`:{row}"
+    assert row["move"] != row["downgraded_from"], row
