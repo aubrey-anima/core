@@ -2130,6 +2130,36 @@ def _parse_trigger(
                    links=tuple(links))
 
 
+#: 🆕 3.13.0(验收 A 整体 ①):**出厂插件声明的那几条公共边。**
+#:
+#: 规矩本来是「只连得动自己声明的边」,而那条规矩把**出厂插件**也算成了"别人":
+#: `clues.knows` 由引擎出厂的 `clues` 插件声明,于是**没有任何一个作者连得动它**
+#: —— 线索这个玩法交出去了,而作者层**一条都点不亮**。
+#:
+#: 🔴 **公共边和「别人的边」不是一回事**:出厂插件是**引擎的一部分**,它声明那条边
+#: 正是**为了让作者去连**(`clues.knows` 的全部意义就是「他知道了这条线索」)。
+#: 而一个作者插件的边归它自己管 —— 那一条一个字没松。
+#:
+#: ⚠️ **从出厂模块自己数出来,不手抄**(`FACTORY_PLUGINS` 那张表的同一条纪律):
+#: 手抄的那一版会停在它被抄下来的那一天。闸在 `tests/test_clues.py`。
+def shared_edge_types() -> frozenset[str]:
+    """出厂插件声明的公共边(`clues.knows` / `factions.member_of` …)。
+
+    ⚠️ **装没装上不在这一层问** —— 这一层不认识世界(它有意不认识)。
+    「`clues.enabled` 关着而作者写了 `clues.knows`」由运行期答:
+    那条边不在 `edge_types` 里,`apply_edge_effect` 当场不连并留一句 warning。
+    在这儿拒的话,一份**开得起来**的世界会被离线那两扇门报成红的 —— 假红。
+    """
+    from anima_world import clues as _clues, factions as _factions
+
+    out: set[str] = set()
+    for module in (_clues, _factions):
+        body = module.factory_plugin()
+        for local in (body.get("edges") or {}):
+            out.add(f"{body['id']}.{local}")
+    return frozenset(out)
+
+
 #: 边那三条效果里,`from` / `to` 认得出的几个词。**认不出就是一个光名字**
 #: (当成节点 id 用),`Scheduler._resolve_node` 那一句"认不出就是空串,不猜"是同一条。
 EDGE_EFFECT_NODES = ("self", "target", "spawned", "event.who")
@@ -2153,13 +2183,20 @@ def _parse_link_effect(
     if not edge_type:
         errors.append(f"{where}.{kind} 少了 type")
         return None
+    # 🆕 3.13.0:出厂插件的**公共边**照连(`clues.knows` / `factions.member_of`)。
+    # 它们由引擎声明,而声明的目的**就是让作者去连** —— 见 `shared_edge_types`。
+    if edge_type in shared_edge_types():
+        return {"op": kind, "type": edge_type,
+                "from": body.get("from"), "to": body.get("to"),
+                "by_dst": bool(body.get("by_dst")),
+                "facts": dict(body.get("facts") or {})}
     local = edge_type[len(plugin_id) + 1:] \
         if edge_type.startswith(f"{plugin_id}.") else edge_type
     if local not in edges:
         errors.append(
             f"{where}.{kind}.type:这个插件没声明过 `{local}` 这种边;"
-            f"声明过的是 {sorted(edges)} —— **只连得动自己声明的边**,"
-            "别的插件的边由它自己管"
+            f"声明过的是 {sorted(edges)},外加出厂那几条公共边 "
+            f"{sorted(shared_edge_types())} —— **别的作者插件的边由它自己管**"
         )
         return None
     return {"op": kind, "type": f"{plugin_id}.{local}",

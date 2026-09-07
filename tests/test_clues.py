@@ -111,22 +111,62 @@ def test_线索板只报存在与状态_不报内容(tmp_path):
             f"未解锁那条的**名字**也漏了(名字就是谜面):{door}")
 
 
-def test_解锁那三条路_都连得上(tmp_path):
-    """**纪律 2 的正面**:三条路各写一遍,都能把 `clues.knows` 连上。"""
-    from anima_world import clues as C
+#: 一个**作者写的**插件:线索上挂一个动词,做完就知道了这条线索。
+#: 🔴 **`clues.knows` 是出厂插件声明的边**,而这份插件叫 `mystery` ——
+#: 上一版这种写法**当场被拒**(「只连得动自己声明的边」),于是
+#: `contract.clues.unlock_paths` 里那条 `verb_effect` **一条真路都没有**。
+_MYSTERY = {
+    "id": "mystery", "version": "1.0.0", "label": "谜",
+    "verbs": {"打听": {"target": "clue", "label": "打听",
+                      "effects": [{"link": {"type": "clues.knows",
+                                            "from": "self", "to": "target"}}]}},
+}
 
-    with _world(tmp_path, "unlock") as world:
+
+def test_解锁路一_动词effects_走真门连得上(tmp_path):
+    """🔴 **验收 A 整体 ①:三条路一条都连不上**(3.13.0)。
+
+    上一版这条用例直接调 `apply_edge_effect` 传字面量 —— 那**不是一条路**,
+    那是绕过所有闸去手写一条边:插件装没装上、作者写不写得出这条效果、
+    动词跑不跑得到这儿,**一件都没验到**。
+    ⚠️ 而它当时是绿的,因为**它和读的那一半错成了同一个形状**(见上面那条)。
+
+    现在走的是真门:作者的插件 → 玩家做那个动词 → 板子看得见。
+    """
+    path = write_seed_file(tmp_path / "verb.cyberworld",
+                           {**_WORLD, "plugins": [dict(_MYSTERY)]})
+    with open_world_at(str(tmp_path / "verb.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.config_set("clues.enabled", True)
         world.player_move("p1", "cafe")
         world.tick(2)
-        edge = f"{C.PLUGIN_ID}.{C.KNOWS_EDGE}"
-        world.scheduler.apply_edge_effect(
-            {"type": edge, "from": "player:p1", "to": "clue:老橡树的来历"}, {})
+        got = world.scheduler.perform_affordance(
+            "player:p1", "clue:老橡树的来历", "打听")
         board = world.player_clues("p1")
 
+    assert got["ok"] is True, got
+    assert got["edges"] == [{"op": "link", "type": "clues.knows", "ok": True}], (
+        f"动词跑完了,而那条边一格没动:{got}")
     assert board["known"] == 1 and board["unknown"] == 2, board
     assert board["known_ids"] == ["clue:老橡树的来历"], board
     # 已知那条**可以**点名 —— 他本来就知道
     assert "老橡树的来历" in str(board)
+
+
+def test_别的作者插件的边_照旧连不动(tmp_path):
+    """放开的只是**出厂那几条公共边**,不是「谁的边都能连」。
+
+    ⚠️ 两条要一起看:只写上面那条的话,把这道闸整个删掉也是绿的。
+    """
+    from anima_world.__main__ import world_plugin_errors
+
+    bad = {**_MYSTERY, "verbs": {"打听": {
+        "target": "clue", "label": "打听",
+        "effects": [{"link": {"type": "sect.apprentice_of",
+                              "from": "self", "to": "target"}}]}}}
+    said = world_plugin_errors({"plugins": [bad]})
+    assert any("apprentice_of" in line for line in said), (
+        f"连别的作者插件的边也放行了 —— 那条规矩一个字都没松过:{said}")
 
 
 def test_契约点名了解锁只有三条路_而且不报怀疑那一档():

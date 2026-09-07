@@ -6811,6 +6811,24 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 内容是你写在实体上的字,而**谁读得到它**由可见性那一层答,不由这一层。
 `text` 是那句人话(「3 条线索,你知道 1 条。」)——**引擎给,别自己译**。
 
+### (b-2) 🔴 **怎么写那条解锁** —— 出厂的公共边,你的插件连得动
+
+规矩本来是「只连得动自己声明的边」,而 `clues.knows` 是**引擎出厂的** `clues`
+插件声明的 —— 3.13.0 的头一版于是**谁都连不动它**:线索这个玩法交出去了,
+而作者层一条都点不亮。
+
+现在 `contract.plugins.shared_edge_types` 那几条(`clues.knows` /
+`factions.member_of`)**任何插件的 `link`/`unlink`/`transfer` 都写得下**:
+
+    {"id": "mystery", "version": "1.0.0",
+     "verbs": {"打听": {"target": "clue",
+                       "effects": [{"link": {"type": "clues.knows",
+                                             "from": "self", "to": "target"}}]}}}
+
+⚠️ 放开的**只有出厂那几条** —— 另一个作者插件的边照旧连不动(它归它自己管)。
+⚠️ `from: "self"` 在动词那条路上就是**做这件事的人**;玩家做时它是
+`agent:player:<id>`,**图上玩家只有这一个形状**(`plugins.edge_node_id_forms`)。
+
 ### (c) 🔴 解锁**只有三条路,没有第四条**
 
 `contract.clues.unlock_paths`:

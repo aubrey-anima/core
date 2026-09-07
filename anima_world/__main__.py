@@ -9465,6 +9465,7 @@ def contract_payload() -> dict[str, Any]:
         EDGE_VERB_EFFECTS,
         EDGE_EFFECT_KEYS,
         EDGE_KEYS,
+        shared_edge_types,
         EMIT_KEY_REQUIRES,
         EMIT_KEYS,
         EMIT_REQUIRED_KEYS,
@@ -10157,6 +10158,11 @@ def contract_payload() -> dict[str, Any]:
             # 触发器的 `emit` 已经"因一件事而发"了。合了,创作台那边就是假红。
             "trigger_emit_keys": list(TRIGGER_EMIT_KEYS),
             "edge_effect_keys": list(EDGE_EFFECT_KEYS),
+            # 🆕 3.13.0(验收 A 整体 ①):**出厂插件声明的那几条公共边** ——
+            # 规矩是「只连得动自己声明的边」,而这几条是**引擎声明、给作者连的**
+            # (`clues.knows` 的全部意义就是「他知道了这条线索」)。
+            # 没有这一格,线索/阵营两个玩法在作者层**一条都点不亮**。
+            "shared_edge_types": sorted(shared_edge_types()),
             "rule_required_keys": list(RULE_REQUIRED_KEYS),
             "rule_keys": list(RULE_KEYS),
             "rule_every_keys": list(RULE_EVERY_KEYS),
