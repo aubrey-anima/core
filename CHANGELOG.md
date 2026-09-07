@@ -91,6 +91,25 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 (≤12,今天 11,规矩写着「同一批里不许再加第二条」),和「玩家读得到什么」
 是两件事。
 
+### 🔴 对人动词声明有了、门有了,而**玩家点不到**(player 带回)
+
+`World.person_verbs()` 在,`player_person_verb` 在,而它**到不了任何玩家面报文**:
+`targets[].verbs[]` 是 affordance 那一族(契约明令对人动词不走那条)、工具目录
+`person_verb` 那两个参数是自由字符串不枚举、主持人那屏也不递。
+**一个玩家点不到的能力,和没有那个能力是同一件事。**
+
+补 `player_options().person_verbs`(每个在场的人一组,键表进
+`contract.person_verbs.options_keys`)。两条纪律写进用例:
+· 🔴 **`available` 是「问得出口」,不是「她会答应」** —— 先替她答一遍就是把她的
+  否决权挪到菜单上;
+· **它不依赖本体层** —— `blocked: "no_ontology"` 不该把一个不走 affordance 的
+  能力一起挡掉(和 `own` 那一格逐字同一课)。
+
+⚠️ **顺带逮到我自己一个**:她单纯不肯时,`player_person_verb` 把 `reason`
+一律当成了世界那道闸,于是屏上是「阿岚这会儿不行 —— declined」——
+**一个裸英文枚举,而且把她的否决说成了世界的状态**。
+分界改成「那个理由在不在 `GATE_LABELS` 里」,不是"有没有理由"。
+
 ### 🔴 `contract.plugins.payload_keys`:一份手抄的键表漏了两次(platform 带回)
 
 壳那侧送达门的 `_KNOWN_PAYLOAD_KEYS` 是**手抄**的,而 `line` / `source`

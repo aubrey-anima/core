@@ -178,3 +178,72 @@ def test_不用点头的那种_直接成(tmp_path):
         assert got["ok"] is True and got["answer"] == "accepted", got
         assert got["gate"] == ""
         assert "person_verb.accepted" in [e["type"] for e in world.events()]
+
+
+def test_玩家菜单上真的递得出对人动词(tmp_path):
+    """🔴 **player 逐个核过之后带回的那条**:`World.person_verbs()` 有、
+    `player_person_verb` 也有,而它**到不了任何玩家面报文** ——
+    `targets[].verbs[]` 是 affordance 那一族(契约明令对人动词不走那条)、
+    工具目录那两个参数是自由字符串不枚举、主持人那屏也不递。
+    **玩家点不到。而一个玩家点不到的能力,和没有那个能力是同一件事。**
+    """
+    from anima_world.__main__ import contract_payload
+
+    with _world(tmp_path, name="opt") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        menu = world.player_options("p1")
+        rows = menu.get("person_verbs")
+        assert rows, f"菜单上一个对人动词都没有:{sorted(menu)}"
+        assert rows[0]["agent_id"] == "阿岚"
+        verbs = {v["verb"]: v for v in rows[0]["verbs"]}
+        assert set(verbs) == {"拜师", "远远看她一眼"}, sorted(verbs)
+        assert verbs["拜师"]["consent_mode"] == "required"
+        assert verbs["远远看她一眼"]["consent_mode"] == "none"
+        # 键表以契约为准 —— 宿主照它写解析
+        want = set(contract_payload()["person_verbs"]["options_keys"])
+        assert want <= set(verbs["拜师"]), sorted(verbs["拜师"])
+
+        # 🔴 **菜单上列的那个 verb,真走得通同意门**(不是一份好看的假清单)
+        got = world.player_person_verb("p1", rows[0]["agent_id"], "远远看她一眼")
+        assert got["ok"] is True, got
+
+
+def test_菜单上的available是问得出口_不是她会答应(tmp_path):
+    """⚠️ **这一格最容易被读错,所以用例把它钉住。**
+
+    `available` 过的是**世界那几条硬闸**;她肯不肯是**真门那一下**才知道的。
+    这一层要是先替她答一遍,就是把她的否决权挪到了菜单上。
+    """
+    with _world(tmp_path, name="opt2") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        rows = world.player_options("p1")["person_verbs"]
+        assert all(v["available"] for v in rows[0]["verbs"]), rows
+
+        # 菜单说"问得出口",而她照样可以不肯 —— 两件事
+        got = world.player_person_verb("p1", "阿岚", "拜师")
+        assert got["ok"] is False and got["answer"] == "declined", got
+        # 🔴 她不肯时说的是**她的话**,不是世界那句规则说明,也不是裸枚举
+        assert got["gate"] == "", got
+        assert "缘分未到" in got["said"], got["said"]
+        assert "declined" not in got["said"], got["said"]
+
+
+def test_没有本体层的世界_对人动词照样递得出(tmp_path):
+    """🔴 **`blocked` 该挡的只有 `targets`**(和 `own` 那一格逐字同一条课):
+    对人动词**永不走 affordance**,所以「这个世界没声明过 kinds」不该把它一起
+    挡掉 —— 挡掉的样子是安静的:菜单上什么都不少,只是永远没有对人动词。
+    """
+    from _worldfile import open_world_at, write_seed_file
+
+    seed = {**_BARE, "plugins": [dict(_MENPAI)]}
+    seed.pop("kinds", None)
+    path = write_seed_file(tmp_path / "noont.cyberworld", seed)
+    with open_world_at(str(tmp_path / "noont.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        menu = world.player_options("p1")
+        assert menu["blocked"] == "no_ontology", menu["blocked"]
+        assert menu["person_verbs"], "本体层挡掉了一个不依赖本体层的能力"

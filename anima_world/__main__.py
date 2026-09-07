@@ -9494,6 +9494,15 @@ def contract_payload() -> dict[str, Any]:
             # ⚠️ 引擎自己那条路是 `World.player_person_verb`,而工具那条只是它在
             # 目录上的样子 —— **判断只有一份**。宿主按 `tool_id` 走就行。
             "world_method": "player_person_verb",
+            # 🆕 3.12.0(player 带回):**玩家面那扇门。**
+            # `player_options().person_verbs` 每个在场的人一组,每组的 `verbs[]`
+            # 就是这几格。🔴 **`available` 的意思是「问得出口」,不是「她会答应」**
+            # —— 过的只是世界那几条硬闸;她肯不肯是真门那一下才知道的,
+            # 这一层先替她答一遍就是把她的否决权挪到了菜单上。
+            "options_method": "player_options",
+            "options_field": "person_verbs",
+            "options_keys": ["verb", "label", "consent_mode", "available",
+                             "reason", "refusal"],
             "declared_method": "person_verbs",
             "host_option_kind": "verb",
             "gloss": (

@@ -6587,6 +6587,20 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 ⚠️ **`verb_target_forms` 里永远不许出现 `agent`** —— 那一格一旦混进去,
 对人动词就从工具路掉回 affordance,而 affordance 整条路上没有一处问过对方肯不肯。
 
+**玩家怎么点得到**(3.12.0,player 带回 —— 上一版**它到不了任何玩家面报文**,
+声明有、门有,而玩家点不到:`targets[].verbs[]` 是 affordance 那一族、
+工具目录那两个参数是自由字符串不枚举、主持人那屏也不递。
+**一个玩家点不到的能力,和没有那个能力是同一件事**):
+
+`player_options().person_verbs` —— **每个在场的人一组**,每组 `verbs[]` 的键见
+`contract.person_verbs.options_keys`(`verb` / `label` / `consent_mode` /
+`available` / `reason` / `refusal`)。
+🔴 **`available` 的意思是「问得出口」,不是「她会答应」** —— 它过的只是世界那几条
+硬闸(不在这儿 / 睡着了 / 手上有事 / 把你静音了);**她肯不肯是真门那一下才知道
+的**,这一层先替她答一遍就是把她的否决权挪到了菜单上。
+⚠️ 它**不依赖本体层**:一个没写 `kinds` 的世界(`blocked: "no_ontology"`)
+照样递得出对人动词 —— `blocked` 该挡的只有 `targets`。
+
 **门在哪**:工具 `person_verb`(`player_tools()` 里有,宿主照着画按钮),
 引擎侧是 `World.player_person_verb`。🔴 **被回了一个字都不写** —— 代价一分不扣,
 只落一条 `person_verb.refused`;拒绝语是**她的话**,世界说不行时才是规则说明。

@@ -8176,7 +8176,13 @@ class World:
                 holder, "", name, [aid], player_id=pid)
             if refused:
                 row = refused[0]
-                gate = str(row.get("reason") or "")
+                said = str(row.get("reason") or "")
+                # 🔴 **「她不肯」和「世界说不行」要分得开**(纪律 1),而分界是
+                # **那个理由在不在 `GATE_LABELS` 里** —— 不是"有没有理由"。
+                # 上一版把 `reason` 一律当 gate,于是她单纯不肯时屏上印的是
+                # 「阿岚这会儿不行 —— declined」:**一个裸英文枚举**,
+                # 而且把她的否决说成了世界的状态。两样都错。
+                gate = said if said in together.GATE_LABELS else ""
                 answer, note = "declined", str(row.get("note") or "")
             elif not accepted:
                 answer = "declined"
@@ -10245,7 +10251,57 @@ class World:
             # 三条 `blocked` 的早退路径也带上这一格:形状随情况变的话,宿主要么
             # 每处写一遍 `?.`,要么在"他还在路上"那一帧崩掉。
             "own": {"quantities": {}, "readouts": []},
+            # 🆕 3.12.0(player 带回):**对人动词也得有人递给他。**
+            # 声明有了、门有了,而**到不了任何玩家面报文** —— `targets[].verbs[]`
+            # 是 affordance 那一族(契约明令对人动词不走那条),工具目录那两个参数
+            # 是自由字符串不枚举,主持人那屏也不递。**玩家点不到。**
+            # 一个玩家点不到的能力,和没有那个能力是同一件事。
+            "person_verbs": [],
         }
+
+        def _fill_person_verbs(here: str) -> None:
+            """这儿**站着的人**,每人一组能对他做的事。
+
+            🔴 **它不依赖本体层**(和 `own` 那一格逐字同一条,3.9.0 创作台验收 C
+            那一课):对人动词永不走 affordance,所以 `blocked: "no_ontology"`
+            不该把它一起挡掉 —— `blocked` 该挡的只有 `targets`。
+
+            ⚠️ **`available` 的意思是「问得出口」,不是「她会答应」。**
+            过的是**世界那几条硬闸**(不在这儿 / 睡着了 / 手上有事 / 把你静音了);
+            **她肯不肯是真门那一下才知道的**(`willingness` / `judge_invite`)——
+            这一层要是先替她答一遍,就是把她的否决权挪到了菜单上。
+            """
+            declared = self.person_verbs()
+            if not declared or not here:
+                return
+            from anima_world import person_verbs as pv_mod
+
+            holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
+            rows: list[dict[str, Any]] = []
+            for agent_id in sorted(self.scheduler.agents):
+                if self.scheduler._where_is(agent_id) != here:
+                    continue
+                gate = ""
+                try:
+                    gate = self.scheduler.joint_gate(holder, "", "", agent_id)
+                except Exception:  # noqa: BLE001 - 读不到闸不该掀翻这一屏
+                    gate = ""
+                verbs = [{
+                    "verb": vid,
+                    "label": str(entry.get("label") or vid),
+                    "consent_mode": ("required" if pv_mod.consent_needed(entry)
+                                     else "none"),
+                    "available": not gate,
+                    "reason": gate,
+                    "refusal": (together.GATE_LABELS.get(gate, gate)
+                                if gate else ""),
+                } for vid, entry in sorted(declared.items())]
+                rows.append({
+                    "agent_id": agent_id,
+                    "agent_name": self.scheduler.hail_agent_name(agent_id),
+                    "verbs": verbs,
+                })
+            blank["person_verbs"] = rows
 
         def _fill_own() -> None:
             """他**自己身上**那几个量 —— 和"这儿有什么"是两件事。
@@ -10275,6 +10331,8 @@ class World:
             blank["blocked_text"] = self._BLOCKED_WORDS[reason]
             if pid:
                 _fill_own()      # 挡住的是"这儿有什么",不是"他是谁"
+                # 对人动词同理:它不依赖本体层,也不依赖这儿有没有东西。
+                _fill_person_verbs(self._player_here(pid))
             return blank
 
         if not pid:
@@ -10307,6 +10365,7 @@ class World:
             return blocked("unknown_player_location")
         blank["location"] = here
         blank["location_name"] = self.scheduler.place_name(here) or here
+        _fill_person_verbs(here)
 
         ontology = self.scheduler.ontology
         if ontology is None:
