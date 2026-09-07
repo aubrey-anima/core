@@ -1449,8 +1449,11 @@ def test_屏那张钥匙表_是从编剧那张推出来的():
     assert H.SCREEN_GRAINS[:len(H.ACTED_GRAINS)] == H.ACTED_GRAINS
     # 🆕 3.13.0 又多一格 `here_seq`(批 3c §2.1:**这儿刚有人动过手**)——
     # 它和 `refused_seq` 同一个理由:**屏该不该重写**,和**他真动了手没有**
-    # 是两个问题。编剧那道守卫照旧只读 `ACTED_GRAINS`:
-    # 别人做的事不该让编剧替他写一拍(那是别人的剧情),而屏必须说一句。
+    # 是两个问题。
+    # 🔴 而编剧那道守卫**真的只读 `ACTED_GRAINS`**(3.13.0,验收 A ⑦ 逮的:
+    # 上一版那句 `(acted_since or recap)` 把撞见也算进了「他动了」,于是
+    # 同地 n 个旁观者 = 每次操作 n 次 LLM 调用,而**撞见不是剧情**)——
+    # 那一条由 `test_旁观者不吃编剧那一拍` 逐格钉着,这儿只钉表。
     assert set(H.SCREEN_GRAINS) - set(H.ACTED_GRAINS) == {
         "refused_seq", "here_seq"}
 
@@ -2089,3 +2092,47 @@ def test_零效果的长动词_那句话也说得准_而三处产地并成一处
     assert "什么都还没动" in said, (
         f"零效果的长动词说成了「开始了」—— 一句说大了的话:{said!r}")
     assert "你开始" not in said, said
+
+
+def test_降级那几拍_doctor数得出来(tmp_path):
+    """🔴 **验收 A ①:我把它从别人的桶里搬出来,却没给它自己的桶。**
+
+    3.13.0 把降级从 `refused_by` 搬进 `downgraded_from`(两件事挤一格,后写的
+    会吃掉先写的)—— 而搬完之后它**三个桶一个都不进**:
+    `source="refused"` 不在 `SOURCES_WITHOUT_A_CALL`、`refused_by` 空、
+    `capped` False,于是 `doctor` 上**它彻底看不见**,`downgraded_from`
+    **全仓零消费方**。
+    **把一格从别人的桶里搬出来,就得给它自己的桶** —— 否则那次搬家
+    只是把它藏得更深。
+
+    ⚠️ **别数源码,去问屏幕。**
+    """
+    import contextlib
+    import io as _io
+
+    from anima_world.__main__ import main as _main
+    from anima_world.director import parse_decision
+
+    with open_world_at(tmp_path / "dz2.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.config_set("director.enabled", True)
+        decision = parse_decision(
+            '{"move":"confront","who":"%s","line":"摊牌了","why":"推一把"}' % agent,
+            allowed=["breathe", "approach", "reveal", "complicate", "confront"],
+            cast_ids=[agent])
+        assert decision["downgraded_from"] == "confront", decision
+        world._director_apply(
+            "p1", decision, tension_before=0.4, phase="climax",
+            tick=int(world.scheduler.clock), place="cafe", thread=None,
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        world.tick(1)
+
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _main(["doctor", "--world-id", "w", "--skip-probe"])
+    screen = buf.getvalue()
+    assert "降级" in screen, f"doctor 上看不见降级那几拍:{screen[-600:]}"
+    assert "1 拍被降级" in screen, screen[-600:]

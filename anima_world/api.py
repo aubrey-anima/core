@@ -9238,7 +9238,14 @@ class World:
             # ⚠️ **白按那一趟编剧一个字都不写**(3.12.0,裁决):世界里什么都没
             # 发生,而一拍关于没发生的事的剧情比不写更坏。`acted_since` 本来就是
             # `False`,这里挡的是 `recap` 非空那一支(别处发生的事把它带起来)。
-            ) if ((acted_since or recap) and not only_refused) else ""
+            # 🔴 **旁观者不吃编剧那一拍**(3.13.0,调度台口径,验收 A ⑦)。
+            # 撞见行是**引擎合成句**,它进 B 的回顾,但**不该让编剧为 B 写一拍**:
+            # · 同地 n 个旁观者 = 每次操作 n 次 LLM 调用;
+            # · 3c 的裁决是「零新状态」,而**撞见不是剧情** —— 别人的动作
+            #   变成"世界为他写的一拍",就是把撞见悄悄升级成了共享剧情。
+            # 编剧只在**他自己**操作时写(`acted_since`),而他这一段看见的事
+            # 照旧进输入(`recap` 里就有)。
+            ) if (acted_since and not only_refused) else ""
             if said:
                 # 编剧那一句排在回顾**最后**:回顾说的是"刚发生了什么",
                 # 而这一句是"于是世界现在做了什么" —— 顺序就是因果。
@@ -9247,6 +9254,13 @@ class World:
                 # 🔴 **「你不在的时候……本周更新……」排在回顾的最前面**(2a-②)。
                 # 「本周更新」读的是 `pack_installed`,不是一份另攒的公告栏。
                 recap = self._host_welcome_back(last, tick=tick, day=day) + recap
+            # 🔴 **被拒那一屏不许把撞见吞掉**(3.13.0,验收 A ⑥)。
+            # 模板路原先 `recap=[]`,而**窗口已经推过去了** —— 那一行永远丢:
+            # 下一屏 `cached`,谁也不会再说一次。
+            # 判据:白按之前那几行撞见,要么这一屏说,要么下一屏说 ——
+            # **不许两屏都不说**。这里选"这一屏说":他刚按过,正看着这块屏。
+            if only_refused and recap:
+                only_refused = False
             if only_refused:
                 # **模板那一条路**:一句说清他为什么白按,后面接原样的场景描述。
                 # ⚠️ 不走 `_host_scene_text` 的 LLM 那一半 —— 裁决写死了"不调模型"。
@@ -10186,24 +10200,54 @@ class World:
         if log is None or since_seq <= 0 or not place:
             return []
         player_key = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        # 🔴 **「同地」要按**那一刻**算,不是按现在**(3.13.0,验收 A ②)。
+        # 上一版只比 `e.loc == place`,而 `place` 是他**此刻**站的地方 ——
+        # 于是 B 在工作室待着、A 在咖啡店动手,B **走进咖啡店的第一屏**
+        # 就读到那句「楚子航端详了老橡树」:**他当时根本不在场**。
+        # 这个函数自己的 docstring 写着「撞见的语义是当面」,而代码没照做。
+        #
+        # 判据:**那条事件的 seq 落在他这一段在场区间里**。他的位置history
+        # 从同一条日志折出来(`travel` 起程 / `location_join` 到站)——
+        # 不另存一份"他几点在哪"的表。
+        # ⚠️ **一次回扫,两个答案**(3.13.0,验收 A ⑨):
+        # 「他这一段从哪条 seq 起在场」和「这儿发生过哪几件事」用的是**同一段
+        # 尾巴** —— 各扫一遍就是把这一屏的代价乘二,换不来任何东西
+        # (和 `_director_context` 那条逐字同一句)。
+        key = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        here_from = int(since_seq)
+        candidates: list[Any] = []
+        for e in log.replay(since_seq):
+            payload = e.payload or {}
+            if str(e.who or "") == key:
+                if (e.type == "state_change"
+                        and str(payload.get("kind") or "") == "location_join"
+                        and str(e.loc or "") == place):
+                    here_from = int(e.seq or 0)
+                elif e.type == "travel" and str(payload.get("to") or "") != place:
+                    here_from = max(here_from, int(e.seq or 0) + 1)
+            if e.type in host_mod.CROSSING_EVENT_TYPES and str(e.loc or "") == place:
+                candidates.append(e)
         rows = [
             {"type": e.type, "who": e.who, "payload": e.payload}
-            for e in log.replay(since_seq)
-            if e.type in host_mod.CROSSING_EVENT_TYPES and str(e.loc or "") == place
+            for e in candidates if int(e.seq or 0) >= here_from
         ]
         if not rows:
             return []
+        # ⚠️ **只给这几条事件的当事人取名字**(验收 A ⑨):上一版对**每个**
+        # 不在场的玩家都走一遍 `_relation_name`(它会扫 `contact_store.all()`)——
+        # 而这一屏只需要**真出现在这几行里**的那几个人。
+        actors = {str(r.get("who") or "") for r in rows} - {player_key}
         names: dict[str, str] = {}
-        for other in list(self.players or {}):
-            if other == pid:
+        for actor in actors:
+            other = actor.split(":", 1)[-1] if actor.startswith("player:") else ""
+            if not other or other == pid:
                 continue
-            said = self.scheduler._relation_name(
-                f"{Scheduler.PLAYER_PREFIX}{other}")
+            said = self.scheduler._relation_name(actor)
             # 🔴 **叫不出名字就不说** —— 别拿 id,也别兜底成「有人」:
             # 那是 `hidden` 才有的待遇,给一个站在这儿的人用它是把
             # 一件看得见的事说成悄悄话。
             if said and said != other:
-                names[f"{Scheduler.PLAYER_PREFIX}{other}"] = said
+                names[actor] = said
         places = {}
         try:
             places = {str(loc["id"]): str(loc.get("name") or loc["id"])

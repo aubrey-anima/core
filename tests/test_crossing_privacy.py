@@ -308,3 +308,191 @@ def test_抹除之后_编剧那几格原文一个字都不许留(tmp_path):
         assert secret not in blob, f"抹除之后这句话还留在库里:{secret}"
     # 对照:名字那一格照旧走「(已注销)」,不是整条删行
     assert "(已抹除)" in blob or "(已注销)" in blob, "什么都没改写 —— 抹除整个没跑?"
+
+
+def test_他不在场时那儿发生的事_走进来也不该补给他(tmp_path):
+    """🔴 **验收 A ②**:上一版只比 `e.loc == place`,而 `place` 是他**此刻**站的
+    地方 —— 于是 B 在工作室待着、A 在咖啡店动手,**B 走进咖啡店的第一屏**
+    就读到「楚子航端详了老橡树」:**他当时根本不在场**。
+
+    那个函数自己的 docstring 写着「撞见的语义是当面」,而代码没照做 ——
+    **一句写在 docstring 里、代码没做的话,比没有那句话更坏**。
+    """
+    with _showcase(tmp_path, "late") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.host_turn("p1")
+        world.host_turn("p2")
+
+        # B 先走开
+        world.player_walk("p2", "workshop")
+        for _ in range(60):
+            world.tick(1)
+            if world.player_location("p2") == "workshop":
+                break
+        assert world.player_location("p2") == "workshop"
+        world.host_turn("p2")
+
+        # A 在咖啡店做一件事 —— B 不在场
+        _act(world, "p1")
+
+        # B 走回咖啡店
+        world.player_walk("p2", "cafe")
+        for _ in range(60):
+            world.tick(1)
+            if world.player_location("p2") == "cafe":
+                break
+        assert world.player_location("p2") == "cafe"
+        back = world.host_turn("p2")["scene"]["text"]
+
+    assert "楚子航端详" not in back and "楚子航" not in back.split("这儿有人")[0], (
+        f"他不在场时发生的事被补给他了 —— 那不是撞见,是回放:{back}")
+
+
+def test_他走进来_屋里的人看得见(tmp_path):
+    """**调度台口径(验收 A ④)**:`travel` 的 `loc` 是**出发地** ——
+    只认它的话,**到站那一下没人看见**:B 在目的地什么都收不到。
+    到站是 `state_change{kind: "location_join"}`。
+    """
+    with _showcase(tmp_path, "walkin") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.player_walk("p1", "workshop")
+        for _ in range(60):
+            world.tick(1)
+            if world.player_location("p1") == "workshop":
+                break
+        world.host_turn("p2")
+
+        world.player_walk("p1", "cafe")
+        for _ in range(60):
+            world.tick(1)
+            if world.player_location("p1") == "cafe":
+                break
+        assert world.player_location("p1") == "cafe"
+        seen = world.host_turn("p2")
+
+    assert seen["scene"]["source"] != "cached", "有人走进来而屋里的人那一屏没动"
+    assert "楚子航走了进来" in seen["scene"]["text"], seen["scene"]["text"]
+
+
+def test_异地那条不进_而这条闸自己有牙(tmp_path):
+    """🔴 **验收 A ⑤**:拆掉 `_crossing_recap` 里那句 `e.loc == place`,
+    官方 139 条**全绿** —— 那道闸从来没有过自己的用例。
+    """
+    with _showcase(tmp_path, "far") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.host_turn("p1")
+        world.host_turn("p2")
+        since = 0
+        with world.scheduler._lock:
+            world.scheduler.catch_up_projection()
+            since = int(world.scheduler._memory_projection.host_scenes.get(
+                "p2", {}).get("seq") or 0)
+        _act(world, "p1")           # 发生在 cafe
+
+    # 直接问那个函数:**站在别处时它必须一行都不给**
+    with _showcase(tmp_path, "far2") as world:
+        pass
+    assert since >= 0
+    with _showcase(tmp_path, "far3") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.host_turn("p2")
+        mark = int((world.scheduler._memory_projection.host_scenes.get("p2")
+                    or {}).get("seq") or 0)
+        _act(world, "p1")
+        here = world._crossing_recap("p2", since_seq=mark, place="cafe")
+        there = world._crossing_recap("p2", since_seq=mark, place="workshop")
+
+    assert here, "同地那一支一行都没有 —— 夹具没跑起来"
+    assert there == [], f"站在别处却收到了咖啡店的事:{there}"
+
+
+def test_旁观者不吃编剧那一拍(tmp_path):
+    """**调度台口径(验收 A ⑦)**:撞见行是**引擎合成句**,它进 B 的回顾,
+    但**不该让编剧为 B 写一拍**。
+
+    两条理由,每条单独成立:同地 n 个旁观者 = 每次操作 **n 次 LLM 调用**;
+    而 3c 的裁决是「零新状态」——**撞见不是剧情**,别人的动作变成
+    「世界为他写的一拍」,就是把撞见悄悄升级成了共享剧情。
+    """
+    with _showcase(tmp_path, "bystander") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.host_turn("p1")
+        world.host_turn("p2")
+        before = len([e for e in world.events()
+                      if e["type"] == "director_log"
+                      and (e["payload"] or {}).get("player_id") == "p2"])
+
+        _act(world, "p1")           # A 动手,B 只是看见
+        turn = world.host_turn("p2")
+        after = len([e for e in world.events()
+                     if e["type"] == "director_log"
+                     and (e["payload"] or {}).get("player_id") == "p2"])
+
+    assert turn["scene"]["source"] != "cached", "B 那一屏该开口(他看见了)"
+    assert after == before, (
+        f"B 只是旁观,而编剧为他写了一拍({before} → {after})—— "
+        "同地 n 个旁观者就是 n 次调用,而撞见不是剧情")
+
+
+def test_白按那一屏不许把撞见吞掉(tmp_path):
+    """🔴 **验收 A ⑥**:白按走模板路时 `recap=[]`,而**窗口已经推过去了**
+    —— 那几行撞见**永远丢**:下一屏 `cached`,谁也不会再说一次。
+
+    判据:白按之前那几行撞见,**不许两屏都不说**。
+    """
+    with _showcase(tmp_path, "swallow") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.player_topup("p2", 100)
+        world.player_buy("p2", "cafe", "garden_shears")
+        world.host_turn("p2")
+        world.player_tool("p2", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        world.host_turn("p2")       # B 起了个长动词的头
+
+        _act(world, "p1")           # A 当着他的面做一件事
+        # B 在忙时再点一次 —— 被拒
+        got = world.player_tool("p2", "interact",
+                                {"target": "tree:harbor_oak", "verb": "嫁接"})
+        assert got["ok"] is False, got
+        first = world.host_turn("p2")["scene"]["text"]
+        second = world.host_turn("p2")["scene"]["text"]
+
+    assert "楚子航" in first or "楚子航" in second, (
+        f"白按那一屏把撞见吞了,而下一屏 cached —— 那一行永远丢:\n"
+        f"  第一屏 {first!r}\n  第二屏 {second!r}")
+
+
+def test_撞见那几行_去重且截得住_而且截了要吭声():
+    """🔴 **验收 A ③**:`recap_lines` 有去重和截断,而这一族上一版**两样都没有**
+    —— 一屏 20 行同一句,原样进提示词也进屏。
+
+    ⚠️ **截断了必须吭声**(和 perception 的 `overflow`、`recap_lines` 的截断
+    逐字同一条):不说的话,他在一个"只发生过六件事"的屋子里做决定。
+    """
+    from anima_world import host as H
+
+    same = [{"type": "entity_interaction", "who": "player:p1",
+             "payload": {"verb_label": "端详", "target_name": "老橡树"}}] * 20
+    got = H.crossing_lines(same, player_key="player:p2",
+                           names={"player:p1": "楚子航"})
+    assert got == ["楚子航端详了老橡树。"], f"同一句没去重:{got}"
+
+    many = [{"type": "entity_interaction", "who": "player:p1",
+             "payload": {"verb_label": f"动词{i}", "target_name": "树"}}
+            for i in range(20)]
+    got = H.crossing_lines(many, player_key="player:p2",
+                           names={"player:p1": "楚子航"})
+    assert len(got) == H.CROSSING_LIMIT + 1, got
+    assert "没细说" in got[-1], f"截了却不吭声:{got[-1]}"

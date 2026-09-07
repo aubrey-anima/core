@@ -11268,6 +11268,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     from anima_world.director import SOURCES_WITHOUT_A_CALL as _DIRECTOR_FALLBACK_SOURCES
 
     director_moves = director_collected = director_mock = 0
+    director_downgraded = 0
     director_by_source: dict[str, int] = {}
     director_refused = director_this_run = 0
     for e in log.replay():
@@ -11302,6 +11303,16 @@ def run_doctor(args: argparse.Namespace) -> int:
             # 一个把两件事写进同一句、却只数了其中一件的读数,比不报更坏。
             if payload.get("refused_by") or payload.get("capped"):
                 director_refused += 1
+            # 🔴 **降级也要有自己的桶**(3.13.0,验收 A ①)。
+            # 3.13.0 把降级从 `refused_by` 里搬出来(两件事挤一格,后写的会吃掉
+            # 先写的)—— 而搬完之后**它三个桶一个都不进**:
+            # `source="refused"` 不在 `SOURCES_WITHOUT_A_CALL` 里、
+            # `refused_by` 空、`capped` False,于是 `doctor` 上**它彻底看不见**,
+            # 而 `downgraded_from` 全仓**零消费方**。
+            # **把一格从别人的桶里搬出来,就得给它自己的桶** ——
+            # 否则那次搬家只是把它藏得更深。
+            if payload.get("downgraded_from"):
+                director_downgraded += 1
             # 🔴 **`run_since_seq` 是 `int | None`,而 `None` 是「答不上来」**
             # (3.11.1,验收 C ③)。上一版这儿直接 `> run_since_seq`,于是一个
             # **有 `director_log` 而没跑过 tick** 的世界(验包世界正是这样)
@@ -11400,6 +11411,14 @@ def run_doctor(args: argparse.Namespace) -> int:
                 f"{SOURCE_LABELS.get(k, k)} {n}"
                 for k, n in sorted(director_by_source.items()))
             print(f"      {onboarding.dim('没走模型的那几拍:' + said)}")
+        if director_downgraded:
+            # ⚠️ **单独一行,而且说清「模型答了、但那个动作没被采纳」** ——
+            # 和「没走模型」是两件事:那几拍**问过模型**。
+            problems += 1
+            print(f"  {onboarding.yellow(onboarding.WARN)} "
+                  f"{director_downgraded} 拍被降级(模型挑了一个要押注的动作"
+                  f"却没写 stake)—— 提示词那段要改;`director_log.downgraded_from` "
+                  f"点得出是哪个动作")
         if director_moves and director_mock == director_moves:
             problems += 1
             print(f"  {onboarding.yellow(onboarding.WARN)} 每一拍都是模板句 —— "

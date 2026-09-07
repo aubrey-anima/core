@@ -194,11 +194,21 @@ PLAYER_MOVE_INVITE_OUTCOMES = ("accepted", "declined")
 #: 拿到东西(`item_transfer`)都**不进** —— 站在旁边的人看不见别人的账,
 #: 而把它们放进来就是**拿交织当剧透**(§2.2 那条红线的另一半)。
 CROSSING_EVENT_TYPES = (
-    "travel",              # 他走进来 / 走出去
+    "travel",              # 他动身走了(`loc` 是**出发地**:B 看见他走出去)
+    # 🆕 3.13.0(调度台口径,验收 A ④):**他走进来也算撞见。**
+    # 上面那条注释本来就写着「走进来 / 走出去」,而**只有 `travel` 的话
+    # 到站那一下没人看见** —— `travel` 的 `loc` 是出发地,B 在目的地什么都收不到。
+    # 到站是 `state_change{kind: "location_join"}`(到达那一刻补发的那一条)。
+    "state_change",
     "entity_interaction",  # 他点了一个动词
     "entity_engage",       # 他起了个长动词的头
     "person_verb.accepted",  # 他对一个人做成了一件事
 )
+
+#: 一屏最多报几行「你看见别人做的事」。**和 `RECAP_LIMIT` 同一把尺子** ——
+#: 🔴 它进提示词也进屏(验收 A ③:一屏 20 行同一句),而**截断了必须吭声**
+#: (和 perception 的 `overflow`、`recap_lines` 的截断逐字同一条)。
+CROSSING_LIMIT = 6
 
 ACTED_GRAINS = ("move_seq", "chat_seq")
 
@@ -413,6 +423,13 @@ def crossing_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
             if said:
                 out.append(f"{name}往{said}去了。")
             continue
+        if kind == "state_change":
+            # 到站那一条(`location_join`)—— **别的 `state_change` 一概不算**:
+            # 关系变了、人设被改写都不是"看得见的动作"(而且多半是别人的账)。
+            if str(payload.get("kind") or "") != "location_join":
+                continue
+            out.append(f"{name}走了进来。")
+            continue
         verb = str(payload.get("verb_label") or payload.get("verb") or "")
         target = str(payload.get("target_name") or payload.get("target") or "")
         if not verb or not target:
@@ -423,7 +440,16 @@ def crossing_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
             out.append(f"{name}{verb}了{str(payload.get('agent_name') or target)}。")
         else:
             out.append(f"{name}{verb}了{target}。")
-    return out
+    # 🔴 **去重 + 截断**(3.13.0,验收 A ③):`recap_lines` 有这两样,而这一族
+    # 上一版**两样都没有** —— 一屏 20 行同一句,原样进提示词也进屏。
+    # ⚠️ **同句去重按"第一次出现"保序**:一个人做了三次同样的事,说一遍就够;
+    # 而**截断要吭声**(不说的话,他在一个"只发生过六件事"的屋子里做决定)。
+    seen: set[str] = set()
+    unique = [x for x in out if not (x in seen or seen.add(x))]
+    if len(unique) > CROSSING_LIMIT:
+        extra = len(unique) - CROSSING_LIMIT
+        return unique[-CROSSING_LIMIT:] + [f"这儿还有 {extra} 件事没细说。"]
+    return unique
 
 
 def chat_line(agent_name: str) -> str:

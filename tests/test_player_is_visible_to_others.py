@@ -211,7 +211,12 @@ def test_changed是空的_玩家也拿得到一行人话(tmp_path):
                                    {"target": "group:狮心会", "verb": "报到"})
         assert result["ok"] is True
         assert result["detail"]["changed"] == {}, "夹具前提:这条能力一个量都不改"
-        assert result["text"] == "你报到了狮心会。", result
+        # 🔴 **3.13.0 起这句话变了,而变的理由正是这条用例的夹具**
+        # (C 真站第七轮 ①):这条能力**一个量都不改** —— 说「你报到了狮心会。」
+        # 是**一句说大了的话**,玩家读到的是"成了",而世界一格没动。
+        # ⚠️ 它**照旧有一行人话**(这条用例的本意:`changed` 空也不许零字),
+        # 变的只有那句话**说得准不准**。
+        assert result["text"] == "你试着报到狮心会,没什么变化。", result
         assert result["detail"]["said"] == result["text"], "两格必须是同一句话"
 
 
