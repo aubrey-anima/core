@@ -1447,7 +1447,12 @@ def test_屏那张钥匙表_是从编剧那张推出来的():
     from anima_world import host as H
 
     assert H.SCREEN_GRAINS[:len(H.ACTED_GRAINS)] == H.ACTED_GRAINS
-    assert set(H.SCREEN_GRAINS) - set(H.ACTED_GRAINS) == {"refused_seq"}
+    # 🆕 3.13.0 又多一格 `here_seq`(批 3c §2.1:**这儿刚有人动过手**)——
+    # 它和 `refused_seq` 同一个理由:**屏该不该重写**,和**他真动了手没有**
+    # 是两个问题。编剧那道守卫照旧只读 `ACTED_GRAINS`:
+    # 别人做的事不该让编剧替他写一拍(那是别人的剧情),而屏必须说一句。
+    assert set(H.SCREEN_GRAINS) - set(H.ACTED_GRAINS) == {
+        "refused_seq", "here_seq"}
 
 
 def test_这道零外网的闸自己有牙():

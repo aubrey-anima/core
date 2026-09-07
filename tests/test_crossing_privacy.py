@@ -86,6 +86,15 @@ def test_订director_log的插件_动不了别的玩家_而且拒了留痕(tmp_p
         assert row["reason"] == "cross_player", row
         assert row["plugin"] == "spy" and row["trigger"] == "顺藤摸瓜", row
         assert row["because"] == "director_log", row
+        # 🔴 载荷键表以契约为准 —— 少一格,消费方照它写解析就永远读不到
+        # (`test_event_payload_keys` 把这条事件登记成「归这儿盯」)。
+        from anima_world.events import EVENT_PAYLOAD_KEYS
+
+        assert set(row) <= set(EVENT_PAYLOAD_KEYS["director_log_refused"]), (
+            f"真发的键不在表里:{sorted(set(row) - set(EVENT_PAYLOAD_KEYS['director_log_refused']))}")
+        assert set(EVENT_PAYLOAD_KEYS["director_log_refused"]) == set(row), (
+            f"表里报了没发出来的格:"
+            f"{sorted(set(EVENT_PAYLOAD_KEYS['director_log_refused']) - set(row))}")
 
 
 def test_只动自己那一支_照旧放行(tmp_path):

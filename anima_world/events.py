@@ -112,7 +112,11 @@ EVENT_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
                      "target_name", "line", "why", "thread_id", "promise",
                      "phase", "due_tick", "closes_thread", "tension_before",
                      "tension_after", "tension_text", "stake", "ops_applied",
-                     "capped", "refused_by", "pin_until", "outcome", "roll"),
+                     "capped", "refused_by", "downgraded_from", "pin_until",
+                     "outcome", "roll"),
+    # 🆕 3.13.0(批 3c §2.2):一条订玩家面事件的触发器想动别的玩家 —— 拒了留痕。
+    "director_log_refused": ("plugin", "trigger", "because", "player_id",
+                             "reason", "effect"),
     "entity_destroy": ("target", "kind", "reason", "by"),
     "entity_interaction": ("target", "target_name", "verb", "verb_label",
                            "changed", "consumed", "me_changed", "me_delta",

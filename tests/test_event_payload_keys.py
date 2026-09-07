@@ -86,6 +86,9 @@ def test_没被这条用例跑到的事件_要么补进夹具_要么明说为什
     KNOWN_UNTESTED_HERE = {
         "entity_destroy", "entity_spawn", "item_consume", "agent_join",
         "agent_hail",      # 要她真开口 / 编剧真派得成人,`test_director_world` 盯着
+        # 要一个**装了插件、而那条插件想跨玩家写**的世界 ——
+        # `tests/test_crossing_privacy.py` 逐格盯着(它就是为这条闸写的)。
+        "director_log_refused",
     }
     never = sorted(set(EVENT_PAYLOAD_KEYS) - set(seen) - KNOWN_UNTESTED_HERE)
     assert not never, (
