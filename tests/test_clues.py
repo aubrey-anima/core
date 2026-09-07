@@ -282,6 +282,60 @@ def test_契约点名了解锁那两条路_而且说得出不做哪条_为什么
     assert set(seg["options_keys"]) == set(C.BOARD_KEYS)
 
 
+def test_契约里的options_field_只有一个意思(tmp_path):
+    """🟡 **验收 A 整体 ⑤**:同一个键名在两处是两个意思。
+
+    `person_verbs.options_field` = `player_options()` 返回里的**那一格**;
+    而 `clues`/`factions` 那一版写的 `"clues"`/`"faction"` **不是任何一格** ——
+    照它去取会拿到 `None`。**一个含义两解的键,比没有那个键更坏**:
+    消费方读得懂两种写法里的哪一种,全靠猜。
+
+    这条闸把那一个意思钉死:**声明了它,真门返回里就必须有那一格。**
+    """
+    from anima_world.__main__ import contract_payload
+
+    payload = contract_payload()
+    with _world(tmp_path, "field") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        for name, seg in sorted(payload.items()):
+            if not isinstance(seg, dict) or "options_field" not in seg:
+                continue
+            method = seg.get("options_method") or ""
+            assert method and hasattr(world, method), (
+                f"`{name}.options_field` 指着一扇不存在的门 `{method}`")
+            got = getattr(world, method)("p1")
+            assert isinstance(got, dict) and seg["options_field"] in got, (
+                f"`{name}.options_field` = {seg['options_field']!r},"
+                f"而 `{method}()` 返回里没有这一格:{sorted(got)} —— "
+                "照它去取会拿到 None")
+    # 而线索/阵营两段**有意没有这一格**:那两扇门返回的就是板子本身
+    for name in ("clues", "factions"):
+        assert "options_field" not in payload[name], (
+            f"`{name}` 又多了一格 `options_field` —— 那扇门返回的就是板子本身,"
+            "写一格上去就是给同一个键名第二个意思")
+
+
+def test_作者插件的id撞上出厂插件_当场拒(tmp_path):
+    """🟡 **验收 A 整体 ⑤**:上一版这一格没查,而下场是安静的。
+
+    插件 id **就是命名空间**(边是 `<id>.<边名>`)。作者写一个也叫 `clues` 的插件,
+    开 `clues.enabled` 那一刻他那份被换掉(`clues.heard` 从 `edge_types` 里消失,
+    而库里那些行还躺着),关掉它又把两份一起摘走 ——
+    **他写的东西不见了,而没有一处报错。**
+    """
+    from anima_world.__main__ import world_plugin_errors
+
+    mine = {"id": "clues", "version": "1.0.0", "label": "我的线索",
+            "edges": {"heard": {"label": "听说过", "from": "player",
+                                "to": "entity:clue"}}}
+    said = world_plugin_errors({"plugins": [mine]})
+    assert any("出厂插件的 id" in line for line in said), (
+        f"作者写了一个和出厂同 id 的插件而没有一处拦下来:{said}")
+    # 换个 id 就放行 —— 拦的是撞名,不是"作者不许写线索相关的插件"
+    assert world_plugin_errors({"plugins": [{**mine, "id": "my_clues"}]}) == []
+
+
 def test_没有本体层的世界_线索板也不塌(tmp_path):
     """`blocked` 该挡的只有「这儿有什么」—— 和 `own` / `person_verbs` 同一课。"""
     seed = {k: v for k, v in _WORLD.items() if k not in ("kinds", "entities")}

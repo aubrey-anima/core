@@ -1157,6 +1157,27 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
     entries = authored.get("plugins")
     if entries is None:
         return []
+    # 🔴 **id 撞上出厂插件 = 当场拒**(3.13.0,验收 A 整体 ⑤)。
+    #
+    # 插件 id **就是命名空间**(边是 `<id>.<边名>`,事实是 `<id>.<名>`),
+    # 所以同 id 不是"两个插件",是**两份对同一批键的声明**。上一版这一格没查,
+    # 而下场是安静的:开 `clues.enabled` 那一刻作者那份被换掉
+    # (他的 `clues.heard` 从 `edge_types` 里消失,而库里那些行还躺着),
+    # 关掉它又把两份一起摘走。**他写的东西不见了,而没有一处报错。**
+    # ⚠️ 这一条**不能靠"隔离"解决** —— 键名空间是共用的,隔离就得给每个键
+    # 再加一层前缀,而那会改掉每一个已经发出去的键名。
+    clash = sorted({str((row or {}).get("id") or "")
+                    for row in (entries if isinstance(entries, list) else ())
+                    if isinstance(row, dict)} & set(FACTORY_PLUGINS))
+    if clash:
+        return [
+            f"plugins:`{pid}` 是**出厂插件的 id**,作者层不许再声明一个同名的 —— "
+            f"插件 id 就是命名空间(边是 `{pid}.<边名>`、事实是 `{pid}.<名>`),"
+            "同 id 是两份对同一批键的声明,而合并的下场是**你写的那份安静地消失**。"
+            f"换个 id(比如 `my_{pid}`);要连出厂那几条边,直接写它们的全名"
+            "(`contract.plugins.shared_edge_types`),不必声明一遍"
+            for pid in clash
+        ]
     from anima_world.events import SUBSCRIBABLE_EVENTS
     from anima_world.person_verbs import effect_errors as _pv_effect_errors
     from anima_world.plugins import (
@@ -9674,7 +9695,9 @@ def contract_payload() -> dict[str, Any]:
             "standing_fact": f"{FACTIONS_PLUGIN_ID}.{FACTION_STANDING_FACT}",
             "morale_fact": f"{FACTIONS_PLUGIN_ID}.{FACTION_MORALE_FACT}",
             "options_method": "player_faction",
-            "options_field": "faction",
+            # 同上:`player_faction()` 返回的就是那一格本身,没有 `options_field`。
+            # ⚠️ 板子里那个 `faction` 是**他站在哪一边的 id**,不是"载荷在哪一格"
+            # —— 两个意思撞在一个键名上,正是上一版这一格的来源。
             "options_keys": list(FACTION_BOARD_KEYS),
             "standing_bands": [list(b) for b in FACTION_STANDING_BANDS],
             # 🔴 **这一版有意不做的四样,点名报出来**(和「解锁没有第四条路」
@@ -9703,7 +9726,13 @@ def contract_payload() -> dict[str, Any]:
             "edge_type": f"{CLUES_PLUGIN_ID}.{CLUES_KNOWS_EDGE}",
             "states": list(CLUE_STATES),
             "options_method": "player_clues",
-            "options_field": "clues",
+            # 🔴 **这一段没有 `options_field`,而那不是漏了**(3.13.0,A ⑤)。
+            # `options_field` 在契约里只有一个意思:**`options_method` 返回的那个
+            # dict 里,这一段的载荷在哪一格**(`person_verbs` 那段是
+            # `player_options()["person_verbs"]`)。而 `player_clues()` **返回的
+            # 就是板子本身** —— 没有那一格。上一版这儿写着 `"clues"`,
+            # 消费方照它去取会拿到 `None`:**一个含义两解的键,比没有那个键更坏。**
+            # 闸:凡是声明了 `options_field` 的段,真门返回里必须有那一格。
             "options_keys": list(CLUE_BOARD_KEYS),
             "unlock_paths": list(CLUE_UNLOCK_PATHS),
             # 🔴 **有意不做的那条,连理由一起点名**(3.13.0,验收 A 整体 ①)。
