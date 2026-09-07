@@ -6094,6 +6094,30 @@ class Scheduler:
                 "「站了就回不去」是产品裁决(3c §2.10 ④);放人走在批 4",
                 edge_type, kind, list(allowed))
             return False
+        # 🔴 **两端的形状在这一刻查 —— 而且 `transfer` 也要查**
+        # (3.13.0,A 末轮 ③ + 四轮 ②)。上一版这道判断写在底下 `link` 那一支里,
+        # 于是 `transfer` 那一支**整个绕过它**:一条 `transfer` 到
+        # 「老橡树的来历」(少了 `clue:` 前缀、而且根本不是实体)的动词
+        # 答 `ok: True`、库里真落一行,而板子把那个 id 原样印出来。
+        # **同一个形状,`link` 拒、`transfer` 收 —— 两支各判各的,正是这一族的病根。**
+        #
+        # ⚠️ **`unlink` 有意不查**:它只删不写,一个形状不对的 id 在库里
+        # 一条也匹配不到 —— 拿它去拒,反而挡住「把这一端上所有边断掉」那种
+        # 只给一端的正当写法。
+        if kind in ("link", "transfer"):
+            from anima_world.plugins import link_node_error
+
+            own = {local for pl in self.plugins
+                   if getattr(pl, "id", "") == declared.plugin
+                   for local in getattr(pl, "kinds", {})}
+            for end, node in ((declared.src, src), (declared.dst, dst)):
+                said = link_node_error(end, node, plugin_id=declared.plugin,
+                                       plugin_kinds=own)
+                if said:
+                    logger.warning(
+                        "`%s` 这一次 %s 的端点不合声明:%s —— 不算数",
+                        edge_type, kind, said)
+                    return False
         if kind == "unlink":
             if src and dst:
                 return bool(store.unlink(edge_type, src, dst))
@@ -6120,24 +6144,6 @@ class Scheduler:
             if declared.exclusive_to and store.of_dst(edge_type, dst):
                 logger.warning(
                     "`%s` 是 exclusive_to 的:%s 那一端已经有一条了", edge_type, dst)
-                return False
-        # 🔴 **两端的形状也在这一刻查**(3.13.0,验收 A 末轮 ③)。
-        #
-        # 上一版这道闸只问「有没有人声明过这种边」,不问「这两个 id 配不配得上
-        # 它声明的那两端」。于是一条拍里写 `{"from": "阿岚"}`(少了 `agent:`)
-        # 的 `link` **建得出来**:`ops_applied` 里有它、库里真有那一行 ——
-        # 而 `src.体力` 读的是另一个 owner key、`connected` 那一档比的也是它,
-        # **那条边谁也读不到、谁也看不见,零报错**。
-        # 判断和作者层 `edge` 段那道闸**是同一个函数**(`edge_node_id_error`)——
-        # 两份判断迟早分岔,而分岔的样子是「同一条边写在文件里过得了闸、
-        # 写在拍里过不了」,作者读不出为什么。
-        from anima_world.plugins import link_node_error
-
-        for end, node in ((declared.src, src), (declared.dst, dst)):
-            said = link_node_error(end, node, plugin_id=declared.plugin)
-            if said:
-                logger.warning("`%s` 这一次 link 的端点不合声明:%s —— 不算数",
-                               edge_type, said)
                 return False
         facts = {
             f"{declared.plugin}.{key}": fact.text_default if fact.shape == "text"

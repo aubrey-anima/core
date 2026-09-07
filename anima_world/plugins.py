@@ -1657,7 +1657,8 @@ def edge_node_id_error(end: str, node: str, *, plugin_id: str = "") -> str | Non
     return f"不认识的一端 `{end}` —— 这是插件声明里的问题,不是这条边的"
 
 
-def link_node_error(end: str, node: str, *, plugin_id: str = "") -> str | None:
+def link_node_error(end: str, node: str, *, plugin_id: str = "",
+                    plugin_kinds: Iterable[str] = ()) -> str | None:
     """`link` 那一刻查两端的形状。**配得上就答 `None`。**
 
     🔴 **它比 `edge_node_id_error` 多认一种情况:借来的种类**(3.13.0,A 末轮 ③)。
@@ -1676,6 +1677,13 @@ def link_node_error(end: str, node: str, *, plugin_id: str = "") -> str | None:
     if said is None or not plugin_id:
         return said
     if not any(end.startswith(prefix) for prefix in EDGE_END_PREFIXES):
+        return said
+    # 🔴 **这个插件自己声明过的种类,不许走回落**(3.13.0,A 四轮 ②)。
+    # 回落是给**借来的**种类开的口子;拿它去放行「插件自己的种类漏了命名空间」,
+    # 就是把一条**实例永远对不上**的边判成合法 —— `menpai` 声明了 `sect`,
+    # 它的实例是 `menpai.sect:青云门`,而 `sect:青云门` 那个 id 一条实例都没有。
+    local = end.partition(":")[2]
+    if local in {str(k) for k in plugin_kinds}:
         return said
     # 借来的种类:按端点里那个**局部名**再试一次
     return edge_node_id_error(end, node)

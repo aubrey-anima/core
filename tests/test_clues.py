@@ -287,6 +287,58 @@ def test_端点形状不合声明_一条都不连_而且回执不撒谎(tmp_path
     assert board["known"] == 0, board
 
 
+def test_transfer那一支_也查两端(tmp_path):
+    """🟡 **A 四轮 ②**:上一版那道端点闸写在 `link` 那一支里,
+    而 `transfer` **整个绕过它** —— 一条 transfer 到「老橡树的来历」
+    (少了 `clue:` 前缀,而且根本不是一个实体)答 `ok: True`、库里真落一行,
+    **而板子把那个 id 原样印出来**。
+
+    **同一个形状,`link` 拒、`transfer` 收 —— 两支各判各的,正是这一族的病根。**
+    """
+    move = {**_MYSTERY, "id": "mover", "verbs": {"挪": {
+        "target": "clue", "label": "挪",
+        "effects": [{"transfer": {"type": "clues.knows",
+                                  "from": "self", "to": "老橡树的来历"}}]}}}
+    path = write_seed_file(tmp_path / "mv.cyberworld",
+                           {**_WORLD, "plugins": [dict(_MYSTERY), move]})
+    with open_world_at(str(tmp_path / "mv.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.config_set("clues.enabled", True)
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.scheduler.perform_affordance("player:p1", "clue:第三条", "打听")
+        got = world.scheduler.perform_affordance(
+            "player:p1", "clue:老橡树的来历", "挪")
+        board = world.player_clues("p1")
+        rows = world.scheduler.edge_store.all("clues.knows")
+
+    assert got["edges"] == [{"op": "transfer", "type": "clues.knows",
+                             "ok": False}], (
+        f"`transfer` 的端点形状不合声明,而回执说搬成了:{got}")
+    assert board["known_ids"] == ["clue:第三条"], (
+        f"板子印出了一个不是实体 id 的东西:{board}")
+    assert all(dst.startswith("clue:") for _src, dst, _f in rows), rows
+
+
+def test_插件自己声明的种类_漏了命名空间照旧拒(tmp_path):
+    """🟡 **A 四轮 ②ب**:借来种类那条回落,不许放行「自己的种类漏了命名空间」。
+
+    `menpai` 声明了 `sect`,它的实例是 `menpai.sect:青云门` —— 而 `sect:青云门`
+    那个 id **一条实例都没有**。回落是给**借来的**种类开的口子,
+    拿它去放行这一种,就是把一条**实例永远对不上**的边判成合法。
+    """
+    from anima_world.plugins import link_node_error
+
+    assert link_node_error("group:sect", "menpai.sect:青云门",
+                           plugin_id="menpai", plugin_kinds=("sect",)) is None
+    said = link_node_error("group:sect", "sect:青云门",
+                           plugin_id="menpai", plugin_kinds=("sect",))
+    assert said and "menpai.sect" in said, (
+        f"自己声明的种类漏了命名空间也放行了:{said}")
+    # 而借来的那种照旧放行(出厂 `clues` 指着作者写的 `clue`)
+    assert link_node_error("entity:clue", "clue:甲", plugin_id="clues") is None
+
+
 def test_借来的种类那一端_照旧连得上(tmp_path):
     """上一条的另一半 —— **拦过头和漏掉一样坏,只是方向相反**。
 
