@@ -22,8 +22,20 @@ _WORLD = {
 }
 
 
+#: 一个**作者写的**插件:阵营上挂一个「投奔」动词。
+#: 🔴 **这才是站队的真路** —— 上一版这个文件直接调 `apply_edge_effect` 传字面量,
+#: 那绕过了插件装没装上、作者写不写得出这条效果、动词跑不跑得到这儿**全部三件**。
+_TOUKAO = {
+    "id": "menpai", "version": "1.0.0", "label": "门派",
+    "verbs": {"投奔": {"target": "group", "label": "投奔",
+                      "effects": [{"link": {"type": "factions.member_of",
+                                            "from": "self", "to": "target"}}]}},
+}
+
+
 def _world(tmp_path, name="f"):
-    path = write_seed_file(tmp_path / f"{name}.cyberworld", _WORLD)
+    path = write_seed_file(tmp_path / f"{name}.cyberworld",
+                           {**_WORLD, "plugins": [dict(_TOUKAO)]})
     world = open_world_at(str(tmp_path / f"{name}.db"), world_file=path,
                           force_mock_llm=True)
     world.config_set("factions.enabled", True)
@@ -31,11 +43,10 @@ def _world(tmp_path, name="f"):
 
 
 def _join(world, pid, side):
-    from anima_world import factions as F
-
-    return world.scheduler.apply_edge_effect(
-        {"type": f"{F.PLUGIN_ID}.{F.MEMBER_EDGE}",
-         "from": f"player:{pid}", "to": side}, {})
+    """站队走**真门**:玩家对那个阵营做「投奔」。"""
+    got = world.scheduler.perform_affordance(f"player:{pid}", side, "投奔")
+    return bool(got.get("ok")) and all(
+        row.get("ok") for row in (got.get("edges") or [{"ok": False}]))
 
 
 def test_站了就回不去_而且是内核拒(tmp_path):

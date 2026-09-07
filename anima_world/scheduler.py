@@ -6050,6 +6050,19 @@ class Scheduler:
         kind = spec.get("op")
         edge_type = str(spec.get("type") or "")
         declared = self.edge_types.get(edge_type)
+        # 🔴 **没人声明过的边类型,一条都不连**(3.13.0,验收 A 整体 ③)。
+        #
+        # 上一版这儿照连:一个拼错的 `type`、一个开关关着的出厂插件、
+        # 一条早就删掉的边 —— 全都**安静地建成一条边**,`link` 返回 True,
+        # 而没有任何一处读得到它(读的人按声明去读)。
+        # ⚠️ 它还骗过了这个仓库自己的夹具:线索那两条用例直接调这个函数,
+        # **连插件装没装上都没验到**,而它们是绿的。
+        # **一个谁都不认识的边,和一条没连上的边,在库里长得一模一样。**
+        if not declared:
+            logger.warning(
+                "没人声明过 `%s` 这种边 —— 这一次 %s 不算数。"
+                "(出厂插件的开关关着?`type` 拼错了?)", edge_type, kind)
+            return False
         src = self._resolve_node(spec.get("from"), namespace, event, owner)
         dst = self._resolve_node(spec.get("to"), namespace, event, owner)
         if not edge_type or (kind != "unlink" and (not src or not dst)):

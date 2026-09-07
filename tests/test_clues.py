@@ -123,6 +123,43 @@ _MYSTERY = {
 }
 
 
+def test_没人声明过的边_一条都不连(tmp_path):
+    """🔴 **验收 A 整体 ③**:上一版 `apply_edge_effect` 对**谁都没声明过**的
+    边类型照连 —— 一个拼错的 `type`、一个开关关着的出厂插件、一条早就删掉的边,
+    全都安静地建成一条边,`link` 返回 True,**而没有任何一处读得到它**
+    (读的人按声明去读)。
+
+    ⚠️ 它还骗过了这个仓库自己的夹具:线索那两条用例当时直接调这个函数,
+    于是 `clues.enabled=False`(**根本没有这种边**)那一趟也是 True ——
+    **连插件装没装上都没验到**。
+    """
+    with _world(tmp_path, "undeclared") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        sch = world.scheduler
+        assert "clues.knows" in sch.edge_types, "夹具没把线索装上,这条就白验了"
+        # 拼错一个字 —— 谁都没声明过它
+        got = sch.apply_edge_effect(
+            {"op": "link", "type": "clues.know", "from": "player:p1",
+             "to": "clue:第三条"}, {})
+        assert got is False, "拼错的边类型也照连 —— 而没有任何一处读得到它"
+        assert sch.edge_store.all("clues.know") == []
+
+    # 开关关着的世界:那条边根本不在,照样一条都不连
+    path = write_seed_file(tmp_path / "off2.cyberworld", _WORLD)
+    with open_world_at(str(tmp_path / "off2.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        got = world.scheduler.apply_edge_effect(
+            {"op": "link", "type": "clues.knows", "from": "player:p1",
+             "to": "clue:第三条"}, {})
+        assert got is False, (
+            "`clues.enabled` 关着而 `link` 说它连上了 —— "
+            "夹具照这个 True 写下去,插件装没装上就永远验不到")
+        assert world.player_clues("p1")["known"] == 0
+
+
 def test_解锁路一_动词effects_走真门连得上(tmp_path):
     """🔴 **验收 A 整体 ①:三条路一条都连不上**(3.13.0)。
 
