@@ -2093,6 +2093,16 @@ class RedisContactStore:
         """
         row = self.get(agent_id, player_id)
         row["last_contact_tick"] = int(tick)
+        # 🆕 3.11.3(验收 A ②):**一轮一格的单调计数,和那个 tick 并排。**
+        #
+        # 🔴 `last_contact_tick` 是**世界时钟**,而龙族一个 tick 是 4.2 真实分钟 ——
+        # 玩家在一个 tick 里聊十轮,那个数一格没动。主持人那把钥匙读它的下场是
+        # **十轮里只有一轮换屏**,而那正是"真站第四轮"报上来的症状本身。
+        # ⚠️ 3.11.2 那两条用例手喂 `clock + 1` 才绿的 —— **那是把测试改绿,
+        # 不是把东西修好**;真门(`World.chat` / `record_chat_turn`)传的是
+        # `scheduler.clock`。
+        # **没有新键**:它和水位同住这一行,而这一行每轮本来就要写。
+        row["contact_seq"] = int(row.get("contact_seq") or 0) + 1
         if name:
             row["player_name"] = str(name)
         self._rows.put(self._field(agent_id, player_id), row)

@@ -3266,3 +3266,50 @@ def test_插件世界之后的增量编辑_只带kinds也开得了机(tmp_path):
         tended = again.act("阿岚", "interact", {"target": "tree:oak", "verb": "照料"})
         assert tended["ok"] is True, tended
         assert again.stocks("agent:阿岚")["wet.体感"] == 4.0, again.stocks("agent:阿岚")
+
+
+def test_开机按库里那份跑_连声明带规律_而不只是库里那一行(tmp_path):
+    """🔴 **验收 A ① 逮的那条:3.11.2 那句话只做进了半层。**
+
+    `install_plugins` 的 `on_boot` 跳过筛的是**它自己那张局部名单** —— 它挡住的
+    只有「别拿旧声明覆盖库里那一行」。而**运行时装的是哪一份**由
+    `_plugin_bodies` 决定,那一处照旧「文件里那份赢」。下场是一个只有真部署
+    才有的裂口:
+
+        库里记着 2.0.0 · `scheduler.plugins` 跑的是 1.0.0 ·
+        2.0.0 那几条规律一条都不在跑 · 而日志说「库里那份说了算」
+
+    **两处各说各的,而屏幕上什么都不少。** 上一条用例只断言了库里那一行,
+    所以它一直是绿的 —— 这条断言**运行时**。
+    """
+    NEW = {**QI, "version": "2.0.0",
+           # ⚠️ 2.0.0 才有的那条 `projected` 事实 —— A 报的现场里
+           # `projected_facts` 是空的,而那正是"跑的是旧那份"的指纹之一。
+           "facts": {**QI["facts"],
+                     "香火": {"bearer": "actor", "shape": "number",
+                              "mode": "projected",
+                              "sources": [{"event": "payment", "credit": "amount"}]}},
+           "rules": [{"id": "回气2", "every": {"ticks": 1},
+                      "for_each": {"kind": "agent"},
+                      "set": {"qi.灵力": "clamp(qi.灵力 + 2.0 * dt, 0, 100)"}}]}
+    with _world_with(tmp_path, NEW, name="rt"):
+        pass
+    old_file = write_seed_file(tmp_path / "rt2.cyberworld",
+                               {**BARE, "plugins": [{**QI, "version": "1.0.0"}]})
+    world = open_world_at(str(tmp_path / "rt.db"), world_file=old_file,
+                          force_mock_llm=True)
+    try:
+        running = {p.id: p.version for p in world.scheduler.plugins}
+        assert running.get("qi") == "2.0.0", (
+            f"库里是 2.0.0,而跑起来的是 {running.get('qi')} —— "
+            "「库里那份说了算」只做进了记录那一层")
+        # 2.0.0 那条规律真的在跑(1.0.0 那条叫「回气」,2.0.0 那条叫「回气2」)
+        ids = set(world.scheduler.plugin_rule_ids)
+        assert "qi.回气2" in ids, sorted(ids)      # 规律 id 带命名空间前缀
+        assert "qi.回气" not in ids, sorted(ids)
+        # 事实也是按库里那份投影的
+        # 2.0.0 声明的那条 `projected` 事实真的在册(跑旧那份时它是空的)
+        assert any("香火" in str(k) for k in world.scheduler.projected_facts), (
+            f"projected_facts 里没有 2.0.0 那条:{world.scheduler.projected_facts}")
+    finally:
+        world.close()

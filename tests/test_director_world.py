@@ -209,9 +209,14 @@ def test_一条线到期没人管_那笔赌注真的掉了(tmp_path):
                          "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
                          "due_tick": int(sch.clock) + 1, "closed": False}],
         }
-        # ⚠️ 3.12.0 起到期之后还有**一个世界日的宽限期**(裁决 §2.5)——
-        # 这条用例原样保留(它钉的是「不来的人照样要还」),只把 tick 拉到宽限期之后。
-        world.tick(24 * 12 + 5)
+        # ⚠️ **3.12.0(批 3b)在到期和扣账之间加了一道宽限期** —— 到期那一刻他多半
+        # 不在,而引擎自己动手扣一个他没机会回应的赌注,等于把「有代价」变成
+        # 「有惩罚」。所以这里要推过 `director.grace_hours` 才看得到那一笔。
+        # 三条并排的用例(上线拿 callback / 不上线过期照扣 / 宽限期内按兵不动)
+        # 在下面,这一条只保「到期没人管,最后那笔真的掉了」。
+        ticks_per_hour = max(1.0, 60.0 / max(1, sch._minutes_per_tick()))
+        grace = int(world.config_get("director.grace_hours", default=12) or 12)
+        world.tick(int(grace * ticks_per_hour) + 3)
         after = world.relationship_summary(agent_id, "player:p1")["axes"]["sentiment"]
         assert after < before, f"赌注没兑现:{before} → {after}"
         collected = [r for r in _logs(world) if r["move"] == "collect"]
@@ -227,10 +232,14 @@ def test_contract里那一段_和闭集逐项相等(tmp_path):
     assert seg["moves"] == list(D.MOVES)
     assert seg["phases"] == list(D.PHASES)
     assert seg["stake_kinds"] == list(D.STAKE_KINDS)
-    # 🆕 3.12.0:三个条件都满足了(载荷表定稿 · 真有消费方 · 还留得下一格),
-    # 所以它从 3a 的 False 转成了 True —— 见 `test_director_log进了白名单…`。
-    assert seg["subscribable"] is True
+    # 🆕 3.12.0(批 3b §2.7):载荷定稿了,`director_log` **进白名单**。
+    # 3.11.x 上这一格是 `False`,理由是"形状还要动,现在进白名单就是一句
+    # 拿不掉的契约" —— 那句话到 3b 为止都成立,而 3b 正是把形状定下来的那一单。
+    assert seg["subscribable"] is True, "3b 定稿之后它该进白名单了"
+    # 两处要一致:契约那一格说进了白名单,那张表里就得真有它
+    # ——**一句只写在契约里、而表里没有的话,消费方订了收不到**。
     from anima_world.events import SUBSCRIBABLE_EVENTS
+
     assert "director_log" in SUBSCRIBABLE_EVENTS
 
 
@@ -607,27 +616,46 @@ def test_编剧关着时_动词之后屏照样要换(tmp_path):
         assert _logs(world) == []
 
 
-def test_说过话也算动过手_而它不进事件日志(tmp_path):
-    """🔴 **真站第三轮那条的根因**:`conversation` 只在**会话关闭**那一刻发一条
-    (「整场会话只在关闭时发一个事件」是这个仓库的硬不变量),而站点把会话
-    **一直开着** —— 于是玩家聊了十轮,`move_seq` 一格没动,整屏纹丝不动。
+def test_同一个tick里连聊十轮_每一轮都要换屏(tmp_path):
+    """🔴 **验收 A ② 那条,逐字**:龙族一个 tick 是 4.2 真实分钟,而 3.11.2 那把
+    钥匙上「他说过话没有」读的是 `last_contact_tick` —— **世界时钟**。
+    于是玩家在一个 tick 里聊十轮,那个数一格没动:**十轮里只有一轮换屏**,
+    而那正是"真站第四轮"报上来的症状本身。
 
-    ⚠️ **不许为它加一条每轮事件** —— 那正是那条不变量挡的东西。
-    接的是转录那一侧本来就在写的水位(`contact_store.last_contact_tick`)。
+    ⚠️ 3.11.2 那两条用例手喂 `clock + 1` 才绿 —— **把测试改绿不是把东西修好**。
+    这条用例**一个 tick 都不推**:时钟从头到尾不动,而十轮要有十屏。
     """
-    with open_world_at(tmp_path / "ct.db") as world:
-        agent = next(iter(world.scheduler.agents))
+    with open_world_at(tmp_path / "ten.db") as world:
         world.player_move("p1", "cafe")
         world.tick(2)
         world.host_turn("p1")
-        # 会话**不关**,只记一轮 —— 站点就是这么用的
-        world.scheduler.contact_store.note_contact(
-            agent, "p1", tick=int(world.scheduler.clock) + 1)
-        turn = world.host_turn("p1")
-        assert turn["trigger"] == "acted", (
-            f"聊了一轮而屏纹丝不动:{turn['trigger']} / {turn['scene']['source']}")
-        # 而且**没有**为此新发一条事件(那条不变量还在)
-        assert not [e for e in world.events() if e["type"] == "conversation"]
+        frozen = int(world.scheduler.clock)
+        seen: list[str] = []
+        for i in range(10):
+            _drive_chat(world, "p1")
+            turn = world.host_turn("p1")
+            seen.append(turn["scene"]["source"])
+        assert int(world.scheduler.clock) == frozen, "这条用例不许推时钟"
+        cached = [i for i, src in enumerate(seen) if src == "cached"]
+        assert not cached, f"同一个 tick 里第 {cached} 轮没换屏:{seen}"
+
+
+def test_聊天那格水位_是轮数不是时钟(tmp_path):
+    """**闸的那一格自己也要量**:上面那条屏级用例在 `record_chat_turn` 这条门上
+    会被 `move_seq` 兜住(它顺带发一条 `conversation`)—— 而钥匙上这一格
+    要挡的是**另一条门**(会话一直开着、一条事件都不发)。所以直接量水位。
+    """
+    with open_world_at(tmp_path / "seq.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        frozen = int(world.scheduler.clock)
+        got = []
+        for _ in range(3):
+            _drive_chat(world, "p1")
+            got.append(world._last_chat("p1")[0])
+        assert int(world.scheduler.clock) == frozen
+        assert got == sorted(set(got)) and len(set(got)) == 3, (
+            f"同一个 tick 里聊三轮,水位是 {got} —— 它读的还是时钟")
 
 
 def test_回来那一屏之后聊一轮_编剧必须写那一拍(tmp_path):
@@ -658,9 +686,8 @@ def test_回来那一屏之后聊一轮_编剧必须写那一拍(tmp_path):
         assert back["trigger"] == "return", back["trigger"]
         before = len(_logs(world))
 
-        # 他回来之后**聊了一轮** —— 站点那条路(record_chat_turn)写的水位
-        world.scheduler.contact_store.note_contact(
-            agent, "p1", int(world.scheduler.clock) + 1)
+        # 他回来之后**聊了一轮** —— 站点那条真门,不喂 tick(验收 A ②)
+        _drive_chat(world, "p1")
         turn = world.host_turn("p1")
 
         assert turn["scene"]["source"] != "cached", (
@@ -673,16 +700,24 @@ def test_回来那一屏之后聊一轮_编剧必须写那一拍(tmp_path):
 # ── 「他动过手没有」那张钥匙表:闸和守卫必须逐格都认(3.11.2,真站第四轮)──────
 
 def _drive_chat(world, pid):
-    """聊一轮 —— 走的是站点那条路写的水位,**不发事件**(硬不变量)。"""
-    world.scheduler.contact_store.note_contact(
-        next(iter(world.scheduler.agents)), pid, int(world.scheduler.clock) + 1)
+    """聊一轮 —— **走站点那条真门**(`record_chat_turn`),不发事件(硬不变量)。
+
+    🔴 **不许手喂 `clock + 1`**(3.11.3,验收 A ②)。3.11.2 那两条用例正是那么
+    写的,于是一个**按世界时钟**记水位的实现在它们眼里是好的 —— 而真门传的是
+    `scheduler.clock`,龙族一个 tick 是 4.2 真实分钟:玩家一个 tick 里聊十轮,
+    水位一格没动。**把测试改绿不是把东西修好**,而这条用例当时是绿的。
+    """
+    world.record_chat_turn(
+        next(iter(world.scheduler.agents)), pid,
+        [{"role": "user", "content": "在吗"},
+         {"role": "assistant", "content": "在。"}])
 
 
 #: 每一格钥匙**怎么让它动**。⚠️ 这张表要和 `host.ACTED_GRAINS` 逐格对上 ——
 #: 加一格而忘了写驱动,下面第一条用例当场红。
 _ACTED_DRIVERS = {
     "move_seq": _act_once,
-    "chat_tick": _drive_chat,
+    "chat_seq": _drive_chat,
 }
 
 
@@ -836,10 +871,11 @@ def test_两个玩家六步不同_编剧的输入和产出都得不同(tmp_path)
 
         world.player_walk("p2", "workshop"); world.player_location("p2")
         world.host_turn("p2")
-        # ⚠️ 这儿**不走 `record_chat_turn`**:配了 key 之后那扇门会连带叫醒
-        # 会话总结那条真路(`chat_session._summarize`),而这条用例要断的是编剧。
-        # 走水位那一条 —— 站点那条路写的正是它。
-        _drive_chat(world, "p2")
+        # ⚠️ 这儿**不聊天**:配了 key 之后那扇门会连带叫醒会话总结那条真路
+        # (`chat_session._summarize`),而这条用例要断的是编剧。
+        # 换一个动作照样把两个人的历史拉开 —— 这条用例问的是"输入不同,
+        # 产出就该不同",不是"聊天这条路通不通"(那条由上面那张钥匙表钉)。
+        world.player_action("p2", "在报刊亭前站了一会儿")
         world.host_turn("p2")
 
         s1, s2 = world.player_story("p1"), world.player_story("p2")
@@ -893,7 +929,225 @@ def test_相位那句和张力那句_不许在同一屏上打架(tmp_path):
                     f"「{D.tension_text(after)}」:{row}")
 
 
-# ── 批 3b:摊牌 / 还债 / 收线(裁决 §2.3–2.5)────────────────────────────────
+def test_source那几格_和客户端真被调过几次对得上账(tmp_path):
+    """🔴 **验收 A ④ / B+C ② 的判据,逐字**:真站 12 拍里 10 条 `refused`,
+    而假客户端只被调过 6 次 —— **读数自己就对不上,而没有一处报错**。
+
+    `refused` 的意思是「问过模型,而它答的不在闭集里」。算术选了 `breathe`、
+    没人可派、额度用完、让给锚点 —— 四种**根本没问过模型**,却都被记成它。
+    🔴 **拆三合一时最容易犯的错,是拆出一个新的三合一。**
+
+    判据能证伪:`refused` 的条数 **≤** 客户端真被调过的次数。
+    """
+    from anima_world import director as D
+
+    with open_world_at(tmp_path / "src.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        fake = _with_key(world, "我觉得应该让恺撒出场")   # 永远读不懂 → 真 refused
+        for i in range(12):
+            here = world.player_location("p1")
+            world.player_walk("p1", "workshop" if here != "workshop" else "cafe")
+            world.player_location("p1")
+            world.host_turn("p1")
+        rows = _logs(world)
+        by = {}
+        for row in rows:
+            by[row["source"]] = by.get(row["source"], 0) + 1
+        refused = by.get("refused", 0)
+        assert refused <= fake.calls, (
+            f"{refused} 拍记成「模型答的不在闭集里」,而客户端只被调过 "
+            f"{fake.calls} 次:{by}")
+        # 而没走模型的那几种,都得落在闭集里(不许再出现一个新桶)
+        assert set(by) <= set(D.SOURCES), f"冒出闭集之外的 source:{sorted(by)}"
+
+
+def test_故事那一屏_不印浮点也不印两句打架的话(tmp_path):
+    """🔴 **验收 A ⑤ / B+C ④**:上一版那一行是
+
+        张力 0.00(松弛)· 这条线到节骨眼了 · 编剧一共写过 3 拍
+        还没有开着的线。
+
+    三宗罪挤在两行里:`0.00` 是给机器看的(而这一屏正是「两样都别自己译」
+    那条规矩的作者)· 「到节骨眼了」和「松弛」**互相打脸**(相位不倒退,
+    张力会衰减)· 紧接着又说「还没有开着的线」—— 一条不存在的线到了节骨眼。
+
+    ⚠️ **别数源码,去问屏幕**。
+    """
+    import contextlib
+    import io as _io
+
+    from anima_world.__main__ import main as _main
+
+    with open_world_at(tmp_path / "sl.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        now = int(world.scheduler.clock)
+        # 走到 climax,然后让时间过去 —— 张力衰减,而相位不倒退
+        world._director_apply(
+            "p1", {"move": "complicate", "who": agent, "line": "出事了",
+                   "why": "", "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.65, phase="escalation", tick=now, place="cafe", thread=None,
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        world.tick(288 * 3)
+        story = world.player_story("p1")
+
+    assert story["phase"] == "climax" and story["tension"] < 0.25, story
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _main(["player", "story", "--player", "p1", "--world-id", "w"])
+    screen = buf.getvalue()
+    assert "0.00" not in screen and "张力 " not in screen, f"印了浮点:{screen}"
+    assert not ("到节骨眼了·" in screen or "这条线到节骨眼了" in screen), screen
+    # 那两句不许并排出现在同一屏上
+    assert not ("到节骨眼了,松弛" in screen), screen
+    assert "到过" in screen, f"松下来的高潮该说成一句:{screen}"
+
+
+def test_同一个tick里_走动词聊走四连_一屏cached都不许有(tmp_path):
+    """🔴 **真站第五轮的验收判据,逐字**(11 屏 6 个 `cached`)。
+
+    ⚠️ **时钟一格都不推** —— 真站上那 11 屏多半落在同几个 tick 里
+    (龙族 4.2 真实分钟一个 tick),而按 tick 记水位的实现在这条用例下才会现形。
+    """
+    with open_world_at(tmp_path / "5th.db") as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.player_topup("p1", 100)
+        world.player_buy("p1", "cafe", "garden_shears")
+        world.host_turn("p1")
+        frozen = int(world.scheduler.clock)
+
+        seen = []
+        world.player_walk("p1", "workshop"); world.player_location("p1")
+        seen.append(world.host_turn("p1"))
+        world.player_walk("p1", "cafe"); world.player_location("p1")
+        world.player_tool("p1", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        seen.append(world.host_turn("p1"))
+        _drive_chat(world, "p1")
+        seen.append(world.host_turn("p1"))
+        world.player_walk("p1", "workshop"); world.player_location("p1")
+        seen.append(world.host_turn("p1"))
+
+        assert int(world.scheduler.clock) == frozen, "这条用例不许推时钟"
+        cached = [i for i, t in enumerate(seen) if t["scene"]["source"] == "cached"]
+        assert not cached, (
+            f"第 {cached} 屏 cached:{[(t['trigger'], t['scene']['source']) for t in seen]}")
+        texts = [t["scene"]["text"] for t in seen]
+        # ⚠️ 判据是**连着两屏**不许一样(真站报的是「连着三屏同一句」)。
+        # 不判"四屏两两不同":第 1 屏和第 4 屏都是"正在去建筑工作室的路上",
+        # 那是**同一个处境**,同一句话是照实说 —— 拿"全都不同"当判据,
+        # 会把一句诚实的话判成 bug。
+        repeats = [i for i in range(1, len(texts)) if texts[i] == texts[i - 1]]
+        assert not repeats, f"第 {repeats} 屏和上一屏一字不差:{texts}"
+
+
+def test_在忙的时候连点同一个长动词_屏是模板句而不是原样不动(tmp_path):
+    """🔴 **真站第五轮那三屏同一句,根在这儿** —— 而 3.12.0 把它裁了。
+
+    复现(和线上「你正为狮心会拉票,芬格尔凑过来…」连出三屏逐字同形):
+    玩家被一个长动词占着,**再点同一个动词一律被拒**(「你已经在做这件事了」)
+    → 一条事件都不发 → 3.11.3 及以前:钥匙一格没动、`scene.source == "cached"`、
+    屏逐字重复。
+
+    ⚠️ **这条用例在 3.11.3 上钉的是「屏原样不动」,而 3.12.0 按裁决改成了新行为**
+    —— 不是把它改绿:老板那句底线是**屏不许逐字重复**,而
+    「一次被拒的操作也是玩家做过的一次操作」要开口、但**不加时刻**。
+    详见 `host.SCREEN_GRAINS` 那段。
+    """
+    with open_world_at(tmp_path / "busy.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.player_topup("p1", 100)
+        world.player_buy("p1", "cafe", "garden_shears")
+        world.host_turn("p1")
+        world.player_tool("p1", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        first = world.host_turn("p1")
+        assert first["scene"]["source"] != "cached"
+
+        prev = first["scene"]["text"]
+        for _ in range(3):
+            got = world.player_tool("p1", "interact",
+                                    {"target": "tree:harbor_oak", "verb": "嫁接"})
+            assert got["ok"] is False, "在忙时再点该被拒"
+            assert "已经在做" in str(got.get("error") or ""), got
+            turn = world.host_turn("p1")
+            # 🔴 抬头照旧 `acted`(`host.moments` 那张表一个字不动),
+            # 而 `source` 是 `template` —— **不许 `cached`**。
+            assert turn["trigger"] == "acted", turn["trigger"]
+            assert turn["scene"]["source"] == "template", turn["scene"]["source"]
+            assert turn["scene"]["text"] != prev, "屏逐字重复了"
+            prev = turn["scene"]["text"]
+
+def test_钥匙那几格和source闭集_都要在契约里探得到():
+    """🔴 **验收 B+C ⑦**:`chat_seq` / `entity_engage` 这两格是 3.11.2 加的,
+    而**契约里一个字都没有** —— 下游探不到。探不到的下场是具体的:
+    站点为「聊完一轮屏不动」自己加一条每轮事件,而那正是
+    「整场会话只在关闭时发一个事件」那条硬不变量挡的东西。
+
+    ⚠️ `chat_seq` **不是事件**,所以它不能藏在 `move_event_types` 里 ——
+    拿那张表去数会永远少一格,而少的正是最常走的那条路。
+    """
+    from anima_world import director as D
+    from anima_world import host as H
+    from anima_world.__main__ import contract_payload
+
+    seg = contract_payload()["director"]
+    assert seg["acted_grains"] == list(H.ACTED_GRAINS)
+    assert "entity_engage" in seg["move_event_types"], seg["move_event_types"]
+    assert seg["sources"] == list(D.SOURCES)
+    assert seg["source_labels"] == dict(D.SOURCE_LABELS)
+    assert "story_text" in seg["text_keys"] and "story_text" in seg["story_keys"]
+
+
+def test_编剧派一个不在场的人_hail载荷自带名字(tmp_path):
+    """🔴 **真站第五轮 + player 带回**:编剧 `approach` 派来的诺诺,
+    `agent_hail.payload.agent_name` 是空的,而那个人**又不在 `/state.agents`** ——
+    站点两条路都取不到名,屏上是「一位还没报上名字的人」。
+    **一个人被派来找你,而屏幕说不出他是谁。**
+
+    判据:**派一个不在他跟前的人**(那正是 `approach` 存在的理由 ——
+    「她不在这儿」不是闸),payload 里那一格非空。
+    """
+    with open_world_at(tmp_path / "hn.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        here = {a: world.scheduler._where_is(a) for a in world.scheduler.agents}
+        away = [a for a, loc in here.items() if loc != "cafe"]
+        assert away, "这条用例要一个不在场的角色"
+        who = away[0]
+        world._director_apply(
+            "p1", {"move": "approach", "who": who, "line": "我找你有事",
+                   "why": "", "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.2, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=0, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        hails = [e for e in world.events() if e["type"] == "agent_hail"]
+        assert hails, "编剧派了人而一条 hail 都没有"
+        got = (hails[-1].get("payload") or {}).get("agent_name")
+        assert str(got or "").strip(), f"派来的人没名字:{hails[-1]['payload']}"
+
+
+def test_名字空着的角色_hail那一格也不许空():
+    """**兜底到 id,不留空**(纯函数那一半):读的一方手上没有名册,
+    而"事后回查"对一个已经不在名册里的人根本查不到 ——
+    照实说一个 id,好过让屏幕说「一位还没报上名字的人」。"""
+    from anima_world.scheduler import Scheduler
+
+    class _Blank:
+        """`agent_display_name` 答空的那种世界。"""
+        agent_display_name = staticmethod(lambda aid: "")
+        _relation_name = staticmethod(lambda aid: "")
+
+    got = Scheduler.hail_agent_name(_Blank(), "诺诺")
+    assert got == "诺诺", got
 
 
 def _story(world, pid, **kw):
@@ -1120,8 +1374,6 @@ def test_日志那一格档词_和故事那扇门用的是同一张表(tmp_path)
         assert D.tension_text(0.63) == world.player_story("p1")["tension_text"] or True
         assert "tension_text" in D.DIRECTOR_LOG_KEYS
 
-
-# ── 被拒的操作也是玩家做过的一次操作(3.12.0,老板 09-03 裁决)──────────────
 
 def test_被拒两次_两屏都是模板句而且和上一屏都不同(tmp_path):
     """🔴 **裁决那条的判据,逐字**:被拒的操作**要开口,但不加时刻** ——
