@@ -8137,6 +8137,44 @@ class World:
             for r in shelves
         ]
 
+    def player_faction(self, player_id: str) -> dict[str, Any]:
+        """他站在哪一边、声望到哪一档(3.13.0,批 3c §2.6)。
+
+        🔴 **没有「这一边有几个人」那一格** —— 那要**聚合**,而聚合是批 4
+        (`contract.factions.deferred` 点名了这四样)。
+        **在一个没有聚合的引擎上手写一遍计票,就是把批 4 那件事做进这一层**,
+        而那份实现以后要被删掉重写,并且在被删掉之前它是**第二份真相**。
+
+        「他站在哪一边」**没有第二处状态**:就是那条 `exclusive` 成员边。
+        而「站了回不去」是**内核在 `link` 那一刻查的**,不是这一层判的。
+        """
+        from anima_world import factions as fac_mod
+
+        pid = str(player_id or "").strip()
+        me = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        side = ""
+        store = getattr(self.scheduler, "edge_store", None)
+        if store is not None:
+            edge = f"{fac_mod.PLUGIN_ID}.{fac_mod.MEMBER_EDGE}"
+            try:
+                rows = store.of_src(edge, me)
+            except Exception:  # noqa: BLE001 - 读不到边不该掀翻这一屏
+                logger.warning("读阵营边失败 player=%s", pid, exc_info=True)
+                rows = []
+            if rows:
+                side = str(rows[0][1] or "")
+        standing = 0.0
+        stock = getattr(self.scheduler, "stock_store", None)
+        if stock is not None and pid:
+            key = f"{fac_mod.PLUGIN_ID}.{fac_mod.STANDING_FACT}"
+            try:
+                standing = float(stock.of(self.scheduler.stock_owner_of(me)).get(
+                    key) or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                standing = 0.0
+        return fac_mod.board(side, self.scheduler.entity_display_name(side)
+                             if side else "", standing)
+
     def player_clues(self, player_id: str) -> dict[str, Any]:
         """他的**线索板**(3.13.0,批 3c §2.4)。
 

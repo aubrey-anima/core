@@ -26,6 +26,13 @@ from anima_world.beats import (
     BeatScript, BeatScriptError, coerce_goals, split_against_stored,
 )
 from anima_world.roll import DEFAULT_BANDS as ROLL_DEFAULT_BANDS, FACES as ROLL_FACES
+from anima_world.factions import (
+    BOARD_KEYS as FACTION_BOARD_KEYS, DEFERRED as FACTION_DEFERRED,
+    FACTION_KIND, MEMBER_EDGE as FACTION_MEMBER_EDGE,
+    MORALE_FACT as FACTION_MORALE_FACT, PLUGIN_ID as FACTIONS_PLUGIN_ID,
+    STANDING_BANDS as FACTION_STANDING_BANDS,
+    STANDING_FACT as FACTION_STANDING_FACT,
+)
 from anima_world.clues import (
     BOARD_KEYS as CLUE_BOARD_KEYS, CLUE_KIND, CLUE_STATES,
     KNOWS_EDGE as CLUES_KNOWS_EDGE, PLUGIN_ID as CLUES_PLUGIN_ID,
@@ -4214,9 +4221,11 @@ def _factory_plugins(config_store: Any) -> list[dict[str, Any]]:
     from anima_world.together import factory_plugin as invitation_plugin
 
     from anima_world.clues import factory_plugin as clues_plugin
+    from anima_world.factions import factory_plugin as factions_plugin
 
     builders = {"needs": needs_plugin, "economy": economy_plugin,
-                "invitation": invitation_plugin, "clues": clues_plugin}
+                "invitation": invitation_plugin, "clues": clues_plugin,
+                "factions": factions_plugin}
     out: list[dict[str, Any]] = []
     for plugin_id, switch in FACTORY_PLUGINS.items():
         # 空串 = 这个出厂插件没有开关(它搬的那件事今天也没有),永远装。
@@ -4238,6 +4247,11 @@ FACTORY_PLUGINS: dict[str, str] = {
     # 就是替他决定线索长什么样。
     # 开关 `clues.enabled` 默认关:一个没写线索的世界不该多一条边类型。
     "clues": "clues.enabled",
+    # 🆕 3.13.0(批 3c §2.6):**阵营。**
+    # 🔴 **只有今天全有的那四样**:`group:` 种类 + exclusive 成员边 + 每人声望
+    # + 世界级士气。**计票 / 人数上限 / 禁地 / 全城声望一行都不许有** ——
+    # 四样全是聚合或 gates,而那是批 4。
+    "factions": "factions.enabled",
     # 🆕 3.8.0 第 2 期 2e:邀请的**存储与过期规律**(裁决 ③)。
     # 🔴 **空串 = 没有开关,永远装**,而这不是偷懒:**它搬的那件事今天也没有开关**
     # (邀请不受 `social.enabled` 管 —— 那一格管的是八卦与小团体;
@@ -4267,6 +4281,14 @@ FACTORY_SCOPE: dict[str, str] = {
         "每个世界各不相同;出厂插件替作者声明种类,就是替他决定线索长什么样。"
         "解锁**只有三条路**(动词 `effects` 的 `link` / 剧情拍的 op / 编剧的 "
         "`reveal`),**没有第四条** —— 别等一个不会来的作者判定"
+    ),
+    "factions": (
+        "**只有那条 exclusive 成员边 + 两格量**(每人声望、世界级士气)。"
+        "🔴 **计票 / 人数上限 / 禁地 / 全城声望一行都没有** —— 四样全是聚合或 "
+        "gates,而那是批 4;**在一个没有聚合的引擎上手写一遍计票,"
+        "就是把第 4 期那件事做进一个插件里**,而那份实现以后要被删掉重写,"
+        "并且在被删掉之前它是第二份真相。"
+        "具体有哪几个阵营是**作者写的**(`group:狮心会`),出厂不替他决定"
     ),
     "economy": (
         "**只有钱包一格**(`economy.coins`,projected,认领 `payment`)。"
@@ -9586,6 +9608,35 @@ def contract_payload() -> dict[str, Any]:
                 "判输赢(d20 的中位),LLM 在这一层没有否决权。"
                 "⚠️ `seed` 带在载荷里是为了**可复算**:拿那五格重掷一次必须得到"
                 "同一个点,这也是「对账即重放」在这一层的落点。"
+            ),
+        },
+        # 🆕 3.13.0(批 3c §2.6):**阵营。**
+        "factions": {
+            "enabled_key": "factions.enabled",
+            "kind_prefix": f"{FACTION_KIND}:",
+            "edge_type": f"{FACTIONS_PLUGIN_ID}.{FACTION_MEMBER_EDGE}",
+            "exclusive": True,
+            "standing_fact": f"{FACTIONS_PLUGIN_ID}.{FACTION_STANDING_FACT}",
+            "morale_fact": f"{FACTIONS_PLUGIN_ID}.{FACTION_MORALE_FACT}",
+            "options_method": "player_faction",
+            "options_field": "faction",
+            "options_keys": list(FACTION_BOARD_KEYS),
+            "standing_bands": [list(b) for b in FACTION_STANDING_BANDS],
+            # 🔴 **这一版有意不做的四样,点名报出来**(和「解锁没有第四条路」
+            # 同一课:一个等不来的东西会让人一直等着)。
+            "deferred": list(FACTION_DEFERRED),
+            "gloss": (
+                "**站了就回不去** —— 成员边是 `exclusive`,而**内核在 `link` "
+                "那一刻查**,不是插件自己判:放行的样子是安静的"
+                "(两条边同时挂着,`plugin list` 看不出来,而提示词里"
+                "他同时属于两个阵营)。"
+                "🔴 **计票 / 人数上限 / 禁地 / 全城声望这一版一行都没有**"
+                "(`deferred`)—— 四样全是**聚合或 gates**,那是批 4。"
+                "**在一个没有聚合的引擎上手写一遍计票,就是把批 4 那件事"
+                "做进一个插件里**,而那份实现以后要被删掉重写,"
+                "并且在被删掉之前它是**第二份真相**。"
+                "⚠️ 具体有哪几个阵营是**作者写的**(`group:狮心会`),"
+                "出厂插件不替他决定 —— 和线索那一层逐字同一条分工。"
             ),
         },
         # 🆕 3.13.0(批 3c §2.4):**线索。**
