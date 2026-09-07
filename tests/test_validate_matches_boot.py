@@ -524,6 +524,11 @@ def test_一整个世界里_对人动词指到不存在的角色_照旧拒(tmp_p
         f"一整个世界里指到「没这个人」还放行 —— 那条承诺又变回一句空话:{errors}")
     ok_check, check_errors = _check_says(path)
     assert not ok_check and any("指不到" in e for e in check_errors), check_errors
+    # 🔴 **两扇门的红灯长得不一样**(A 末轮 ①:CHANGELOG 上一版写着「都退 2」,
+    # 而那是假的)。`_validate_says` / `_check_says` 里那两句断言就是判据:
+    # `validate world` 退 2;`world check` **照旧 rc 0**,答案在 `loadable`。
+    # 宿主的闸是 `rc == 0 and loadable`(FOR-STUDIO §3.45),不是只看退出码 ——
+    # 只看退出码的话,`world check` 对一份装不进去的世界永远是绿的。
 
 
 @pytest.mark.parametrize("name,rows", [
