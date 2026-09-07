@@ -36,6 +36,55 @@ def _world(tmp_path, name="c"):
     return world
 
 
+def test_玩家在图上只有一个形状_写的人和读的人不许各写各的(tmp_path):
+    """🔴 **验收 A ② 实测出来的**:边连上了,而板子读不到。
+
+    这个引擎里玩家有两个形状,**各管一头**(`beats.bind_player` 逐字):
+    量表按 `agent:player:<id>` 存,而关系 / 账本 / 库存 / 事件顶层的 `who` /
+    在场位置一律是 `player:<id>`。**边属于前者**
+    (`plugins.EDGE_NODE_ID_FORMS["player"]`,那一行的注释就写着「最容易写错」)。
+
+    上一版 `_apply_verb_edges` 写 `agent:player:p1`、`player_clues` 读 `player:p1`
+    —— **写的人和读的人错成了两个样子**,而两边都不报错:
+    `link` 返回 True、日志一条不少,板子上是 0。
+    ⚠️ 而夹具当时直接调 `apply_edge_effect` 传了个 `"player:p1"` 字面量,
+    于是**它和读的那一半错成了同一个样子**,一条不红。
+
+    现在规范化只有一处(`Scheduler._edge_node`),这条闸钉两件:
+    ① 两种写法进去都落在**同一个节点**上;② 板子读的就是那个节点。
+    """
+    from anima_world.plugins import EDGE_NODE_ID_FORMS
+    from anima_world.scheduler import Scheduler
+
+    assert EDGE_NODE_ID_FORMS["player"] == "agent:player:<player_id>", (
+        "契约里玩家节点的形状换了 —— 这条闸和 `_edge_node` 都照它写")
+    assert Scheduler._edge_node("player:p1") == "agent:player:p1"
+    assert Scheduler._edge_node("agent:player:p1") == "agent:player:p1"
+    assert Scheduler._edge_node("夏") == "夏", "别把角色 id 也改写了"
+
+    with _world(tmp_path, "node") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        edge = f"{clues_edge()}"
+        # 两种写法各连一次 —— 落在同一个节点上,所以第二次是同一条边
+        world.scheduler.apply_edge_effect(
+            {"type": edge, "from": "player:p1", "to": "clue:老橡树的来历"}, {})
+        world.scheduler.apply_edge_effect(
+            {"type": edge, "from": "agent:player:p1", "to": "clue:第三条"}, {})
+        rows = world.scheduler.edge_store.of_src(edge, "agent:player:p1")
+        board = world.player_clues("p1")
+
+    assert len(rows) == 2, f"两种写法落在了两个节点上:{rows}"
+    assert board["known"] == 2, (
+        f"边连上了而板子读不到 —— 写的人和读的人又各写各的:{board}")
+
+
+def clues_edge() -> str:
+    from anima_world import clues as C
+
+    return f"{C.PLUGIN_ID}.{C.KNOWS_EDGE}"
+
+
 def test_线索板只报存在与状态_不报内容(tmp_path):
     """🔴 **纪律 1**(设计 §5 那张表的原话)。
 

@@ -8151,7 +8151,10 @@ class World:
         from anima_world import factions as fac_mod
 
         pid = str(player_id or "").strip()
-        me = f"{Scheduler.PLAYER_PREFIX}{pid}"
+        # 🔴 **一格之内两个 key 是上一版真犯的错**:声望走 `stock_owner_of`
+        # (`agent:player:p1`),而边那一格写成裸的 `player:p1` ——
+        # 图上的节点 id 只有一种形状(`plugins.EDGE_NODE_ID_FORMS["player"]`)。
+        me = self.scheduler.stock_owner_of(f"{Scheduler.PLAYER_PREFIX}{pid}")
         side = ""
         store = getattr(self.scheduler, "edge_store", None)
         if store is not None:
@@ -8168,8 +8171,7 @@ class World:
         if stock is not None and pid:
             key = f"{fac_mod.PLUGIN_ID}.{fac_mod.STANDING_FACT}"
             try:
-                standing = float(stock.of(self.scheduler.stock_owner_of(me)).get(
-                    key) or 0.0)
+                standing = float(stock.of(me).get(key) or 0.0)
             except (TypeError, ValueError, AttributeError):
                 standing = 0.0
         return fac_mod.board(side, self.scheduler.entity_display_name(side)
@@ -8198,7 +8200,13 @@ class World:
         known: list[str] = []
         if store is not None:
             edge = f"{clue_mod.PLUGIN_ID}.{clue_mod.KNOWS_EDGE}"
-            me = f"{Scheduler.PLAYER_PREFIX}{str(player_id or '').strip()}"
+            # 🔴 **玩家在图上的节点 id 是 `agent:player:<id>`,不是 `player:<id>`**
+            # (`plugins.EDGE_NODE_ID_FORMS["player"]` 逐字,而那一行的注释里
+            # 就写着「这一行最容易写错」)。上一版这儿写的是后者,
+            # **而那次没有一处会红** —— 夹具直接调 `apply_edge_effect` 传了同一个
+            # 错形状的字面量:**写的人和读的人错成了同一个样子**。
+            me = self.scheduler.stock_owner_of(
+                f"{Scheduler.PLAYER_PREFIX}{str(player_id or '').strip()}")
             try:
                 known = [dst for src, dst, _f in store.of_src(edge, me)]
             except Exception:  # noqa: BLE001 - 读不到边不该掀翻这一屏

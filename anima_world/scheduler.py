@@ -6076,12 +6076,38 @@ class Scheduler:
         """
         name = str(raw or "")
         if name == "self":
-            return str(owner or "")
-        if name == "event.who":
-            return str((event or {}).get("who") or "")
-        if name in ("target", "spawned"):
-            return str(namespace.get(name) or "")
-        return name
+            got = str(owner or "")
+        elif name == "event.who":
+            got = str((event or {}).get("who") or "")
+        elif name in ("target", "spawned"):
+            got = str(namespace.get(name) or "")
+        else:
+            got = name
+        return Scheduler._edge_node(got)
+
+    @staticmethod
+    def _edge_node(node: str) -> str:
+        """一个节点 id 在**图上**长什么样。玩家只有一种写法:`agent:player:<id>`。
+
+        🔴 **这个引擎里玩家有两个形状,而它们各管一头**(`beats.bind_player`
+        逐字):量表按 `agent:player:<id>` 存,而**关系、账本、库存、事件顶层的
+        `who`、在场位置一律是 `player:<id>`**。边**属于前者** ——
+        `plugins.EDGE_NODE_ID_FORMS["player"]` 写死了这一条,那一行的注释里
+        就写着「这一行最容易写错」。
+
+        ⚠️ **所以规范化放在这儿,不放在每个调用方**:剧情拍那条路的 `player`
+        由 `bind_player` 换成 `player:<id>`(它换的是关系/账本那一族的形状,
+        那是对的),动词那条路的 `self` 是 `stock_owner_of` 出来的
+        `agent:player:<id>`。两条路在这儿汇合,**汇合处只有一处,而每个调用方
+        各记一遍的下场是:哪条路忘了转,那条路上的边就安静地连到另一个节点上**
+        —— 连上了、返回 True、日志一条不少,而板子读不到。
+        (3.13.0 验收 A ② 实测:`player_clues` 读 `player:p1`、
+        `_apply_verb_edges` 写 `agent:player:p1`,**写的人和读的人错成了两个样子**。)
+        """
+        got = str(node or "")
+        if got.startswith(Scheduler.PLAYER_PREFIX):
+            return f"agent:{got}"
+        return got
 
     def _trigger_bearer(self, trigger: Any, event: dict[str, Any]) -> str | None:
         """这条事件落在哪个 owner 身上。答不出就是 `None` —— **不猜**。"""
