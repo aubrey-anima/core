@@ -1631,3 +1631,29 @@ def test_装包路上_插件降级照旧当场拒(tmp_path):
         assert world.packs() == [], "拒了还写进去了"
         assert any(p.id == "qi" and p.version == "2.0.0"
                    for p in world.scheduler.plugins), "旧声明把库里那份盖了"
+
+
+def test_内容包里的插件_撞上出厂id也拒(tmp_path):
+    """🟡 **旧账**(3.13.0 那一轮记的欠账,A 上上轮实测过):撞出厂 id 那道闸
+    3.13.0 装在 `world_plugin_errors` 上 —— 世界文件 / 开机 / `validate` /
+    `world check` 四扇门都走它,而**内容包是第五扇**,当时没单独验过。
+
+    ⚠️ **「另一条路上也拒」和「这条路上拒」是两件事**:这个仓库为
+    「新增一种失败,忘了把它接进另一扇门」红过不止一轮(REFERENCE §9 那句
+    「新增一种开机失败,就必须同一轮把它补进离线那两扇门」就是那么来的)。
+    没有这一条,哪天 `pack install` 换了条校验路,**没有一处会说**。
+    """
+    from anima_world.__main__ import PackInstallError
+
+    with _world(tmp_path, name="clash") as world:
+        path = _pack(tmp_path, "myclues",
+                     pack={"id": "我的线索", "version": "1.0.0"},
+                     plugins=[{"id": "clues", "version": "1.0.0", "label": "我的线索",
+                               "edges": {"heard": {"label": "听说过",
+                                                   "from": "player",
+                                                   "to": "entity:clue"}}}])
+        with pytest.raises(PackInstallError) as raised:
+            world.install_pack(path)
+        assert "出厂插件的 id" in str(raised.value), raised.value
+        assert world.packs() == [], "拒了还写进去了"
+        assert "clues.heard" not in world.scheduler.edge_types
