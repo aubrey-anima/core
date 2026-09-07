@@ -6743,6 +6743,16 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 于是一个装了三条对人动词的插件在那一屏上显示「动词 0」。
 现在多一格:`对人动词 3`;`--json` 里是 `person_verbs: [...]`(id 列表)。
 
+### (a-4) 编剧那一段能调的开关 —— `contract.director.config_keys` 4 → 6
+
+那一格从前是**手抄**的,停在四个键上;`director.grace_hours`(3.12.0)与
+`director.first_arc_beats`(3.13.0)都没进来。现在它从引擎那张真配置表里数出来,
+**照它列「编剧能调什么」不会再漏**。
+
+🔴 **`director.first_arc_beats` 从前是个死键** —— 读出来只喂给一个不读它的形参,
+**改成 60 和改成 6 一模一样**。3.13.0 这一版起它才真的接到「翻不翻篇」那一处:
+**调过这个键的世界,行为这一版会变**(头几拍相位翻得更快 / 更慢)。
+
 ### (b) 哪几种事会被撞见 —— `contract.director.crossing_event_types`
 
     travel · state_change(**只有 location_join**)· entity_interaction ·
