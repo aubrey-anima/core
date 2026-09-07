@@ -4486,10 +4486,10 @@ anima-world contract --json    # 契约本身;持镜像的仓库拿它对账
 ```
 
 **不连 Redis、不建世界**(跑不了世界也要答得出,和 `world inspect` 同一类)。
-顶层**十六**段:`beats` · `character_card` · `chat_tools` · **`config`** ·
+顶层**十八**段:`beats` · `character_card` · `chat_tools` · **`config`** ·
 **`director`** · `engine_version` · `erasure` · **`host`** · `invitations` ·
-`operation` · `package` · **`packs`** · **`plugins`** · `report` · `seed` ·
-`storage`。
+`operation` · `package` · **`packs`** · **`person_verbs`** · **`plugins`** ·
+`report` · **`roll`** · `seed` · `storage`。
 ⚠️ **这份清单是"顶层有什么"的权威**,照它写探测器 —— 上一版漏了 `plugins`
 (2026-08-26 验收 C 挑的),而一份漏了一段的清单会让读它的人以为那一段不存在。
 判据敲得动:`anima-world contract --json | jq 'keys'`。

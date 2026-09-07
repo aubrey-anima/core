@@ -29,7 +29,11 @@
     "怎么跑": "内置橱窗 · 288 tick · needs 开 · 规划与自主关 · **叙事与关系判定两个线程池都关**(scheduler.narrative = None / scheduler.relationship_judge = None)",
     "改它之前先问一句": "**是行为该变,还是我把它改坏了。**",
     "树": "a6b3da3(= fa1507b^,第 1 期地基已在、needs 还没搬的那一棵)",
-    "🔴 prompt_sha 窄化(3.11.1)": "这一格从「整个 `debug_prompt()` 的 sha」窄化成「刨掉 `absent` 之后的 sha」。起因:3.11.1 给缺席表加了一行 `director.intent`,而 `absent` 答的是「这一块**为什么**没出现」—— 一句写给改提示词的人看的话,不是提示词。这道闸的名字叫「提示词逐字节相同」,它此前量的比名字多。⚠️ **新值不是从 HEAD 采的** —— 那会让这道闸变成 HEAD 和 HEAD 比。它采自 `dd960f1`(3.11.0 那棵、这道闸对它全绿的树):在那棵树上就地把 sha 换成窄化算法再跑一次,得到这三个值;而 HEAD 上同一算法算出来**逐字节相同** —— **这正是「提示词一个字没变、只是缺席表多了一行」的证明**。复核:`git archive dd960f1` 解一棵树,把 `_run` 里那句 sha 换成 `{k: v for k, v in world.debug_prompt(a).items() if k != 'absent'}` 再跑。"
+    "🔴 prompt_sha 窄化(3.11.1)": "这一格从「整个 `debug_prompt()` 的 sha」窄化成「刨掉 `absent` 之后的 sha」。起因:3.11.1 给缺席表加了一行 `director.intent`,而 `absent` 答的是「这一块**为什么**没出现」—— 一句写给改提示词的人看的话,不是提示词。这道闸的名字叫「提示词逐字节相同」,它此前量的比名字多。⚠️ **新值不是从 HEAD 采的** —— 那会让这道闸变成 HEAD 和 HEAD 比。它采自 `dd960f1`(3.11.0 那棵、这道闸对它全绿的树):在那棵树上就地把 sha 换成窄化算法再跑一次,得到这三个值;而 HEAD 上同一算法算出来**逐字节相同** —— **这正是「提示词一个字没变、只是缺席表多了一行」的证明**。复核:`git archive dd960f1` 解一棵树,把 `_run` 里那句 sha 换成 `{k: v for k, v in world.debug_prompt(a).items() if k != 'absent'}` 再跑。",
+    "3.12.0 加了一行": {
+      "为什么": "3.12.0(批 3b):新增了一个能力 `person_verb`(对人动词,只在 player 面上)—— 于是开机那一趟多发一条 `capability_registered`。⚠️ **这一份不是重采的,是加了那一行**:改之前先把新旧两份按多重集比过 —— **多 1 条、少 0 条**,多的那条逐字节就是 person_verb 那一行。重采会把 HEAD 和 HEAD 比,那样这道闸就白设了。",
+      "改之前那份的 sha256": "be6b3bf5b17cd4304486d51163da5fdd52df6adc4a0d0cf2170aa9a2b747d3fd"
+    }
   },
   "events": [
     [
@@ -91,6 +95,10 @@
     [
       "capability_registered",
       "{\"description\": \"在此刻所在的地方干活\", \"id\": \"work\", \"kind\": \"work\", \"params_schema\": {}, \"surface\": \"body\"}"
+    ],
+    [
+      "capability_registered",
+      "{\"description\": \"对一个人做一件这个世界声明过的事(拜师 / 决斗 / 说服)。这不是 interact —— 它要对方点头\", \"id\": \"person_verb\", \"kind\": \"person_verb\", \"params_schema\": {\"agent\": {\"description\": \"对谁(在场名单里的那个 id)\", \"required\": true, \"type\": \"string\"}, \"verb\": {\"description\": \"做什么(这个世界声明过的对人动词 id)\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"player\"}"
     ],
     [
       "capability_registered",

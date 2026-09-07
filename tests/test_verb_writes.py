@@ -209,7 +209,8 @@ def test_every_verb_declares_where_it_changes_the_world(verb):
     "verb",
     sorted(
         spec.id for spec in tools_mod.tools_for("*")
-        if spec.writes and spec.id not in {"end_conversation", "walk_away", "delay_reply"}
+        if spec.writes and spec.id not in {"end_conversation", "walk_away",
+                                           "delay_reply", "person_verb"}
     ),
 )
 def test_a_verb_really_changes_what_it_declared(world, verb):
@@ -221,6 +222,14 @@ def test_a_verb_really_changes_what_it_declared(world, verb):
     三个动词暂时不在这条里:`end_conversation` / `walk_away` / `delay_reply` 需要一场
     真的会话才有 `conversations` 行可改,而建一场会话要走聊天子系统。它们由
     `test_chat_tools.py` 各自盯着,这里不重复。
+
+    🆕 第四个:`person_verb`(3.12.0)。它只在**声明过对人动词的世界**里做得成
+    (橱窗一个都没声明),而这条测试的夹具是橱窗 —— 在这儿调它必然答
+    「这个世界没有声明过对人动词」,验的就不是"它兑现没兑现"了。
+    它那三种事件由 `test_person_verbs.py` 逐条盯着(答应了 / 世界说不行 /
+    她不肯,而且**被回了一个字都不写**)。
+    ⚠️ 登记在这儿而不是塞进 `CHANGES_NOTHING`:它**确实**改世界,
+    只是这套夹具驱动不了它 —— 两件事不许记成一件。
     """
     spec = tools_mod.get(verb)
     agent = _agents(world)[0]

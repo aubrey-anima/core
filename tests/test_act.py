@@ -158,8 +158,12 @@ def test_verbs_lists_what_she_can_do(world):
         "过日子的动词该在 body 面上,而且不该漏进自主菜单(那会改提示词)"
     )
 
+    # ⚠️ **四个面,不是三个**(3.12.0):`person_verb` 是第一个**只在 player 面上**
+    # 的能力,而这一行原先写着 `autonomy | chat | body` —— 它悄悄假设了
+    # "没有哪个能力只给人用",而那个假设一直成立到批 3b。
+    player = {v["id"] for v in world.verbs(agent, "player")}
     everything = world.verbs(agent)
-    assert {v["id"] for v in everything} == autonomy | chat | body
+    assert {v["id"] for v in everything} == autonomy | chat | body | player
     for entry in everything:
         assert entry["surfaces"], f"{entry['id']} 没说自己在哪个面上"
         assert entry["description"], f"{entry['id']} 没有给人读的说明"

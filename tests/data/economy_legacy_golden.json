@@ -70,6 +70,10 @@
     ],
     [
       "capability_registered",
+      "{\"description\": \"对一个人做一件这个世界声明过的事(拜师 / 决斗 / 说服)。这不是 interact —— 它要对方点头\", \"id\": \"person_verb\", \"kind\": \"person_verb\", \"params_schema\": {\"agent\": {\"description\": \"对谁(在场名单里的那个 id)\", \"required\": true, \"type\": \"string\"}, \"verb\": {\"description\": \"做什么(这个世界声明过的对人动词 id)\", \"required\": true, \"type\": \"string\"}}, \"surface\": \"player\"}"
+    ],
+    [
+      "capability_registered",
       "{\"description\": \"对你这儿的一样东西做点什么(照料、收取产出、读……)。东西的 id 和它能被怎么做,都写在你感觉到的那几行里 —— 带方括号 id、后面跟着「可以……」的就是。标着「得有人一起」的那些,要用 with 点名跟你一起做的人\", \"id\": \"interact\", \"kind\": \"interact\", \"params_schema\": {\"target\": {\"description\": \"对哪样东西(options 里给的 id)\", \"required\": true, \"type\": \"string\"}, \"verb\": {\"description\": \"做什么(options 里给的动词;人话和 id 都认)\", \"required\": true, \"type\": \"string\"}, \"with\": {\"description\": \"跟你一起做这件事的人(名字或 id);只有标着「得有人一起」的才要填\", \"type\": \"array\"}}, \"surface\": \"body,autonomy,player\"}"
     ],
     [
@@ -807,5 +811,11 @@
   },
   "ticks_after": 144,
   "ticks_before": 144,
-  "_prompt_sha 窄化(3.11.1)": "这一格 3.11.1 从「整个 `debug_prompt()` 的 sha」窄化成「刨掉 `absent` 之后的 sha」——`absent` 答的是「这一块为什么没出现」,是写给改提示词的人的话,不是提示词;而这道闸的名字叫「提示词逐字节相同」。⚠️ **新值采自 `dd960f1`(这道闸对它全绿的那棵树)上就地换算法跑的一遍,不是从 HEAD 采的** —— 从 HEAD 采会让它变成 HEAD 和 HEAD 比。HEAD 上同一算法算出来逐字节相同,那正是「提示词一个字没变」的证明。详见 `needs_legacy_golden.json` 的同名条目。"
+  "_prompt_sha 窄化(3.11.1)": "这一格 3.11.1 从「整个 `debug_prompt()` 的 sha」窄化成「刨掉 `absent` 之后的 sha」——`absent` 答的是「这一块为什么没出现」,是写给改提示词的人的话,不是提示词;而这道闸的名字叫「提示词逐字节相同」。⚠️ **新值采自 `dd960f1`(这道闸对它全绿的那棵树)上就地换算法跑的一遍,不是从 HEAD 采的** —— 从 HEAD 采会让它变成 HEAD 和 HEAD 比。HEAD 上同一算法算出来逐字节相同,那正是「提示词一个字没变」的证明。详见 `needs_legacy_golden.json` 的同名条目。",
+  "_采自": {
+    "3.12.0 加了一行": {
+      "为什么": "3.12.0(批 3b):新增了一个能力 `person_verb`(对人动词,只在 player 面上)—— 于是开机那一趟多发一条 `capability_registered`。⚠️ **这一份不是重采的,是加了那一行**:改之前先把新旧两份按多重集比过 —— **多 1 条、少 0 条**,多的那条逐字节就是 person_verb 那一行。重采会把 HEAD 和 HEAD 比,那样这道闸就白设了。",
+      "改之前那份的 sha256": "a36eb964f8a30bfe3c044bbcb95173dd6421f71de8066b018ee2b0ce90aa09e0"
+    }
+  }
 }

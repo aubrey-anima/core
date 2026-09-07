@@ -333,14 +333,17 @@ def reach_out(ctx: ToolContext, params: dict) -> ToolResult:
     writes=("events:person_verb.proposed", "events:person_verb.accepted",
             "events:person_verb.refused"),
     kind="person_verb",
+    # ⚠️ **这两句会原样印到终端和玩家屏幕上** —— 不许有裸 markdown 星号,
+    # 也不许有 🔴 这种给写代码的人看的记号(`test_屏幕上不许出现裸markdown星号`
+    # 那道闸扫的就是它们)。要强调的话用中文标点,别用 `**`。
     description=(
-        "对**一个人**做一件这个世界声明过的事(拜师 / 决斗 / 说服)。"
-        "🔴 这不是 interact —— 它要对方点头"
+        "对一个人做一件这个世界声明过的事(拜师 / 决斗 / 说服)。"
+        "这不是 interact —— 它要对方点头"
     ),
-    # 写给**人**的那一半:哪些动词、对谁,由 `World.person_verbs()` 与在场名单答。
+    # 写给人的那一半:哪些动词、对谁,由 `World.person_verbs()` 与在场名单答。
     player_description=(
-        "对这儿的**一个人**做一件事(拜师 / 决斗 / 说服……)。"
-        "🔴 **这是一次请求,不是一次操作** —— 她可以不答应,"
+        "对这儿的一个人做一件事(拜师 / 决斗 / 说服……)。"
+        "这是一次请求,不是一次操作 —— 她可以不答应,"
         "而她不答应时你这一下什么都没花掉"
     ),
     params={
