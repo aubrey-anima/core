@@ -73,6 +73,168 @@ $ docker run --rm --entrypoint python anima-world:3.6.0 \
 `anima-world contract --json` answers the same kind of question for the storage contract.
 (Which builds ever left the building: same place as above — `CLAUDE.md` §当前状态.)
 
+## [3.12.2] —— 三道从没红过的闸 (2026-09-07)
+
+A 复验 3.12.1 判 PASS-有保留,六条尾巴。**三条是闸自己从没红过** ——
+而它们全是我上一版**为了治别的病刚加的**。
+
+### 🔴 一道 `getattr` 找不到表的闸,找不到时不会报错,只会永远同意
+
+`test_roll.py` 那道「`roll` 不许混进表达式名表」找的是
+`FUNCTIONS`/`ALLOWED_FUNCTIONS`/`SAFE_FUNCTIONS`/`FUNCS` —— **四个名字在
+`expressions.py` 里一个都不存在**(真表是 `_FUNCTIONS` + `DICE_NAME`),
+于是 `names` 恒为空、断言恒真。A 把 `roll` 真塞进 `_FUNCTIONS`,11 条照样绿。
+改成直接盯真表,并加一条**读对了表的正判据**(`min`/`clamp` 在里面)——
+**只断"不在"的闸,读空了也算过。**
+
+### 🔴 一句承诺了一道不存在的闸的注释
+
+`projection.py` 收线那一格写着「值只能从 `OUTCOME_LABELS` 里取 —— 闸在
+`test_director_world.py`」,而**那道闸不存在**:把值改回 `"called_back"`,
+四个测试文件 122 条全绿。**一句承诺了一道不存在的闸的注释,比没有注释更坏** ——
+它让下一个人以为改坏了会有人喊。现在那道闸真的有了,而且同时断
+**那句话带不带得出结果那半**。
+
+### 🔴 同一条收掉的线,两条路两句话
+
+`closed_threads[].outcome_text` 读**线上存的** stake,而
+`callback_settled.outcome_text` 读**这一拍 decision 的** stake ——
+而 `callback` 本来就不带:
+
+    「「那本旧相册」,押着她的信任,这条线收了。」   ← 故事页
+    「「那本旧相册」,这条线收了。」                 ← 事件
+
+**同一件事两处各说一句,而少的那半没有一处会报错。**
+两处现在共用 `director.settle_view`,分界写死成一句话:
+**赌注是线上的那一笔**,这一拍自己的 `stake` 只在**没有线**时才算数。
+
+### 🟠 降级仍然是静默的
+
+无 stake 的 `confront` 降级时:`director_log.source` 照旧 `llm`、
+`refused_by` 空、而那句 log **写死了 `complicate`** —— 运维 grep `confront`
+什么都搜不到。**摊牌那一拍从来没真的发生过,而三处读数都说一切正常。**
+现在 `source` 记 `refused`、`refused_by` 写 `stake missing:<真实 move>`、
+log 句带真实 move。
+⚠️ 那条用例**没有做成端到端**,而理由写在用例里:橱窗世界的
+`pacing.ceiling` 是 0.6,`complicate`/`confront` 要的 gap 在它的 ladder 上
+**永远不出现**(实测八轮,每轮 offered 最多到 `reveal`)——
+**拿一个到不了的路径当端到端用例,就是又造一道永远绿的闸。**
+判断那一半钉在纯函数上(含 `confront`),记账那一半直接喂一个降级过的决定。
+
+### 🟡 其余两条
+
+- `grace_hours` 读坏退回默认值**没有闸**(改回 `grace = 0` 照样 93 条全绿)。
+  补用例,而且它**绕过 `config_set`**:那扇门自己会拒 —— 这一条要验的是
+  「**它已经躺在库里**了怎么办」(手改过的库 / 老世界文件 / 半截的写入),
+  **挡在门口的闸救不了已经进来的那一格**。
+- FOR-STUDIO §3.69(d) 写「十六段齐」,而代码报的是**三张表之和**
+  (`test_packs.py` 自己断言 19)。**这份文档不再写那个数** ——
+  **一个写在文档里的数,是一个迟早会烂的判据**;要数就敲 `contract --json`。
+
+### Known
+
+- 契约面**只动了值不动形状**:`director_log.source` 现在会出现 `refused`
+  这个**已有**的取值(闭集没加新值),`refused_by` 会出现
+  `stake missing:<move>` 这种字符串。消费方按闭集写的分支不用改。
+- `.storage` 段一个字没动;作者层 schema 未动。
+
+## [3.12.1] —— 老板那句「输了真掉东西」两个方向各错一次 (2026-09-06)
+
+A 判 3.12.0 FAIL,B+C 两条 🔴 落在**我自报的 release 门槛上,而各有绿用例盖住**。
+把它们排在一起,共同的形状是:**一条写下来的判断,和一行没写的代码。**
+
+### 🔴 ① 我自己的裁决没落地:编剧扣走了玩家的钱
+
+3c 单 §2.10 那条代拍写着「只掉关系与声望」,而**它从来没被写成代码** ——
+`director.py` 对**四种 `STAKE_KINDS` 一视同仁**,`api.py` 原样递给 `_stake_ops`。
+真站实跑:一次 `confront` 输掉,玩家的钱 **160 → 130**。
+**一条写下来的裁决和一行没写的代码之间,只有屏幕上那笔钱知道差别。**
+
+现在有 `director.DIRECTOR_MAY_DEDUCT = ("relation",)`,**两个方向都挡** ——
+`reward` 那一侧(还回去)也一样:**引擎凭空给钱和凭空扣钱是同一种越权**,
+而"还回去"更难被发现。
+⚠️ 模型照旧可以**押** `money`(那句话在故事里是真的),只是引擎不替它扣;
+要真扣就写一个动词让玩家自己按下去。
+🔴 用例只用过 `relation`,所以它绿着 —— 这一版逐种都验。
+
+### 🔴 ② 提示词和闭集分叉,而分叉的下场是静默降级
+
+3b 加了三个动作,而那段提示词是**手写的五行** —— 模型从来不知道
+`confront`/`reward`/`callback` 是什么意思。更坏的是那句
+「complicate 必须写 stake,别的动作可以留空」,和闸
+`MOVES_REQUIRING_STAKE=('complicate','confront')` **正相反**:
+模型照提示词答一个没有 stake 的 `confront`,而 `parse_decision`
+**静默把它降级成 `reveal`** —— **摊牌那一拍从来没真的发生过**,
+日志里只看得到一条正常的 `reveal`。
+现在那两段都从闭集生成(`MOVE_BRIEFS` / `MOVES_REQUIRING_STAKE`),
+外加一条「提示词与闭集不许分叉」的闸。
+
+### 🔴 ③ `closed_threads[].outcome_text` 吞了结果那半
+
+收线时投影写的是 `outcome: "called_back"` —— **不在 `OUTCOME_LABELS` 那八个词里**,
+于是 `settle_text` 的 `head` 是空串,屏上是「「那本旧相册」,押着一笔钱。」
+**押了什么说了,结果那半吞了**;而同一件事的 `callback_settled` 那句是全的 ——
+**同一个事实,两条路给出两句话**,少的那半没有一处报错。
+
+### 🔴 ④ `person_verb` 被回时顶层 `ok` 说了谎
+
+`ToolResult` 的默认值是 `ok=True`,而拒绝只躺在 `detail` 里 —— 白按那道水位
+只看顶层。**点两次被回两次,两屏逐字不变**,正是 3.12.0 那条裁决要杀的东西;
+而那条裁决的用例是拿"在忙时点长动词"验的,**没验这条路**。
+⚠️ **真站第六轮那三发 `/tool` 报「200 accepted」,答案就在这儿:
+`200` 是 HTTP,`ok:true` 是那一行写错的。**
+顺带把 `person_verb.accepted` 放进 `PLAYER_MOVE_EVENT_TYPES` ——
+**一个做成了却没进故事的动作,和没做过一样。**
+
+### 🔴 ⑤ 说「我不出网」却出网
+
+`--llm mock` / `force_mock_llm` 从前只换掉**规划器**那个客户端,聊天与背景槽
+照旧是 config-backed —— 于是主持人那一屏和编剧那一次**照样出网**,
+而**验收员照着它跑,把真 key 发了出去**。
+**一个说「我不出网」却出网的开关,比没有那个开关更坏。**
+降级档现在一路降到底(记在 `scheduler.force_mock_llm`,`World` 造两个客户端时读它)。
+
+### 🔴 一条我自己报成「已交付」而其实没落地的回执
+
+3.12.0 那一轮我在回报里写着「FOR-STUDIO §3.69 含结算三事件与 `payload_keys`」——
+**而那两节从来没进过文件**(编辑没生效,我没回头核)。
+B+C 那一轮扫的是「§3.68·§3.69 全过」,扫的是**在的那几节**,
+所以它也没逮到。
+**一条说自己交付了、而其实没交付的回执,比漏掉那份回执更坏** ——
+下游按回报去读,读不到,而两边都以为是对方的问题。
+这一版把 (c-2) 结算三事件 / (c-3) `payload_keys` 补进 §3.69,
+并加一条 (c-2b) 说清「编剧只扣得动关系」。
+⚠️ 教训不是"下次记得":**回执落没落地,要和代码一样去问文件,不是问记忆。**
+
+### Fixed(其余)
+
+- 🟠 **零效果的动词照实说**(platform 从龙族审计带回):那三发
+  `ok:true`、事件也在,而 `changed`/`me_delta` **全空** —— 世界什么都没变。
+  「你报到了狮心会。」是**一句说大了的话**:玩家读到"成了",编剧也读到"成了",
+  于是它顺着一件没发生的事往下写。改说「你试着…,没什么变化」。
+  ⚠️ 这**不是**判它失败 —— 他确实按了,屏照样换;变的只有那句话准不准。
+  ⚠️ 只扣体力、不改目标的动词(`训练`)**不是**零效果:两格都要看。
+- 🟠 `director_log` 那句 `note` 手抄错两处(格数写 23 而实 24;列了一个不存在的
+  `engine`)→ **从 `DIRECTOR_LOG_KEYS`/`MOVES`/`SOURCES` 生成**。
+- 🟠 `contract.roll.payload_keys` 手抄(删掉 `band` 全量照样绿)→ 从
+  `EVENT_PAYLOAD_KEYS` 生成。
+- 🟠 `--with-authored` 的 `authored_skipped` **只报了那十四段** ——
+  对象型四段与标量型一段一格没报;**十六段齐**(闸断 19 个名字)。
+- 🟠 `thread_text_keys` 补 `outcome_text`;`refused_scene_source` 补用例。
+- 🟠 **`conditional` 是个死档**:引擎里没有任何一条路产出得了它,而它躺在契约的
+  `answers` 里,让消费方为一种永远不会到达的情况写分支。**拿掉**,并写明
+  要它回来得先有产出它的那条路。
+- 🟠 `grace_hours` 读坏时**静默当 0**(= 到期当场扣)→ 退回默认 24 并 warning:
+  「没有宽限期」是一个**有效的世界配置**,和「这一格读不出来」是两件事。
+- 🟡 `player options` 人话屏**一个字不印**对人动词(库里有而对方看不见,等于没有),
+  且 `blocked` 那一行就早退 —— 而对人动词根本不走 affordance。两条都改;
+  契约补 `options_group_keys`。
+- 🟡 🔴 **`host_option_kind` 说了一句比实现大的话**:它写着 `"verb"`,
+  像是在说主持人那一屏会递对人动词 —— **而它从来没递过**。改成 `None` +
+  一句说清玩家那扇门在哪。**一句比实现大的契约,会让宿主去找一个不存在的分支。**
+- 🟡 `roll` 不许混进 `expressions` 名表的反向闸(混进去 =「对账即重放」当场破)。
+- 🟡 FOR-STUDIO 补「导出是 gzip,魔数 `1f 8b`」(tool 四个读点为这件事栽过)。
+
 ## [3.12.0] —— 编剧 v2:摊牌、还债、收线 (2026-09-03)
 
 ### 🔴 一个只有 GM 看得见的赌注,和没有赌注是同一件事(player 带回)

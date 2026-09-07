@@ -41,8 +41,16 @@ from typing import Any, Sequence
 PERSON_VERB_KEYS = ("id", "label", "description", "requires", "costs",
                     "consumes", "duration", "consent", "effects", "refusal")
 
-#: 同意门的三种答案。**闭集** —— 「有条件」是第三种,不是"拒绝的一种"。
-ANSWERS = ("accepted", "declined", "conditional")
+#: 同意门的答案。**闭集**。
+#:
+#: 🔴 **`conditional` 3.12.1 拿掉了**(验收 A ⑤):它是一个**死档** ——
+#: 引擎里**没有任何一条路产出得了它**,而它躺在契约的 `answers` 里,
+#: 让消费方为一种永远不会到达的情况写一个分支。
+#: **一个报得出、却永远不会发生的取值,比不报它更坏**:
+#: 它让下游以为自己漏处理了什么。
+#: ⚠️ 要它回来,得先有**产出它的那条路**(她说「你先帮我做件事」——
+#: 那是一次带条件的同意,需要一个待办与一次回查),而那是另一单的事。
+ANSWERS = ("accepted", "declined")
 
 #: 她**不必**点头的那几种(作者显式写 `consent: "none"`)。
 #: ⚠️ **默认是要点头的**,而且没有 `consent: false` 这种写法 ——
@@ -107,8 +115,7 @@ def proposal_event(*, verb: str, entry: dict[str, Any], actor: str, target: str,
                    agent_name: str, answer: str, gate: str = "",
                    note: str = "") -> dict[str, Any]:
     """一次对人动词的结局事件。**三种结局三种事件**(见 `EVENTS`)。"""
-    kind = {"accepted": EVENTS[1], "declined": EVENTS[2],
-            "conditional": EVENTS[1]}.get(answer, EVENTS[2])
+    kind = {"accepted": EVENTS[1], "declined": EVENTS[2]}.get(answer, EVENTS[2])
     return {
         "type": kind,
         "who": actor,

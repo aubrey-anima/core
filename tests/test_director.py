@@ -295,3 +295,64 @@ def test_摊牌也必须带真赌注():
                            allowed=D.MOVES, cast_ids=["a"])
     assert got["move"] != "confront" and got["line"] == "就今天"
     assert "confront" in D.MOVES_REQUIRING_STAKE
+
+
+def test_提示词那段动作说明_和闭集不许分叉():
+    """🔴 **验收 A ②**:3b 加了三个动作,而那段提示词是**手写的五行** ——
+    模型从来不知道 `confront`/`reward`/`callback` 是什么意思。
+    **闭集加了一格而提示词没跟,是这一层最安静的坏法**:
+    日志、契约、用例全绿,只有模型不知道。
+    """
+    assert set(D.MOVE_BRIEFS) == set(D.MOVES), (
+        f"简介表 {sorted(D.MOVE_BRIEFS)} vs 闭集 {sorted(D.MOVES)}")
+    blob = "".join(m["content"] for m in D.decide_messages(
+        recap=["x"], cast=[{"id": "夏", "name": "苏晚夏"}], allowed=list(D.MOVES),
+        thread=None, guidance={}, place_name="咖啡店", day=1,
+        tension=0.5, phase="climax"))
+    for move in D.MOVES:
+        assert f"  {move} = " in blob, f"提示词里没有 {move} 的说明"
+
+
+def test_必须写stake那句话_和闸说的是同一句():
+    """🔴 上一版提示词写死「complicate 必须写 stake,别的可以留空」,
+    而闸是 `('complicate', 'confront')` —— **两句相反的话**。
+    下场:模型照提示词答一个没有 stake 的 `confront`,
+    而 `parse_decision` **静默把它降级成 `reveal`** ——
+    摊牌那一拍从来没真的发生过,日志里只看得到一条正常的 `reveal`。
+    """
+    blob = "".join(m["content"] for m in D.decide_messages(
+        recap=["x"], cast=[{"id": "夏"}], allowed=list(D.MOVES), thread=None,
+        guidance={}, place_name="咖啡店", day=1, tension=0.5, phase="climax"))
+    for move in D.MOVES_REQUIRING_STAKE:
+        assert move in blob.split("必须**写 stake")[0][-40:] or \
+            move in blob[blob.index("⚠️ "):], f"{move} 没写进那句话:{blob[-300:]}"
+    # 只给 breathe 时那句话不该出现(没有哪个动作要 stake)
+    quiet = "".join(m["content"] for m in D.decide_messages(
+        recap=["x"], cast=[], allowed=["breathe"], thread=None, guidance={},
+        place_name="咖啡店", day=1, tension=0.1, phase="setup"))
+    assert "必须**写 stake" not in quiet, quiet[-200:]
+
+
+def test_编剧自己动手时_只扣得动关系():
+    """🔴 **验收 A ①,而这条是我自己的裁决没落地。**
+
+    §2.10 那条代拍写着「只掉关系与声望」,而它**从来没被写成代码** ——
+    真站上一次 `confront` 输掉,玩家的钱 **160 → 130**。
+    **一条写下来的裁决和一行没写的代码之间,只有屏幕上那笔钱知道差别。**
+
+    ⚠️ **两个方向都挡**:`reward` 那一侧(还回去)也一样 ——
+    引擎凭空给钱和凭空扣钱是同一种越权,而"还回去"更难被发现。
+    """
+    from anima_world.api import World
+
+    assert D.DIRECTOR_MAY_DEDUCT == ("relation",), D.DIRECTOR_MAY_DEDUCT
+    for kind in D.STAKE_KINDS:
+        ops = World._stake_ops("player:p1", "夏",
+                               {"kind": kind, "amount": 30, "what": "x"})
+        back = World._stake_ops("player:p1", "夏",
+                                {"kind": kind, "amount": 30, "what": "x"},
+                                reverse=True)
+        if kind in D.DIRECTOR_MAY_DEDUCT:
+            assert ops and back, kind
+        else:
+            assert ops == [] and back == [], f"{kind} 被引擎自己动了:{ops} / {back}"

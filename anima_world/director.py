@@ -163,6 +163,21 @@ PHASE_TARGET: dict[str, float] = {
 #:   deadline → 只发 `director_log`(这条线作废,不改数)
 STAKE_KINDS = ("relation", "money", "item", "deadline")
 
+#: 🔴 **编剧自己动手扣的时候,只许扣这两种**(3.12.1,验收 A ①)。
+#:
+#: 裁决 §2.10 那条代拍写着「只掉关系与声望」,而**那句话从来没被写成代码** ——
+#: 于是真站上一次 `confront` 输掉,玩家的钱 **160 → 130**:
+#: **一条写下来的裁决和一行没写的代码之间,只有屏幕上那笔钱知道差别。**
+#:
+#: 分界是「谁按下的」:`money` / `item` 是**玩家攒出来的东西**,拿走它得由
+#: 一个他按过的动作负责(动词的 `costs`/`consumes`、一次交易);
+#: 而 `relation` / 声望是**世界对他的看法**,那正是编剧该动的东西。
+#: ⚠️ `deadline` 不在这张表里也不必在:它本来就不改数(只作废一条线)。
+#:
+#: **模型照旧可以押 `money`**(那句话在故事里是真的:「你押上了那五十块」),
+#: 只是**引擎不替它扣** —— 要真扣就写一个动词让玩家自己按下去。
+DIRECTOR_MAY_DEDUCT = ("relation",)
+
 #: `complicate` **必须**带赌注。写不出赌注的 complicate 退成 `reveal` ——
 #: 「写下去、开得了机、什么都不发生」是这一层最贵的那种错。
 MOVES_REQUIRING_STAKE = ("complicate", "confront")
@@ -333,6 +348,35 @@ def settle_text(move: str, *, stake: dict[str, Any] | None,
     parts = [p for p in (f"「{line}」" if line else "", bet, head) if p]
     # ⚠️ 用顿号分开 —— 连着拼出来的是「押着她的信任你赌输了」,一句读不断的话。
     return ",".join(parts) + "。" if parts else ""
+
+
+def settle_view(move: str, *, thread: dict[str, Any] | None,
+                stake: dict[str, Any] | None, outcome: str) -> dict[str, Any]:
+    """一次结算**给玩家看的那几格** —— 🔴 **两条路共用这一个函数**。
+
+    3.12.1 之前那两条路各算各的,于是**同一条收掉的线有两句话**
+    (3.12.2,验收 A ③):
+
+    · `player_story().closed_threads[].outcome_text` 读**线上存的** stake →
+      「「那本旧相册」,押着她的信任,这条线收了。」
+    · `callback_settled.outcome_text` 读**这一拍 decision 的** stake ——
+      而 `callback` 本来就不带 → 「「那本旧相册」,这条线收了。」
+
+    **同一件事,两处各说一句,而少的那半没有一处会报错。**
+
+    分界写死成一句话:**赌注是线上的那一笔**(`thread.stake`),
+    这一拍自己的 `stake` 只在**没有线**时才算数(`confront` 可以不挂线)。
+    """
+    on_thread = dict(thread or {})
+    used = on_thread.get("stake") or stake or None
+    promise = str(on_thread.get("promise") or "")
+    return {
+        "stake": dict(used) if used else None,
+        "stake_text": stake_text(used),
+        "outcome": str(outcome or ""),
+        "outcome_text": settle_text(move, stake=used, outcome=outcome,
+                                    promise=promise),
+    }
 
 
 def story_text(tension: float, phase: str) -> str:
@@ -596,6 +640,45 @@ _SYSTEM = (
 )
 
 
+#: 每个动作**给模型的那一句**。🔴 **它和 `MOVES` 是一张表,不是两张**
+#: (3.12.1,验收 A ②):上一版这段提示词是**手写的五行**,而 3b 加了三个动作 ——
+#: 于是模型从来不知道 `confront`/`reward`/`callback` 是什么意思,
+#: 挑中了也写不对。**闭集加了一格而提示词没跟,是这一层最安静的坏法**:
+#: 日志、契约、用例全绿,只有模型不知道。
+MOVE_BRIEFS: dict[str, str] = {
+    "breathe": "只写一句冲着他刚做的事的旁白,不派人",
+    "approach": "派一个人来找他搭话",
+    "invite": "派一个人约他一起做件事",
+    "reveal": "让他知道一件他本来不知道的事",
+    "complicate": "出一件麻烦事,而且**必须押上点什么**",
+    "confront": "摊牌:当场见分晓,**必须押上点什么**(引擎会替你掷一次点定输赢)",
+    "reward": "还他一份人情 —— **只能还他手上那条线上的债**,不能凭空给",
+    "callback": "把他那条到期的线收掉:让人来提起它,给个交代",
+}
+
+
+def _move_menu(allowed: Sequence[str]) -> str:
+    """这一轮能挑的那几个动作,一行一个 —— **从闭集生成,不手写**。"""
+    return "".join(f"  {m} = {MOVE_BRIEFS[m]}\n"
+                   for m in MOVES if m in set(allowed) and m in MOVE_BRIEFS)
+
+
+def _stake_rule(allowed: Sequence[str]) -> str:
+    """「哪几个动作必须写 stake」——**从 `MOVES_REQUIRING_STAKE` 生成**。
+
+    🔴 上一版这句话写死成「complicate 必须写 stake,别的动作可以留空」,
+    而闭集里是 `('complicate', 'confront')` —— **提示词和闸说了两句相反的话**。
+    下场:模型照提示词答一个没有 stake 的 `confront`,而 `parse_decision`
+    **静默把它降级成 `reveal`** —— 摊牌那一拍从来没真的发生过,
+    而日志里只看得到一条正常的 `reveal`。
+    """
+    need = [m for m in MOVES_REQUIRING_STAKE if m in set(allowed)]
+    if not need:
+        return ""
+    return (f"⚠️ {'、'.join(need)} **必须**写 stake,别的动作可以留空 ——"
+            "写不出赌注的那一拍会被降级,而你不会收到任何提示。\n")
+
+
 def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
                     allowed: Sequence[str], thread: dict[str, Any] | None,
                     guidance: dict[str, Any] | None, place_name: str,
@@ -662,19 +745,15 @@ def decide_messages(*, recap: Sequence[str], cast: Sequence[dict[str, Any]],
         + line_you
         + f"\n你这一拍能派的人(**只能从这里面挑,不许写别的名字**):\n{who}\n"
         + f"\n你这一拍能做的事(**只能挑一个**):{'、'.join(allowed)}\n"
-        + "  breathe = 只写一句冲着他刚做的事的旁白,不派人\n"
-        + "  approach = 派一个人来找他搭话\n"
-        + "  invite = 派一个人约他一起做件事\n"
-        + "  reveal = 让他知道一件他本来不知道的事\n"
-        + "  complicate = 出一件麻烦事,而且**必须押上点什么**\n"
+        + _move_menu(allowed)
         + "\n只输出一个 JSON 对象,不要有别的字:\n"
         + '{"move": "…", "who": "上面那个 id(breathe 时留空)", '
         + '"line": "他说的那一句(≤30 字;breathe 时写旁白)", '
         + '"why": "你为什么这么写,一句话给创作者看", '
         + '"promise": "这一拍开了什么口子(≤20 字,没有就留空)", '
-        + '"stake": {"kind": "relation|money|item|deadline", "amount": 数字, '
+        + f'"stake": {{"kind": "{"|".join(STAKE_KINDS)}", "amount": 数字, '
         + '"what": "他可能失去什么(≤12 字)"}}\n'
-        + "⚠️ complicate 必须写 stake,别的动作可以留空。\n"
+        + _stake_rule(allowed)
         + "⚠️ `line` 是**那个人自己说的话**,不是旁白 —— breathe 除外。"
     )
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
@@ -724,15 +803,29 @@ def parse_decision(text: str, *, allowed: Sequence[str],
             amount = 0.0
         stake_out = {"kind": str(stake["kind"]), "amount": amount,
                      "what": str(stake.get("what") or "")[:12]}
+    downgraded_from = ""
     if move in MOVES_REQUIRING_STAKE and stake_out is None:
         # **降级而不是丢弃**:一句写好了的台词不该因为少一格就整条作废,
         # 但「添乱」这个名分得收回来 —— 没有赌注的添乱只是一句吓唬。
-        logger.info("编剧写了 complicate 却没写 stake —— 降成 reveal")
+        #
+        # 🔴 **降级要留痕,而且那句 log 得说真话**(3.12.2,验收 A ④)。
+        # 上一版只落一条 `logger.info`,而且**句子里写死了 `complicate`** ——
+        # 于是一次 `confront` 被降级时:`director_log.source` 照旧 `llm`、
+        # `refused_by` 是空的、日志里 grep 不到 `confront`。
+        # **摊牌那一拍从来没真的发生过,而三处读数都说一切正常。**
+        downgraded_from = move
+        logger.info("编剧写了 %s 却没写 stake —— 降成 %s",
+                    move, "reveal" if "reveal" in allowed else "approach")
         move = "reveal" if "reveal" in allowed else "approach"
         if move not in allowed:
             return None
     return {
         "move": move, "who": who,
+        # 🔴 降级过的那一拍**不许记成 `llm`**:模型答的那个动作没被采纳。
+        # `refused_by` 说清是哪一格缺了,运维 grep 得到。
+        **({"source": "refused",
+            "refused_by": f"stake missing:{downgraded_from}"}
+           if downgraded_from else {}),
         "line": str(data.get("line") or "").strip()[:60],
         "why": str(data.get("why") or "").strip()[:80],
         "promise": str(data.get("promise") or "").strip()[:20],

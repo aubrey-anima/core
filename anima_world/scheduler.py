@@ -333,6 +333,9 @@ class Scheduler:
         # 插件(3.8.0)。`plugins` 是**这一次开机装着的那几个**(声明的权威是世界
         # 文件,库里那份 `:plugins` 只记"装的是哪一版、有哪几个事实名")。
         self.plugin_store: Any | None = None
+        #: 这一趟是不是 `--llm mock` / `force_mock_llm`(3.12.1,验收 B+C ⑥)。
+        #: `World` 造聊天与背景槽那两个客户端时读它 —— **降级档要一路降到底**。
+        self.force_mock_llm: bool = False
         self.edge_store: Any | None = None
         #: 边类型名(带命名空间)→ 它的声明。`link` 那一刻查约束靠它。
         self.edge_types: dict[str, Any] = {}
@@ -6668,7 +6671,18 @@ class Scheduler:
                             "director.grace_hours", default=24) or 0)
                         grace = int(hours * max(1, 60 // max(1, self._minutes_per_tick())))
                     except (TypeError, ValueError):
-                        grace = 0
+                        # 🔴 **读坏了不许静默当 0**(3.12.1,验收 A ⑧)。
+                        # `grace = 0` 的意思是「没有宽限期」—— 那是一个**有效的
+                        # 世界配置**,而不是"这一格读不出来"。两件事记成一件的
+                        # 下场:一个把 `grace_hours` 写成 `"24小时"` 的世界,
+                        # 到期那一刻**当场扣**,而屏幕上什么都不少。
+                        # 退回默认值并吼一声 —— 让作者知道那一格没生效。
+                        logger.warning(
+                            "director.grace_hours 读不出来(%r)—— 这一趟按默认 %d "
+                            "小时算。那一格要写成一个整数",
+                            self.config_store.get("director.grace_hours", default=None),
+                            24)
+                        grace = int(24 * max(1, 60 // max(1, self._minutes_per_tick())))
                 if not due or now_tick < due + grace:
                     continue
                 stake = thread.get("stake") or {}

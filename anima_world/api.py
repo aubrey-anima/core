@@ -1906,12 +1906,22 @@ class World:
         self.chat_store.content_filter = self._strip_receipt
         scheduler.chat_state = self.chat_state
         config_store = scheduler.config_store
-        chat_llm = (
+        # 🔴 **降级档要一路降到底**(3.12.1,验收 B+C ⑥)。
+        # `--llm mock` / `force_mock_llm` 从前只换掉**规划器**那个客户端 ——
+        # 聊天与背景槽照旧是 config-backed,于是主持人那一屏和编剧那一次
+        # **照样出网**。一个说「我不出网」却出网的开关,比没有那个开关更坏:
+        # 验收员照着它跑,而它把真 key 发了出去。
+        # 判据放在**构造这一处**:它是唯一知道"这一趟是不是降级档"的地方,
+        # 而从客户端类型倒推是错的(刚试过 —— 规划器换了、这两个没换)。
+        from anima_world.llm_client import MockLLMClient
+
+        forced_mock = bool(getattr(scheduler, "force_mock_llm", False))
+        chat_llm = MockLLMClient() if forced_mock else (
             create_llm_client_from_config(config_store)
             if config_store is not None
             else create_llm_client_from_env()
         )
-        background_llm = (
+        background_llm = MockLLMClient() if forced_mock else (
             create_background_llm_client_from_config(config_store)
             if config_store is not None
             else chat_llm
@@ -2229,7 +2239,9 @@ class World:
         ⚠️ 读不到的段**记进 `_authored_skipped`,不静默跳过** —— 一份少了几段
         而不吭声的导出,会让创作台以为它离线判过了全部十六段。
         """
-        from anima_world.world_file import AUTHOR_SECTIONS
+        from anima_world.world_file import (
+            AUTHOR_OBJECT_TYPES, AUTHOR_SCALAR_TYPES, AUTHOR_SECTIONS,
+        )
 
         out: list[dict[str, Any]] = []
         sch = self.scheduler
@@ -2268,9 +2280,16 @@ class World:
         self._authored_written = [k for k in self.AUTHORED_KEPT_VERBATIM if got.get(k)]
         # 空着的那几段和**写不出来的那十三段**分开记:前者是"这个世界没写",
         # 后者是"这个引擎给不出" —— 两件事,而合成一句的话创作台分不出该找谁。
+        # 🔴 **十六段是三张表加起来的**(3.12.1,验收 A ④)。
+        # 上一版只循环 `AUTHOR_SECTIONS`(那是「一列条目」那十四段),
+        # 于是 `pack` / `config` / `guidance` / `mock_narration`(对象型)与
+        # `world_setting`(标量型)**一格都没报** —— 创作台读 `authored_skipped`
+        # 会以为那几段没被跳过,而它们确实没写进去。
+        # **一份漏了几段的"跳过清单",比没有那张清单更坏。**
+        every = [*AUTHOR_SECTIONS, *AUTHOR_OBJECT_TYPES, *AUTHOR_SCALAR_TYPES]
         self._authored_skipped = (
             [k for k in self.AUTHORED_KEPT_VERBATIM if not got.get(k)]
-            + [k for k in AUTHOR_SECTIONS if k not in self.AUTHORED_KEPT_VERBATIM]
+            + [k for k in every if k not in self.AUTHORED_KEPT_VERBATIM]
         )
         return out
 
@@ -3180,9 +3199,9 @@ class World:
             thread["phase_text"] = dmod.PHASE_LABELS.get(
                 str(thread.get("phase") or ""), "")
             thread["due_text"] = ""
-            thread["outcome_text"] = dmod.settle_text(
-                "callback", stake=thread.get("stake"), outcome=got,
-                promise=str(thread.get("promise") or ""))
+            # 🔴 **和 `*_settled` 那条路共用同一个纯函数**(3.12.2,验收 A ③)。
+            thread["outcome_text"] = dmod.settle_view(
+                "callback", thread=thread, stake=None, outcome=got)["outcome_text"]
         tension = dmod.tension_now(float(row.get("tension") or 0.0),
                                    int(row.get("tension_tick") or 0), tick,
                                    ticks_per_hour)
@@ -9453,7 +9472,10 @@ class World:
         line = str(decision.get("line") or "")
         holder = f"{Scheduler.PLAYER_PREFIX}{pid}"
         ops: list[dict[str, Any]] = []
-        refused = ""
+        # 🔴 **降级过的那一拍带着自己的 `refused_by` 进来**(3.12.2,验收 A ④):
+        # `parse_decision` 把「模型答的动作没被采纳」记在决定上,这一层照收 ——
+        # 各写一遍的话,`director_log` 那一格会和纯函数说两句话。
+        refused = str(decision.get("refused_by") or "")
         rolled: dict[str, Any] | None = None
         outcome = ""
 
@@ -9578,12 +9600,16 @@ class World:
                         "with": target_id,
                         "with_name": (self.scheduler.hail_agent_name(target_id)
                                       if target_id else ""),
-                        "stake": dict(stake) if stake else None,
-                        "stake_text": dmod.stake_text(stake),
-                        "outcome": settled,
-                        "outcome_text": dmod.settle_text(
-                            move, stake=stake, outcome=settled,
-                            promise=str(promise or (thread or {}).get("promise") or "")),
+                        # 🔴 **和 `closed_threads` 那条路共用同一个纯函数**
+                        # (3.12.2,验收 A ③):从前两处各算各的,于是同一条
+                        # 收掉的线有两句话 —— 这一处读这一拍的 stake,而
+                        # `callback` 本来就不带,于是「押了什么」那半没了。
+                        **dmod.settle_view(
+                            move,
+                            thread=({**(thread or {}), "promise": (
+                                promise or (thread or {}).get("promise") or "")}
+                                if (thread or promise) else None),
+                            stake=stake, outcome=settled),
                         "tick": int(tick),
                     },
                 })
@@ -9602,9 +9628,31 @@ class World:
         return f"{name}朝你走过来:「{line}」" if line else f"{name}朝你走过来。"
 
     def _llm_key_configured_for_director(self) -> bool:
-        """这个世界有没有一把 key —— **按有没有 key 判,不按客户端类型判**
-        (和 `_host_scene_text` 那一格逐字同一句)。"""
+        """这个世界这一趟**会不会真去调模型**。
+
+        ⚠️ **两个条件,不是一个**(3.12.1,验收 B+C ⑥):有 key **而且**
+        没被强制降级。上一版只看 key 非空 —— 于是 `--llm mock` /
+        `force_mock_llm` 的世界**照样出网**:降级档挡住了别的路,
+        却挡不住主持人那一屏和编剧那一次。
+        🔴 **一个说"我不出网"却出网的开关,比没有那个开关更坏** ——
+        验收员照着它跑,而它把真 key 发了出去。
+        """
+        if self._forced_mock_llm():
+            return False
         return bool(str(self.config_get("llm.api_key", default="") or ""))
+
+    def _forced_mock_llm(self) -> bool:
+        """这个世界被强制降到 mock 档了吗(`--llm mock` / `force_mock_llm`)。
+
+        ⚠️ 判据是**背景槽那个客户端是不是 Mock** —— 而它之所以可信,是因为
+        3.12.1 起降级档**一路降到底**(见构造那一段):从前只换规划器,
+        于是"从客户端倒推"会答错,而那正是这条 bug 的样子。
+        """
+        from anima_world.llm_client import MockLLMClient
+
+        service = getattr(self, "chat_service", None)
+        client = getattr(service, "_background_llm", None) if service else None
+        return isinstance(client, MockLLMClient)
 
     @staticmethod
     def _stake_ops(holder: str, who: str, stake: dict[str, Any], *,
@@ -9620,7 +9668,17 @@ class World:
         ⚠️ `deadline` 两个方向都不动数 —— 它押的是"这条线作废",而那是日志上
         的一句话,不是账上的一笔。
         """
+        from anima_world.director import DIRECTOR_MAY_DEDUCT
+
         kind = str(stake.get("kind") or "")
+        # 🔴 **编剧自己动手时只扣得动这几种**(3.12.1,验收 A ①)。
+        # 裁决 §2.10 那条代拍写着「只掉关系与声望」,而它**从来没被写成代码**
+        # —— 真站上一次 `confront` 输掉,玩家的钱 160 → 130。
+        # **一条写下来的裁决和一行没写的代码之间,只有屏幕上那笔钱知道差别。**
+        # ⚠️ **两个方向都挡**:`reverse`(`reward` 还债)也一样 ——
+        # 引擎凭空给钱和凭空扣钱是同一种越权,而"还回去"那一侧更难被发现。
+        if kind not in DIRECTOR_MAY_DEDUCT:
+            return []
         try:
             amount = abs(float(stake.get("amount") or 0))
         except (TypeError, ValueError):
@@ -10176,7 +10234,9 @@ class World:
                                        in_transit=in_transit)
         service = getattr(self, "chat_service", None)
         client = getattr(service, "_background_llm", None) if service else None
-        if client is None or not str(self.config_get("llm.api_key", default="") or ""):
+        # ⚠️ 走**同一个判断**(3.12.1,验收 B+C ⑥):`--llm mock` 的世界
+        # 从前在这一行漏出去过 —— 那一行只看 key 非空。
+        if client is None or not self._llm_key_configured_for_director():
             return fallback, "mock"
         messages = host_mod.scene_messages(
             place_name=place_name, place_desc=place_desc, day=day, hour=hour,

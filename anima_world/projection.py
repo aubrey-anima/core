@@ -485,7 +485,21 @@ def _apply_director_log(proj: Projection, e: Event) -> None:
         for thread in row["threads"]:
             if str(thread.get("id")) == closed:
                 thread["closed"] = True
-                thread["outcome"] = "called_back"
+                # 🔴 **写闭集里的那个值**(3.12.1,验收 B+C ①)。
+                # 上一版写的是 `"called_back"` —— 它**不在 `OUTCOME_LABELS`
+                # 那八个词里**,于是 `settle_text` 的 `head` 是空串,
+                # `closed_threads[].outcome_text` 变成
+                # 「「那本旧相册」,押着一笔钱。」—— **押了什么说了,结果那半吞了**。
+                # 而同一件事的 `callback_settled` 那句是全的:**同一个事实,
+                # 两条路给出两句话**,而屏上少的那半没有一处会报错。
+                # ⚠️ 值只能从 `director.OUTCOME_LABELS` 里取。
+                # 🔴 **上一版这儿写着「闸在 `test_director_world.py`」,而那道闸
+                # 根本不存在**(3.12.2,验收 A ②):把这个值改回 `"called_back"`,
+                # 四个测试文件 122 条全绿。
+                # **一句承诺了一道不存在的闸的注释,比没有注释更坏** ——
+                # 它让下一个人以为改坏了会有人喊。
+                # 现在那道闸真的有了:`test_收线那一格的值必须在闭集里`。
+                thread["outcome"] = "closed"
 
     # ② 这一拍开了一条线吗。**`due` 那一格现在就得记** —— 开线那一刻不记,
     #    以后补不回来(推迟功能可以,推迟数据不行)。

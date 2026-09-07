@@ -215,7 +215,7 @@ def test_一条线到期没人管_那笔赌注真的掉了(tmp_path):
         # 三条并排的用例(上线拿 callback / 不上线过期照扣 / 宽限期内按兵不动)
         # 在下面,这一条只保「到期没人管,最后那笔真的掉了」。
         ticks_per_hour = max(1.0, 60.0 / max(1, sch._minutes_per_tick()))
-        grace = int(world.config_get("director.grace_hours", default=12) or 12)
+        grace = int(world.config_get("director.grace_hours", default=24) or 24)
         world.tick(int(grace * ticks_per_hour) + 3)
         after = world.relationship_summary(agent_id, "player:p1")["axes"]["sentiment"]
         assert after < before, f"赌注没兑现:{before} → {after}"
@@ -1605,3 +1605,340 @@ def test_收掉的线_玩家读得到它是怎么收的(tmp_path):
         closed = story["closed_threads"]
         assert closed, f"收掉的线一条都读不到:{story}"
         assert closed[-1]["outcome_text"], closed[-1]
+
+
+def test_被拒那一屏的source_契约报的就是它(tmp_path):
+    """🟠 **验收 A ④**:`contract.director.refused_scene_source` 零用例 ——
+    契约报着 `"template"`,而没有一处断言那一屏真的是这个值。
+    **一个报出去却没人验的读数,和一句没人验的话是同一种东西。**
+    """
+    from anima_world.__main__ import contract_payload
+
+    want = contract_payload()["director"]["refused_scene_source"]
+    with open_world_at(tmp_path / "rs.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.player_topup("p1", 100)
+        world.player_buy("p1", "cafe", "garden_shears")
+        world.host_turn("p1")
+        world.player_tool("p1", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        world.host_turn("p1")
+        world.player_tool("p1", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        turn = world.host_turn("p1")
+    assert turn["scene"]["source"] == want, (turn["scene"]["source"], want)
+
+
+def test_零效果的动词_也算他按过一次_而那句话说得准(tmp_path):
+    """🔴 **platform 从龙族审计带回的那条**:真站那三发(`报到`/`拉票`/`训练`)
+    `ok:true`、`entity_interaction` 也在,而 `changed` / `me_delta` **全是空的**
+    —— 动词受理了,世界什么都没变。
+
+    两条判据,**都要**:
+    · 他按了 → **这一屏照样换**(白按那道水位不是给这种情形的:他没被拒);
+    · 而那句话**说得准** —— 「你报到了狮心会。」是**一句说大了的话**:
+      玩家读到的是"成了",编剧读到的也是"成了",于是它顺着一件没发生的事往下写。
+    """
+    from anima_world import host as H
+
+    with open_world_at(tmp_path / "zero.db") as world:
+        world.player_move("p1", "cafe")
+        world.tick(3)
+        world.host_turn("p1")
+        frozen = int(world.scheduler.clock)
+        seen = []
+        for _ in range(2):
+            got = world.player_tool("p1", "interact",
+                                    {"target": "tree:harbor_oak", "verb": "look"})
+            assert got["ok"] is True, got
+            seen.append(world.host_turn("p1"))
+        assert int(world.scheduler.clock) == frozen
+        assert [t for t in seen if t["scene"]["source"] == "cached"] == [], (
+            [t["scene"]["source"] for t in seen])
+    # 那句话本身:零效果说「试着…没什么变化」,有变化才说「…了」
+    assert "没什么变化" in H.interaction_line("报到", "狮心会", changed=False)
+    assert H.interaction_line("报到", "狮心会") == "你报到了狮心会。"
+    assert H.recap_lines(
+        [{"type": "entity_interaction", "who": "player:p1",
+          "payload": {"verb_label": "报到", "target_name": "狮心会", "changed": {}}}],
+        player_key="player:p1") == ["你试着报到狮心会,没什么变化。"]
+    # ⚠️ 只扣了体力、没改目标的动词**不是**零效果
+    assert H.recap_lines(
+        [{"type": "entity_interaction", "who": "player:p1",
+          "payload": {"verb_label": "训练", "target_name": "沙袋",
+                      "changed": {}, "me_delta": {"体力": -5}}}],
+        player_key="player:p1") == ["你训练了沙袋。"]
+
+
+def test_mock档的世界_主持人那屏也不出网(tmp_path):
+    """🔴 **验收 B+C ⑥**:`--llm mock` / `force_mock_llm` 从前**挡不住主持人那
+    一屏和编剧那一次** —— 那两处只看 `llm.api_key` 非空。
+    于是一个说"我不出网"的世界照样出网,而**验收员照着它跑,把真 key 发了出去**。
+    **一个说"我不出网"却出网的开关,比没有那个开关更坏。**
+
+    ⚠️ 这条不靠 socket 那道总闸(那一道是**测试进程**的),它断的是
+    **产品路上那个判断**:降级档一开,`_llm_key_configured_for_director` 就该答 False。
+    """
+    with open_world_at(tmp_path / "mk.db", force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        # 有 key,而且被强制降级 —— 这正是 `--llm mock` 的现场
+        world.config_set("llm.api_key", "sk-real-looking")
+        assert world._forced_mock_llm() is True, "夹具不是 mock 档"
+        assert world._llm_key_configured_for_director() is False, (
+            "mock 档的世界仍然认为自己该去调模型")
+        turn = world.host_turn("p1")
+        assert turn["scene"]["source"] in ("mock", "template", "cached"), (
+            turn["scene"]["source"])
+
+
+def test_对人动词被回_也算白按_下一屏不许逐字重复(tmp_path):
+    """🔴 **验收 B+C ②**:`person_verb` 走真门被回时,顶层 `ok` 是 `True`
+    (`ToolResult` 的默认值),拒绝只躺在 `detail` 里 —— 而白按那道水位
+    只看顶层。**点两次被回两次,两屏逐字不变**,正是 3.12.0 那条裁决要杀的东西,
+    而那条裁决的用例是拿"在忙时点长动词"验的,**没验这条路**,所以它绿着。
+
+    ⚠️ 真站第六轮那三发 `/tool` 报「200 accepted」,答案就在这儿:
+    **`200` 是 HTTP,`ok:true` 是那一行写错的。**
+    """
+    from _worldfile import write_seed_file
+
+    MENPAI = {"id": "menpai", "version": "1.0.0", "label": "门派",
+              "person_verbs": [{"id": "拜师", "label": "拜师",
+                                "refusal": "「你我缘分未到。」"}]}
+    BARE = {"agents": [{"id": "阿岚", "name": "阿岚", "location": "cafe",
+                        "personality": "安静"}],
+            "locations": [{"id": "cafe", "name": "咖啡馆", "description": "小店"}]}
+    path = write_seed_file(tmp_path / "pv.cyberworld", {**BARE, "plugins": [MENPAI]})
+    with open_world_at(str(tmp_path / "pv.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        first = world.host_turn("p1")
+        prev = first["scene"]["text"]
+        for _ in range(2):
+            got = world.player_tool("p1", "person_verb",
+                                    {"agent": "阿岚", "verb": "拜师"})
+            # 🔴 顶层 `ok` 要跟着 `detail.ok` 走
+            assert got["ok"] is False, f"她不肯,而顶层说成了 ok:{got}"
+            assert got["detail"]["answer"] == "declined", got
+            turn = world.host_turn("p1")
+            assert turn["scene"]["source"] == "template", turn["scene"]["source"]
+            assert turn["scene"]["text"] != prev, "屏逐字重复了"
+            prev = turn["scene"]["text"]
+
+
+def test_对人动词做成了_也算他动过手(tmp_path):
+    """`person_verb.accepted` 进 `PLAYER_MOVE_EVENT_TYPES`(验收 B+C ②)——
+    少了它,一次成功的「拜师」在主持人那一屏上什么都不算:屏不换、编剧不写、
+    故事里没有。**一个做成了却没进故事的动作,和没做过一样。**"""
+    from _worldfile import write_seed_file
+    from anima_world import host as H
+
+    assert "person_verb.accepted" in H.PLAYER_MOVE_EVENT_TYPES
+    assert "person_verb.refused" not in H.PLAYER_MOVE_EVENT_TYPES, (
+        "被回的那一条走白按那道水位 —— 世界里什么都没发生,编剧不许为它写一拍")
+
+    MENPAI = {"id": "menpai", "version": "1.0.0", "label": "门派",
+              "person_verbs": [{"id": "远远看她一眼", "consent": "none"}]}
+    BARE = {"agents": [{"id": "阿岚", "name": "阿岚", "location": "cafe",
+                        "personality": "安静"}],
+            "locations": [{"id": "cafe", "name": "咖啡馆", "description": "小店"}]}
+    path = write_seed_file(tmp_path / "ok.cyberworld", {**BARE, "plugins": [MENPAI]})
+    with open_world_at(str(tmp_path / "ok.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        got = world.player_tool("p1", "person_verb",
+                                {"agent": "阿岚", "verb": "远远看她一眼"})
+        assert got["ok"] is True, got
+        turn = world.host_turn("p1")
+        assert turn["trigger"] == "acted", turn["trigger"]
+        assert turn["scene"]["source"] != "cached", turn["scene"]["source"]
+
+
+def test_收线那一格的值必须在闭集里_而且屏上带结果那半(tmp_path):
+    """🔴 **验收 A ②:这道闸此前只存在于一句注释里。**
+
+    投影收线时写的 `outcome` 必须是 `OUTCOME_LABELS` 认得的那几个词之一 ——
+    写一个闭集外的值(比如 `"called_back"`),`settle_text` 的 `head` 会是空串,
+    屏上就成了「「那本旧相册」,押着一笔钱。」:**押了什么说了,结果那半吞了**。
+    而那不会让任何用例红。
+
+    两条一起断:**值在闭集里**,而且**那句话真的带得出结果那半**。
+    """
+    from anima_world import director as D
+
+    with open_world_at(tmp_path / "cl.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "她欲言又止", "why": "",
+                   "promise": "那本旧相册",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
+                   "source": "mock"},
+            tension_before=0.3, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=50, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        opened = world.player_story("p1")["threads"]
+        tid = opened[0]["id"]
+        world._director_apply(
+            "p1", {"move": "callback", "who": agent, "line": "那本相册呢", "why": "",
+                   "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.4, phase="climax", tick=int(world.scheduler.clock),
+            place="cafe",
+            thread={"id": tid, "promise": "那本旧相册", "with": agent,
+                    "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"}},
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+
+        closed = world.player_story("p1")["closed_threads"]
+        assert closed, "收掉的线一条都读不到"
+        row = closed[-1]
+        # ① 值在闭集里 —— 闭集外的值会让下面那句话吞掉一半
+        assert row["outcome"] in D.OUTCOME_LABELS, (
+            f"收线写了闭集外的值 {row['outcome']!r};闭集是 "
+            f"{sorted(D.OUTCOME_LABELS)}")
+        # ② 那句话真的带得出**结果**那半
+        said = row["outcome_text"]
+        assert D.OUTCOME_LABELS[row["outcome"]] in said, (
+            f"结果那半被吞了:{said!r}")
+        assert "那本旧相册" in said, said
+
+
+def test_同一条收掉的线_两条路说的是同一句(tmp_path):
+    """🔴 **验收 A ③**:`closed_threads[].outcome_text` 读**线上存的** stake,
+    而 `callback_settled.outcome_text` 读**这一拍 decision 的** stake ——
+    `callback` 本来就不带,于是同一条线在两个地方是两句话:
+
+        「「那本旧相册」,押着她的信任,这条线收了。」   ← 故事页
+        「「那本旧相册」,这条线收了。」                 ← 事件
+
+    **同一件事两处各说一句,而少的那半没有一处会报错。**
+    现在两处共用 `director.settle_view`,这条用例逐字比。
+    """
+    with open_world_at(tmp_path / "sv.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "她欲言又止", "why": "",
+                   "promise": "那本旧相册",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
+                   "source": "mock"},
+            tension_before=0.3, phase="setup", tick=int(world.scheduler.clock),
+            place="cafe", thread=None, pin_ticks=12, due_ticks=50, capped=False,
+            forbidden_ops=set(), recap=[], place_name="咖啡店")
+        tid = world.player_story("p1")["threads"][0]["id"]
+        world._director_apply(
+            "p1", {"move": "callback", "who": agent, "line": "那本相册呢", "why": "",
+                   "promise": "", "stake": None, "source": "mock"},
+            tension_before=0.4, phase="climax", tick=int(world.scheduler.clock),
+            place="cafe",
+            thread={"id": tid, "promise": "那本旧相册", "with": agent,
+                    "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"}},
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+
+        page = world.player_story("p1")["closed_threads"][-1]
+        event = [e["payload"] for e in world.events()
+                 if e["type"] == "callback_settled"][-1]
+
+    assert page["outcome_text"] == event["outcome_text"], (
+        f"两条路两句话:\n  故事页 {page['outcome_text']!r}\n  事件   "
+        f"{event['outcome_text']!r}")
+    # 而且**两边都带得出「押了什么」**(那正是 callback 那条从前丢掉的一半)
+    assert "她的信任" in event["outcome_text"], event["outcome_text"]
+    assert event["stake_text"] == page.get("stake_text", event["stake_text"])
+
+
+def test_没写stake的动作被降级_读数上看得出来(tmp_path):
+    """🔴 **验收 A ④**:上一版降级只落一条 `logger.info`,而且那句话**写死了
+    `complicate`** —— 于是一次 `confront` 被降级时:`director_log.source`
+    照旧 `llm`、`refused_by` 是空的、运维 grep `confront` 什么都搜不到。
+    **摊牌那一拍从来没真的发生过,而三处读数都说一切正常。**
+
+    ⚠️ **两半分开钉,而且要说清为什么**:
+    · 判断住在 `parse_decision`(纯函数)—— 那儿逐字断言,含 `confront`;
+    · api 那一半是「把决定带来的 `refused_by` 记进 `director_log`」—— 那儿直接
+      喂一个降级过的决定。
+    **橱窗世界跑不出这一条**:`guidance.pacing.ceiling` 是 0.6,而
+    `complicate`/`confront` 要的 gap 在这个世界的 ladder 上**永远不出现**
+    (实测八轮,每轮 offered 最多到 `reveal`)—— 拿一个到不了的路径当端到端
+    用例,就是又造一道永远绿的闸。
+    """
+    from anima_world.director import parse_decision
+
+    # ① 纯函数:两个要 stake 的动作各来一次,`refused_by` 要点得出名字
+    for move in ("complicate", "confront"):
+        got = parse_decision(
+            '{"move":"%s","who":"夏","line":"出事了","why":"x"}' % move,
+            allowed=["breathe", "approach", "reveal", "complicate", "confront"],
+            cast_ids=["夏"])
+        assert got["move"] != move, f"没写 stake 的 {move} 照原样落地了:{got}"
+        assert got["source"] == "refused", got
+        assert got["refused_by"] == f"stake missing:{move}", (
+            f"`refused_by` 没点出是哪个动作被降的,运维 grep 不到:{got}")
+
+    # ② api:降级过的那个决定,`director_log` 上那两格要跟着
+    with open_world_at(tmp_path / "dg.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        decision = parse_decision(
+            '{"move":"confront","who":"%s","line":"摊牌了","why":"推一把"}' % agent,
+            allowed=["breathe", "approach", "reveal", "complicate", "confront"],
+            cast_ids=[agent])
+        world._director_apply(
+            "p1", decision, tension_before=0.4, phase="climax",
+            tick=int(world.scheduler.clock), place="cafe", thread=None,
+            pin_ticks=12, due_ticks=0, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        row = _logs(world)[-1]
+
+    assert row["source"] != "llm", (
+        f"降级过的那一拍记成了 `llm` —— 读数上看不出模型那个动作没被采纳:{row}")
+    assert "stake missing" in str(row["refused_by"]), row["refused_by"]
+    assert "confront" in str(row["refused_by"]), (
+        f"`refused_by` 没说是哪个动作被降的,运维 grep 不到:{row['refused_by']}")
+
+
+def test_grace_hours读坏时_退回默认值并吼一声(tmp_path, caplog):
+    """🟡 **验收 A ⑤:这条修法此前没有闸** —— 把它改回 `grace = 0`,93 条全绿。
+
+    `grace = 0` 的意思是「**没有宽限期**」—— 那是一个**有效的世界配置**,
+    和「这一格读不出来」是两件事。两件事记成一件的下场:一个把
+    `grace_hours` 写成 `"24小时"` 的世界,**到期那一刻当场扣**,
+    而屏幕上什么都不少。
+    """
+    import logging
+
+    with open_world_at(tmp_path / "gh.db", force_mock_llm=True) as world:
+        agent = next(iter(world.scheduler.agents))
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        now = int(world.scheduler.clock)
+        # 一条**马上到期**的线,押着关系
+        world._director_apply(
+            "p1", {"move": "reveal", "who": agent, "line": "她欲言又止", "why": "",
+                   "promise": "那本旧相册",
+                   "stake": {"kind": "relation", "amount": 0.2, "what": "她的信任"},
+                   "source": "mock"},
+            tension_before=0.3, phase="setup", tick=now, place="cafe", thread=None,
+            pin_ticks=12, due_ticks=1, capped=False, forbidden_ops=set(),
+            recap=[], place_name="咖啡店")
+        # 🔴 那一格写成一句读不出来的话。
+        # ⚠️ **绕过 `config_set`**:那扇门自己会拒(它认整数)—— 而这一条要验的
+        # 是「**它已经躺在库里**了怎么办」(一份手改过的库、一份老世界文件、
+        # 一次半截的写入)。挡在门口的闸救不了已经进来的那一格。
+        world.scheduler.config_store.set("director.grace_hours", "24小时")
+        with caplog.at_level(logging.WARNING):
+            world.tick(6)
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "grace_hours" in said, f"读坏了却一声不吭:{said[-300:]}"
+        # 而且**没有当场收账** —— 退回的是默认 24 小时,不是 0
+        assert not [r for r in _logs(world) if r["move"] == "collect"], (
+            "读坏了当成「没有宽限期」,于是到期那一刻当场扣")

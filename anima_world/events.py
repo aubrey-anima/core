@@ -126,6 +126,24 @@ EVENT_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
                          "outcome_text", "tick"),
 }
 
+def _director_log_note() -> str:
+    """`director_log` 那一句说明 —— **格数与闭集都从权威表数出来**。
+
+    ⚠️ 延迟到调用时 `import`:`director` 反过来不 import 这里,
+    但保持单向依赖比省一次 import 值钱。
+    """
+    from anima_world.director import DIRECTOR_LOG_KEYS, MOVES, SOURCES
+
+    return (
+        f"⚠️ **载荷是一张固定的表,缺的写空不省略**"
+        f"(`director.DIRECTOR_LOG_KEYS`,{len(DIRECTOR_LOG_KEYS)} 格):"
+        f"`move` 是闭集({len(MOVES)} 个动作 + 引擎自己收账的 `collect`),"
+        f"`source` 分得出 {' / '.join('`%s`' % s for s in SOURCES)}。"
+        "🔴 **`why` 是写给创作者与运维的 GM 笔记,别上玩家屏**;"
+        "`roll` 只有 `confront` 那一支非空"
+    )
+
+
 SUBSCRIBABLE_EVENTS: dict[str, dict[str, object]] = {
     # 🆕 3.12.0(批 3b,裁决 §2.7):**编剧写的那一拍。**
     #
@@ -141,11 +159,12 @@ SUBSCRIBABLE_EVENTS: dict[str, dict[str, object]] = {
         "gloss": "实时编剧写了一拍(或者一条线到期被结算)—— **按 `payload.move` 二级分发**",
         "numbers": ["tick", "tension_before", "tension_after", "due_tick", "pin_until"],
         "parties": ["player_id", "target"],
-        "note": "⚠️ **载荷是一张固定的表,缺的写空不省略**(`director.DIRECTOR_LOG_KEYS`,"
-                "23 格):`move` 是闭集(八个动作 + 引擎自己收账的 `collect`),"
-                "`source` 分得出 `llm` / `mock` / `engine`。"
-                "🔴 **`why` 是写给创作者与运维的 GM 笔记,别上玩家屏**;"
-                "`roll` 只有 `confront` 那一支非空",
+        # 🔴 **这一句从表生成,不手抄**(3.12.1,验收 B+C ③)。
+        # 手抄那一版把两处写错了:格数写「23」而实际 24,`source` 里列了一个
+        # **不存在的 `engine`**(闭集是那八个)。
+        # **一份手抄的说明和一句没人验的话是同一种东西** —— 而这一段的读者
+        # 正是照它写解析的三个仓库。
+        "note": _director_log_note(),
     },
     "conversation": {
         "gloss": "一场对话结束了(整场只发这一条,在关闭时)",

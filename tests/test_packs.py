@@ -1568,7 +1568,17 @@ def test_带作者层导出_只写留得下来的那几段_而且跳过的要说
     assert kept.isdisjoint(skipped)
     for evolved in ("agent", "location", "stock", "relation"):
         assert evolved in skipped, f"{evolved} 是演化态,不写就要说"
-    assert set(AUTHOR_SECTIONS) - kept <= skipped
+    # 🔴 **十六段齐,不只那十四段**(3.12.1,验收 A ④):上一版只循环
+    # `AUTHOR_SECTIONS`,于是对象型那四段(`config`/`guidance`/`pack`/
+    # `mock_narration`)与标量型那一段(`world_setting`)**一格都没报** ——
+    # 创作台读 `authored_skipped` 会以为它们没被跳过。
+    from anima_world.world_file import AUTHOR_OBJECT_TYPES, AUTHOR_SCALAR_TYPES
+
+    every = {*AUTHOR_SECTIONS, *AUTHOR_OBJECT_TYPES, *AUTHOR_SCALAR_TYPES}
+    assert len(every) == 19, sorted(every)      # 十四 + 四 + 一
+    assert every - kept <= skipped, sorted(every - kept - skipped)
+    assert "pack" in skipped, "对象型那几段一格都没报"
+    assert "world_setting" in skipped
 
     _, records = read_world_file(str(out))
     types = {r.get("type") for r in records if r.get("kind") == "author"}
