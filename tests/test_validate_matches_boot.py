@@ -459,6 +459,73 @@ def test_一次编辑_两条路都收(tmp_path, fresh_redis, open_world):
     assert _check_says(path)[0] is False, "`world check` 的 --edit 也要真的分两种问法"
 
 
+def test_一次编辑里的对人动词_指到目标世界已有的人_不许报红(tmp_path, fresh_redis,
+                                                     open_world):
+    """🔴 **一道比开机还严的假红**(验收 A 三轮 ②,3.13.0)。
+
+    3.13.0 把「effect 指到不存在的角色当场拒」接上线时,判断写进了
+    `world_plugin_errors` —— 而那个函数在 `--edit` 上**照跑**,
+    `known_agents` 又是从**这份文件自己的** `agents` 里数出来的。
+    于是一份只带插件的编辑,effect 指到目标世界里**明明躺着的**那个人,
+    被这两扇门报成「指不到」;**开机门照收,完整世界那两门答 `[]`** ——
+    三个答案两种,而校验器是错的那一个。
+
+    ⚠️ 这条撞的正是这个文件开头点名的那句话:
+    **比开机严是假红,比它松是假绿,两种都比没有校验器更坏。**
+    """
+    world = open_world("w", redis=fresh_redis, world_file=_write(
+        tmp_path / "base.cyberworld", [_MANIFEST, _YARD, _JIA]))
+    world.close()
+
+    # 一份编辑:**添一个新角色**,外加一条 effect 指到 `甲` ——
+    # 目标世界里有 `甲`,而这份文件里只有新添的 `乙`。
+    # ⚠️ **新角色这一格是承重的**:少了它,`known_agents` 是空集,
+    # 那条闸自己短路返回 `[]`,于是这条用例**在闸没修好的时候也是绿的**
+    # (第一版就是这么写的,试牙一改,两条全绿)。
+    yi = {"kind": "author", "type": "agent",
+          "body": {"id": "乙", "name": "乙", "location": "yard",
+                   "personality": "急"}}
+    plug = {"kind": "author", "type": "plugin", "body": {
+        "id": "duiren", "version": "1.0.0", "label": "对人",
+        "person_verbs": [
+            {"id": "请教一句", "label": "请教一句", "consent": "none",
+             "effects": [{"op": "sentiment_delta", "as": "甲",
+                          "target": "player:p1", "delta": 0.1}]},
+        ],
+    }}
+    path = _write(tmp_path / "edit-verb.cyberworld", [_MANIFEST, yi, plug])
+
+    ok_edit, errors = _validate_says(path, edit=True)
+    ok_check, check_errors = _check_says(path, edit=True)
+    ok_boot, boot_errors = _boot_says(path, fresh_redis, "w")
+    assert ok_boot, f"开机门自己都收了 —— 那这一条就无从谈起:{boot_errors}"
+    assert ok_edit and ok_check, (
+        f"一次编辑指到目标世界已有的角色被报红 —— 比开机严就是假红。"
+        f"校验器:{errors};check:{check_errors}")
+
+
+def test_一整个世界里_对人动词指到不存在的角色_照旧拒(tmp_path, fresh_redis):
+    """上一条的另一半:**放开的只是「一次编辑」,不是这道闸本身。**
+
+    ⚠️ 两条要一起看 —— 只写上面那条的话,"把这道闸整个删掉"也是绿的。
+    """
+    plug = {"kind": "author", "type": "plugin", "body": {
+        "id": "duiren", "version": "1.0.0", "label": "对人",
+        "person_verbs": [
+            {"id": "请教一句", "label": "请教一句", "consent": "none",
+             "effects": [{"op": "sentiment_delta", "as": "没这个人",
+                          "target": "player:p1", "delta": 0.1}]},
+        ],
+    }}
+    path = _write(tmp_path / "full-verb.cyberworld",
+                  [_MANIFEST, _YARD, _JIA, plug])
+    ok, errors = _validate_says(path)
+    assert not ok and any("指不到" in e for e in errors), (
+        f"一整个世界里指到「没这个人」还放行 —— 那条承诺又变回一句空话:{errors}")
+    ok_check, check_errors = _check_says(path)
+    assert not ok_check and any("指不到" in e for e in check_errors), check_errors
+
+
 @pytest.mark.parametrize("name,rows", [
     ("unknown-kind", [_MANIFEST, {"kind": "沙发", "body": {}}]),
     ("unknown-type", [_MANIFEST, {"kind": "author", "type": "沙发", "body": {"id": "x"}}]),

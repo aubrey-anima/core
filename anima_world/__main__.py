@@ -1068,6 +1068,12 @@ def authored_layer_errors(
         _world_seed_errors(_authored_with_plugin_kinds(authored), complete=complete))
     for check in AUTHORED_LAYER_CHECKS:
         out += check(authored)
+    # 🔴 **跨段引用只在「这是一整个世界」时问**(`COMPLETE_WORLD_CHECKS`)——
+    # 一次编辑手上没有名册,拿"这份文件里有没有这个人"去问它必然报红,
+    # 而那份编辑开得起来。**比开机严是假红。**
+    if complete:
+        for check in COMPLETE_WORLD_CHECKS:
+            out += check(authored)
     return out
 
 
@@ -1134,9 +1140,16 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
     第一版只收了段没补门,于是 `world check` 对一份开不了机的文件照答
     `loadable: true` —— 而同一版的上一个 commit 刚为同一种假绿修过三格。
 
-    ⚠️ **和 `complete` 无关**:插件声明**没有跨引用**(它读的是自己的命名空间与
-    `reads` 里点名的那几个,而那几个必须由同一份文件里的别的插件提供)——
+    ⚠️ **和 `complete` 无关**,而这句话是**有条件的**:这个函数里剩下的每一条
+    都只读**这份文件自己**(插件自己的命名空间、`reads` 点名的那几个必须由同一份
+    文件里的别的插件提供、动词借的种类查的是同一份 `kinds`)——
     所以一次编辑(`--edit`)里它照查。这一格和 `world_beat_errors` 逐字同构。
+
+    🔴 **凡是要看别的段的,不许写在这儿** —— 它们在
+    `COMPLETE_WORLD_CHECKS`(只在 `complete=True` 上跑)。3.13.0 里
+    「effect 指到不存在的角色」曾经写在这儿,于是**一份只带插件的 `--edit`
+    对着目标世界里明明存在的「昂热」报「指不到」** —— 开机门照收,完整世界那两门
+    答 `[]`,而这一层报红:**比开机严就是假红**,和比它松一样坏,只是方向相反。
     """
     if not authored:
         return []
@@ -1144,22 +1157,10 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
     if entries is None:
         return []
     from anima_world.events import SUBSCRIBABLE_EVENTS
+    from anima_world.person_verbs import effect_errors as _pv_effect_errors
     from anima_world.plugins import (
         PluginError, borrowed_kind_errors, order_plugins, parse_plugins,
     )
-
-    # 🔴 **「指到不存在的角色当场拒」那句话要真的接上线**
-    # (3.13.0,验收 A 二轮 ⑤)。`effect_errors(known_agents=…)` 上一版
-    # **全仓零生产调用方** —— `plugins.py` 那层有意不认识世界,而**认识世界的
-    # 这一层没往下传**:于是那条承诺只活在 CHANGELOG 和 FOR-STUDIO 里,
-    # 而 `world check` 对一个指到「没这个人」的 effect 照答 `[]`。
-    # **一句已经发给下游的承诺,兑现不了就是假承诺** —— tool 正照着它填 effects。
-    known_agents = {
-        str(row.get("id") or "")
-        for row in (authored.get("agents") or ())
-        if isinstance(row, dict) and row.get("id")
-    }
-    from anima_world.person_verbs import effect_errors as _pv_effect_errors
 
     extra: list[str] = []
     for i, entry in enumerate(entries if isinstance(entries, list) else ()):
@@ -1167,9 +1168,7 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
             continue
         label = f"plugins[{i}] ({entry.get('id')})"
         for j, row in enumerate(entry.get("person_verbs") or ()):
-            extra += _pv_effect_errors(
-                row, f"{label}.person_verbs[{j}]",
-                known_agents=(known_agents or None))
+            extra += _pv_effect_errors(row, f"{label}.person_verbs[{j}]")
     try:
         plugins = parse_plugins(entries, subscribable=SUBSCRIBABLE_EVENTS)
         ordered = order_plugins(plugins)
@@ -1719,9 +1718,57 @@ def _authored_edge_warnings(authored: dict[str, Any] | None) -> list[str]:
         authored, _parsed_plugins_or_none(authored.get("plugins")))[1]
 
 
+def world_person_verb_target_errors(authored: dict[str, Any] | None) -> list[str]:
+    """对人动词的 effect 指到的那个人**在不在这个世界的名册上**(3.13.0)。
+
+    🔴 **这一条只在 `complete=True` 上问**,而那不是"宽松一点":
+    一份 `--edit` 手上**根本没有名册** —— 它要装进去的那个世界里躺着「昂热」,
+    而这份文件里一个 `agents` 都没有。拿"这份文件里有没有这个人"去问一次编辑,
+    答案永远是"没有",于是**一份开得起来的编辑被这扇门报成红的**。
+
+    ⚠️ 这就是这个仓库那条老纪律的另一半:**比开机严是假红,比它松是假绿,
+    两种都比没有校验器更坏。** 上一版这一条混在 `world_plugin_errors` 里,
+    而那个函数在 `--edit` 上照跑。
+    """
+    if not authored:
+        return []
+    entries = authored.get("plugins")
+    if not isinstance(entries, list):
+        return []
+    from anima_world.person_verbs import effect_errors as _pv_effect_errors
+
+    known_agents = {
+        str(row.get("id") or "")
+        for row in (authored.get("agents") or ())
+        if isinstance(row, dict) and row.get("id")
+    }
+    if not known_agents:
+        # 一份**完整**世界而名册是空的 —— 那件事由本体那一层报,不在这儿再报一遍。
+        return []
+    out: list[str] = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        label = f"plugins[{i}] ({entry.get('id')})"
+        for j, row in enumerate(entry.get("person_verbs") or ()):
+            out += _pv_effect_errors(row, f"{label}.person_verbs[{j}]",
+                                     known_agents=known_agents)
+    return out
+
+
+#: 🔴 **只在「这是一整个世界」的时候才问的那几条**(3.13.0,验收 A 三轮 ②)。
+#:
+#: 判据一句话:**它要不要看这份文件里别的段?** 要 → 进这张表。
+#: 一次编辑(`validate world --edit` / `world check --edit`)手上只有它自己那几段,
+#: 拿"这份文件里有没有这个人"去问它,答案永远是"没有" —— 而那份编辑装得进去、
+#: 开得起来。**比开机严是假红**,和比它松一样坏,只是方向相反。
+COMPLETE_WORLD_CHECKS: tuple[Any, ...] = ()
+
+
 def _register_authored_layer_checks() -> None:
     """把那几个检查器填进 `AUTHORED_LAYER_CHECKS`。**加一个就往这儿加一行。**"""
-    global AUTHORED_LAYER_CHECKS
+    global AUTHORED_LAYER_CHECKS, COMPLETE_WORLD_CHECKS
+    COMPLETE_WORLD_CHECKS = (world_person_verb_target_errors,)
     AUTHORED_LAYER_CHECKS = (
         visibility_band_errors,
         world_card_errors,

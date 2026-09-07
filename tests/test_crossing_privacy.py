@@ -679,8 +679,18 @@ def test_指到不存在的角色_world_check那条路真的拒(tmp_path):
     **一句已经发给下游的承诺,兑现不了就是假承诺**(tool 正照着它填 effects)。
 
     ⚠️ 判据走**那扇门**,不是那个函数本身。
+
+    ⚠️ 3.13.0 后一批(A 三轮 ②)这一条从 `world_plugin_errors` 搬到了
+    `COMPLETE_WORLD_CHECKS` —— 因为它**要看别的段**(名册),
+    而一次编辑手上没有名册,在那儿问必然报红。**门没变,问的时候变了。**
     """
-    from anima_world.__main__ import world_plugin_errors
+    from anima_world.__main__ import (
+        COMPLETE_WORLD_CHECKS, world_person_verb_target_errors,
+    )
+
+    assert world_person_verb_target_errors in COMPLETE_WORLD_CHECKS, (
+        "这条闸不在那张表上 —— 那它就不在任何一扇门上,"
+        "而这条用例仍然会绿(它直接调那个函数)")
 
     world = {
         "agents": [{"id": "阿岚", "name": "阿岚"}],
@@ -688,7 +698,7 @@ def test_指到不存在的角色_world_check那条路真的拒(tmp_path):
             {"id": "请教", "label": "请教",
              "effects": [{"op": "sentiment_delta", "as": "没这个人"}]}]}],
     }
-    said = world_plugin_errors(world)
+    said = world_person_verb_target_errors(world)
     assert any("指不到" in line and "没这个人" in line for line in said), said
 
     ok = {**world, "plugins": [{"id": "duiren", "version": "1.0.0",
@@ -696,4 +706,5 @@ def test_指到不存在的角色_world_check那条路真的拒(tmp_path):
                                     {"id": "请教", "label": "请教",
                                      "effects": [{"op": "sentiment_delta",
                                                   "as": "$target"}]}]}]}
-    assert world_plugin_errors(ok) == [], world_plugin_errors(ok)
+    assert world_person_verb_target_errors(ok) == [], \
+        world_person_verb_target_errors(ok)
