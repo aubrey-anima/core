@@ -31,7 +31,12 @@ _SELF = {
     "id": "mine", "version": "1.0.0", "label": "自己",
     "facts": {"记号": {"bearer": "agent", "shape": "number", "default": 0.0,
                       "visibility": "self"}},
-    "edges": {"记住": {"from": "agent", "to": "agent"}},
+    # ⚠️ 两端都声明成 `player`(3.13.0,A 末轮 ③):这条触发器订的是
+    # `director_log` —— **那是玩家面事件**,`self` 与 `event.who` 都是玩家。
+    # 上一版这儿写着 `agent`,而 `link` 那一刻从前不查两端,于是一条
+    # 「起点声明成角色、实际连着玩家」的边照建 —— **那条边谁也读不到**,
+    # 而这条用例照绿。声明和它真连的东西对不上,是这一族 bug 的源头。
+    "edges": {"记住": {"from": "player", "to": "player"}},
     "triggers": [{"id": "记自己", "on": {"event": "director_log"},
                   "effects": [{"link": {"type": "mine.记住", "from": "self",
                                         "to": "event.who"}}]}],
