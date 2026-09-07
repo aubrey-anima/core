@@ -1441,3 +1441,17 @@ def test_屏那张钥匙表_是从编剧那张推出来的():
 
     assert H.SCREEN_GRAINS[:len(H.ACTED_GRAINS)] == H.ACTED_GRAINS
     assert set(H.SCREEN_GRAINS) - set(H.ACTED_GRAINS) == {"refused_seq"}
+
+
+def test_这道零外网的闸自己有牙():
+    """**一道没人验过的闸,和没有那道闸是同一种东西。**
+
+    ⚠️ 这条不连任何真地址 —— 它断的是"试图连"那一下**当场抛**。
+    """
+    import socket
+
+    with pytest.raises(RuntimeError, match="测试进程试图连外网"):
+        socket.create_connection(("api.openai.com", 443), timeout=1)
+    with pytest.raises(RuntimeError, match="测试进程试图连外网"):
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(
+            ("api.openai.com", 443))

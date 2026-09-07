@@ -77,6 +77,58 @@ def _machine_config_stays_out_of_your_home(tmp_path_factory, monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+#: 本机地址 —— 只有这些允许连(fakeredis 根本不开 socket,真要连的只可能是
+#: 有人在测试里起了一个本地服务)。
+_LOOPBACK = {"127.0.0.1", "::1", "localhost", "0.0.0.0"}
+
+
+@pytest.fixture(autouse=True)
+def _tests_never_touch_the_network(monkeypatch):
+    """🔴 **测试进程一个字节都不许发到外网。**
+
+    这条也是踩出来的,而且踩得比上面那条更难看:`_with_key` 那个辅助函数
+    往世界配置里写 `llm.api_key = "sk-test"`,于是背景槽解析出**真的**客户端 ——
+    全量跑一趟会真的去连 `api.openai.com`(401 一片)。
+    验收员照着跑的时候,**带出了一把真 key 和一个真 base_url**。
+
+    上面那条只清了**环境变量**,而这一把 key 是从**世界配置**来的 ——
+    **两条来源,只挡住一条,等于没挡。** 这一条挡在最后一层:socket 本身。
+
+    ⚠️ 挡在 socket 而不是"把每个用例的客户端都换成假的":需要人记住的隔离
+    迟早会漏掉一处,而漏掉的那一处**在 CI 上看起来只是慢**。
+    ⚠️ 报错要说人话:撞上它的人下一步该做的是**给那个用例装一个假客户端**,
+    不是把这道闸关掉。
+    """
+    import socket
+
+    def _refuse(address, *args, **kwargs):
+        host = ""
+        if isinstance(address, tuple) and address:
+            host = str(address[0])
+        raise RuntimeError(
+            f"测试进程试图连外网({host or address})。"
+            "**测试一律用假客户端** —— 往世界配置里写一把 key(哪怕是 sk-test)"
+            "会让背景槽解析出真的客户端,而那会真的发 HTTPS。"
+            "给这个用例装一个假的 `chat_service._background_llm`(见 "
+            "`tests/test_director_world.py::_with_key`),别关掉这道闸。"
+        )
+
+    real_connect = socket.socket.connect
+
+    def guarded_connect(self, address, *args, **kwargs):
+        host = str(address[0]) if isinstance(address, tuple) and address else ""
+        if host and host not in _LOOPBACK:
+            _refuse(address)
+        return real_connect(self, address, *args, **kwargs)
+
+    def guarded_create_connection(address, *args, **kwargs):
+        _refuse(address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect, raising=False)
+    monkeypatch.setattr(socket, "create_connection", guarded_create_connection,
+                        raising=False)
+
+
 @pytest.fixture
 def fresh_redis():
     """一个干净的 fakeredis —— world.db 退役后,测试世界的家。
