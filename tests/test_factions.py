@@ -153,3 +153,37 @@ def test_作者写不出叛出改投_而那不是漏了(tmp_path):
     assert seg["factions.member_of"] == ["link"], seg
     assert "leave" in contract_payload()["factions"]["deferred"], (
         "关掉一条路而不说「放人走去哪儿找」,下一个人会以为是漏了")
+
+
+def test_一条拍也叛不出_两扇门都拒(tmp_path):
+    """🔴 **A 四轮 ①**:上一版那道闸只写在插件效果那一层,**剧情拍整个绕过它** ——
+    一条三行的拍 `unlink factions.member_of` 装得进去、跑得动、
+    `ops_applied` 里有它,而「站了就回不去」同时写在 gloss、CHANGELOG 和契约三处。
+
+    **写在一扇门上的规矩不是规矩。** 判断挪进内核(`apply_edge_effect`),
+    拍与动词共用一份;加载期那一半也要说 —— **一条装得进去、跑起来什么都不做的拍,
+    比一条装不进去的坏得多**。
+    """
+    from anima_world.__main__ import authored_layer_errors
+
+    beat = {"id": "叛出", "for_each": {"node": "player"},
+            "trigger": {"at": {"day": 0, "minute_of_day": 5}},
+            "payload": [{"op": "unlink", "type": "factions.member_of",
+                         "from": "player", "to": "group:狮心会"}]}
+    said = authored_layer_errors({**_WORLD, "beats": [beat]}, complete=True)
+    assert any("关着的" in line for line in said), (
+        f"一条拍写得出叛出,而离线那两扇门一声不吭:{said}")
+
+    # 运行期那一半:就算绕过加载期(库里那份老拍),边也不许动
+    with _world(tmp_path, "beatleave") as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        assert _join(world, "p1", "group:狮心会") is True
+        got = world.scheduler._beat_edge(
+            {"op": "unlink", "type": "factions.member_of",
+             "from": "player:p1", "to": "group:狮心会"})
+        after = world.player_faction("p1")
+
+    assert got is None, "拍把那条边摘掉了 —— 而它该连 `ops_applied` 都进不去"
+    assert after["faction"] == "group:狮心会", (
+        f"站过的那一边被一条拍摘掉了:{after}")

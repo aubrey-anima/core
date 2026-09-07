@@ -2174,10 +2174,10 @@ def shared_edge_types() -> frozenset[str]:
     那条边不在 `edge_types` 里,`apply_edge_effect` 当场不连并留一句 warning。
     在这儿拒的话,一份**开得起来**的世界会被离线那两扇门报成红的 —— 假红。
     """
-    return frozenset(_shared_edge_ops())
+    return frozenset(shared_edge_ops())
 
 
-def _shared_edge_ops() -> dict[str, tuple[str, ...]]:
+def shared_edge_ops() -> dict[str, tuple[str, ...]]:
     """公共边 → **这条边上放开哪几个 op**(3.13.0,A 末轮 ④)。
 
     🔴 **不是每条公共边都三个 op 全开。** `factions.member_of` 上
@@ -2226,10 +2226,10 @@ def _parse_link_effect(
     # 🆕 3.13.0:出厂插件的**公共边**照连(`clues.knows` / `factions.member_of`)。
     # 它们由引擎声明,而声明的目的**就是让作者去连** —— 见 `shared_edge_types`。
     if edge_type in shared_edge_types():
-        if kind not in _shared_edge_ops()[edge_type]:
+        if kind not in shared_edge_ops()[edge_type]:
             errors.append(
                 f"{where}.{kind}.type:`{edge_type}` 这条出厂公共边上 `{kind}` "
-                f"是关着的,只放开 {list(_shared_edge_ops()[edge_type])} —— "
+                f"是关着的,只放开 {list(shared_edge_ops()[edge_type])} —— "
                 "「站了就回不去」是产品裁决(3c §2.10 ④),不该由一条动词推翻;"
                 "要放人走,那件事在批 4(`contract.factions.deferred` 的 `leave`)"
             )

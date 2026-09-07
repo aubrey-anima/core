@@ -6047,7 +6047,12 @@ class Scheduler:
         store = self.edge_store
         if store is None:
             return False
-        kind = spec.get("op")
+        # ⚠️ **没写 `op` 就是 `link`** —— 这一句从前是隐式的(底下那一支是
+        # 兜底的 link),而 3.13.0 起有一道**按 op 判**的闸,隐式的默认值
+        # 到了那儿就成了 `None`:同一个调用,加不加 `"op": "link"` 两个结果。
+        # 把它写出来,而不是在闸那边补一个 `or "link"`(那样下一道按 op 判的闸
+        # 还要再补一次)。
+        kind = str(spec.get("op") or "link")
         edge_type = str(spec.get("type") or "")
         declared = self.edge_types.get(edge_type)
         # 🔴 **没人声明过的边类型,一条都不连**(3.13.0,验收 A 整体 ③)。
@@ -6066,6 +6071,28 @@ class Scheduler:
         src = self._resolve_node(spec.get("from"), namespace, event, owner)
         dst = self._resolve_node(spec.get("to"), namespace, event, owner)
         if not edge_type or (kind != "unlink" and (not src or not dst)):
+            return False
+        # 🔴 **公共边上关掉的那几个 op,在这儿拒**(3.13.0,A 四轮 ①,调度台裁)。
+        #
+        # 上一版这道判断只写在插件效果那一层(`plugins._parse_link_effect`),
+        # 于是**剧情拍那扇门整个绕过它**:一条三行的拍 `unlink factions.member_of`
+        # 装得进去、跑得动、`ops_applied` 里有它 —— 而「站了就回不去」这句话
+        # 同时写在 `factions` 的 gloss、CHANGELOG 和契约三处。
+        # **写在一扇门上的规矩不是规矩** —— 和 ③ 那条「拍与动词共用同一个函数」
+        # 逐字同一条理由:两份判断迟早分岔,而分岔的样子是安静的。
+        #
+        # ⚠️ **拒的是这条口子,不是内核直接写库那条路**:抹除
+        # (`_erase_player_edges`)走的是 `edge_store.unlink`,它照旧扫得干净 ——
+        # 一个已经抹掉的人不许以边的形式留在世界里,那条纪律比这一条更硬。
+        # 批 4 那条「放人走」要走哪扇门,由它自己决定(`factions.deferred.leave`)。
+        from anima_world.plugins import shared_edge_ops
+
+        allowed = shared_edge_ops().get(edge_type)
+        if allowed is not None and kind not in allowed:
+            logger.warning(
+                "`%s` 这条出厂公共边上 `%s` 是关着的(只放开 %s)—— 这一次不算数。"
+                "「站了就回不去」是产品裁决(3c §2.10 ④);放人走在批 4",
+                edge_type, kind, list(allowed))
             return False
         if kind == "unlink":
             if src and dst:

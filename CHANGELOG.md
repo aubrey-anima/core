@@ -244,7 +244,14 @@ A 当着 B 的面做一件事 → B 那一屏开口,并**指名道姓**;A 在别
   新 `contract.plugins.shared_edge_ops`:公共边**不是三个 op 全开**,
   `factions.member_of` 上只放开 `link`(写了 `unlink`/`transfer` 加载期当场拒);
   `clues.knows` 三个照开 —— 它没有这条裁决,**拦过头和漏掉一样坏**。
-  ⚠️ 关的是**这条口子**(别的插件连它),不是内核本身;
+  ⚠️ **而这道闸第一版只装在插件效果那一层,剧情拍整个绕过它**(A 四轮 ① 逮的):
+  一条三行的拍 `unlink factions.member_of` 装得进去、跑得动、`ops_applied` 里有它
+  —— 而「站了就回不去」同时写在 gloss、CHANGELOG 和契约三处。
+  **写在一扇门上的规矩不是规矩。** 判断挪进内核 `apply_edge_effect`,
+  动词/剧情拍/插件触发器**共用一份**;加载期那一半在 `beats._validate_payload`
+  (**一条装得进去、跑起来什么都不做的拍,比一条装不进去的坏得多**)。
+  ⚠️ 关的是**这条口子**(别的插件连它),不是内核直接写库那条路 ——
+  抹除走 `edge_store.unlink`,照旧扫得干净;
   「放人走」进 `factions.deferred` 的 `leave`(批 4)——
   **关掉一条路而不说去哪儿找,下一个人会以为是漏了**。
   那句 gloss 也改成两道闸合起来说:`exclusive` 拦第二次站队,

@@ -145,10 +145,10 @@ def test_公共边上放开哪几个op_和引擎逐格相等():
     多抄一个,作者照它写下一条加载期被拒的动词(假红灯);
     少抄一个,他绕开一条其实写得出的路。
     """
-    from anima_world.plugins import _shared_edge_ops
+    from anima_world.plugins import shared_edge_ops
 
     text = _text()
-    real = _shared_edge_ops()
+    real = shared_edge_ops()
     found = re.search(
         r"`contract\.plugins\.shared_edge_ops` 判:\n\n(.+?)\n\n", text, re.S)
     assert found, "§3.71(b-2) 那张 `shared_edge_ops` 表换了写法 —— 这道闸靠它定位"

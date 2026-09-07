@@ -598,6 +598,22 @@ def _validate_payload(payload: Any, label: str, *, per_player: bool = False) -> 
             line = op.get("line")
             if line is not None and not isinstance(line, str):
                 errors.append(f"{op_label}: hail 的 'line' 要是一段文本")
+        if kind in ("link", "unlink", "transfer"):
+            # 🔴 **公共边上关掉的那几个 op,加载期就说**(3.13.0,A 四轮 ①)。
+            # 运行期那道闸(`Scheduler.apply_edge_effect`)已经拦得住它,而
+            # **一条装得进去、跑起来什么都不做的拍,比一条装不进去的坏得多**:
+            # 前者要作者去线上一次次试,后者当场告诉他。
+            # ⚠️ 判断读的是**同一张表**(`plugins.shared_edge_ops`),不是抄一份。
+            from anima_world.plugins import shared_edge_ops
+
+            allowed = shared_edge_ops().get(str(op.get("type") or ""))
+            if allowed is not None and kind not in allowed:
+                errors.append(
+                    f"{op_label}: `{op.get('type')}` 这条出厂公共边上 `{kind}` "
+                    f"是关着的,只放开 {list(allowed)} —— 「站了就回不去」是"
+                    "产品裁决(3c §2.10 ④),一条拍不该推翻它;"
+                    "放人走那件事在批 4(`contract.factions.deferred` 的 `leave`)"
+                )
         if kind in ("memory", "broadcast_memory"):
             errors.extend(_validate_memory_fields(op, op_label))
         if kind == "agent_join":

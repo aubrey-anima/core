@@ -9487,7 +9487,7 @@ def contract_payload() -> dict[str, Any]:
         EDGE_VERB_EFFECTS,
         EDGE_EFFECT_KEYS,
         EDGE_KEYS,
-        _shared_edge_ops,
+        shared_edge_ops,
         shared_edge_types,
         EMIT_KEY_REQUIRES,
         EMIT_KEYS,
@@ -9710,9 +9710,11 @@ def contract_payload() -> dict[str, Any]:
                 "不是插件自己判(放行的样子是安静的:两条边同时挂着,"
                 "`plugin list` 看不出来,而提示词里他同时属于两个阵营);"
                 "② 这条边在公共边那一格上**只放开 `link`** "
-                "(`plugins.shared_edge_ops`)—— 少了这一道,"
-                "**作者写一条 `unlink` 就能让人叛出改投**,"
+                "(`plugins.shared_edge_ops`),而这一道**在内核里**"
+                "(`apply_edge_effect`)—— **动词、剧情拍、插件触发器共用同一份**;"
+                "少了它,作者写一条 `unlink`(或一条三行的拍)就能让人叛出改投,"
                 "而那是拿一条动词推翻一条产品裁决(3c §2.10 ④)。"
+                "⚠️ 拒的是这条口子,不是内核直接写库那条路:**抹除照旧扫得干净**。"
                 "放人走这件事在批 4(`deferred` 里的 `leave`)。"
                 "🔴 **计票 / 人数上限 / 禁地 / 全城声望这一版一行都没有**"
                 "(`deferred`)—— 四样全是**聚合或 gates**,那是批 4。"
@@ -10213,7 +10215,7 @@ def contract_payload() -> dict[str, Any]:
             # 「站了就回不去」是产品裁决(3c §2.10 ④),而放开公共边之后
             # **一条作者写的 `unlink` 就能推翻它**。照这一格判,别照上一格猜。
             "shared_edge_ops": {k: list(v) for k, v in
-                                sorted(_shared_edge_ops().items())},
+                                sorted(shared_edge_ops().items())},
             "rule_required_keys": list(RULE_REQUIRED_KEYS),
             "rule_keys": list(RULE_KEYS),
             "rule_every_keys": list(RULE_EVERY_KEYS),
