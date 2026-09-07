@@ -544,3 +544,156 @@ def test_三条发射点_没有一条发得出空话的敲门(tmp_path):
         == len(H.HAIL_FALLBACK_LINES)
     assert H.hail_fallback_line(0) == H.hail_fallback_line(
         len(H.HAIL_FALLBACK_LINES)), "同一份日志重放两遍要得到同一句"
+
+
+def test_一拍为他响了_他没动手_编剧照旧要写(tmp_path):
+    """🔴 **验收 A 二轮 ①:我修 A⑦ 时收过头了。**
+
+    「旁观者不吃编剧那一拍」是对的,而我的落法是把 `(acted_since or recap)`
+    **整个砍成 `acted_since`** —— 可 `recap` 从 3.12.1 就在,**收的不只是撞见**:
+    「一拍为他响了、而他没动手」从此**编剧一个字不写**。
+
+    **收窄一条判据时,要问它原来收的是哪几样,不是只看眼前那一样。**
+    """
+    with _showcase(tmp_path, "beat") as world:
+        world.player_move("p1", "cafe", display_name="路明非")
+        world.tick(3)
+        world.host_turn("p1")
+        before = len([e for e in world.events() if e["type"] == "director_log"])
+        # 一件**为他发生**的事(不是他动的手):给他一笔钱。
+        # ⚠️ 屏靠**新的一天**开(`new_day` 那个时刻)—— 他确实没动手,
+        # 而这正是 A 点名的那种情形。
+        world.player_topup("p1", 50)
+        world.tick(288)
+        turn = world.host_turn("p1")
+        after = len([e for e in world.events() if e["type"] == "director_log"])
+
+    assert turn["scene"]["source"] != "cached", "有事为他发生了,而屏没动"
+    assert after > before, (
+        "一件为他发生的事(recap 非空)而编剧一个字没写 —— "
+        "A⑦ 那一改把 `recap` 那一支也砍掉了")
+
+
+def test_白按那一屏_照旧不调模型_而且撞见不丢(tmp_path):
+    """🔴 **验收 A 二轮 ②:我修 A⑥ 时把整句吞了还推上了模型路。**
+
+    上一版为了不吞掉撞见,我把 `only_refused` 直接翻成 `False` ——
+    于是**屋里有人动一下,白按屏就变成 `source=mock` 走模型路,
+    而「你为什么白按」那句一字不剩**。
+    裁决写死的是「不调模型」,那句话要**全时成立**。
+    """
+    with _showcase(tmp_path, "refuse") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.player_topup("p2", 100)
+        world.player_buy("p2", "cafe", "garden_shears")
+        world.host_turn("p2")
+        world.player_tool("p2", "interact",
+                          {"target": "tree:harbor_oak", "verb": "嫁接"})
+        world.host_turn("p2")
+
+        _act(world, "p1")           # 屋里有人动了一下
+        got = world.player_tool("p2", "interact",
+                                {"target": "tree:harbor_oak", "verb": "嫁接"})
+        assert got["ok"] is False, got
+        turn = world.host_turn("p2")
+
+    # ① 照旧是模板路 —— 「不调模型」全时成立
+    assert turn["scene"]["source"] == "template", turn["scene"]["source"]
+    # ② 「你为什么白按」那句还在
+    assert "已经在做" in turn["scene"]["text"], turn["scene"]["text"]
+    # ③ 撞见那一行也没丢
+    assert "楚子航" in turn["scene"]["text"], turn["scene"]["text"]
+
+
+def test_回执和屏上是同一句_长动词零效果时也一样(tmp_path):
+    """🔴 **验收 A 二轮 ③:「三处并一处」并的是产地,而读它的两处也得给同一个参数。**
+
+    `recap_lines` 那处调 `engage_line(verb, target)` **没传 `changed=`** ——
+    于是同一件事:**回执说「什么都还没动」,屏上说「这得花上一会儿」**。
+    """
+    from _worldfile import write_seed_file
+
+    plug = {"id": "hui", "version": "1.0.0", "label": "社团",
+            "verbs": {"拉票": {"target": "tree", "label": "拉票", "duration": 12,
+                              "occupies": True}}}
+    bare = {"agents": [{"id": "阿岚", "name": "阿岚", "location": "cafe",
+                        "personality": "安静"}],
+            "locations": [{"id": "cafe", "name": "咖啡馆", "description": "小店"}],
+            "kinds": [{"id": "tree", "gloss": "一棵树",
+                       "affordances": {"look": {}}}],
+            "entities": [{"id": "tree:oak", "name": "老橡树", "location": "cafe"}]}
+    path = write_seed_file(tmp_path / "same.cyberworld", {**bare, "plugins": [plug]})
+    with open_world_at(str(tmp_path / "same.db"), world_file=path,
+                       force_mock_llm=True) as world:
+        world.player_move("p1", "cafe")
+        world.tick(2)
+        world.host_turn("p1")
+        got = world.player_tool("p1", "interact",
+                                {"target": "tree:oak", "verb": "拉票"})
+        said = str(got.get("detail", {}).get("said") or got.get("text") or "")
+        screen = world.host_turn("p1")["scene"]["text"]
+
+    assert "什么都还没动" in said, said
+    assert said.rstrip("。") in screen or "什么都还没动" in screen, (
+        f"回执和屏上两种说法:\n  回执 {said!r}\n  屏   {screen!r}")
+
+
+def test_看不见的state_change_不许把旁观者的屏叫醒(tmp_path):
+    """🔴 **验收 A 二轮 ④**:整个 `state_change` 进表,而**只有 `location_join`
+    印得出字** —— 于是一条关系变动就把旁观者的屏**白叫醒**:
+    屏重开了,而撞见那几行是空的。
+
+    **一张「哪几种事看得见」的表,收了印不出字的事件,就是在白叫醒人。**
+    """
+    from anima_world import host as H
+
+    assert H.crosses_here("state_change", {"kind": "location_join"}) is True
+    assert H.crosses_here("state_change", {"kind": "sentiment_delta"}) is False
+    assert H.crosses_here("entity_interaction", {}) is True
+    assert H.crosses_here("payment", {}) is False
+
+    with _showcase(tmp_path, "quiet") as world:
+        for pid, name in (("p1", "楚子航"), ("p2", "路明非")):
+            world.player_move(pid, "cafe", display_name=name)
+        world.tick(3)
+        world.host_turn("p1")
+        world.host_turn("p2")
+        # 一条**看不见的** state_change:关系变了
+        agent = next(iter(world.scheduler.agents))
+        for event in (world.scheduler._expand_beat_op(
+                {"op": "sentiment_delta", "as": agent,
+                 "target": "player:p1", "delta": 0.2}) or ()):
+            world.scheduler._record_and_deliver(event)
+        world.tick(1)
+        turn = world.host_turn("p2")
+
+    assert turn["scene"]["source"] == "cached", (
+        f"一条看不见的 state_change 把旁观者的屏叫醒了:{turn['scene']['source']}")
+
+
+def test_指到不存在的角色_world_check那条路真的拒(tmp_path):
+    """🔴 **验收 A 二轮 ⑤**:`effect_errors(known_agents=…)` **全仓零生产调用方**
+    —— 那条承诺只活在 CHANGELOG 和 FOR-STUDIO 里,而 `world check` 照答 `[]`。
+    **一句已经发给下游的承诺,兑现不了就是假承诺**(tool 正照着它填 effects)。
+
+    ⚠️ 判据走**那扇门**,不是那个函数本身。
+    """
+    from anima_world.__main__ import world_plugin_errors
+
+    world = {
+        "agents": [{"id": "阿岚", "name": "阿岚"}],
+        "plugins": [{"id": "duiren", "version": "1.0.0", "person_verbs": [
+            {"id": "请教", "label": "请教",
+             "effects": [{"op": "sentiment_delta", "as": "没这个人"}]}]}],
+    }
+    said = world_plugin_errors(world)
+    assert any("指不到" in line and "没这个人" in line for line in said), said
+
+    ok = {**world, "plugins": [{"id": "duiren", "version": "1.0.0",
+                                "person_verbs": [
+                                    {"id": "请教", "label": "请教",
+                                     "effects": [{"op": "sentiment_delta",
+                                                  "as": "$target"}]}]}]}
+    assert world_plugin_errors(ok) == [], world_plugin_errors(ok)

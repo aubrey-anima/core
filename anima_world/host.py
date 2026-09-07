@@ -198,7 +198,10 @@ CROSSING_EVENT_TYPES = (
     # 🆕 3.13.0(调度台口径,验收 A ④):**他走进来也算撞见。**
     # 上面那条注释本来就写着「走进来 / 走出去」,而**只有 `travel` 的话
     # 到站那一下没人看见** —— `travel` 的 `loc` 是出发地,B 在目的地什么都收不到。
-    # 到站是 `state_change{kind: "location_join"}`(到达那一刻补发的那一条)。
+    # 🔴 **只认 `location_join` 那一支**(验收 A 二轮 ④):整个 `state_change`
+    # 进表的下场是**一起做事收尾那条 `sentiment_delta` 把旁观者的屏白叫醒**
+    # —— 屏重开了,而撞见那几行是空的(`crossing_lines` 只给 `location_join`
+    # 印字)。**一张"哪几种事看得见"的表,收了印不出字的事件就是在白叫醒人。**
     "state_change",
     "entity_interaction",  # 他点了一个动词
     "entity_engage",       # 他起了个长动词的头
@@ -209,6 +212,27 @@ CROSSING_EVENT_TYPES = (
 #: 🔴 它进提示词也进屏(验收 A ③:一屏 20 行同一句),而**截断了必须吭声**
 #: (和 perception 的 `overflow`、`recap_lines` 的截断逐字同一条)。
 CROSSING_LIMIT = 6
+
+#: `state_change` 那一族里,**只有这一种算撞见**(3.13.0,验收 A 二轮 ④)。
+#: 关系变了、人设被改写都不是"看得见的动作"(而且多半是别人的账)。
+CROSSING_STATE_KINDS = ("location_join",)
+
+
+def crosses_here(event_type: str, payload: dict[str, Any]) -> bool:
+    """这一条事件**看得见吗** —— 一处判断,两个读者。
+
+    🔴 投影那一格(「这儿有人动过手」的水位)和 `crossing_lines`(印字那一处)
+    **必须问同一句话**(验收 A 二轮 ④):上一版投影拿整张
+    `CROSSING_EVENT_TYPES` 当水位,而印字那处只给 `location_join` 印 ——
+    于是一条 `state_change{sentiment_delta}` **把旁观者的屏白叫醒**:
+    屏重开了,而撞见那几行是空的。
+    """
+    kind = str(event_type or "")
+    if kind not in CROSSING_EVENT_TYPES:
+        return False
+    if kind == "state_change":
+        return str((payload or {}).get("kind") or "") in CROSSING_STATE_KINDS
+    return True
 
 ACTED_GRAINS = ("move_seq", "chat_seq")
 
@@ -424,9 +448,7 @@ def crossing_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
                 out.append(f"{name}往{said}去了。")
             continue
         if kind == "state_change":
-            # 到站那一条(`location_join`)—— **别的 `state_change` 一概不算**:
-            # 关系变了、人设被改写都不是"看得见的动作"(而且多半是别人的账)。
-            if str(payload.get("kind") or "") != "location_join":
+            if not crosses_here(kind, payload):
                 continue
             out.append(f"{name}走了进来。")
             continue
@@ -526,9 +548,15 @@ def move_lines(rows: Sequence[dict[str, Any]], *, player_key: str,
         if kind in ("entity_interaction", "entity_engage") and who == player_key:
             verb = str(payload.get("verb_label") or payload.get("verb") or "")
             target = str(payload.get("target_name") or payload.get("target") or "")
-            said = (engage_line(verb, target) if kind == "entity_engage"
-                    else interaction_line(verb, target,
-                                          changed=_moved_something(payload)))
+            # 🔴 **两条都要传 `changed=`**(3.13.0,验收 A 二轮 ③):
+            # 上一版只有 `interaction_line` 那半传了 —— 于是同一件事,
+            # **回执说「什么都还没动」、屏上说「这得花上一会儿」**。
+            # 「三处并一处」并的是产地,而**读它的两处也得给同一个参数**,
+            # 否则并完照样两种说法。
+            moved = _moved_something(payload)
+            said = (engage_line(verb, target, changed=moved)
+                    if kind == "entity_engage"
+                    else interaction_line(verb, target, changed=moved))
             if said:
                 out.append(said)
             continue
@@ -698,7 +726,7 @@ def recap_lines(
                 continue
             verb = str(payload.get("verb_label") or payload.get("verb") or "")
             target = str(payload.get("target_name") or payload.get("target") or "")
-            said = engage_line(verb, target)
+            said = engage_line(verb, target, changed=_moved_something(payload))
             if said:
                 lines.append(said)
             continue

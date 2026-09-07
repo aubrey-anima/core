@@ -76,7 +76,11 @@ TARGET_PLACEHOLDER = "$target"
 
 #: `effects` 里哪几个字段是**指人的**(会被占位符替换)。
 #: ⚠️ 只替换这几格,不做全文替换:一个叫 `$target` 的**物品 id** 不该被改写。
-TARGET_FIELDS = ("as", "agent_id", "target", "from", "to", "who")
+#: ⚠️ **只放真有消费方的那几格**(3.13.0,验收 A 二轮 ⑦):
+#: 上一版还列着 `who`,而**没有任何一个 op 用这个字段名** ——
+#: 一格报得出、却永远不会被替换的名字,会让作者写下 `{"who": "$target"}`
+#: 然后发现什么都没发生。**契约里的死格和一句假话是同一种东西。**
+TARGET_FIELDS = ("as", "agent_id", "target", "from", "to")
 
 
 def resolve_effects(effects: Any, *, agent_id: str) -> list[dict[str, Any]]:

@@ -6452,8 +6452,11 @@ class Scheduler:
             return True
         if getattr(outcome, "consumed", None):
             return True
+        # ⚠️ `_spent` 只给这两格 —— 上一版还查了一个 `"spent"`,**那是个死格**
+        # (验收 A 二轮 ⑦)。查一个不存在的键不会报错,只会**永远答 False**,
+        # 而那正是这一族最难查的形状。
         spent = self._spent(outcome) or {}
-        return any(spent.get(k) for k in ("me_delta", "me_changed", "spent"))
+        return any(spent.get(k) for k in ("me_delta", "me_changed"))
 
     def _player_said(self, agent_id: str, verb: str, target: str,
                      affordance: Any, *, started: bool = False,

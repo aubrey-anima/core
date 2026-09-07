@@ -6734,7 +6734,15 @@ tool 真敲之后带回来的一条,写死在这儿免得下一个人**等一个
 
 ### (b) 哪几种事会被撞见 —— `contract.director.crossing_event_types`
 
-    travel · entity_interaction · entity_engage · person_verb.accepted
+    travel · state_change(**只有 location_join**)· entity_interaction ·
+    entity_engage · person_verb.accepted
+
+⚠️ **`state_change` 只认到站那一支**(`contract.director.crossing_state_kinds`)
+—— 关系变了、人设被改写都不是"看得见的动作";整族都收的下场是
+**旁观者的屏被白叫醒**(屏重开了,而撞见那几行是空的)。
+⚠️ **一屏最多 `contract.director.crossing_limit` 行(今天 6),截断会多出一行
+「这儿还有 N 件事没细说。」** —— 和 perception 的 `overflow` 同一条:
+截断了必须吭声。同一句话**只说一遍**(去重)。
 
 🔴 **收的是「看得见的动作」,不是「发生过的事」**:`payment`(钱包变了)、
 `item_transfer`(拿到东西)**一条都不在里面** —— 站在旁边的人看不见别人的账,

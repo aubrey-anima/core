@@ -46,6 +46,8 @@ from anima_world.director import (
 from anima_world.host import (
     ACTED_GRAINS as HOST_ACTED_GRAINS,
     CROSSING_EVENT_TYPES as HOST_CROSSING_EVENT_TYPES,
+    CROSSING_LIMIT as HOST_CROSSING_LIMIT,
+    CROSSING_STATE_KINDS as HOST_CROSSING_STATE_KINDS,
     PLAYER_MOVE_EVENT_TYPES, SCREEN_GRAINS as HOST_SCREEN_GRAINS,
 )
 # `PackInstallError` 住在 `world_package` 而不是这儿 —— `python -m` 会把本文件
@@ -1134,11 +1136,33 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
         PluginError, borrowed_kind_errors, order_plugins, parse_plugins,
     )
 
+    # 🔴 **「指到不存在的角色当场拒」那句话要真的接上线**
+    # (3.13.0,验收 A 二轮 ⑤)。`effect_errors(known_agents=…)` 上一版
+    # **全仓零生产调用方** —— `plugins.py` 那层有意不认识世界,而**认识世界的
+    # 这一层没往下传**:于是那条承诺只活在 CHANGELOG 和 FOR-STUDIO 里,
+    # 而 `world check` 对一个指到「没这个人」的 effect 照答 `[]`。
+    # **一句已经发给下游的承诺,兑现不了就是假承诺** —— tool 正照着它填 effects。
+    known_agents = {
+        str(row.get("id") or "")
+        for row in (authored.get("agents") or ())
+        if isinstance(row, dict) and row.get("id")
+    }
+    from anima_world.person_verbs import effect_errors as _pv_effect_errors
+
+    extra: list[str] = []
+    for i, entry in enumerate(entries if isinstance(entries, list) else ()):
+        if not isinstance(entry, dict):
+            continue
+        label = f"plugins[{i}] ({entry.get('id')})"
+        for j, row in enumerate(entry.get("person_verbs") or ()):
+            extra += _pv_effect_errors(
+                row, f"{label}.person_verbs[{j}]",
+                known_agents=(known_agents or None))
     try:
         plugins = parse_plugins(entries, subscribable=SUBSCRIBABLE_EVENTS)
         ordered = order_plugins(plugins)
     except PluginError as exc:
-        return list(exc.errors)
+        return list(exc.errors) + extra
     # 🔴 **开机那条路上还有第三处拒绝,而它从前不在这扇门上**(2026-08-27):
     # 动词借的那个种类到底存不存在。它判的是插件与**作者写的 `kinds`** 之间的
     # 引用,所以只有拿到整份作者层才判得动 —— 而这个函数正好拿到了。
@@ -1148,7 +1172,7 @@ def world_plugin_errors(authored: dict[str, Any] | None) -> list[str]:
         ordered,
         {str(row.get("id") or "") for row in (authored.get("kinds") or [])
          if isinstance(row, dict)},
-    )
+    ) + extra
 
 
 #: 一个 pack 的 id 长什么样。**照 `PLUGIN_ID_PATTERN` 那条先例给一格正则**,
@@ -9473,6 +9497,12 @@ def contract_payload() -> dict[str, Any]:
             # **拿交织当剧透**。
             # ⚠️ **同地才算**(同一个 point,不放宽到父节点)。
             "crossing_event_types": list(HOST_CROSSING_EVENT_TYPES),
+            # ⚠️ `state_change` 那一族里**只有这一种算**(到站)——
+            # 报出来,免得下游以为整族都算(验收 A 二轮 ④/⑥)。
+            "crossing_state_kinds": list(HOST_CROSSING_STATE_KINDS),
+            # 一屏最多报几行,以及**截断了会多出来的那一句**。
+            "crossing_limit": HOST_CROSSING_LIMIT,
+            "crossing_overflow_gloss": "截断时最后一行是「这儿还有 N 件事没细说。」",
             # 玩家面事件进插件触发器时被剥掉的那几格,以及"只许作用于当事人"那条。
             "private_payload_keys": list(PLAYER_FACING_PRIVATE_KEYS),
             "player_facing_events": list(PLAYER_FACING_EVENTS),

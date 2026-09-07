@@ -9185,8 +9185,15 @@ class World:
             # 读的是开屏用的**同一个水位**,不另攒一份。
             # 🆕 3.13.0(批 3c §2.1):**他在旁边看见的那几件事**排在自己那几条后面
             # —— 先说「你做了什么」,再说「你看见谁做了什么」。
+            crossing: list[str] = []
             if last and place:
-                recap = list(recap) + self._crossing_recap(
+                # 🔴 **撞见那几行单独一份**(3.13.0,验收 A 二轮 ①)。
+                # 上一版把它们拼进 `recap` 之后再拿 `recap` 当"他动了"的判据,
+                # 于是我为了修那条(旁观者不吃编剧那一拍)**把整个 `recap`
+                # 那一支砍掉了** —— 而 `recap` 从 3.12.1 就在,收的**不只是撞见**:
+                # 「一拍为他响了、而他没动手」从此**编剧一个字不写**。
+                # **收窄一条判据时,要问它原来收的是哪几样,不是只看眼前那一样。**
+                crossing = self._crossing_recap(
                     pid, since_seq=int(last.get("seq") or 0), place=place)
             if last and chat_seq != int(last.get("chat_seq") or 0) and chat_with:
                 said = host_mod.chat_line(self.scheduler.agent_display_name(chat_with))
@@ -9251,7 +9258,10 @@ class World:
             #   变成"世界为他写的一拍",就是把撞见悄悄升级成了共享剧情。
             # 编剧只在**他自己**操作时写(`acted_since`),而他这一段看见的事
             # 照旧进输入(`recap` 里就有)。
-            ) if (acted_since and not only_refused) else ""
+            # ⚠️ **判据是「他动了手,或者有别的事为他发生」** —— 而**撞见不算**
+            # (调度台口径 A ⑦:同地 n 个旁观者 = 每次操作 n 次调用,
+            # 而撞见不是剧情)。`recap` 是他自己那几条,`crossing` 是别人的。
+            ) if ((acted_since or recap) and not only_refused) else ""
             if said:
                 # 编剧那一句排在回顾**最后**:回顾说的是"刚发生了什么",
                 # 而这一句是"于是世界现在做了什么" —— 顺序就是因果。
@@ -9265,17 +9275,24 @@ class World:
             # 下一屏 `cached`,谁也不会再说一次。
             # 判据:白按之前那几行撞见,要么这一屏说,要么下一屏说 ——
             # **不许两屏都不说**。这里选"这一屏说":他刚按过,正看着这块屏。
-            if only_refused and recap:
-                only_refused = False
+            # 撞见那几行拼在自己那几条后面 —— 先说「你做了什么」,
+            # 再说「你看见谁做了什么」。**拼在这里**:上面那道编剧的守卫
+            # 必须只看他自己那几条。
+            recap = list(recap) + list(crossing)
             if only_refused:
                 # **模板那一条路**:一句说清他为什么白按,后面接原样的场景描述。
                 # ⚠️ 不走 `_host_scene_text` 的 LLM 那一半 —— 裁决写死了"不调模型"。
+                # 🔴 **白按那一屏照旧走模板路,但要带上 `recap`**
+                # (3.13.0,验收 A 二轮 ②)。上一版我为了不吞掉撞见,
+                # 把 `only_refused` 直接翻成 False —— 于是**屋里有人动一下,
+                # 白按屏就变成 `source=mock` 走模型路,而「你为什么白按」
+                # 那句一字不剩**。裁决写死的是「不调模型」,那句话要**全时成立**。
                 text = host_mod.refusal_line(refused_why, seq=refused_seq) + \
                     host_mod.mock_scene(
                         place_name=place_name, day=day, hour=hour,
                         options=options,
                         going_to=str((places.get(going) or {}).get("name") or going),
-                        recap=[], in_transit=in_transit)
+                        recap=recap, in_transit=in_transit)
                 source = "template"
                 said = ""
             else:
@@ -10265,7 +10282,7 @@ class World:
                     here_from = int(e.seq or 0)
                 elif e.type == "travel" and str(payload.get("to") or "") != place:
                     here_from = max(here_from, int(e.seq or 0) + 1)
-            if e.type in host_mod.CROSSING_EVENT_TYPES and str(e.loc or "") == place:
+            if host_mod.crosses_here(e.type, payload) and str(e.loc or "") == place:
                 candidates.append(e)
         rows = [
             {"type": e.type, "who": e.who, "payload": e.payload}
@@ -10276,6 +10293,8 @@ class World:
         # ⚠️ **只给这几条事件的当事人取名字**(验收 A ⑨):上一版对**每个**
         # 不在场的玩家都走一遍 `_relation_name`(它会扫 `contact_store.all()`)——
         # 而这一屏只需要**真出现在这几行里**的那几个人。
+        # ⚠️ **取自筛完的 `rows`,不是筛前的 `candidates`**(验收 A 二轮 ⑦):
+        # 筛前那份里有"他不在场时"的那几条,拿它去取名字就是多扫几个人。
         actors = {str(r.get("who") or "") for r in rows} - {player_key}
         names: dict[str, str] = {}
         for actor in actors:

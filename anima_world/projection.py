@@ -301,7 +301,11 @@ def _apply_player_move(proj: Projection, e: Event) -> None:
     # 而"谁撞见了谁"是读的时候才知道的(B 此刻在哪)。
     # ⚠️ **只收玩家做的**:她们每 tick 都在动,把 NPC 也算进来的话,
     # 一个有三个 NPC 的地方会让每个玩家的屏幕永不停歇地重开。
-    if e.type in host_mod.CROSSING_EVENT_TYPES and who.startswith("player:"):
+    # 🔴 **和印字那一处问同一句话**(3.13.0,验收 A 二轮 ④):
+    # 上一版这儿拿整张表当水位,而 `crossing_lines` 只给 `location_join` 印字
+    # —— 一条 `state_change{sentiment_delta}` 就把旁观者的屏**白叫醒**:
+    # 屏重开了,而撞见那几行是空的。
+    if host_mod.crosses_here(e.type, payload) and who.startswith("player:"):
         where = str(e.loc or "")
         if where:
             proj.place_move_seq[where] = seq
