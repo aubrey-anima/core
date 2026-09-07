@@ -2222,3 +2222,32 @@ def test_两个玩家的线_对手真的不一样(tmp_path):
     assert agents[0] in taken, f"没认出别人那条线上的对手:{taken}"
     assert world._threads_taken_by_others("p1") == [], (
         "自己那条线不该算进「别人的」")
+
+
+def test_几条线都开在同一个人身上_那份名单只报他一次(tmp_path):
+    """🟡 **A 三轮 ⑤**:上一版三个玩家的线开在同一个人身上,这份名单回三份同一个 id。
+
+    下游只当集合用,所以那不是一个**错误**的答案 —— **但它是一个会变长的答案**:
+    进日志、进回报、以后有人拿它 `len()` 去说「有几条线占着人」时,那个数是错的,
+    而**那一刻不会有人想到问这儿**。
+    """
+    with open_world_at(tmp_path / "dup.db", force_mock_llm=True) as world:
+        agents = sorted(world.scheduler.agents)
+        for pid in ("p1", "p2", "p3"):
+            world.player_move(pid, "cafe")
+        world.tick(2)
+        for pid in ("p2", "p3"):
+            world._director_apply(
+                pid, {"move": "reveal", "who": agents[0], "line": "她欲言又止",
+                      "why": "", "promise": "那本旧相册", "stake": None,
+                      "source": "mock"},
+                tension_before=0.3, phase="setup",
+                tick=int(world.scheduler.clock), place="cafe", thread=None,
+                pin_ticks=12, due_ticks=50, capped=False, forbidden_ops=set(),
+                recap=[], place_name="咖啡店")
+        taken = world._threads_taken_by_others("p1")
+
+    assert taken.count(agents[0]) == 1, (
+        f"两条线开在同一个人身上,这份名单报了 {taken.count(agents[0])} 次:{taken}")
+    assert taken == sorted(taken), (
+        f"同一时刻问两次可以给出不同的顺序:{taken} —— 这一层的老纪律是确定")

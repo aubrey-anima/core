@@ -10230,10 +10230,16 @@ class World:
         「把别人的 `promise` 摘要塞进提示词」的分界(裁决 §2.12):
         `promise` 是别人剧情的原文,进了提示词就可能被模型抄进 `line`,
         **从这个人的屏上漏出去**;而一个 NPC 的名字是公开的。
+
+        ⚠️ **去重、排序**(A 三轮 ⑤):三个玩家的线都开在同一个人身上时,
+        上一版回三份同一个 id。它下游只当集合用,所以那不是一个错误的答案 ——
+        **但它是一个会变长的答案**:进日志、进回报、以后有人拿它 `len()` 去说
+        「有几条线占着人」时,那个数是错的,而**那一刻不会有人想到问这儿**。
+        排序是这一层的老纪律:同一个世界同一时刻问两次,逐项相同。
         """
         with self.scheduler._lock:
             stories = dict(self.scheduler._memory_projection.stories or {})
-        out: list[str] = []
+        out: set[str] = set()
         for other, row in stories.items():
             if other == pid:
                 continue
@@ -10242,8 +10248,8 @@ class World:
                     continue
                 who = str(thread.get("with") or "")
                 if who:
-                    out.append(who)
-        return out
+                    out.add(who)
+        return sorted(out)
 
     @staticmethod
     def _director_keep(thread: dict[str, Any] | None, tick: int) -> str:
